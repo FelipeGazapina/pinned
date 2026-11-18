@@ -3,6 +3,7 @@
 //! database keeps what users chose to share to improve the app, such as rated dictations.
 
 use crate::boxes::{BoxRow, BoxWork, Opener, Phase, Remains};
+use crate::sync_limits::SyncLimits;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit};
@@ -27,7 +28,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_postgres::{Client, GenericClient, NoTls};
 use uuid::Uuid;
 
@@ -222,11 +223,29 @@ alter table team_runs add column if not exists reserved boolean not null default
 -- reserved run that holds its place, until its team's poller claims it (`teams::db::claim`).
 alter table team_run_queue add column if not exists granted_at timestamptz;
 alter table team_run_queue add column if not exists run uuid;
+-- How many of the team's turns found a waiting row's bot unreadable (`teams::queue::UNREAD_PASSES`).
+alter table team_run_queue add column if not exists unread_passes integer not null default 0;
+-- Since when, and why, the team's waiting line is held (`teams::queue::take_and_start`): its owner sees it.
+alter table teams add column if not exists line_held_at timestamptz;
+alter table teams add column if not exists line_held_why text;
 alter table team_runs add column if not exists reserved_at timestamptz;
 -- A run's limit call the limits tick opened (`teams::calls::tick`): the only call that counts as
 -- its limit call (`teams::db::runs_at_limit`). A session's own ask never sets it.
 alter table team_calls add column if not exists opened_by_hub boolean not null default false;
+-- One fire per trigger event (`Db::claim_fire`): the row of the call that claimed the key, kept
+-- `FIRES_FOR_DAYS` (`Db::expire_trigger_fires`).
+create table if not exists trigger_fires (account uuid not null references accounts on delete cascade,
+  workflow text not null, key text not null, at timestamptz not null default now(),
+  primary key (account, workflow, key));
+create index if not exists trigger_fires_at on trigger_fires (at);
+-- The `Connectors` that claimed the fire: its retry of a claim whose insert timed out wins.
+alter table trigger_fires add column if not exists claimer text;
 ";
+/// How long the hub keeps a trigger's claimed fire, in days: `connectors::FIRES_KEPT`.
+const FIRES_FOR_DAYS: u64 = 7;
+const _: () = assert!(FIRES_FOR_DAYS * 24 * 60 * 60 == pinned_core::connectors::FIRES_KEPT.as_secs());
+// A change older than the catch-up is never claimed, so a dropped claim never fires again.
+const _: () = assert!(pinned_core::connectors::CATCH_UP.as_secs() < FIRES_FOR_DAYS * 24 * 60 * 60);
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";
 /// The most held ends one hub-wide expiry run deletes.
@@ -263,8 +282,11 @@ pub struct OpenedBox {
     pub machine: Option<String>,
 }
 const BOX_COLUMNS: &str = "id, account, machine, upstash, connector, subject, spec, size, phase, reason, extract(epoch from now() - created_at)::float8";
-/// Compressed bytes of synced project files one account may keep on the hub.
-const SYNC_QUOTA: i64 = 1 << 30;
+/// How often a push reads again what synced projects take and the database's size.
+const SYNC_READ_EVERY: Duration = Duration::from_secs(60);
+/// How long after the last read of what synced projects take a push about to be refused for the
+/// total reads it again.
+const SYNC_FRESH_READ_EVERY: Duration = Duration::from_secs(5);
 
 const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_LEN: usize = 8;
@@ -279,6 +301,93 @@ pub struct Db {
     /// Opened on first use. The shared connection pipelines every caller's statements, so a
     /// transaction there would take in other callers' statements too.
     transactions: Arc<tokio::sync::Mutex<Option<Client>>>,
+    sync_space: Arc<SyncSpace>,
+}
+
+/// What synced projects may take on the hub, and what this hub counts they take.
+struct SyncSpace {
+    limits: SyncLimits,
+    /// The check of a growing push and its reservation happen under this one lock, so two pushes at
+    /// once cannot both take the last of the space. The count is this process's: the hub runs as
+    /// one process, and another on the same database would count only its own pushes between reads.
+    counted: tokio::sync::Mutex<Counted>,
+    /// Held for reading by a growing push while it writes; `Db::pause_sync_writes` holds it for a test.
+    writes: Arc<tokio::sync::RwLock<()>>,
+}
+
+/// Bytes, as `octet_length` counts the stored files.
+#[derive(Default)]
+struct Counted {
+    /// Every stored file at the last read; none until a read succeeds, and then nothing is refused for the total.
+    sum: Option<i64>,
+    /// When `sum` was last read, or a read of it failed.
+    sum_at: Option<Instant>,
+    /// What the pushes taken since that read added.
+    grown: i64,
+    /// What the pushes still writing their files reserved.
+    writing: i64,
+    /// `pg_database_size` at the last read.
+    db: Option<i64>,
+    /// When the sum and the database's size were last read, each on its own, or a read failed.
+    read_at: Option<Instant>,
+}
+
+impl SyncSpace {
+    fn new(limits: SyncLimits) -> Arc<SyncSpace> {
+        Arc::new(SyncSpace { limits, counted: Default::default(), writes: Default::default() })
+    }
+}
+
+impl Counted {
+    fn read_sum(&mut self, sum: i64, now: Instant) {
+        self.sum = Some(sum);
+        self.grown = 0;
+        self.sum_at = Some(now);
+    }
+
+    /// Whether `growth` more would pass the total, or the database is past its limit.
+    fn full(&self, limits: &SyncLimits, growth: i64) -> bool {
+        self.sum.is_some_and(|sum| sum + self.grown + self.writing + growth > limits.total) || self.db.is_some_and(|db| db > limits.db)
+    }
+
+    fn due(at: Option<Instant>, every: Duration, now: Instant) -> bool {
+        at.is_none_or(|at| now.saturating_duration_since(at) >= every)
+    }
+}
+
+/// The growth a push reserved while it writes its files. Dropped, it gives the reservation back,
+/// and counts it as grown if the push was `taken`.
+struct SyncReserved {
+    space: Arc<SyncSpace>,
+    growth: i64,
+    taken: bool,
+}
+
+impl Drop for SyncReserved {
+    fn drop(&mut self) {
+        let (growth, taken) = (self.growth, self.taken);
+        let settle = move |counted: &mut Counted| {
+            counted.writing -= growth;
+            if taken {
+                counted.grown += growth;
+            }
+        };
+        match self.space.counted.try_lock() {
+            Ok(mut counted) => settle(&mut counted),
+            Err(_) => {
+                let space = self.space.clone();
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move { settle(&mut *space.counted.lock().await) });
+                }
+            }
+        }
+    }
+}
+
+/// The refusal of a push that would grow synced projects past what the whole hub may keep, or of
+/// any growing push while the database is past its limit.
+fn hub_full() -> String {
+    format!("{}the space the hub has left; nothing is deleted, the push is refused", sync::LIMIT_REFUSAL)
 }
 
 /// The learning database. It holds no accounts, so its rows name the account only by id.
@@ -673,7 +782,7 @@ async fn needed(client: &Client, needs: &Needs<'_>) -> Result<bool, tokio_postgr
 }
 
 /// Whether Postgres refused `e` for waiting on a lock past `LOCK_LIMIT`.
-fn lock_refused(e: &tokio_postgres::Error) -> bool {
+pub(crate) fn lock_refused(e: &tokio_postgres::Error) -> bool {
     e.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE)
 }
 
@@ -681,7 +790,88 @@ pub(crate) fn err(e: tokio_postgres::Error) -> String {
     if lock_refused(&e) {
         return BUSY.into();
     }
+    if one_live_run_refused(&e) {
+        return ONE_LIVE_RUN.into();
+    }
     e.to_string()
+}
+
+/// The index that holds, in Postgres too, the rule the team's turn keeps (`teams::queue`): a bot
+/// has at most one live run. A write of a second one, by any path, is refused.
+const ONE_LIVE_RUN_INDEX: &str = "team_runs_one_live_per_bot";
+/// What a write refused by `ONE_LIVE_RUN_INDEX` answers.
+pub const ONE_LIVE_RUN: &str = "this bot already has a live run; try again once it ends";
+
+/// Whether Postgres refused `e` for giving a bot a second live run (`ONE_LIVE_RUN_INDEX`).
+pub(crate) fn one_live_run_refused(e: &tokio_postgres::Error) -> bool {
+    e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) && e.as_db_error().and_then(|d| d.constraint()) == Some(ONE_LIVE_RUN_INDEX)
+}
+
+/// Sets `ONE_LIVE_RUN_INDEX` at the hub's start, unless it is there. A database where some bot
+/// already has more than one live run (left by an older hub) keeps them as they are: the index is
+/// not set, the start says so, and the next start tries again. No failure here stops the start:
+/// the team's turn still holds the rule, and the start logs that the index is not set.
+async fn one_live_run_per_bot(url: &str) {
+    let set = async {
+        let client = open(url).await.map_err(|_| "it could not connect".to_owned())?;
+        set_one_live_run(&client).await.map_err(|e| format!("Postgres refused it ({})", e.code().map_or("no code", |c| c.code())))
+    };
+    match set.await {
+        Ok(clashing) if clashing.is_empty() => {}
+        Ok(clashing) => eprintln!("pinned-server: {}", clashing_line(&clashing)),
+        Err(why) => eprintln!("pinned-server: one live run per bot: the rule was not set: {why}; the next start tries again"),
+    }
+}
+
+/// How many bots of the start's log `clashing_line` names; the rest it counts.
+const CLASHING_NAMED: usize = 20;
+
+/// What a start logs when the bots `clashing` (team, workflow) have more than one live run: their
+/// count, and the ids of the first `CLASHING_NAMED`. A workflow id that is not a uuid is not shown.
+fn clashing_line(clashing: &[(Uuid, String)]) -> String {
+    let count = match clashing.len() {
+        1 => "1 bot has".to_owned(),
+        n => format!("{n} bots have"),
+    };
+    let named: Vec<String> = clashing
+        .iter()
+        .take(CLASHING_NAMED)
+        .map(|(team, workflow)| format!("({team}, {})", Uuid::parse_str(workflow).map_or_else(|_| "an id that is not a uuid".to_owned(), |w| w.to_string())))
+        .collect();
+    let more = match clashing.len().saturating_sub(CLASHING_NAMED) {
+        0 => String::new(),
+        n => format!(" and {n} more"),
+    };
+    format!(
+        "one live run per bot: {count} more than one live run; the rule starts on the first start after they end; bots (team, workflow): {}{more}",
+        named.join(", ")
+    )
+}
+
+/// The bots (team, workflow) that have more than one live run; when none, the index is set. A start that finds the
+/// index takes no lock. Otherwise the count and the index are one transaction holding `share row
+/// exclusive` on `team_runs` (it waits as long as it must, as a needed schema statement does): no
+/// run is written between the two, and a second hub starting meanwhile waits for it, then finds the
+/// index. That lock blocks writes of team runs, not reads, for one scan of the table and the sort
+/// of its live rows. Dropping `client` on an error rolls the transaction back.
+async fn set_one_live_run(client: &Client) -> Result<Vec<(Uuid, String)>, tokio_postgres::Error> {
+    const FOUND: &str = "select to_regclass($1::text) is not null";
+    if client.query_one(FOUND, &[&ONE_LIVE_RUN_INDEX]).await?.get(0) {
+        return Ok(vec![]);
+    }
+    let live = crate::teams::db::LIVE;
+    client.batch_execute("begin; set local lock_timeout = 0; lock table team_runs in share row exclusive mode").await?;
+    let clashing: Vec<(Uuid, String)> = client
+        .query(&format!("select team, workflow from team_runs where state in {live} group by team, workflow having count(*) > 1 order by team, workflow"), &[])
+        .await?
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    if clashing.is_empty() {
+        client.batch_execute(&format!("create unique index if not exists {ONE_LIVE_RUN_INDEX} on team_runs (team, workflow) where state in {live}")).await?;
+    }
+    client.batch_execute("commit").await?;
+    Ok(clashing)
 }
 
 /// The row, or what deleting its box takes when its run is in a shape this hub can't read.
@@ -764,9 +954,104 @@ impl Learning {
     }
 }
 
+/// A file a machine pushes: its entry, its stored bytes, the sha a deletion `agreed` on, and the
+/// `base` a history was merged with.
+pub type PushedFile = (sync::Entry, Vec<u8>, Option<String>, Option<String>);
+
 impl Db {
     pub async fn connect(url: &str, sealer: Sealer) -> Result<Db, String> {
-        Ok(Db { sealer, connection: Connection::open(url, SCHEMA).await?, transactions: Arc::default() })
+        let connection = Connection::open(url, SCHEMA).await?;
+        one_live_run_per_bot(url).await;
+        Ok(Db { sealer, connection, transactions: Arc::default(), sync_space: SyncSpace::new(SyncLimits::default()) })
+    }
+
+    /// Keeps synced projects within `limits`.
+    pub fn limit_sync(self, limits: SyncLimits) -> Db {
+        Db { sync_space: SyncSpace::new(limits), ..self }
+    }
+
+    /// Moves the times the sync space was last read `by` into the past, as if that long went by, for a test.
+    #[doc(hidden)]
+    pub async fn age_sync_reads(&self, by: Duration) {
+        let counted = &mut *self.sync_space.counted.lock().await;
+        for at in [&mut counted.sum_at, &mut counted.read_at] {
+            *at = at.and_then(|at| at.checked_sub(by));
+        }
+    }
+
+    /// Holds every growing push after its check and before its files are written, until the
+    /// answer is dropped, for a test.
+    #[doc(hidden)]
+    pub async fn pause_sync_writes(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        self.sync_space.writes.clone().write_owned().await
+    }
+
+    async fn read_sync_sum(&self) -> Result<i64, String> {
+        let row = self.client().await?.query_one("select coalesce(sum(octet_length(data)), 0)::bigint from project_files", &[]).await.map_err(err)?;
+        Ok(row.get(0))
+    }
+
+    async fn read_db_size(&self) -> Result<i64, String> {
+        let row = self.client().await?.query_one("select pg_database_size(current_database())", &[]).await.map_err(err)?;
+        Ok(row.get(0))
+    }
+
+    /// Reserves `growth` bytes for a push about to write its files, or refuses it with `hub_full`.
+    /// What synced projects take is read on the first push, again every `SYNC_READ_EVERY`, and
+    /// again before a refusal for the total once `SYNC_FRESH_READ_EVERY` passed since the last
+    /// read, so deletions that landed open the hub at once. A failed read refuses nothing for its
+    /// own limit, and leaves the other read's limit in force.
+    async fn reserve_sync(&self, growth: i64) -> Result<SyncReserved, String> {
+        let space = &self.sync_space;
+        let mut counted = space.counted.lock().await;
+        let now = Instant::now();
+        if Counted::due(counted.read_at, SYNC_READ_EVERY, now) {
+            counted.read_at = Some(now);
+            // Read apart, so a failure of one leaves the other's limit in force.
+            match self.read_sync_sum().await {
+                Ok(sum) => counted.read_sum(sum, now),
+                Err(e) => eprintln!("pinned-server: could not read what synced projects take: {e}"),
+            }
+            match self.read_db_size().await {
+                Ok(db) => counted.db = Some(db),
+                Err(e) => eprintln!("pinned-server: could not read the database's size: {e}"),
+            }
+        }
+        if counted.full(&space.limits, growth) && Counted::due(counted.sum_at, SYNC_FRESH_READ_EVERY, now) {
+            counted.sum_at = Some(now);
+            match self.read_sync_sum().await {
+                Ok(sum) => counted.read_sum(sum, now),
+                Err(e) => eprintln!("pinned-server: could not read what synced projects take: {e}"),
+            }
+        }
+        if counted.full(&space.limits, growth) {
+            return Err(hub_full());
+        }
+        counted.writing += growth;
+        Ok(SyncReserved { space: space.clone(), growth, taken: false })
+    }
+
+    /// The census lines of what synced projects take (`sync_limits::census`).
+    pub async fn sync_census(&self) -> Vec<String> {
+        let read = async {
+            let client = self.client().await?;
+            let row = client
+                .query_one("select coalesce(sum(octet_length(data)), 0)::bigint, pg_database_size(current_database()) from project_files", &[])
+                .await
+                .map_err(err)?;
+            let top: Vec<(Uuid, i64)> = client
+                .query("select account, sum(octet_length(data))::bigint from project_files group by account order by 2 desc limit 3", &[])
+                .await
+                .map_err(err)?
+                .iter()
+                .map(|r| (r.get(0), r.get(1)))
+                .collect();
+            Ok::<_, String>((row.get(0), row.get(1), top))
+        };
+        match read.await {
+            Ok((total, db, top)) => crate::sync_limits::census(&self.sync_space.limits, total, db, &top),
+            Err(e) => vec![format!("pinned-server: census-sync could not read what synced projects take: {e}")],
+        }
     }
 
     pub(crate) async fn client(&self) -> Result<Arc<Client>, String> {
@@ -845,20 +1130,20 @@ impl Db {
             .collect())
     }
 
-    /// Keeps the files, unless they would take the account past its quota. A push that does not
-    /// grow the account is always kept, even past the quota, so deleting is a way out. Two pushes
-    /// at once may pass it by a batch, which is fine for a guard against filling the disk.
+    /// Keeps the files, unless they would take the account past its limit, when one is set, or
+    /// every account's synced projects past the hub's total, or the database is past its limit
+    /// (`reserve_sync`). A push that does not grow is always kept, even past every limit, so
+    /// deleting is a way out. Two pushes at once to one account may pass its limit by a batch,
+    /// which is fine for a guard against filling the disk; the total reserves each push's growth.
     ///
     /// A deletion that names the sha its sender `agreed` on is skipped when the hub holds another
     /// sha by then: another machine changed the file after the sender last saw it.
-    pub async fn sync_push(&self, account: Uuid, project: &str, files: Vec<(sync::Entry, Vec<u8>, Option<String>)>) -> Result<(), String> {
+    ///
+    /// A file that names the `base` it was merged with, empty for none, is refused with
+    /// `sync::STALE_REFUSAL`, the whole push with it, when the hub holds another copy by then.
+    pub async fn sync_push(&self, account: Uuid, project: &str, mut files: Vec<PushedFile>) -> Result<(), String> {
         let client = self.client().await?;
-        let paths: Vec<&str> = files.iter().map(|(e, _, _)| e.path.as_str()).collect();
-        let used: i64 = client
-            .query_one("select coalesce(sum(octet_length(data)), 0)::bigint from project_files where account = $1", &[&account])
-            .await
-            .map_err(err)?
-            .get(0);
+        let paths: Vec<&str> = files.iter().map(|(e, _, _, _)| e.path.as_str()).collect();
         let stored: BTreeMap<String, (String, i64)> = client
             .query("select path, sha, octet_length(data)::bigint from project_files where account = $1 and project = $2 and path = any($3)", &[&account, &project, &paths])
             .await
@@ -866,31 +1151,62 @@ impl Db {
             .iter()
             .map(|r| (r.get(0), (r.get(1), r.get(2))))
             .collect();
+        let held = |path: &str| stored.get(path).map_or("", |(sha, _)| sha.as_str());
+        if files.iter().any(|(e, _, _, base)| base.as_ref().is_some_and(|base| base != held(&e.path))) {
+            return Err(sync::STALE_REFUSAL.into());
+        }
         let kept = |path: &str, agreed: &Option<String>| match (agreed, stored.get(path)) {
             (Some(agreed), Some((sha, _))) => agreed == sha,
             _ => true,
         };
         // The paths this push replaces: a deletion skipped for its stale `agreed` replaces nothing.
-        let replacing: BTreeSet<&str> = files.iter().filter(|(e, _, agreed)| kept(&e.path, agreed)).map(|(e, _, _)| e.path.as_str()).collect();
+        let replacing: BTreeSet<&str> = files.iter().filter(|(e, _, agreed, _)| kept(&e.path, agreed)).map(|(e, _, _, _)| e.path.as_str()).collect();
         let replaced: i64 = stored.iter().filter(|(path, _)| replacing.contains(path.as_str())).map(|(_, (_, size))| size).sum();
-        let incoming: i64 = files.iter().map(|(_, data, _)| data.len() as i64).sum();
-        if incoming > replaced && used - replaced + incoming > SYNC_QUOTA {
-            return Err(format!("{}{} MB; delete old sessions to sync more", sync::LIMIT_REFUSAL, SYNC_QUOTA >> 20));
+        let incoming: i64 = files.iter().map(|(_, data, _, _)| data.len() as i64).sum();
+        let growth = incoming - replaced;
+        if let Some(limit) = self.sync_space.limits.account.filter(|_| growth > 0) {
+            let used: i64 = client
+                .query_one("select coalesce(sum(octet_length(data)), 0)::bigint from project_files where account = $1", &[&account])
+                .await
+                .map_err(err)?
+                .get(0);
+            if used + growth > limit {
+                return Err(format!("{}{} MB; nothing is deleted, the push is refused", sync::LIMIT_REFUSAL, limit >> 20));
+            }
         }
-        for (entry, data, agreed) in &files {
+        let mut reserved = if growth > 0 { Some(self.reserve_sync(growth).await?) } else { None };
+        let _writing = match &reserved {
+            Some(_) => Some(self.sync_space.writes.read().await),
+            None => None,
+        };
+        // A file with a base goes first, so another machine's push landing since the check above
+        // refuses this push before any of its files is kept.
+        files.sort_by_key(|(_, _, _, base)| base.is_none());
+        let written = Db::write_pushed(&client, account, project, &files).await;
+        if let Some(reserved) = reserved.as_mut() {
+            reserved.taken = written.is_ok();
+        }
+        written
+    }
+
+    async fn write_pushed(client: &Client, account: Uuid, project: &str, files: &[PushedFile]) -> Result<(), String> {
+        for (entry, data, agreed, base) in files {
             // `known` is false when the sender omitted the mode, so a stored true survives. A null column would be omitted on the way out, and a unix machine would never send the bit.
             let known = entry.executable.is_some();
             let bit = entry.executable.unwrap_or(false);
-            client
+            let written = client
                 .execute(
                     "insert into project_files (account, project, path, sha, modified, data, executable) values ($1, $2, $3, $4, $5, $6, $7) \
                      on conflict (account, project, path) do update set sha = excluded.sha, modified = excluded.modified, data = excluded.data, \
                      executable = case when $8 then excluded.executable else project_files.executable end \
-                     where $9::text is null or project_files.sha = $9",
-                    &[&account, &project, &entry.path, &entry.sha, &(entry.modified as i64), data, &bit, &known, agreed],
+                     where ($9::text is null or project_files.sha = $9) and ($10::text is null or project_files.sha = $10)",
+                    &[&account, &project, &entry.path, &entry.sha, &(entry.modified as i64), data, &bit, &known, agreed, base],
                 )
                 .await
                 .map_err(err)?;
+            if base.is_some() && written == 0 {
+                return Err(sync::STALE_REFUSAL.into());
+            }
         }
         Ok(())
     }
@@ -1210,6 +1526,48 @@ impl Db {
             .map_err(err)
     }
 
+    /// Claims the account's one fire of `workflow` for the event `key` for `claimer`: true when
+    /// this call stored the claim, false when one is stored already, by this hub or another on the
+    /// database. With `retry`, a claim `claimer` stored already answers true: its earlier insert
+    /// answered an error, but may have committed.
+    pub async fn claim_fire(&self, account: Uuid, workflow: &str, key: &str, claimer: &str, retry: bool) -> Result<bool, String> {
+        let client = self.client().await?;
+        let stored = client
+            .execute(
+                "insert into trigger_fires (account, workflow, key, claimer) values ($1, $2, $3, $4) on conflict do nothing",
+                &[&account, &workflow, &key, &claimer],
+            )
+            .await
+            .map_err(err)?;
+        if stored == 1 || !retry {
+            return Ok(stored == 1);
+        }
+        let mine = client
+            .query_opt("select 1 from trigger_fires where account = $1 and workflow = $2 and key = $3 and claimer = $4", &[&account, &workflow, &key, &claimer])
+            .await
+            .map_err(err)?;
+        Ok(mine.is_some())
+    }
+
+    /// Drops `claimer`'s claim of the fire `key`, whose run did not start.
+    pub async fn release_fire(&self, account: Uuid, workflow: &str, key: &str, claimer: &str) -> Result<(), String> {
+        self.client()
+            .await?
+            .execute("delete from trigger_fires where account = $1 and workflow = $2 and key = $3 and claimer = $4", &[&account, &workflow, &key, &claimer])
+            .await
+            .map_err(err)?;
+        Ok(())
+    }
+
+    /// Deletes the claimed fires of any account older than `FIRES_FOR_DAYS`, and returns how many.
+    pub async fn expire_trigger_fires(&self) -> Result<u64, String> {
+        self.client()
+            .await?
+            .execute(&format!("delete from trigger_fires where at <= now() - interval '{FIRES_FOR_DAYS} days'"), &[])
+            .await
+            .map_err(err)
+    }
+
     /// Deletes up to `HELD_EXPIRY_BATCH` of the account's held ends older than `HELD_FOR`, and
     /// returns how many. Bounded, as it runs on every connection of a machine over the hub's one
     /// shared connection; the rest go on the next connection or the hub-wide run.
@@ -1274,14 +1632,36 @@ impl Db {
         Ok(rows.iter().map(box_row).collect())
     }
 
+    /// The machines of the account's boxes that have not ended: each is creating, booting or running.
+    pub async fn live_boxes(&self, account: Uuid) -> Result<Vec<Uuid>, String> {
+        let rows = self.client().await?.query("select machine from boxes where account = $1 and phase in ('creating', 'booting', 'running')", &[&account]).await.map_err(err)?;
+        Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
     pub async fn box_of(&self, account: Uuid, machine: Uuid) -> Result<Option<BoxRow>, String> {
         let row = self.client().await?.query_opt(&format!("select {BOX_COLUMNS} from boxes where account = $1 and machine = $2"), &[&account, &machine]).await.map_err(err)?;
         row.as_ref().map(|r| readable(box_row(r))).transpose()
     }
 
-    /// Adds to the row's budget, kept in its spec beside the run.
+    /// Adds to the row's budget, kept in its spec beside the run. Only a box that still runs takes
+    /// it: one that moved to ending since its extend was checked keeps its budget, and reads so.
+    /// An id with no row of this account, as another account's, changes nothing.
     pub async fn set_box_budget(&self, account: Uuid, id: &str, budget: f64) -> Result<(), String> {
-        self.client().await?.execute("update boxes set spec = spec || jsonb_build_object('budget_usd', $2::float8) where id = $1 and account = $3", &[&id, &budget, &account]).await.map_err(err)?;
+        let client = self.client().await?;
+        let written = client
+            .execute(
+                "update boxes set spec = spec || jsonb_build_object('budget_usd', $2::float8) where id = $1 and account = $3 and phase in ('creating', 'booting', 'running')",
+                &[&id, &budget, &account],
+            )
+            .await
+            .map_err(err)?;
+        if written == 0 {
+            // The update passed over this account's row only when it no longer runs: it is ending.
+            let ending = client.query_opt("select 1 from boxes where id = $1 and account = $2", &[&id, &account]).await.map_err(err)?;
+            if ending.is_some() {
+                return Err("this box is already ending".into());
+            }
+        }
         Ok(())
     }
 
@@ -1671,6 +2051,17 @@ impl Db {
         Ok((row.get(0), false))
     }
 
+    /// The id of the confirmation the session in `tab` on `machine` asked with `action` and `request_id`, if it asked one.
+    pub async fn asked_confirmation(&self, account: Uuid, machine: Uuid, tab: &str, action: &str, request_id: &str) -> Result<Option<Uuid>, String> {
+        let row = self
+            .client()
+            .await?
+            .query_opt("select id from agent_confirmations where account = $1 and machine = $2 and tab = $3 and action = $4 and request_id = $5", &[&account, &machine, &tab, &action, &request_id])
+            .await
+            .map_err(err)?;
+        Ok(row.map(|r| r.get(0)))
+    }
+
     /// The account's confirmation `id`.
     pub async fn confirmation(&self, account: Uuid, id: Uuid) -> Result<Option<Held>, String> {
         let query = format!("select {CONFIRMATION_COLUMNS} from agent_confirmations c left join machines m on m.id = c.machine and m.account = c.account where c.account = $1 and c.id = $2");
@@ -1687,6 +2078,48 @@ impl Db {
                where c.account = $1 and c.decided_at is not null order by c.decided_at desc limit 20)"
         );
         Ok(self.client().await?.query(&query, &[&account]).await.map_err(err)?.iter().map(|r| held(r).confirmation).collect())
+    }
+
+    /// How many of the account's extend_box confirmations wait, each adding an amount above zero to
+    /// a box that has not ended, read without listing them. It never counts more than the turn's
+    /// count does: an ask that names its box other than as the box's id reads is left to that one.
+    pub async fn waiting_extends(&self, account: Uuid) -> Result<i64, String> {
+        let query = "select count(*) from agent_confirmations where account = $1 and decided_at is null and action = 'extend_box'
+                       and case when jsonb_typeof(args->'extra_usd') = 'number' then (args->>'extra_usd')::float8 > 0 else false end
+                       and exists (select 1 from boxes where boxes.account = $1 and boxes.machine::text = lower(agent_confirmations.args->>'machine')
+                                   and boxes.phase in ('creating', 'booting', 'running'))";
+        Ok(self.client().await?.query_one(query, &[&account]).await.map_err(err)?.get(0))
+    }
+
+    /// Closes the account's extend_box asks still waiting for the box on `machine`, which ended. An
+    /// ask names its box as its args hold it, in any spelling `Uuid::parse_str` reads, so the asks
+    /// are matched by the id they parse to, as the turn count in `surface` matches them. Each reads
+    /// denied with `EXTEND_BOX_ENDED`, an outcome the sweep of interrupted decisions leaves as it is.
+    /// It runs after the box's move to ending is committed, so an ask stored meanwhile is either
+    /// closed here or finds the box ending once stored, and closes itself. Answers the asks it closed.
+    pub async fn close_extends(&self, account: Uuid, machine: Uuid) -> Result<Vec<Uuid>, String> {
+        let client = self.client().await?;
+        let waiting = client
+            .query("select id, args->>'machine' from agent_confirmations where account = $1 and action = 'extend_box' and decided_at is null", &[&account])
+            .await
+            .map_err(err)?;
+        let ids: Vec<Uuid> = waiting
+            .iter()
+            .filter(|row| row.get::<_, Option<String>>(1).and_then(|named| Uuid::parse_str(&named).ok()) == Some(machine))
+            .map(|row| row.get(0))
+            .collect();
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rows = client
+            .query(
+                "update agent_confirmations set decided_at = now(), approved = false, outcome = $3, result = 'null'::jsonb
+                 where account = $1 and id = any($2) and decided_at is null returning id",
+                &[&account, &ids, &EXTEND_BOX_ENDED],
+            )
+            .await
+            .map_err(err)?;
+        Ok(rows.iter().map(|row| row.get(0)).collect())
     }
 
     /// Decides the account's waiting confirmation `id`, once: None when it is unknown, another
@@ -2054,6 +2487,9 @@ const AGENT_REQUEST_MINUTES: i32 = 10;
 const AGENT_CODE_MINUTES: i32 = 5;
 pub const AGENT_ACCESS_SECS: i64 = 3600;
 const AGENT_REFRESH_DAYS: i32 = 30;
+/// What an extend_box ask still waiting for the owner reads as once its box ends.
+pub const EXTEND_BOX_ENDED: &str = "the box ended before the owner answered";
+
 /// A call still pending this long was cut off, as by a hub restart, so its outcome is unknown.
 const AGENT_CALL_STALE_SECS: i64 = 600;
 

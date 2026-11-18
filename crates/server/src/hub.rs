@@ -21,6 +21,7 @@ use pinned_core::wire::{
 use pinned_core::surface::{self, Side, Unlocked};
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -37,6 +38,9 @@ const MCP_IMPORT_WAIT: Duration = Duration::from_secs(20);
 const MAX_RECORDS_PER_CALL: usize = 500;
 /// Why `open_placed` refuses a run on a team's account.
 pub const TEAM_RUNS: &str = "a team's runs start only through its bots";
+/// Why the hub refuses a worker profile proposal: only a Captain's or the global orchestrator's
+/// session proposes one, through its machine.
+const NOT_AN_ORCHESTRATOR: &str = "only a Captain or the global orchestrator proposes a worker profile";
 /// How long the password the app took counts as the owner being there.
 const UNLOCK_FOR: Duration = Duration::from_secs(12 * 60 * 60);
 /// A run may clone a large repository before its session starts.
@@ -171,11 +175,114 @@ pub(crate) fn too_old_for_run_now(account: &Account, machine: &str, subject: &Su
 pub const CENSUS_EVERY: Duration = Duration::from_secs(300);
 
 /// `census_accounts`' line for one account.
-fn account_census(id: Uuid, runs: usize, (store_bytes, runs_bytes, pending): (usize, usize, store_writes::Pending)) -> String {
+fn account_census(id: Uuid, runs: usize, (store_bytes, runs_bytes, pending): (usize, usize, store_writes::Pending), (check_age_s, check_failing): (i64, bool), watching: bool) -> String {
     format!(
-        "pinned-server: census-account id={id} runs={runs} runs_bytes={runs_bytes} store_bytes={store_bytes} store_pending={} store_pending_bytes={} secrets_pending={} secrets_pending_bytes={}",
-        pending.store, pending.store_bytes, pending.secrets, pending.secrets_bytes
+        "pinned-server: census-account id={id} runs={runs} runs_bytes={runs_bytes} store_bytes={store_bytes} store_pending={} store_pending_bytes={} secrets_pending={} secrets_pending_bytes={} check_age_s={check_age_s} check_failing={} watching={}",
+        pending.store, pending.store_bytes, pending.secrets, pending.secrets_bytes, u8::from(check_failing), u8::from(watching)
     )
+}
+
+/// What the hub's check log keeps of an account's previous check: when it ran, the kind of its
+/// error (`error_kind`), when the failure that error belongs to began, and when its line last printed.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct CheckLog {
+    at: Option<i64>,
+    error: Option<String>,
+    error_since: i64,
+    error_logged: i64,
+}
+
+/// An error that lasts with the same kind prints its line again after this many seconds.
+const CHECK_ERROR_REPEAT_S: i64 = 30 * 60;
+
+/// A check that comes more than this many seconds after the one before it is late.
+const CHECK_LATE_AFTER_S: i64 = 120;
+
+/// The check log's lines for one new check of `account`, and what it keeps for the next one. An
+/// error's text stays out of the log: its line names the error's class, its part count and its
+/// fingerprint. The line prints when the error's kind changes, and while one kind lasts at most once
+/// per `CHECK_ERROR_REPEAT_S`, so a text that varies per check (a request id) does not print each time.
+fn log_check(prev: &CheckLog, account: Uuid, check: &pinned_core::connectors::Check, now: i64) -> (CheckLog, Vec<String>) {
+    let who: String = account.to_string().chars().take(8).collect();
+    let mut lines = vec![];
+    if let Some(gap) = prev.at.map(|at| now - at).filter(|gap| *gap > CHECK_LATE_AFTER_S) {
+        lines.push(format!("pinned-server: check-late account={who} gap_s={gap}"));
+    }
+    let error = check.error.as_deref();
+    let kind = error.map(error_kind);
+    let mut next = CheckLog { at: Some(now), error: kind.clone(), ..prev.clone() };
+    match (&prev.error, error, &kind) {
+        (Some(was), _, Some(new)) if was == new && now - prev.error_logged < CHECK_ERROR_REPEAT_S => {}
+        (_, Some(error), Some(_)) => {
+            next.error_logged = now;
+            // A changed error belongs to the failure that is already on, so it does not restart the count.
+            if prev.error.is_none() {
+                next.error_since = now;
+            }
+            lines.push(format!("pinned-server: check-error account={who} class={} parts={} fp={}", error_class(error), error.split("; ").count(), error_fingerprint(error)));
+        }
+        (Some(_), _, None) => lines.push(format!("pinned-server: check-ok account={who} after_s={}", now - prev.error_since)),
+        _ => {}
+    }
+    (next, lines)
+}
+
+/// The first 8 hex digits of an error's SHA-256. The same text has the same fingerprint, and the
+/// log keeps it in place of the text.
+fn error_fingerprint(error: &str) -> String {
+    Sha256::digest(error.as_bytes())[..4].iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// What decides that an error is another one: its class and the status it names after "answered"
+/// (`Linear answered 503`). Neither holds the rest of the text, which may vary per check.
+fn error_kind(error: &str) -> String {
+    let first = error.split("; ").next().unwrap_or_default();
+    let status = first.split("answered ").nth(1).map(|after| after.chars().take_while(char::is_ascii_digit).collect::<String>()).filter(|status| status.len() == 3);
+    format!("{}/{}", error_class(error), status.unwrap_or_default())
+}
+
+/// The class of a check's error, from the prefix of its first part (the parts are joined by "; "):
+/// the connector or the step that failed. A prefix that no class names is `other`.
+fn error_class(error: &str) -> &'static str {
+    const CLASSES: [(&str, &str); 7] = [
+        ("Slack", "slack"),
+        ("Linear", "linear"),
+        ("Vercel", "vercel"),
+        ("Upstash Box", "upstash"),
+        ("could not open a session", "session"),
+        ("workflow ", "workflow"),
+        ("could not read workflow runs", "runs"),
+    ];
+    let first = error.split("; ").next().unwrap_or_default();
+    CLASSES.iter().find(|(prefix, _)| first.starts_with(prefix)).map_or("other", |&(_, class)| class)
+}
+
+/// `account_census`' check fields: the last check's age in whole seconds at `now` (-1 when there is
+/// none), and whether it failed.
+fn check_census(check: Option<&pinned_core::connectors::Check>, now: i64) -> (i64, bool) {
+    let age = check.and_then(|check| chrono::DateTime::parse_from_rfc3339(&check.at).ok()).map_or(-1, |at| now - at.timestamp());
+    (age, check.is_some_and(|check| check.error.is_some()))
+}
+
+/// `census_accounts`' lines, one per persisted account in the order given: each one's census with
+/// its connectors' runs and last check, read from `accounts`.
+fn census_lines(censuses: Vec<(Uuid, (usize, usize, store_writes::Pending))>, accounts: &HashMap<Uuid, Arc<Account>>, now: i64) -> Vec<String> {
+    censuses
+        .into_iter()
+        .map(|(id, census)| {
+            let account = accounts.get(&id);
+            let connectors = account.and_then(|account| account.connectors.get());
+            let runs = connectors.map_or(0, |connectors| connectors.census().runs);
+            let check = check_census(connectors.and_then(|connectors| connectors.last_check()).as_ref(), now);
+            let watching = account.is_some_and(|account| account.watching.load(Ordering::SeqCst));
+            account_census(id, runs, census, check, watching)
+        })
+        .collect()
+}
+
+/// The current time in whole seconds since the Unix epoch.
+fn unix_secs_now() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
 /// The resident set size, in KiB, from the text of `/proc/self/status`.
@@ -484,13 +591,8 @@ impl Hub {
         persisted.sort_by_key(|(id, _)| *id);
         // The accounts' lock is let go before any account's own locks are taken.
         let accounts: HashMap<Uuid, Arc<Account>> = self.accounts.lock().unwrap().clone();
-        persisted
-            .iter()
-            .map(|(id, p)| {
-                let runs = accounts.get(id).and_then(|account| account.connectors.get()).map_or(0, |connectors| connectors.census().runs);
-                account_census(*id, runs, p.census())
-            })
-            .collect()
+        let censuses = persisted.iter().map(|(id, p)| (*id, p.census())).collect();
+        census_lines(censuses, &accounts, unix_secs_now())
     }
 
     /// Writes every account's store and keys that wait, all at once, and again what was saved
@@ -521,7 +623,8 @@ impl Hub {
     /// longer than 30 days, so an account whose machines never come back keeps none past them. Runs
     /// at most once per `HELD_EXPIRY_EVERY`, or on the next tick after a run that deleted a full
     /// batch; a call before that, or one whose delete failed, deletes nothing and returns 0. A
-    /// failure is logged without any row's text.
+    /// failure is logged without any row's text. Each run first expires the trigger fires
+    /// (`expire_trigger_fires`).
     pub async fn expire_held_ends(&self) -> u64 {
         {
             let mut last = self.held_expired.lock().unwrap();
@@ -530,6 +633,7 @@ impl Hub {
             }
             *last = Some(Instant::now());
         }
+        self.expire_trigger_fires().await;
         match self.db.expire_all_held_ends(crate::db::HELD_EXPIRY_BATCH).await {
             Ok(0) => 0,
             Ok(n) => {
@@ -544,6 +648,16 @@ impl Hub {
                 eprintln!("pinned-server: could not expire the held ends older than 30 days: {e}");
                 0
             }
+        }
+    }
+
+    /// Deletes every trigger's claimed fire older than 7 days, in the hourly run of
+    /// `expire_held_ends`. A failure is logged without any row's text.
+    async fn expire_trigger_fires(&self) {
+        match self.db.expire_trigger_fires().await {
+            Ok(0) => {}
+            Ok(n) => eprintln!("pinned-server: {n} trigger fires older than 7 days expired"),
+            Err(e) => eprintln!("pinned-server: could not expire the trigger fires older than 7 days: {e}"),
         }
     }
 
@@ -601,7 +715,15 @@ impl Hub {
                 let hub = hub.clone();
                 async move { hub.open_found(id, work).await }
             };
-            let on_check = |_: &pinned_core::connectors::Check| {
+            let log = Mutex::new(CheckLog::default());
+            let on_check = move |check: &pinned_core::connectors::Check| {
+                let mut state = log.lock().unwrap();
+                let (next, lines) = log_check(&state, id, check, unix_secs_now());
+                *state = next;
+                drop(state);
+                for line in lines {
+                    eprintln!("{line}");
+                }
                 let (hub, account) = checked.clone();
                 tokio::spawn(async move { hub.push_settings(&account).await });
             };
@@ -890,9 +1012,10 @@ impl Hub {
                     if data.len() as u64 > sync::FILE_LIMIT {
                         return Err(format!("{} is bigger than a synced file may be", file.entry.path));
                     }
-                    // Only a deletion is compared with what the hub holds.
+                    // A deletion is compared with what the hub holds through `agreed`, a history through `base`.
                     let agreed = file.agreed.filter(|_| file.entry.sha.is_empty());
-                    kept.push((file.entry, data, agreed));
+                    let base = file.base.filter(|_| file.entry.path == sync::HISTORY && !file.entry.sha.is_empty());
+                    kept.push((file.entry, data, agreed, base));
                 }
                 return json(self.db.sync_push(account.id, &project, kept).await?);
             }
@@ -914,7 +1037,7 @@ impl Hub {
                     .into_iter()
                     .map(|(entry, data)| {
                         let data = (!entry.sha.is_empty()).then(|| base64::engine::general_purpose::STANDARD.encode(data));
-                        sync::File { entry, data, agreed: None }
+                        sync::File { entry, data, agreed: None, base: None }
                     })
                     .collect();
                 return json(files);
@@ -996,6 +1119,16 @@ impl Hub {
                 };
                 return self.change_tastes(account, reset).await;
             }
+            HubCall::SetReviewer { patch } => return self.change_tastes(account, |tastes| tastes.set_reviewer(patch)).await,
+            HubCall::SetWorkerProfiles { project, profiles, drop_proposed } => {
+                let set = |tastes: &mut Tastes| {
+                    tastes.set_worker_profiles(project.as_deref(), profiles)?;
+                    tastes.drop_proposed(&drop_proposed);
+                    Ok(())
+                };
+                return self.change_tastes(account, set).await;
+            }
+            HubCall::ProposeWorkerProfile { .. } => return Err(NOT_AN_ORCHESTRATOR.into()),
             HubCall::GetBoxSize { repo, size } => return json(crate::boxes::box_size(self, account, repo.as_deref(), size).await?),
             HubCall::SetBoxSize { repo, size } => {
                 let scope = match repo {
@@ -1044,7 +1177,7 @@ impl Hub {
             }
             HubCall::Act { .. } => return Err("only an agent session on a machine acts".into()),
             HubCall::Confirmations => return json(self.db.confirmations(account.id).await?),
-            HubCall::DecideConfirmation { id, approve, entered } => return crate::surface::decide(self, account, &id, approve, entered).await,
+            HubCall::DecideConfirmation { id, approve, entered, reason } => return crate::surface::decide(self, account, &id, approve, entered, reason).await,
             HubCall::Unlock { .. } => return Err("only the app unlocks, on its own connection".into()),
             HubCall::AgentAudit { before, limit } => {
                 let limit = i64::from(limit.unwrap_or(50).clamp(1, 200));
@@ -1239,6 +1372,16 @@ impl Hub {
         let _held = account.marks.lock().await;
         self.write_marks(account, vec![MarkChange { session, mark: Mark::Clear }]).await?;
         Ok(())
+    }
+
+    /// `HubCall::ProposeWorkerProfile` from `machine`, which it takes only when `tab` is a tab that
+    /// machine reports as a Captain or the global orchestrator.
+    pub async fn propose_worker_profile(&self, account: &Account, machine: &str, tab: &str, profile: pinned_core::profiles::WorkerProfile) -> Result<Value, String> {
+        let orchestrates = |t: &TabView| t.id == tab && (t.orchestrator_global || t.role == Some(pinned_core::agent::Role::Orchestrator));
+        if !account.tabs_of(machine).is_some_and(|tabs| tabs.iter().any(orchestrates)) {
+            return Err(NOT_AN_ORCHESTRATOR.into());
+        }
+        self.change_tastes(account, |tastes| tastes.propose_worker_profile(profile)).await
     }
 
     async fn change_tastes(&self, account: &Account, change: impl FnOnce(&mut Tastes) -> Result<(), String>) -> Result<Value, String> {
@@ -1535,6 +1678,14 @@ impl Account {
             .any(|t| t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject))
     }
 
+    /// Whether the session in tab `tab` of the online `machine` itself runs the connector on `subject`.
+    pub fn runs_in_tab(&self, connector: &str, subject: &Subject, machine: &str, tab: &str) -> bool {
+        let live = self.live.lock().unwrap();
+        live.machines
+            .get(machine)
+            .is_some_and(|m| m.tabs().iter().any(|t| t.id == tab && t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject)))
+    }
+
     /// Machines a workflow run may go to: online, never a box's, `preferred` first, then the most recently connected.
     fn run_pool(&self, preferred: &str) -> Vec<MachineId> {
         let live = self.live.lock().unwrap();
@@ -1622,6 +1773,18 @@ impl Account {
         let Some(m) = live.machines.get(machine) else { return Seen::Offline };
         match m.tabs() {
             [] => Seen::NoTab,
+            tabs => Seen::Tab { running: tabs.iter().any(|t| t.running), quiet: !tabs.iter().any(holds_box) },
+        }
+    }
+
+    /// What a worker's box shows: `Starting` while a session runs and no tab has reported a
+    /// conversation; else as `seen_any`.
+    pub fn seen_worker(&self, machine: &str) -> Seen {
+        let live = self.live.lock().unwrap();
+        let Some(m) = live.machines.get(machine) else { return Seen::Offline };
+        match m.tabs() {
+            [] => Seen::NoTab,
+            tabs if tabs.iter().any(|t| t.running) && tabs.iter().all(|t| t.session.is_none()) => Seen::Starting,
             tabs => Seen::Tab { running: tabs.iter().any(|t| t.running), quiet: !tabs.iter().any(holds_box) },
         }
     }
@@ -1875,7 +2038,21 @@ pub(crate) struct Persisted {
     writes: Arc<Writes>,
     /// `Hub::refuse_run_saves`.
     refuse_runs: Arc<AtomicBool>,
+    /// Where `claim_fire` claims the account's fires; none in a test of the writes alone.
+    fires: Option<Fires>,
 }
+
+/// The account's row in `trigger_fires`, and the runtime its database connection runs on.
+struct Fires {
+    db: Db,
+    account: Uuid,
+    runtime: tokio::runtime::Handle,
+}
+
+/// How long `PgStorage::claim_fire` waits for the database before it answers an error. A check
+/// claims its changes one at a time and stops at the first claim that answers an error, so a
+/// stalled database holds a check up for one `CLAIM_WAIT` at most, within its call timeout.
+const CLAIM_WAIT: Duration = Duration::from_secs(10);
 
 /// The name of the listed project that holds `cwd`, the innermost one, else the folder's own name.
 fn project_name(projects: &[ProjectView], cwd: &str) -> String {
@@ -1935,6 +2112,7 @@ fn prompt_outcome(answer: Result<Value, Unanswered>) -> Result<bool, String> {
 
 impl PgStorage {
     fn new(db: Db, account: Uuid, stored: db::Connectors, refuse_runs: Arc<AtomicBool>) -> PgStorage {
+        let fires_db = db.clone();
         let write: store_writes::Write = Arc::new(move |account, version, doc| {
             let db = db.clone();
             Box::pin(async move {
@@ -1965,10 +2143,11 @@ impl PgStorage {
                 }
             })
         });
-        PgStorage::with_writer(account, stored, refuse_runs, write)
+        let fires = Fires { db: fires_db, account, runtime: tokio::runtime::Handle::current() };
+        PgStorage::with_writer(account, stored, refuse_runs, write, Some(fires))
     }
 
-    fn with_writer(account: Uuid, stored: db::Connectors, refuse_runs: Arc<AtomicBool>, write: store_writes::Write) -> PgStorage {
+    fn with_writer(account: Uuid, stored: db::Connectors, refuse_runs: Arc<AtomicBool>, write: store_writes::Write, fires: Option<Fires>) -> PgStorage {
         let mut doc = stored.store;
         let runs = doc.as_object_mut().and_then(|map| map.remove("runs")).and_then(|value| serde_json::to_vec(&value).ok()).unwrap_or_default();
         let store = (doc != serde_json::json!({})).then(|| serde_json::to_vec(&doc).unwrap());
@@ -1977,6 +2156,7 @@ impl PgStorage {
             keys: Mutex::new(stored.secrets),
             writes: Writes::start(account, u64::try_from(stored.version).unwrap_or(0), write),
             refuse_runs,
+            fires,
         }))
     }
 
@@ -2057,6 +2237,38 @@ impl Storage for PgStorage {
         if keys.remove(name).is_some() {
             self.0.writes.queue_secrets(keys.clone());
         }
+    }
+
+    /// The calls of the store that wait on Postgres: the claim must be the database's, so two
+    /// hubs on it see one winner. The hub's runtime has many threads, and this one hands its
+    /// other tasks to them while it waits.
+    fn claim_fire(&self, workflow: &str, key: &str, claimer: &str, retry: bool) -> Result<bool, String> {
+        let Some(fires) = &self.0.fires else { return Err("no database to claim the fire in".into()) };
+        let claim = async {
+            tokio::time::timeout(CLAIM_WAIT, fires.db.claim_fire(fires.account, workflow, key, claimer, retry))
+                .await
+                .map_err(|_| "could not claim the fire: the database did not answer".to_owned())?
+        };
+        wait_on_fires(fires, claim)
+    }
+
+    fn release_fire(&self, workflow: &str, key: &str, claimer: &str) -> Result<(), String> {
+        let Some(fires) = &self.0.fires else { return Err("no database to release the fire in".into()) };
+        let release = async {
+            tokio::time::timeout(CLAIM_WAIT, fires.db.release_fire(fires.account, workflow, key, claimer))
+                .await
+                .map_err(|_| "could not give back the fire: the database did not answer".to_owned())?
+        };
+        wait_on_fires(fires, release)
+    }
+}
+
+/// Waits for a `trigger_fires` call from a check, on the runtime of its database connection.
+fn wait_on_fires<T>(fires: &Fires, call: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
+    match tokio::runtime::Handle::try_current().map(|current| current.runtime_flavor()) {
+        Err(_) => fires.runtime.block_on(call),
+        Ok(tokio::runtime::RuntimeFlavor::CurrentThread) => Err("could not claim the fire: a single-threaded runtime cannot wait for it".into()),
+        Ok(_) => tokio::task::block_in_place(|| fires.runtime.block_on(call)),
     }
 }
 
@@ -2160,7 +2372,7 @@ mod tests {
     }
 
     /// The fields of a census line after its prefix, each `name=<number>`, or the failure.
-    fn numeric_fields<'a>(line: &'a str, prefix: &str) -> Vec<(&'a str, u64)> {
+    fn numeric_fields<'a>(line: &'a str, prefix: &str) -> Vec<(&'a str, i64)> {
         let rest = line.strip_prefix(prefix).unwrap_or_else(|| panic!("{line:?} starts with {prefix:?}"));
         rest.split_whitespace()
             .map(|field| {
@@ -2178,7 +2390,7 @@ mod tests {
         crate::traffic::received("machine_reply", 7);
         crate::traffic::sync_pulled(4096);
         let line = format!("pinned-server: census{}{}", crate::heap::census(), crate::traffic::take().fields());
-        let fields: HashMap<&str, u64> = numeric_fields(&line, "pinned-server: census").into_iter().collect();
+        let fields: HashMap<&str, i64> = numeric_fields(&line, "pinned-server: census").into_iter().collect();
         for name in ["heap_live_mb", "heap_big_live_mb", "heap_allocated_gb", "sent_n", "sent_bytes", "sent_max", "recv_n", "recv_bytes", "recv_max", "sync_pulls", "sync_pull_bytes"] {
             assert!(fields.contains_key(name), "{name} in {line}");
         }
@@ -2187,12 +2399,169 @@ mod tests {
         assert!(fields["recv_machine_reply_n"] >= 1 && fields["sync_pull_bytes"] >= 4096, "{line}");
         let pending = store_writes::Pending { store: 1, store_bytes: 1234, secrets: 0, secrets_bytes: 0 };
         let id = Uuid::from_u128(7);
-        let account = account_census(id, 3, (100, 200, pending));
+        let account = account_census(id, 3, (100, 200, pending), check_census(None, 42), false);
         let fields = numeric_fields(&account, &format!("pinned-server: census-account id={id}"));
         assert_eq!(
             fields,
-            vec![("runs", 3), ("runs_bytes", 200), ("store_bytes", 100), ("store_pending", 1), ("store_pending_bytes", 1234), ("secrets_pending", 0), ("secrets_pending_bytes", 0)]
+            vec![("runs", 3), ("runs_bytes", 200), ("store_bytes", 100), ("store_pending", 1), ("store_pending_bytes", 1234), ("secrets_pending", 0), ("secrets_pending_bytes", 0), ("check_age_s", -1), ("check_failing", 0), ("watching", 0)]
         );
+    }
+
+    #[test]
+    fn the_account_census_says_how_old_the_last_check_is_and_whether_it_failed() {
+        let id = Uuid::from_u128(7);
+        let pending = || store_writes::Pending { store: 0, store_bytes: 0, secrets: 0, secrets_bytes: 0 };
+        let failed = check_at("1970-01-01T00:00:00+00:00", Some("Linear answered 500"));
+        assert_eq!(check_census(Some(&failed), 42), (42, true));
+        assert_eq!(check_census(None, 42), (-1, false));
+        let line = account_census(id, 3, (100, 200, pending()), check_census(Some(&failed), 42), true);
+        assert!(line.ends_with(" check_age_s=42 check_failing=1 watching=1"), "{line}");
+        let line = account_census(id, 3, (100, 200, pending()), check_census(None, 42), false);
+        assert!(line.ends_with(" check_age_s=-1 check_failing=0 watching=0"), "{line}");
+    }
+
+    /// A check that ran at `at`, which the log does not read, with `error`.
+    fn check_at(at: &str, error: Option<&str>) -> pinned_core::connectors::Check {
+        pinned_core::connectors::Check { at: at.into(), error: error.map(Into::into) }
+    }
+
+    #[test]
+    fn the_check_log_names_late_checks_and_changes_in_the_error_only() {
+        let id = Uuid::from_u128(0x1234_5678_9abc_def0_1111_2222_3333_4444);
+        let log = |prev: &CheckLog, error: Option<&str>, now: i64| log_check(prev, id, &check_at("", error), now);
+        let (state, lines) = log(&CheckLog::default(), None, 1000);
+        assert!(lines.is_empty(), "{lines:?}");
+        let (state, lines) = log(&state, None, 1030);
+        assert!(lines.is_empty(), "{lines:?}");
+        let (state, lines) = log(&state, None, 1180);
+        assert_eq!(lines, ["pinned-server: check-late account=12345678 gap_s=150"]);
+        let (state, lines) = log(&state, Some("Linear answered 500"), 1240);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 class=linear parts=1 fp=1d8aa235"]);
+        let (state, lines) = log(&state, Some("Linear answered 500"), 1300);
+        assert!(lines.is_empty(), "{lines:?}");
+        let (state, lines) = log(&state, Some("Slack answered 403"), 1360);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 class=slack parts=1 fp=7c9e905a"]);
+        // The failure began at 1240, and a changed error does not start the count again.
+        let (_, lines) = log(&state, None, 1450);
+        assert_eq!(lines, ["pinned-server: check-ok account=12345678 after_s=210"]);
+
+        // A repeated error lasts from its first check, so the recovery says 120 s here.
+        let (state, _) = log(&CheckLog::default(), Some("Linear answered 500"), 100);
+        let (state, _) = log(&state, Some("Linear answered 500"), 150);
+        let (_, lines) = log(&state, None, 220);
+        assert_eq!(lines, ["pinned-server: check-ok account=12345678 after_s=120"]);
+
+        // The line carries no error text, whatever the error holds: a query string or a newline.
+        let (_, lines) = log(&CheckLog::default(), Some("Bad\nthing?token=x&more"), 0);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 class=other parts=1 fp=168b78fb"]);
+        let long = "x".repeat(500);
+        let (_, lines) = log(&CheckLog::default(), Some(&long), 0);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 class=other parts=1 fp=c38c2bf3"]);
+    }
+
+    #[test]
+    fn a_check_error_line_names_its_class_and_never_its_text() {
+        let id = Uuid::from_u128(0x1234_5678_9abc_def0_1111_2222_3333_4444);
+        let error = "workflow \"Workflow Alpha\" names a step \"Step Beta\" it does not have; could not open a session in /home/u/acme-site: no tab took it";
+        let (_, lines) = log_check(&CheckLog::default(), id, &check_at("", Some(error)), 0);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 class=workflow parts=2 fp=58bf650f"]);
+        for text in ["Workflow Alpha", "Step Beta", "/home/u/acme-site", "names a step"] {
+            assert!(!lines[0].contains(text), "{lines:?} holds {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_changed_error_text_logs_again_and_the_same_text_does_not() {
+        let id = Uuid::from_u128(0x1234_5678_9abc_def0_1111_2222_3333_4444);
+        let log = |prev: &CheckLog, error: Option<&str>, now: i64| log_check(prev, id, &check_at("", error), now);
+        let (state, lines) = log(&CheckLog::default(), Some("Linear answered 500"), 0);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 class=linear parts=1 fp=1d8aa235"]);
+        let (state, lines) = log(&state, Some("Linear answered 500"), 60);
+        assert!(lines.is_empty(), "{lines:?}");
+        let (state, lines) = log(&state, Some("Linear answered 503"), 120);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 class=linear parts=1 fp=b616c532"]);
+        let (_, lines) = log(&state, Some("Linear answered 503"), 180);
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    #[test]
+    fn a_check_error_logs_when_its_kind_changes_and_every_30_minutes_while_it_lasts() {
+        let id = Uuid::from_u128(0x1234_5678_9abc_def0_1111_2222_3333_4444);
+        let log = |prev: &CheckLog, error: Option<&str>, now: i64| log_check(prev, id, &check_at("", error), now);
+        let starts = |lines: &[String], head: &str| lines.len() == 1 && lines[0].starts_with(head);
+        // Ten checks of one kind whose texts differ (a request id each) make one line.
+        let mut state = CheckLog::default();
+        let mut printed = vec![];
+        for n in 0..10 {
+            let (next, lines) = log(&state, Some(&format!("Linear answered 500: request req-{n:04}")), n * 60);
+            printed.extend(lines);
+            state = next;
+        }
+        assert!(starts(&printed, "pinned-server: check-error account=12345678 class=linear "), "{printed:?}");
+        // Another status of the same connector is another kind, and so is another connector.
+        let (state, lines) = log(&state, Some("Linear answered 503: request req-0010"), 600);
+        assert!(starts(&lines, "pinned-server: check-error account=12345678 class=linear "), "{lines:?}");
+        let (state, lines) = log(&state, Some("Slack answered 503"), 660);
+        assert!(starts(&lines, "pinned-server: check-error account=12345678 class=slack "), "{lines:?}");
+        // The same kind that lasts prints once more after 30 minutes, and not before.
+        let (mut state, mut printed) = (state, vec![]);
+        for minute in 12..=45 {
+            let (next, lines) = log(&state, Some(&format!("Slack answered 503: retry after {minute}")), minute * 60);
+            printed.extend(lines.into_iter().map(|line| (minute, line)));
+            state = next;
+        }
+        assert_eq!(printed.iter().map(|(minute, _)| *minute).collect::<Vec<_>>(), [41], "{printed:?}");
+        // The recovery prints once, counted from the first failure.
+        let (state, lines) = log(&state, None, 46 * 60);
+        assert_eq!(lines, ["pinned-server: check-ok account=12345678 after_s=2760"]);
+        let (_, lines) = log(&state, None, 47 * 60);
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    #[test]
+    fn check_ok_counts_from_the_first_failure() {
+        let id = Uuid::from_u128(0x1234_5678_9abc_def0_1111_2222_3333_4444);
+        let log = |prev: &CheckLog, error: Option<&str>, now: i64| log_check(prev, id, &check_at("", error), now);
+        let (state, _) = log(&CheckLog::default(), Some("Linear answered 500"), 0);
+        let (state, _) = log(&state, Some("Slack answered 403"), 60);
+        let (_, lines) = log(&state, None, 150);
+        assert_eq!(lines, ["pinned-server: check-ok account=12345678 after_s=150"]);
+    }
+
+    /// An account the hub knows, its connectors as given and watched or not.
+    fn account_with(id: Uuid, connectors: Option<Connectors>, watching: bool) -> Account {
+        Account { id, email: String::new(), team: false, live: Mutex::default(), connectors: OnceCell::new_with(connectors.map(Arc::new)), watching: AtomicBool::new(watching), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() }
+    }
+
+    /// Connectors whose `runs.json` does not parse, so they hold a failed check from the start.
+    fn connectors_with_broken_runs() -> (tempfile::TempDir, Connectors) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("runs.json"), b"{not json").unwrap();
+        let connectors = Connectors::new(pinned_core::connectors::FileStorage::new(dir.path().to_path_buf()), String::new());
+        (dir, connectors)
+    }
+
+    #[test]
+    fn the_census_says_whether_the_account_is_watched() {
+        let pending = || store_writes::Pending { store: 0, store_bytes: 0, secrets: 0, secrets_bytes: 0 };
+        let (id, other) = (Uuid::from_u128(7), Uuid::from_u128(8));
+        let empty = tempfile::tempdir().unwrap();
+        let connectors = || Connectors::new(pinned_core::connectors::FileStorage::new(empty.path().to_path_buf()), String::new());
+        let accounts: HashMap<Uuid, Arc<Account>> = HashMap::from([(id, Arc::new(account_with(id, Some(connectors()), false))), (other, Arc::new(account_with(other, Some(connectors()), true)))]);
+        let lines = census_lines(vec![(id, (0, 0, pending())), (other, (0, 0, pending()))], &accounts, 42);
+        assert!(lines[0].ends_with(" check_age_s=-1 check_failing=0 watching=0"), "{lines:?}");
+        assert!(lines[1].ends_with(" check_age_s=-1 check_failing=0 watching=1"), "{lines:?}");
+    }
+
+    #[test]
+    fn the_census_line_reads_the_last_check_its_connectors_kept() {
+        let pending = store_writes::Pending { store: 0, store_bytes: 0, secrets: 0, secrets_bytes: 0 };
+        let id = Uuid::from_u128(7);
+        let (_dir, connectors) = connectors_with_broken_runs();
+        let at = chrono::DateTime::parse_from_rfc3339(&connectors.last_check().unwrap().at).unwrap().timestamp();
+        let accounts: HashMap<Uuid, Arc<Account>> = HashMap::from([(id, Arc::new(account_with(id, Some(connectors), true)))]);
+        let lines = census_lines(vec![(id, (0, 0, pending))], &accounts, at + 42);
+        assert_eq!(lines, ["pinned-server: census-account id=00000000-0000-0000-0000-000000000007 runs=0 runs_bytes=0 store_bytes=0 store_pending=0 store_pending_bytes=0 secrets_pending=0 secrets_pending_bytes=0 check_age_s=42 check_failing=1 watching=1"]);
     }
 
     #[test]
@@ -2359,6 +2728,32 @@ mod tests {
         }
     }
 
+    /// A box's account with one machine showing `tabs`.
+    fn box_with(tabs: Vec<serde_json::Value>) -> Account {
+        let account = Account { id: Uuid::nil(), email: String::new(), team: false, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
+        let (out, _sent, _) = Outbox::new();
+        account.came_online("box", 1, "box".into(), true, "0.18.7".into(), out);
+        let tabs = tabs.into_iter().map(|tab| serde_json::from_value(tab).unwrap()).collect();
+        account.machine_event("box", 1, MachineEvent::Tabs { tabs });
+        account
+    }
+
+    #[test]
+    fn a_worker_box_whose_session_reported_no_conversation_is_starting() {
+        let tab = |id: &str, status: Option<AgentStatus>, session: Option<&str>, running: bool| {
+            serde_json::json!({ "id": id, "cwd": "/work/repo", "bypass": true, "running": running, "opened": 1, "status": status, "session": session, "connector": "delegate" })
+        };
+        assert_eq!(box_with(vec![tab("tab-1", None, None, true)]).seen_worker("box"), Seen::Starting, "a session that reported no conversation");
+        assert_eq!(box_with(vec![tab("tab-1", Some(AgentStatus::Working), None, true)]).seen_worker("box"), Seen::Starting, "a tab that reads working with no turn reported");
+        assert_eq!(box_with(vec![tab("tab-1", Some(AgentStatus::Working), Some("s-1"), true)]).seen_worker("box"), Seen::Tab { running: true, quiet: false }, "a worker at work");
+        assert_eq!(box_with(vec![tab("tab-1", Some(AgentStatus::Done), Some("s-1"), true)]).seen_worker("box"), Seen::Tab { running: true, quiet: true }, "a worker done with its turn");
+        assert_eq!(box_with(vec![tab("tab-1", None, None, false)]).seen_worker("box"), Seen::Tab { running: false, quiet: true }, "an exited session ends as exited");
+        let two = box_with(vec![tab("tab-1", Some(AgentStatus::Done), Some("s-1"), true), tab("tab-2", None, None, true)]);
+        assert_eq!(two.seen_worker("box"), Seen::Tab { running: true, quiet: true }, "a started worker with a thread of its own still starting");
+        assert_eq!(box_with(vec![]).seen_worker("box"), Seen::NoTab);
+        assert_eq!(box_with(vec![]).seen_worker("elsewhere"), Seen::Offline);
+    }
+
     #[test]
     fn a_working_box_is_not_quiet() {
         let account = box_showing(AgentStatus::Working, false, true);
@@ -2437,7 +2832,7 @@ mod tests {
             })
         };
         let stored = db::Connectors { store: serde_json::json!({ "runs": [] }), secrets: BTreeMap::new(), version: 0 };
-        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write);
+        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write, None);
         for n in 0..20 {
             storage.save(format!(r#"{{"n":{n}}}"#).as_bytes()).unwrap();
             storage.save_runs(format!(r#"[{{"run":{n}}}]"#).as_bytes()).unwrap();
@@ -2469,7 +2864,7 @@ mod tests {
             })
         };
         let stored = db::Connectors { store: serde_json::json!({}), secrets: BTreeMap::new(), version: 0 };
-        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write);
+        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write, None);
         let nested = |n: usize| format!("{}0{}", "[".repeat(n), "]".repeat(n));
         let store_at = |n: usize| format!(r#"{{"s":"[[\\\"{{","deep":{}}}"#, nested(n - 1));
         assert!(storage.save(store_at(200).as_bytes()).is_err(), "a store 200 deep is refused, not taken and dropped");
@@ -2508,7 +2903,7 @@ mod tests {
             })
         };
         let stored = db::Connectors { store: serde_json::json!({}), secrets: BTreeMap::new(), version: 0 };
-        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write);
+        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write, None);
         for store in [
             r#"{"a":"x\u0000y"}"#,
             r#"{"a\u0000":1}"#,

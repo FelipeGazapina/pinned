@@ -14,6 +14,7 @@ const NEEDS_YOU_KINDS = {
   plan: { label: "Plan", glyph: "needs", rank: 0 },
   limit: { label: "Usage limit", glyph: "failed", rank: 1 },
   failed: { label: "Failed", glyph: "failed", rank: 2 },
+  stopped: { label: "Stopped on error", glyph: "failed", rank: 2 },
   sleep: { label: "Stopped", glyph: "failed", rank: 2 },
   review: { label: "Finished", glyph: "unread", rank: 3 },
   offer: { label: "Asked", glyph: "idle", rank: 4 },
@@ -33,6 +34,7 @@ function needsYouCards() {
     const view = item.tab.view;
     const line =
       item.kind === "failed" ? String(view.message ?? "").trim() || null
+        : item.kind === "stopped" ? item.error
         : item.kind === "sleep" ? item.sleep.text
         : item.kind === "review" ? needsYouFinished(item.tab)
         : item.kind === "question" ? item.ask.text
@@ -62,7 +64,7 @@ function needsYouCards() {
   }));
   // What an approved request handed the user to see once, such as a pairing command.
   const shown = agentShown ? [{ key: "agent-shown", kind: "shown", title: agentShown.action, where: "", machine: null, since: null, tab: null, ask: null, limit: null, line: null, confirmation: null }] : [];
-  return [...shown, ...agents, ...threads, ...offers].sort((a, b) => NEEDS_YOU_KINDS[a.kind].rank - NEEDS_YOU_KINDS[b.kind].rank || (b.since ?? 0) - (a.since ?? 0));
+  return [...shown, ...agents, ...threads.filter((card) => needsYouDismissed.get(card.key) !== card.since), ...offers].sort((a, b) => NEEDS_YOU_KINDS[a.kind].rank - NEEDS_YOU_KINDS[b.kind].rank || (b.since ?? 0) - (a.since ?? 0));
 }
 
 const nyPlural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -80,6 +82,9 @@ function needsYouSummary(cards) {
 const needsYouAnswers = new Map();
 /** The typed answer in a card's field, by card key, so a repaint never loses it. */
 const needsYouTyped = new Map();
+/** The stopped-on-error cards dismissed here, by card key, with the `since` each was dismissed at, so a
+ * newer error on the same thread draws again. Kept for this page's life only. */
+const needsYouDismissed = new Map();
 const needsYouSig = (card) => `${card.kind}:${card.since}`;
 
 const nyButton = (act, label, cls, attrs = "") => `<button type="button" class="${cls}" data-ny="${act}"${attrs}>${esc(label)}</button>`;
@@ -118,6 +123,8 @@ function needsYouActionsHtml(card) {
       return row(`${card.limit.switchTo.map((a) => nyButton("switch", `Continue under ${a.name}`, "ny-secondary ny-plain", ` data-account="${esc(a.id)}"`)).join("")}${nyButton("snooze", "Snooze", "ny-quiet")}`);
     case "failed":
       return row(nyOpen());
+    case "stopped":
+      return row(`${nyButton("continue", "Try again", "ny-primary")}${nyButton("dismiss", "Dismiss", "ny-secondary")}`);
     case "sleep":
       return row(`${nyButton("continue", "Continue", "ny-primary")}${nyOpen()}`);
     default:
@@ -138,7 +145,7 @@ function needsYouCardHtml(card, answer = null) {
   const body =
     card.kind === "approval" && card.ask?.command ? `<pre>${esc(card.ask.command)}</pre>`
       : card.kind === "agent" && Object.keys(card.confirmation.args ?? {}).length && !AGENT_TITLE_ONLY.has(card.confirmation.action) ? `<pre>${esc(JSON.stringify(card.confirmation.args, null, 2))}</pre>`
-      : card.line && card.line !== card.title ? `<p class="ny-line">${esc(card.line)}</p>`
+      : card.kind !== "agent" && card.line && card.line !== card.title ? `<p class="ny-line">${esc(card.line)}</p>`
       : "";
   const unsupervised = card.sleep?.delegated ? `<p class="ny-line">${esc(`${nyPlural(card.sleep.delegated, "delegated task")} still running with nobody to supervise ${card.sleep.delegated === 1 ? "it" : "them"}.`)}</p>` : "";
   const agentLine = unsupervised + (card.kind === "agent" ? `<p class="ny-line">${esc(card.line)}</p>` : "");
@@ -201,9 +208,18 @@ function drawNeedsYou() {
   tickNeedsYou();
 }
 
+/** The page's heading: it says Personal while a team is current, so the person's own asks say whose they are. */
+const needsYouTeamCurrent = () => typeof teamsNow !== "undefined" && teamsNow !== null;
+const needsYouTitle = () => (needsYouTeamCurrent() ? "Needs you · Personal" : "Needs you");
+/** Sets both headings of the open page to the title, after a team switch. */
+function paintNeedsYouTitle() {
+  for (const h of pageView.querySelectorAll(".page-head h1, .ny-title h1")) h.textContent = needsYouTitle();
+}
+document.addEventListener("teams:changed", () => needsYouLive && paintNeedsYouTitle());
+
 function showNeedsYou() {
-  setPage(`${headHtml("Needs you", `<span class="range ny-count"></span>`)}<div class="page-body"><div class="ny-wrap">
-    <div class="ny-title"><h1>Needs you</h1><span class="ny-count"></span></div>
+  setPage(`${headHtml(needsYouTitle(), `<span class="range ny-count"></span>`)}<div class="page-body"><div class="ny-wrap">
+    <div class="ny-title"><h1>${needsYouTitle()}</h1><span class="ny-count"></span></div>
     <section class="ny-list" aria-label="Threads that need you"></section>
     <p class="ny-empty" role="status" hidden>Nothing needs you right now.</p>
   </div></div>`);
@@ -234,6 +250,10 @@ async function needsYouContinue(card) {
 
 const NEEDS_YOU_ACTS = {
   continue: (card) => needsYouContinue(card),
+  dismiss: (card) => {
+    needsYouDismissed.set(card.key, card.since);
+    drawNeedsYou();
+  },
   open: (card) => activate(card.tab),
   approve: (card) => needsYouAnswer(card, "approve"),
   decline: (card) => needsYouAnswer(card, "decline"),

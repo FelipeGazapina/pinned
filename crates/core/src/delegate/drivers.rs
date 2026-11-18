@@ -60,7 +60,7 @@ fn claude_args(spec: &SpawnSpec) -> Vec<String> {
     match spec.access {
         Access::Full => args.push("--dangerously-skip-permissions".into()),
         Access::Auto => args.extend(["--permission-mode".into(), "auto".into()]),
-        Access::ReadOnly => args.extend(["--permission-mode".into(), "plan".into()]),
+        Access::ReadOnly => args.extend(super::claude_read_only_args()),
     }
     let configs: Vec<String> = spec.mcp_config.into_iter().chain(spec.session_mcp.map(|files| files.file.as_path())).map(|config| config.display().to_string()).collect();
     if !configs.is_empty() {
@@ -695,14 +695,7 @@ pub fn spawn(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    for key in spec.strip {
-        cmd.env_remove(key);
-    }
-    cmd.env_remove(crate::agent::TAB_ENV);
-    cmd.env_remove(crate::agent::TASK_ENV);
-    for (key, value) in spec.env {
-        cmd.env(key, value);
-    }
+    crate::machine::ChildEnv::new(spec.strip, spec.env.to_vec()).apply(&mut cmd);
     if let Some(path) = spec.path {
         cmd.env("PATH", path);
     }

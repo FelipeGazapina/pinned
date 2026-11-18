@@ -35,6 +35,15 @@ class Backoff {
     return this.wait();
   }
 }
+/** A terminal's output as bytes. Every running session streams it, so this runs about a hundred
+ * times a second: a plain loop, where Uint8Array.from with a mapping function calls it per byte. */
+function base64Bytes(text) {
+  const raw = atob(text);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return bytes;
+}
+
 /** The hub's answer to a call only the account's owner makes, until this app unlocks (`surface::LOCKED`). */
 const LOCKED = "unlock with your password in the app to do this";
 
@@ -111,7 +120,7 @@ class Hub {
         break;
       case "event":
         if (frame.event.kind === "output") {
-          const bytes = Uint8Array.from(atob(frame.event.data), (c) => c.charCodeAt(0));
+          const bytes = base64Bytes(frame.event.data);
           for (const sink of this.attached.get(`${frame.machine}:${frame.event.tab}`)?.sinks ?? []) sink.write(bytes);
         } else {
           this.on.event?.(frame.machine, frame.event);

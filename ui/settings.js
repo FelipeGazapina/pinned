@@ -665,7 +665,8 @@ ${slackBotSelect(c)}
     fields: (c) => `${kindHtml(c)}${connectForHtml(c.trigger.kind)}
 ${slackBotSelect(c)}
       <label>Channel ${input("trigger.channel", c.trigger.channel, 'list="slack-channels" placeholder="support"')}</label>
-      <p class="hint">Invite the bot with <code>/invite @your-bot</code>. Every new message a person posts in the channel is sorted once, checked every minute. Thread replies and bots are skipped.</p>`,
+      ${check("trigger.apps", !!c.trigger.apps, "Also read posts from apps and integrations")}
+      <p class="hint">Invite the bot with <code>/invite @your-bot</code>. Every new message a person posts in the channel is sorted once, checked every minute. Thread replies are skipped, and so are apps and bots unless the box is ticked. Your own pinned bots are never read.</p>`,
   },
   "called-trigger": {
     tone: "called",
@@ -1043,7 +1044,7 @@ function syncTriggerFromWatch(c, watch) {
   if (!watch) return;
   if (watch.kind === "linear-label") c.trigger = { kind: "linear-label", label: watch.label ?? "" };
   else if (watch.kind === "slack-mention") c.trigger = { kind: "slack-mention", channel: watch.channel ?? "" };
-  else if (watch.kind === "slack-message") c.trigger = { kind: "slack-message", channel: watch.channel ?? "", decide: c.trigger?.decide ?? { model: "", instructions: "", categories: [], fallback: null } };
+  else if (watch.kind === "slack-message") c.trigger = { kind: "slack-message", channel: watch.channel ?? "", ...(watch.apps ? { apps: true } : {}), decide: c.trigger?.decide ?? { model: "", instructions: "", categories: [], fallback: null } };
   else if (watch.kind === "called") c.trigger = { kind: "called" };
 }
 
@@ -1053,7 +1054,7 @@ function syncWatchFromTrigger(c) {
   const t = c.trigger;
   if (t.kind === "linear-label") node.watch = { kind: "linear-label", label: t.label ?? "" };
   else if (t.kind === "slack-mention") node.watch = { kind: "slack-mention", channel: t.channel ?? "" };
-  else if (t.kind === "slack-message") node.watch = { kind: "slack-message", channel: t.channel ?? "" };
+  else if (t.kind === "slack-message") node.watch = { kind: "slack-message", channel: t.channel ?? "", ...(t.apps ? { apps: true } : {}) };
   else node.watch = { kind: "called" };
 }
 
@@ -1151,7 +1152,7 @@ function sessionNodeIssues(node, c) {
 }
 function legacyTriggerFromWatch(watch) {
   if (watch?.kind === "linear-label") return { kind: "linear-label", label: watch.label ?? "" };
-  if (watch?.kind === "slack-message") return { kind: "slack-message", channel: watch.channel ?? "", decide: { model: "", instructions: "", categories: [], fallback: null } };
+  if (watch?.kind === "slack-message") return { kind: "slack-message", channel: watch.channel ?? "", ...(watch.apps ? { apps: true } : {}), decide: { model: "", instructions: "", categories: [], fallback: null } };
   if (watch?.kind === "slack-mention") return { kind: "slack-mention", channel: watch.channel ?? "" };
   return { kind: "called" };
 }
@@ -1691,10 +1692,11 @@ function checkedText() {
 
 const trimmed = (s) => (s ?? "").trim();
 
-function tidyTrigger({ kind, label, channel, decide }) {
+function tidyTrigger({ kind, label, channel, decide, apps }) {
   const trigger = { kind };
   if (label !== undefined) trigger.label = trimmed(label);
   if (channel !== undefined) trigger.channel = trimmed(channel);
+  if (kind === "slack-message" && apps) trigger.apps = true;
   if (decide) {
     trigger.decide = {
       model: trimmed(decide.model),
@@ -2352,7 +2354,7 @@ settingsPage.addEventListener("input", (e) => {
       }
     }
   }
-  if (path === "trigger.label" || path === "trigger.channel") syncWatchFromTrigger(view.draft);
+  if (path === "trigger.label" || path === "trigger.channel" || path === "trigger.apps") syncWatchFromTrigger(view.draft);
   if (path.startsWith("graph.nodes") && path.includes(".watch.")) syncLegacyFromGraph(view.draft);
   refresh();
 });

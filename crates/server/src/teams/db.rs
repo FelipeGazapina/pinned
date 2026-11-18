@@ -6,7 +6,7 @@ use crate::db::{err, Db};
 use tokio_postgres::Client;
 use pinned_core::agent::Subject;
 use pinned_core::preauth::team_hook::GO_AHEAD;
-use pinned_core::teams::{Answer, Bot, BotLimits, Call, Group, Role, Run, RunState, SkipReason, Skipped, TeamProject, Who};
+use pinned_core::teams::{Answer, Bot, BotLimits, Call, Group, HeldWhy, LineHeld, Role, Run, RunState, SkipReason, Skipped, TeamProject, Who};
 use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
@@ -16,6 +16,8 @@ pub struct TeamRow {
     pub name: String,
     pub owner: Uuid,
     pub role: Role,
+    /// Since when, and why, the team's waiting line is held (`hold_line`).
+    pub line_held: Option<LineHeld>,
 }
 
 /// A member of a team, with its email from `accounts`.
@@ -90,12 +92,26 @@ pub async fn teams_of(db: &Db, member: Uuid) -> Result<Vec<TeamRow>, String> {
     let rows = db
         .client().await?
         .query(
-            "select t.id, t.name, t.owner, m.role from team_members m join teams t on t.id = m.team where m.member = $1 order by t.created_at",
+            "select t.id, t.name, t.owner, m.role, extract(epoch from t.line_held_at)::bigint, t.line_held_why
+             from team_members m join teams t on t.id = m.team where m.member = $1 order by t.created_at",
             &[&member],
         )
         .await
         .map_err(err)?;
-    Ok(rows.iter().map(|r| TeamRow { id: r.get(0), name: r.get(1), owner: r.get(2), role: Role::parse(r.get(3)) }).collect())
+    let held = |r: &tokio_postgres::Row| Some(LineHeld { since: r.get::<_, Option<i64>>(4)?, why: HeldWhy::parse(r.get::<_, Option<&str>>(5)?)? });
+    Ok(rows.iter().map(|r| TeamRow { id: r.get(0), name: r.get(1), owner: r.get(2), role: Role::parse(r.get(3)), line_held: held(r) }).collect())
+}
+
+/// The team's waiting line is held for `why`, since now unless it already was. Written on `held`,
+/// in the team's turn.
+pub async fn hold_line(held: &Client, team: Uuid, why: HeldWhy) -> Result<(), String> {
+    held.execute("update teams set line_held_at = now(), line_held_why = $2 where id = $1 and line_held_at is null", &[&team, &why.as_str()]).await.map_err(err).map(drop)
+}
+
+/// The team's waiting line is no longer held. Written on `held`, in the team's turn; a team whose
+/// line was not held is not written.
+pub async fn line_read(held: &Client, team: Uuid) -> Result<(), String> {
+    held.execute("update teams set line_held_at = null, line_held_why = null where id = $1 and line_held_at is not null", &[&team]).await.map_err(err).map(drop)
 }
 
 /// Renames the team; false when it has no `teams` row.
@@ -511,18 +527,24 @@ pub async fn set_run_subject(db: &Db, team: Uuid, run: Uuid, subject: &Subject) 
 
 /// Holds a place for run `run` of an admitted trigger's event on `subject`, before anything
 /// outside pinned hears of the event: the cap counts it, and its session's `open` takes it.
-/// Written on `held`, the connection of the team's turn, so it commits with the turn.
-pub async fn insert_reserved(held: &Client, team: Uuid, run: &Run, subject: &Subject) -> Result<(), String> {
+/// Written on `held`, the connection of the team's turn, so it commits with the turn. False, with
+/// nothing written and the turn still usable, when the bot has a live run the turn did not read:
+/// one another path wrote, which the database refuses as a second (`crate::db::ONE_LIVE_RUN`).
+pub async fn insert_reserved(held: &Client, team: Uuid, run: &Run, subject: &Subject) -> Result<bool, String> {
     let id = Uuid::parse_str(&run.id).map_err(|_| "a run's id is a uuid")?;
-    let started_by = serde_json::Value::String(run.started_by.clone());
-    held
+    let (started_by, subject) = (serde_json::Value::String(run.started_by.clone()), json(subject)?);
+    held.batch_execute("savepoint reserve").await.map_err(err)?;
+    let inserted = held
         .execute(
             "insert into team_runs (id, team, workflow, started_by, state, subject, reserved, reserved_at) values ($1, $2, $3, $4, 'working', $5, true, now())",
-            &[&id, &team, &run.workflow, &started_by, &json(subject)?],
+            &[&id, &team, &run.workflow, &started_by, &subject],
         )
-        .await
-        .map_err(err)
-        .map(drop)
+        .await;
+    match inserted {
+        Ok(_) => held.batch_execute("release savepoint reserve").await.map_err(err).map(|()| true),
+        Err(e) if crate::db::one_live_run_refused(&e) => held.batch_execute("rollback to savepoint reserve").await.map_err(err).map(|()| false),
+        Err(e) => Err(err(e)),
+    }
 }
 
 /// The live run of bot `workflow` that holds a place for `subject` and has opened no session yet.
@@ -655,7 +677,7 @@ const CALL_COLUMNS: &str = "c.id, c.run, r.workflow, c.situation, c.asked, c.que
      c.escalated_at is not null, c.answer, c.outcome, c.team, c.step_hash";
 
 /// The run states a run that has not ended is in.
-const LIVE: &str = "('working', 'waiting', 'taken_over')";
+pub(crate) const LIVE: &str = "('working', 'waiting', 'taken_over')";
 
 fn run_of(r: &Row) -> Run {
     Run {
@@ -1435,17 +1457,18 @@ pub async fn enqueue(held: &Client, team: Uuid, workflow: &str, start: &serde_js
         .map_err(err)
 }
 
-/// The oldest waiting event, not granted yet, of a bot of the team that has no live run, `first`'s
-/// before any other bot's. Read on `held`, the connection of the team's turn.
-pub async fn next_waiting(held: &Client, team: Uuid, first: &str) -> Result<Option<Waiting>, String> {
+/// The oldest waiting event, not granted yet, of a bot of the team that has no live run and is not
+/// one of `passed`, `first`'s before any other bot's. Read on `held`, the connection of the team's turn.
+pub async fn next_waiting(held: &Client, team: Uuid, first: &str, passed: &[String]) -> Result<Option<Waiting>, String> {
     let row = held
         .query_opt(
             &format!(
                 "select id, workflow, start from team_run_queue q where team = $1 and granted_at is null
+                 and workflow <> all($3::text[])
                  and not exists (select 1 from team_runs r where r.team = q.team and r.workflow = q.workflow and r.state in {LIVE})
                  order by (workflow = $2) desc, id limit 1"
             ),
-            &[&team, &first],
+            &[&team, &first, &passed],
         )
         .await
         .map_err(err)?;
@@ -1541,6 +1564,13 @@ pub async fn claim(db: &Db, team: Uuid, id: i64) -> Result<Option<(serde_json::V
         .await
         .map_err(err)?;
     Ok(row.map(|r| (r.get(0), r.get(1))))
+}
+
+/// One more of the team's turns found waiting event `id`'s bot unreadable: answers how many have.
+/// Written on `held`, in the team's turn.
+pub async fn unread_pass(held: &Client, id: i64) -> Result<i32, String> {
+    let row = held.query_one("update team_run_queue set unread_passes = unread_passes + 1 where id = $1 returning unread_passes", &[&id]).await.map_err(err)?;
+    Ok(row.get(0))
 }
 
 /// Takes waiting event `id` out of its line. Written on `held`, the connection of the team's

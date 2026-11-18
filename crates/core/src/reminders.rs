@@ -157,6 +157,37 @@ pub fn permissions() -> Vec<String> {
         .collect()
 }
 
+/// pinned's own tools that only read. A read-only session calls these without asking and is
+/// refused every other tool of `permissions`, which act.
+const READ_TOOLS: [&str; 21] = [
+    LIST_TOOL,
+    CAPABILITIES_TOOL,
+    STATUS_TOOL,
+    STATS_TOOL,
+    "agents",
+    "work_cost",
+    "memory_search",
+    "actions",
+    "projects",
+    "read_captain",
+    "waiting",
+    "sessions",
+    "read_session",
+    "repo_overview",
+    "repo_read",
+    "repo_search",
+    "taste_get",
+    "convex_tables",
+    "convex_data",
+    "convex_run",
+    "convex_logs",
+];
+
+/// `permissions` split into the tools that only read and the tools that act.
+pub fn read_and_acting_permissions() -> (Vec<String>, Vec<String>) {
+    permissions().into_iter().partition(|tool| READ_TOOLS.iter().any(|read| *tool == format!("mcp__{SERVER}__{read}")))
+}
+
 pub fn serve(reminders: bool) {
     let stdin = std::io::stdin();
     let _ = serve_io(reminders, stdin.lock(), std::io::stdout());
@@ -225,6 +256,8 @@ enum Seat {
     GlobalOrchestrator,
     Captain,
     TasteChat,
+    /// A worker or reviewer thread.
+    Worker,
     Other,
 }
 
@@ -235,6 +268,7 @@ impl Seat {
             Some(crate::global_orchestrator::ROLE) => Seat::GlobalOrchestrator,
             Some(crate::taste::CHAT_ROLE) => Seat::TasteChat,
             Some(role) if Role::parse(role) == Some(Role::Orchestrator) => Seat::Captain,
+            Some(role) if matches!(Role::parse(role), Some(Role::Worker | Role::Reviewer)) => Seat::Worker,
             _ => Seat::Other,
         }
     }
@@ -274,6 +308,7 @@ fn tool_definitions(reminders: bool, child: bool, seat: Seat) -> Value {
         tools.push(stats_tool());
     }
     tools.extend(project_tools().into_iter().filter(|(audience, _)| offered(*audience)).map(|(_, tool)| tool));
+    tools.extend(crate::team_tools::offered(&crate::team_tools::TeamSeat { captain: seat == Seat::Captain, worker: seat == Seat::Worker || child, child }));
     Value::Array(tools)
 }
 
@@ -286,7 +321,7 @@ fn convex_offer(child: bool) -> Option<convex::Offer> {
 }
 
 fn delegation_tools() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         json!({
             "name": CAPABILITIES_TOOL,
             "description": "Call this before the first delegate_task and pick providerInstanceId, model, and options from it. It lists the accounts this machine can run a child agent on, and the access this session inherits.",
@@ -351,6 +386,7 @@ fn delegation_tools() -> Vec<Value> {
                     },
                     "isolation": { "type": "string", "enum": ["shared", "worktree"], "description": "shared runs in this checkout. worktree makes a separate checkout and runs the child there." },
                     "heavy": { "type": "boolean", "description": "Whether the account's placement policy picks the machine for this worker when target names none. Left out, a worker with isolation worktree is heavy and a shared one is not." },
+                    "planStep": { "type": "string", "description": "A step id (s2) or a list id (l1) of this Captain's plan. The task drives that step or list: it reads Running while the task works and Done or Failed when it ends, and a plan_step report on it waits for the task. A newer delegate_task naming the step replaces the link. Naming a failed step opens a fix of one step named for the task, at most 3 fixes per step. Only a project's Captain may name one." },
                     "mode": { "type": "string", "enum": ["async", "wait"], "default": "async", "description": "async returns at once. The notice is typed automatically only when this session is idle; otherwise the user sends it from the task's card. End your turn and do not poll. wait blocks until the result is in this call." },
                     "timeoutMs": { "type": "number", "description": "How long wait blocks, in milliseconds. The child keeps running after a timeout." },
                     "budgetMs": { "type": "number", "description": "How long the child may work before pinned tells this session how long it has run, in milliseconds. The default is 7200000, two hours, or half of the run limit when that is shorter. It must be below the run limit. Time counts only while the machine is awake." },
@@ -398,7 +434,13 @@ fn delegation_tools() -> Vec<Value> {
                 "required": ["taskId", "verdict"],
             },
         }),
-    ]
+    ];
+    // The agent team's delegate_task arguments, each offered once its unit turns it on.
+    let delegate = tools.iter_mut().find(|tool| tool["name"] == DELEGATE_TOOL).expect("delegate_task is listed");
+    for (name, schema) in [crate::profiles::delegate_property(), crate::chain::delegate_property()].into_iter().flatten() {
+        delegate["inputSchema"]["properties"][name] = schema;
+    }
+    tools
 }
 
 fn stats_tool() -> Value {
@@ -434,7 +476,7 @@ fn reminder_tools() -> Vec<Value> {
 
 /// Each project tool, named as `ProjectTool` tags it, and who is offered it. Every session gets the
 /// memory tools; one outside a project is told it has no memory.
-fn project_tools() -> [(Audience, serde_json::Value); 20] {
+fn project_tools() -> [(Audience, serde_json::Value); 24] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
     let project = serde_json::json!({ "type": "string", "description": "The project's key from projects, its folder on this machine, or <machine>:<folder> for a folder on another machine." });
     let machine = serde_json::json!({ "type": "string", "description": "The machine's id or name from projects, with or without @. Pass it whenever projects lists the project on more than one machine." });
@@ -557,7 +599,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 20] {
         })),
         (Audience::GlobalOrchestrator, serde_json::json!({
             "name": "sessions",
-            "description": "List as JSON every session of the account on every online machine and account: loose threads the user opened, workers and Capitães. Each has its id (for read_session), project (key, name, path), machine, account (such as work or personal), role (captain, worker or thread), the Capitão a worker works for, title, branch, PR, state and last_activity (Unix seconds). state is running (working on a turn), idle (its turn ended), waiting_on_input (it asks the user mid-turn), error (it stopped on an error) or settled (its session is not running). Newest activity first. machines lists every machine of the account, so an offline one or one that needs to update pinned shows. Call it to answer what runs in a project or on a machine.",
+            "description": "List as JSON every session of the account on every online machine and account: loose threads the user opened, workers and Capitães. Each has its id (for read_session), project (key, name, path), machine, account (such as work or personal), role (captain, worker or thread), the Capitão a worker works for, title, branch, PR, state and last_activity (Unix seconds). state is running (working on a turn), idle (its turn ended), waiting_on_input (it asks the user mid-turn), error (it stopped on a failure), stopped_on_error (its last turn ended on an API or stream error, and the user can have it try again) or settled (its session is not running). Newest activity first. machines lists every machine of the account, so an offline one or one that needs to update pinned shows. Call it to answer what runs in a project or on a machine.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -644,8 +686,6 @@ fn project_tools() -> [(Audience, serde_json::Value); 20] {
                             "hard_model": model,
                             "parallel": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Workers at once in a project; delegate_task refuses one more." },
                             "autonomy": { "type": "string", "enum": ["ask_first", "decide_and_tell", "report_at_end"] },
-                            "review_diffs": { "type": "boolean", "description": "Review each worker's diff before accepting it." },
-                            "second_opinion": { "type": "boolean", "description": "Another model reviews a risky change." },
                             "skills": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "enabled": { "type": "boolean" } }, "required": ["name", "enabled"] }, "description": "Skills the sessions follow; the whole list." },
                             "context": { "type": "array", "items": { "type": "string" }, "description": "Notes every turn carries; the whole list." },
                             "tier": { "type": "string", "enum": ["low", "mid", "high"], "description": "The costliest model tier a worker may run on, as orchestrator_capabilities lists it. It covers the worker's own model, not the models it picks for its subagents." },
@@ -668,7 +708,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 20] {
                 "type": "object",
                 "properties": {
                     "scope": scope,
-                    "field": { "type": "string", "enum": ["strategy", "ladder", "hard_model", "parallel", "autonomy", "review_diffs", "second_opinion", "skills", "context", "tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"] },
+                    "field": { "type": "string", "enum": ["strategy", "ladder", "hard_model", "parallel", "autonomy", "skills", "context", "tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"] },
                 },
                 "required": ["scope", "field"],
             },
@@ -680,6 +720,91 @@ fn project_tools() -> [(Audience, serde_json::Value); 20] {
                 "type": "object",
                 "properties": { "text": { "type": "string", "description": "The report, written so it stands alone." } },
                 "required": ["text"],
+            },
+        })),
+        (Audience::Captains, serde_json::json!({
+            "name": "plan_set",
+            "description": "Write or rewrite your plan for the user's ask as lists of steps the user follows in the Orchestrator panel. Without plan, rewrites your one unfinished plan, or starts one when you have none; pass new: true to start another beside it. Pass the ids of lists and steps you keep, so their states stay. Limits: 8 lists, 20 steps per list, 120 steps in all; a name is up to 60 characters, a step's what up to 300, the title up to 80. You keep at most 6 unfinished plans. Answers the plan as one line per list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "plan": { "type": "string", "description": "The plan's id, as in p1, to rewrite that plan." },
+                    "new": { "type": "boolean", "description": "Start another plan instead of rewriting one." },
+                    "title": { "type": "string", "description": "What the plan delivers, up to 80 characters." },
+                    "lists": {
+                        "type": "array",
+                        "description": "Up to 8 lists, each a line of work run in order.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "The id of a list you keep, as in l1." },
+                                "name": { "type": "string", "description": "Up to 60 characters." },
+                                "steps": {
+                                    "type": "array",
+                                    "description": "Up to 20 steps.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": { "type": "string", "description": "The id of a step you keep, as in s1." },
+                                            "name": { "type": "string", "description": "Up to 60 characters." },
+                                            "what": { "type": "string", "description": "What the step does, up to 300 characters." },
+                                        },
+                                        "required": ["name"],
+                                    },
+                                },
+                            },
+                            "required": ["name"],
+                        },
+                    },
+                },
+            },
+        })),
+        (Audience::Captains, serde_json::json!({
+            "name": "plan_step",
+            "description": "Report on one step of your plan: pending, running, waiting, done or failed, with a note of up to 200 characters the user reads beside it. Answers the plan as one line per list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "step": { "type": "string", "description": "The step's id, as in s2." },
+                    "state": { "type": "string", "enum": ["pending", "running", "waiting", "done", "failed"] },
+                    "note": { "type": "string", "description": "Why, up to 200 characters." },
+                },
+                "required": ["step", "state"],
+            },
+        })),
+        (Audience::Captains, serde_json::json!({
+            "name": "plan_fix",
+            "description": "Open a fix under a failed step: up to 6 steps that repair it, and at most 3 fixes per step. A name is up to 60 characters, a what up to 300. Answers the plan as one line per list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "step": { "type": "string", "description": "The failed step's id." },
+                    "steps": {
+                        "type": "array",
+                        "description": "Up to 6 steps.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string", "description": "Up to 60 characters." },
+                                "what": { "type": "string", "description": "Up to 300 characters." },
+                            },
+                            "required": ["name"],
+                        },
+                    },
+                },
+                "required": ["step", "steps"],
+            },
+        })),
+        (Audience::Captains, serde_json::json!({
+            "name": "plan_close",
+            "description": "Give up a plan the user no longer wants, with a reason of up to 200 characters. Answers the closed plan.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "plan": { "type": "string", "description": "The plan's id, as in p1." },
+                    "reason": { "type": "string", "description": "Why, up to 200 characters." },
+                },
+                "required": ["plan", "reason"],
             },
         })),
     ]
@@ -747,6 +872,7 @@ fn call(params: &Value, reminders: bool, output: &Mutex<impl Write>) -> Value {
             reason: args["reason"].as_str().unwrap_or("the parent asked").to_owned(),
         }),
         "" => Err(format!("unknown tool {}", params["name"])),
+        name if crate::team_tools::named(name) => crate::team_tools::request(name, args).map(|tool| Message::Team { tab: session_var(TAB_ENV), task: session_var(TASK_ENV), tool }),
         name if name.starts_with("convex_") => match session_var(TASK_ENV) {
             Some(_) => Err("A delegated child reads no Convex data: ask the session that started you.".into()),
             None => convex::ask(name, args).and_then(|ask| in_tab(ProjectTool::Convex { ask }, std::env::var(TAB_ENV).ok())),
@@ -911,8 +1037,27 @@ mod tests {
     use super::*;
     use chrono::FixedOffset;
 
+    #[test]
+    fn every_read_tool_is_one_of_pinneds_and_the_rest_act() {
+        let (reads, acting) = read_and_acting_permissions();
+        assert_eq!(reads.len(), READ_TOOLS.len(), "a read tool pinned no longer has: {reads:?}");
+        assert_eq!(reads.len() + acting.len(), permissions().len());
+        for tool in ["memory_save", "memory_forget", "delegate_task", "act", "task_cancel", "remind_me", "taste_set", "send_to_captain", "plan_set"] {
+            assert!(acting.contains(&format!("mcp__{SERVER}__{tool}")), "{tool} {acting:?}");
+        }
+    }
+
     fn at_noon() -> DateTime<FixedOffset> {
         FixedOffset::west_opt(3 * 3600).unwrap().with_ymd_and_hms(2026, 10, 21, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn taste_set_refuses_a_patch_that_names_the_reviewer_or_the_worker_profiles() {
+        for field in ["reviewer", "worker_profiles"] {
+            let refused = project_request("taste_set", &json!({ "scope": "captains", "patch": { field: {} } }), Some("tab-1".into())).unwrap_err();
+            assert!(refused.starts_with(&format!("taste_set: {field} is the user's own, set only on the Way of working page; nothing changed")), "{refused}");
+        }
+        assert!(project_request("taste_set", &json!({ "scope": "captains", "patch": { "parallel": 2 } }), Some("tab-1".into())).is_ok());
     }
 
     #[test]
@@ -1028,6 +1173,7 @@ mod tests {
                 "isolation".into(),
                 "limitMs".into(),
                 "mode".into(),
+                "planStep".into(),
                 "role".into(),
                 "runtimeMode".into(),
                 "target".into(),
@@ -1075,6 +1221,8 @@ mod tests {
     fn a_wait_returns_the_summary_while_a_second_call_answers_and_progress_is_sent() {
         use std::os::unix::net::UnixListener;
         use std::sync::{Arc, Mutex};
+        // The guard reads the environment once; this test sets a session's variables in it.
+        crate::machine::refuse_real_home();
         let _guard = session_env_lock();
         let dir = std::env::temp_dir().join(format!("pinned-mcp-wait-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1302,9 +1450,12 @@ fn restore_var(name: &str, value: Option<String>) {
                 "mcp__pinned__taste_set",
                 "mcp__pinned__taste_reset",
                 "mcp__pinned__tell_orchestrator",
+                "mcp__pinned__plan_set",
+                "mcp__pinned__plan_step",
+                "mcp__pinned__plan_fix",
+                "mcp__pinned__plan_close",
                 "mcp__pinned__convex_tables",
                 "mcp__pinned__convex_data",
-                "mcp__pinned__convex_query",
                 "mcp__pinned__convex_run",
                 "mcp__pinned__convex_logs",
             ]
@@ -1316,7 +1467,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("work_cost", serde_json::json!({"taskId": "task-7"}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"work_cost","taskId":"task-7"}}"#.into()));
         assert_eq!(ask("memory_forget", serde_json::json!({"id": 3}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"memory_forget","id":3}}"#.into()));
         assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
-        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `work_cost`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `repo_overview`, `repo_read`, `repo_search`, `tell_orchestrator`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `convex`, `act`".into()));
+        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `work_cost`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `repo_overview`, `repo_read`, `repo_search`, `tell_orchestrator`, `plan_set`, `plan_step`, `plan_fix`, `plan_close`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `convex`, `act`".into()));
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
         assert_eq!(
             ask("act", serde_json::json!({ "action": "rename_machine", "args": { "name": "Mini", "id": "m1" }, "request_id": "r-1" }), Some("tab-2")),
@@ -1326,8 +1477,22 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("act", serde_json::json!({}), Some("tab-2")), Err("act: missing field `action`".into()));
     }
 
+    #[test]
+    fn the_taste_tools_offer_no_review_setting() {
+        let taste = |name: &str| project_tools().into_iter().find(|(audience, tool)| *audience == Audience::TasteChat && tool["name"] == name).unwrap().1;
+        let set = taste("taste_set");
+        let patch = set["inputSchema"]["properties"]["patch"]["properties"].as_object().unwrap();
+        assert!(!patch.contains_key("review_diffs") && !patch.contains_key("second_opinion"), "taste_set still offers a review setting: {set}");
+        let reset = taste("taste_reset");
+        let fields: Vec<&str> = reset["inputSchema"]["properties"]["field"]["enum"].as_array().unwrap().iter().filter_map(serde_json::Value::as_str).collect();
+        assert!(!fields.contains(&"review_diffs") && !fields.contains(&"second_opinion"), "taste_reset still offers a review setting: {fields:?}");
+        assert!(fields.contains(&"parallel"), "the other fields stay offered: {fields:?}");
+    }
+
     #[cfg(unix)]
     fn offered(role: Option<&str>, task: Option<&str>) -> Vec<String> {
+        // The guard reads the environment once; this test sets a session's variables in it.
+        crate::machine::refuse_real_home();
         let _guard = session_env_lock();
         let previous = (std::env::var(ROLE_ENV).ok(), std::env::var(TASK_ENV).ok(), std::env::var(TAB_ENV).ok());
         std::env::remove_var(TAB_ENV);
@@ -1356,6 +1521,8 @@ fn restore_var(name: &str, value: Option<String>) {
     #[cfg(unix)]
     fn over_socket(task: Option<&str>, requests: &[Value], answers: Vec<Result<String, String>>) -> (Vec<Value>, Vec<String>) {
         use std::io::{BufRead, Write};
+        // The guard reads the environment once; this test sets a session's variables in it.
+        crate::machine::refuse_real_home();
         let _guard = session_env_lock();
         let dir = std::env::temp_dir().join(format!("pinned-mcp-convex-{}-{}", std::process::id(), task.unwrap_or("none")));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1439,7 +1606,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert!(!plain.contains(&"delegate".to_owned()), "delegate_task is the one delegation tool: {plain:?}");
         let empty_task = offered(None, Some(""));
         assert!(empty_task.contains(&"delegate_task".to_owned()), "{empty_task:?}");
-        assert_eq!(offered(Some("orchestrator"), None), [&plain[..], &["tell_orchestrator".to_owned()]].concat());
+        assert_eq!(offered(Some("orchestrator"), None), [&plain[..], &CAPTAIN_TOOLS.map(String::from)].concat());
         assert_eq!(offered(Some("worker"), None), plain, "a worker starts workers the way a plain thread does");
         let child = offered(None, Some("task-1"));
         assert!(!child.contains(&"delegate_task".to_owned()), "{child:?}");
@@ -1457,7 +1624,7 @@ fn restore_var(name: &str, value: Option<String>) {
         let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats", "agents", "work_cost"], &memory].concat();
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
         assert_eq!(offered(Some("worker"), None), today);
-        assert_eq!(offered(Some("orchestrator"), None), [&today[..], &["tell_orchestrator"]].concat());
+        assert_eq!(offered(Some("orchestrator"), None), [&today[..], &CAPTAIN_TOOLS].concat());
         assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &["delegation_stats"], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session", "repo_overview", "repo_read", "repo_search"]].concat());
         assert_eq!(offered(Some("taste-chat"), None), [&today[..], &["taste_get", "taste_set", "taste_reset"]].concat(), "only a taste chat may change the way of working");
         assert_eq!(offered(Some("taste-chat"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a taste chat's delegated child can't");
@@ -1481,6 +1648,77 @@ fn restore_var(name: &str, value: Option<String>) {
             ask("repo_search", serde_json::json!({ "project": "github.com/o/r", "query": "Call::", "max": 500 })),
             Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"repo_search","project":"github.com/o/r","query":"Call::","regex":false,"case":false,"max":500}}"#.into())
         );
+    }
+
+    /// What a Captain is offered on top of what a plain thread is.
+    const CAPTAIN_TOOLS: [&str; 5] = ["tell_orchestrator", "plan_set", "plan_step", "plan_fix", "plan_close"];
+
+    #[test]
+    #[cfg(unix)]
+    fn only_a_captain_is_offered_the_plan_tools_and_plan_set_reaches_the_machine_as_one_line() {
+        let plan_tools = ["plan_set", "plan_step", "plan_fix", "plan_close"];
+        let captain = offered(Some("orchestrator"), None);
+        assert!(plan_tools.iter().all(|tool| captain.iter().any(|name| name == tool)), "{captain:?}");
+        for (role, task) in [(None, None), (Some("worker"), None), (Some("global-orchestrator"), None), (Some("taste-chat"), None), (Some("orchestrator"), Some("task-1"))] {
+            let names = offered(role, task);
+            assert!(!names.iter().any(|name| name.starts_with("plan_")), "{role:?} with task {task:?} is offered {names:?}");
+        }
+        let listed = tool_definitions(true, false, Seat::Captain);
+        let about = |name: &str| listed.as_array().unwrap().iter().find(|tool| tool["name"] == name).unwrap()["description"].as_str().unwrap().to_owned();
+        let set = about("plan_set");
+        for limit in ["8 lists", "20 steps", "120 steps", "6 unfinished plans", "60", "300", "80"] {
+            assert!(set.contains(limit), "plan_set names the limit {limit}: {set}");
+        }
+        assert!(about("plan_step").contains("200"), "{}", about("plan_step"));
+        let fix = about("plan_fix");
+        assert!(fix.contains("6 steps") && fix.contains("3 fixes"), "{fix}");
+        assert!(about("plan_close").contains("200"), "{}", about("plan_close"));
+
+        let call = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "plan_set", "arguments": { "title": "Ship the form", "lists": [{ "name": "Build", "steps": [{ "name": "Write" }, { "name": "Test" }] }] } } });
+        let answer = "p1 rev 1: Ship the form\nl1 Build: s1 pending, s2 pending";
+        let (replies, heard) = over_socket(None, std::slice::from_ref(&call), vec![Ok(answer.into())]);
+        assert_eq!(heard, [r#"{"kind":"project","tab":"tab-1","tool":{"name":"plan_set","plan":null,"new":false,"title":"Ship the form","lists":[{"id":null,"name":"Build","steps":[{"id":null,"name":"Write","what":null},{"id":null,"name":"Test","what":null}]}]}}"#]);
+        assert_eq!(replies[0]["result"], json!({ "content": [{ "type": "text", "text": answer }], "isError": false }));
+        let ask = |name, args| project_request(name, &args, Some("tab-9".into())).map(|m| serde_json::to_string(&m).unwrap());
+        assert_eq!(ask("plan_step", json!({ "step": "s2", "state": "failed", "note": "The suite is red." })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"plan_step","step":"s2","state":"failed","note":"The suite is red."}}"#.into()));
+        assert_eq!(ask("plan_fix", json!({ "step": "s2", "steps": [{ "name": "Fix the test" }] })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"plan_fix","step":"s2","steps":[{"name":"Fix the test","what":null}]}}"#.into()));
+        assert_eq!(ask("plan_close", json!({ "plan": "p1", "reason": "The user dropped it." })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"plan_close","plan":"p1","reason":"The user dropped it."}}"#.into()));
+        assert_eq!(ask("plan_step", json!({ "step": "s2", "state": "late" })), Err("plan_step: unknown variant `late`, expected one of `pending`, `running`, `waiting`, `done`, `failed`".into()));
+    }
+
+    #[test]
+    fn the_plan_tools_and_planstep_name_the_limits_of_plan_rs() {
+        use crate::plan::{MAX_FIXES_PER_STEP, MAX_LISTS, MAX_NAME, MAX_NOTE, MAX_PLANS_UNFINISHED, MAX_REASON, MAX_STEPS_IN_ALL, MAX_STEPS_PER_FIX, MAX_STEPS_PER_LIST, MAX_TITLE, MAX_WHAT};
+        let listed = tool_definitions(true, false, Seat::Captain);
+        let tools = listed.as_array().unwrap();
+        let tool = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap();
+        let about = |name: &str| tool(name)["description"].as_str().unwrap().to_owned();
+        let planstep = tool("delegate_task")["inputSchema"]["properties"]["planStep"]["description"].as_str().unwrap().to_owned();
+        let cases = [
+            ("plan_set", about("plan_set"), vec![
+                format!("{MAX_LISTS} lists"),
+                format!("{MAX_STEPS_PER_LIST} steps per list"),
+                format!("{MAX_STEPS_IN_ALL} steps in all"),
+                format!("up to {MAX_NAME} characters"),
+                format!("up to {MAX_WHAT}"),
+                format!("up to {MAX_TITLE}"),
+                format!("{MAX_PLANS_UNFINISHED} unfinished plans"),
+            ]),
+            ("plan_step", about("plan_step"), vec![format!("up to {MAX_NOTE} characters")]),
+            ("plan_fix", about("plan_fix"), vec![
+                format!("up to {MAX_STEPS_PER_FIX} steps"),
+                format!("at most {MAX_FIXES_PER_STEP} fixes per step"),
+                format!("up to {MAX_NAME} characters"),
+                format!("up to {MAX_WHAT}"),
+            ]),
+            ("plan_close", about("plan_close"), vec![format!("up to {MAX_REASON} characters")]),
+            ("delegate_task planStep", planstep, vec![format!("at most {MAX_FIXES_PER_STEP} fixes per step")]),
+        ];
+        for (name, text, limits) in cases {
+            for limit in limits {
+                assert!(text.contains(&limit), "{name} names `{limit}`: {text}");
+            }
+        }
     }
 
     #[test]

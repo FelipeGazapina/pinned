@@ -29,7 +29,10 @@ pub fn project(graph: &Graph) -> Projected {
         Watch::SlackMention { channel } => Trigger::SlackMention { channel: channel.clone() },
         Watch::Called => Trigger::Called,
         Watch::Manual => Trigger::Manual,
-        Watch::SlackMessage { channel } => Trigger::SlackMessage { channel: channel.clone(), decide: decide.clone().unwrap_or_else(empty_decide) },
+        Watch::LinearStatus { from, to, scope, by } => Trigger::LinearStatus { from: from.clone(), to: to.clone(), scope: scope.clone(), by: by.clone() },
+        Watch::LinearAssigned { to, scope, by } => Trigger::LinearAssigned { to: to.clone(), scope: scope.clone(), by: by.clone() },
+        Watch::Schedule { schedule, tz } => Trigger::Schedule { schedule: schedule.clone(), tz: tz.clone() },
+        Watch::SlackMessage { channel, apps } => Trigger::SlackMessage { channel: channel.clone(), decide: decide.clone().unwrap_or_else(empty_decide), apps: *apps },
     };
     Projected { ask: asks.first().map(|node| ask_of(graph, node)), decide, trigger }
 }

@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.18.7 (2026-11-18)
+
+### Added
+
+- Slack: a workflow that sorts a channel's messages can now also read posts from apps and integrations, such as alerts, CI runs, deploys and pull request notices. Tick "Also read posts from apps and integrations" in its trigger; it is off by default. pinned's own bots are never read. A check reads at most 10 app posts per workflow, and app posts past those 10 are skipped. The text of an app post reaches the model and the session marked as untrusted data.
+- The global Orchestrator now puts the questions waiting on you, its own and its Captains', on one page named "Pendências", with options to tick and a note field, and links that page in its reply. It publishes the page as a claude.ai Artifact at the same link each time and reads your answers back from it.
+
+### Changed
+
+- Sync: the hub no longer limits each account to 1024 MB. An account whose sync stopped at that limit syncs again. The hub now has one limit for all accounts together; when it is full, a push that would grow an account is refused, and nothing is deleted.
+- Captains and workers no longer answer with only "ok". They reply once the answer is final, say what they did or found, and name a task or a file instead of pasting its contents. A Captain asks its most blocking question first, treats a question you skip as skipped for that task only, and proposes a test or a repo rule when you make the same correction a second time.
+- A worker no longer gives `rm` a path built from `$(…)` or backticks. It runs the command first, then removes the literal paths it prints.
+
+### Removed
+
+- Convex: the `convex_query` tool is off for every session. It ran any JavaScript against a project's Convex deployment with its admin key, which can read the deployment's environment values. `convex_tables`, `convex_data`, `convex_run` and `convex_logs` are unchanged. An older app that still offers `convex_query` gets a refusal that points to `convex_data`.
+
+### Fixed
+
+- Hub web UI on a phone: while a thread or the Orchestrator is open, the page no longer redraws the hidden thread list or animates its status icons. With a busy Orchestrator on a simulated slow phone (6x CPU throttle), the page is busy 34% of the time, down from 59%, and drops 11% of scroll frames, down from 23%. The slowest keystroke takes 40 ms, down from 80 ms. Opening a thread takes about as long as before.
+- Convex: the Tables hint in a workflow's connection no longer says a run can query. It now says that All tables also lets the run read logs, and that a table list turns logs off.
+- pinned no longer types into a session while it shows a menu or dialog of its own, such as a permission question. Queued messages, task notices, pull request updates, the continue after a usage limit and a skills reload wait until it closes. Before, the keystrokes could reach the dialog and the message was lost.
+- A task notice is no longer lost when pinned stops while it delivers it. A notice that was picked up but not typed is pending again the next time pinned starts, so after a crash it can show twice but never zero times.
+- Pull request updates: a new comment no longer replaces an older one the session has not heard yet. The session hears every unheard comment, oldest first. When more than 10 wait, it hears the newest 10 and a line saying how many earlier comments are not shown.
+- A message sent to a busy Captain is no longer lost when the Captain's end-of-turn hook stopped waiting before the reply reached it. The message stays queued and is typed into the session at its next idle pass.
+- Captain queue: choosing a model in the `/model` picker no longer holds queued messages until you type. `/statusline` and a line that starts with a space now start a turn, as Claude Code reads them, so queued messages wait for that turn to end.
+- Threads show Compacting for every compaction, including the automatic ones, not only after a typed `/compact`. A Compacting mark that never ends clears after 10 minutes.
+- A turn that ended on an API error now shows as "Stopped on error" in Needs you, with Try again and Dismiss, instead of as a question waiting for your answer. The card shows the error, cut at 200 characters. Dismiss hides it only on that device.
+- Shared history: two machines that sync it at the same moment both keep their new lines. Before, one machine's push could replace the other's lines on the hub.
+- A Claude Code session that pinned starts now carries the project MCP servers you already approved in the main checkout, so a session in a pinned worktree, or under another of your Claude accounts, no longer asks again. A server whose definition differs from the one you approved is not carried.
+- A session that stops on Claude Code's "New MCP server found in this project" dialog now ends its start after 60 seconds with the reason "Claude Code is waiting for approval of this project's MCP servers in <folder>; open the session to answer it". Before, it stayed in starting for 10 minutes with no reason. pinned never answers that dialog for you.
+- A read-only worker no longer stops at the plan-approval menu, where nobody answers it. It starts with writes refused instead of in plan mode, and a restore, a resume or a hand-off to a tab never runs it with permission prompts skipped.
+- Upstash Box: a worker stuck on a startup dialog before its first prompt now ends after 10 minutes with that reason, instead of running until its time limit or budget. If its machine does not end it, the hub ends it at 12 minutes.
+- Upstash Box: a worker box is never taken as the global Orchestrator's host. Before, a box that answered as host made messages to Captains fail, or counted as the host when none of your machines hosted.
+- Upstash Box: an agent's request to extend a box is now checked against the box and the Box budget when the agent asks, not only after you approve it. A request that can never extend anything is refused at once. At most 3 requests per box and 10 per account wait for you. The agent gets an answer, or "busy", within about 2 seconds. When a box ends, its waiting requests close as denied, and agent activity shows them as denied.
+- Teams: when the hub cannot read one bot's settings, that bot's waiting run keeps its place in the line instead of being dropped. After five failed reads it is dropped and counted as a failed start. Other bots' runs go on meanwhile. This was a known limit of 0.18.6.
+- Teams: the same event never starts a bot twice, and the database refuses a second live run for one bot.
+- Teams: when the hub cannot read the team's workflows, keys or settings, the owner sees on the team's page and in the team nav that the team's line is held, since when and why.
+- Teams: a run that has ended answers "this run's log was not kept after it ended" when you ask for its log, instead of "the team has no such run".
+- Teams: the bot wizard no longer offers "A Linear issue gets a label". A team keeps no Linear key, so such a bot could never start. A bot made earlier with that trigger still shows it on its page.
+- Teams: the owner can connect the team's AI account at any time with "Connect AI account" in the team nav or on a bot's page. Before, only the create-a-team wizard offered it, and the bot page pointed to a settings page that does not exist. A member's bot page now reads "Ask <owner> to connect the team's AI account."
+- Teams: switching to a team opens the team's home. While a team is current, personal places say so: "New personal thread...", "Personal · Threads" in ⌘K, "Needs you · Personal" and "Personal · " before a personal thread's prompt.
+- Teams: a bot made in the wizard shows in the team sidebar at once, without a reload.
+- Teams: the wizard's Done row has no step number, so the list matches "Step n of 4", and the invite code field shows the code's real shape, `ABCD-EFGH-JKMN-PQRS`.
+- Needs you: an agent's request card says "Asked by …" once, not twice.
+- The sidebar keeps your project filter on a fresh page load. Before, a hub message that arrived early reset it to All projects.
+- Sync: when the hub refuses a push because a limit is reached, the machine waits before it tries again, from 20 seconds up to 10 minutes. While it waits, it still sends changes that do not grow a project, and it pulls nothing over a local change it has not sent. The sidebar shows "Sync stopped on <machine>" with a Review button until the hub takes a push again. The refusal says that nothing is deleted and no longer tells you to delete old sessions.
+- My reports: a report already marked fixed moves to the version in a `fixed-in:` label added to its issue later.
+- Upstash Box: a box can now only read the account's files. The hub refuses every change a box sends that the account's other machines or apps would read, such as synced files, workflows, MCP servers, Way of working or a new folder on your machine, also when an agent in the box asks. A box can still hand a task to another box and send its report.
+- Workflows: staging a Linear issue, replying in a Slack thread, and filing or taking a Linear issue through a workflow's connections are now accepted only from the session that runs that workflow on that issue or thread, while it runs. Another session gets "only the session that runs this workflow can do that".
+- Only you can change "Review each diff before accepting" and "Second opinion on risky changes", on the Way of working page. An agent can read them but never change them, with or without your approval. A request to change them that was waiting for you ends with nothing changed when you approve it.
+- An agent that writes Claude Code's own settings or hooks in `~/.claude` (`settings.json`, `settings.local.json`, `hooks/`), or the project's MCP approval files from another checkout, now counts as changing its own permissions, which a schedule can never pre-approve.
+- A session pinned starts no longer inherits the role, project, tab, account, box or Claude home of the session or machine that started it.
+- A login-account session no longer inherits `ANTHROPIC_*` settings that point at the OpenCode Go gateway.
+- If you export `CLAUDE_CONFIG_DIR` for the built-in account, plugin sync now shares that home instead of the default one.
+
+### Known limits
+
+- Workflows can start when a Linear issue's status or assignee changes, once per change, but the workflow editor cannot make such a workflow yet. Only an agent can, with `save_connector`. The Workflows page shows that workflow as "Open this workflow to repair its trigger", and its Run now is off. A workflow starts at most once every 15 minutes for one issue, an issue starts at most 4 runs an hour, and a change pinned made itself does not start one. Team bots don't use these triggers.
+- A workflow trigger on a schedule can be saved but does not start the workflow yet. To run a workflow on a schedule, make a scheduled task whose action is that workflow.
+- A Captain now keeps a plan for each request that takes more than one step, and links its delegated tasks to the plan's steps. The app does not show these plans yet.
+- Apps older than 0.18.7 do not wait after a refused push, and they show the old "would pass 1024 MB" text when the hub is full.
+- Your own Extend of a box in the app does not wait its turn. If it races your approval of an agent's request for the same box, one of the two increments can be lost. A box never ends above its ceiling.
+- After `/model`, Esc, Up and Enter, the prompt recalled from history still counts as a local command, so the Captain queue can type a queued message after 10 seconds while that turn runs.
+
 ## 0.18.6 (2026-11-16)
 
 ### Added

@@ -2,12 +2,13 @@
 //! against the manifest, run as the account that owns the session's machine, written to the audit
 //! trail, and a `confirm` action waits for the user's approval in the app.
 
-use crate::boxes::Opener;
+use crate::boxes::{ExtendTurn, Opener};
 use crate::db::{Audit, Held};
 use crate::hub::{Account, Hub};
 use pinned_core::surface::{self, ActAnswer, Action, ActorRole, AgentAct, AuditOutcome, Class, Confirmation, Decided, Decision, Parsed, Side};
 use pinned_core::connectors::{Connector, Placement, RunsOn};
 use pinned_core::schedule::{self, Actor};
+use pinned_core::taste;
 use pinned_core::wire::{Call, HubCall, RunStarted, ToClient};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -95,25 +96,37 @@ fn json<T: serde::Serialize>(value: T) -> Result<Value, String> {
 }
 
 /// Runs `act` for the session in tab `act.tab` of `origin`, a machine of `account`, or holds it
-/// for the user's approval. Every outcome but a repeat writes one audit row.
-pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: AgentAct) -> Result<Value, String> {
+/// for the user's approval. Every outcome but a repeat or a busy refusal writes one audit row.
+/// `boxed`: whether the connection the act came on signed in as a box (`box_gate::is_box`).
+pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, boxed: bool, act: AgentAct) -> Result<Value, String> {
+    // An extend's wait counts from here, its own start, so its reads before its turn count in it.
+    let deadline = ExtendTurn::deadline();
     let caller = Caller::of(account, origin, &act.tab)?;
     let request_id = act.request_id.as_deref().filter(|id| !id.is_empty());
     let trail = Trail { hub, account: account.id, machine: caller.machine, tab: &caller.tab, role: caller.role, action: &act.action, args: surface::summary(&act.args), request_id, task: Default::default() };
     if let Some(id) = request_id {
-        match hub.db.audited(account.id, caller.machine, &caller.tab, &act.action, id).await? {
+        // An extend's repeat check counts in its 2 s too: one that has not answered by then is busy, and writes no row.
+        let earlier = if act.action == "extend_box" {
+            tokio::time::timeout_at(deadline, hub.db.audited(account.id, caller.machine, &caller.tab, &act.action, id)).await.map_err(|_| crate::db::BUSY.to_owned())??
+        } else {
+            hub.db.audited(account.id, caller.machine, &caller.tab, &act.action, id).await?
+        };
+        match earlier {
             Some((AuditOutcome::Pending, _)) | None => {}
             Some((earlier, at)) => return json(ActAnswer::Repeat { earlier, at }),
         }
     }
-    let admitted = match admit(hub, account, origin, &caller, &act).await {
+    let mut admitted = match admit(hub, account, origin, boxed, &caller, &act, deadline).await {
         Ok(admitted) => admitted,
+        // Refused for a busy lock, nothing was done: no row, so the same request_id asks again.
+        Err(busy) if busy == crate::db::BUSY => return Err(busy),
         Err(refusal) => {
             let refusal = surface::mask_secrets(&refusal);
             trail.write(AuditOutcome::Refused, &refusal).await?;
             return Err(refusal);
         }
     };
+    let turn = admitted.turn.take();
     // A schedule act whose task cannot be read is refused here, before anything runs.
     let why = match schedule_needs_ok(hub, account, &admitted.call).await {
         Ok(why) => why,
@@ -161,7 +174,18 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             decided_at: None,
             outcome: None,
         };
+        // An extend is held only while its turn's locks are: nothing was done, so no row.
+        if let Some(turn) = &turn {
+            turn.held().await?;
+        }
         let (id, held) = hub.db.hold_confirmation(account.id, caller.machine, caller.session.as_deref(), &asked).await?;
+        end_turn(turn).await;
+        if held {
+            if let Some(ended) = extend_ended(hub, account, &admitted.call, id).await {
+                trail.write(AuditOutcome::Refused, &ended).await?;
+                return Err(ended);
+            }
+        }
         if !held {
             let earlier = hub.db.confirmation(account.id, id).await?.map(|held| held.confirmation);
             if let Some(Confirmation { decision: Some(decision), decided_at, .. }) = earlier {
@@ -181,6 +205,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
     } else {
         run(hub, account, &caller.tab, caller.actor(), admitted.call, &admitted.target, admitted.on_origin).await
     };
+    end_turn(turn).await;
     match ran {
         Ok(result) => {
             let widened = note_task(&trail, act.action.as_str(), &act.args, &result, widened);
@@ -201,10 +226,28 @@ struct Admitted {
     call: Parsed,
     target: String,
     on_origin: bool,
+    /// An extend's box turn, held until the extend waits for the owner or has run.
+    turn: Option<ExtendTurn>,
+}
+
+async fn end_turn(turn: Option<ExtendTurn>) {
+    if let Some(turn) = turn {
+        turn.end().await;
+    }
+}
+
+/// Refuses a call that changes a review setting, which only the user makes on the Way of working page, approved or
+/// not and whoever sends it. The user's own app calls the hub's SetTaste directly, so this is not in its way.
+pub fn refuse_review_setting(call: &HubCall) -> Result<(), String> {
+    match call {
+        HubCall::SetTaste { patch, .. } => taste::refuse_review_settings(patch.review_settings()),
+        HubCall::ResetTasteField { field, .. } => taste::refuse_review_settings(field.review_setting()),
+        _ => Ok(()),
+    }
 }
 
 /// The act as it may run, or why it may not, checked in the order the contract lists.
-async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act: &AgentAct) -> Result<Admitted, String> {
+async fn admit(hub: &Hub, account: &Account, origin: &str, boxed: bool, caller: &Caller, act: &AgentAct, deadline: tokio::time::Instant) -> Result<Admitted, String> {
     if !caller.known {
         let name = account.name_of(origin).unwrap_or_else(|| origin.to_owned());
         return Err(format!("{name} runs no session {}", caller.tab));
@@ -222,6 +265,21 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
         return Err(format!("{}: {field}. The user enters it in the app.", surface::SECRET_REFUSAL));
     }
     let call = surface::parse(action, &surface::with_blank_asks(action, &act.args))?;
+    // Only the user changes a review setting, approved or not: an agent's change to one is refused here, before
+    // any confirmation is held. The user's own app calls the hub's SetTaste directly and is not an agent's act.
+    if let Parsed::Hub(hub_call) = &call {
+        refuse_review_setting(hub_call)?;
+    }
+    // A call that acts through a workflow's Linear and Slack connections comes only from the
+    // session that runs that workflow on that subject: the tab its machine names, which the node
+    // does not yet vouch for.
+    if let Parsed::Hub(hub_call) = &call {
+        if let Some((connector, subject)) = crate::http::run_work(hub_call) {
+            if !account.runs_in_tab(&connector, &subject, origin, &caller.tab) {
+                return Err("only the session that runs this workflow can do that".into());
+            }
+        }
+    }
     if surface::skips_prompts(&call) && !caller.bypass {
         return Err(format!("{name} would run a session that skips its permission prompts, and your own session asks for them"));
     }
@@ -255,7 +313,142 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
     if action.starts_work && !on_origin {
         return Err(format!("{name} starts work only on this session's own machine for now"));
     }
-    Ok(Admitted { action, call, target, on_origin })
+    // A box may only pull the account's files: its sessions' acts are held to `box_gate` as its
+    // own calls are, and on the account's other machines they only read.
+    if crate::box_gate::is_box(boxed, account, origin) {
+        crate::box_gate::box_may_act(origin, &call, on_origin, action.class == Class::Read)?;
+    }
+    // An extend that cannot run is refused now, with the text its run would give, so the owner is
+    // never asked for it. Its run after the approval checks again. A repeat of an ask this session
+    // made is answered as that ask, when it is held, and not checked again. The check and the hold
+    // happen in the box's turn and then the account's, so two asks are never both checked before
+    // either waits, and the account never has more than `MAX_WAITING_EXTENDS_PER_ACCOUNT` waiting.
+    let mut turn = None;
+    if let Parsed::Hub(HubCall::ExtendBox { machine, extra_usd }) = &call {
+        let machine = Uuid::parse_str(machine).map_err(|_| format!("this account has no machine {machine}"))?;
+        // An ask that could be no extend, or that the account's cap refuses already, is refused
+        // before it takes a turn and its connection. The cap is counted again in the turn.
+        // These reads share the ask's wait: one that has not answered by its deadline is busy, as its turn would be.
+        tokio::time::timeout_at(deadline, crate::boxes::extend_of(hub, account, machine, *extra_usd)).await.map_err(|_| crate::db::BUSY.to_owned())??;
+        let capped = tokio::time::timeout_at(deadline, async {
+            Ok::<bool, String>(!asked_before(hub, account, caller, act).await? && hub.db.waiting_extends(account.id).await? >= MAX_WAITING_EXTENDS_PER_ACCOUNT as i64)
+        })
+        .await
+        .map_err(|_| crate::db::BUSY.to_owned())??;
+        if capped {
+            return Err(TOO_MANY_EXTENDS.into());
+        }
+        let held = ExtendTurn::ask(hub, account.id, machine, deadline).await?;
+        // The reads before the turn is held share the ask's wait too: one that has not answered by its deadline is busy.
+        if !tokio::time::timeout_at(deadline, asked_before(hub, account, caller, act)).await.map_err(|_| crate::db::BUSY.to_owned())?? {
+            let waiting = tokio::time::timeout_at(deadline, waiting_extends(hub, account)).await.map_err(|_| crate::db::BUSY.to_owned())??;
+            let live = tokio::time::timeout_at(deadline, hub.db.live_boxes(account.id)).await.map_err(|_| crate::db::BUSY.to_owned())??;
+            if waiting.iter().filter(|(of, _, _)| of.is_some_and(|of| live.contains(&of))).count() >= MAX_WAITING_EXTENDS_PER_ACCOUNT {
+                return Err(TOO_MANY_EXTENDS.into());
+            }
+            let since = (pinned_core::connectors::unix_millis() / 1000).saturating_sub(EXTENDS_COUNTED_FOR.as_secs()) as i64;
+            let for_box = waiting.iter().filter(|(of, _, at)| *of == Some(machine) && *at > since).map(|(_, usd, _)| usd).sum();
+            tokio::time::timeout_at(deadline, crate::boxes::extended(hub, account, machine, *extra_usd, for_box)).await.map_err(|_| crate::db::BUSY.to_owned())??;
+        }
+        turn = Some(held);
+    }
+    Ok(Admitted { action, call, target, on_origin, turn })
+}
+
+/// Why the extend just stored as `id` can never run: its box ended between the ask's check and its
+/// store, after the end closed what waited. It closes the asks still waiting for the box, this one
+/// among them, whose session hears the refusal and no notice. None for any other act, or a box that runs.
+/// A database error here is logged, not answered: the ask is stored and waits as any ask does, so
+/// the act answers it pending as it would have. The error text is the database's generic one.
+async fn extend_ended(hub: &Hub, account: &Arc<Account>, call: &Parsed, id: Uuid) -> Option<String> {
+    let Parsed::Hub(HubCall::ExtendBox { machine, .. }) = call else { return None };
+    // `admit` parsed the machine already, so it parses here too.
+    let machine = Uuid::parse_str(machine).ok()?;
+    match ended_extend(hub, account, machine, id).await {
+        Ok(ended) => ended,
+        Err(e) => {
+            eprintln!("pinned-server: account {}'s extend {id} was stored, but its box could not be checked: {e}", account.id);
+            None
+        }
+    }
+}
+
+async fn ended_extend(hub: &Hub, account: &Arc<Account>, machine: Uuid, id: Uuid) -> Result<Option<String>, String> {
+    let Err(ended) = crate::boxes::still_open(hub.db.box_of(account.id, machine).await?) else { return Ok(None) };
+    let closed = hub.db.close_extends(account.id, machine).await?;
+    hub.db.notified(account.id, id).await?;
+    closed_extends(hub, account, closed, Some(id)).await;
+    Ok(Some(ended))
+}
+
+/// Tells the account's apps what waits now that a box's end closed the extend asks `closed`, and
+/// each asking session that its box ended. `asked` is the ask the act that found the end answers
+/// itself: its refusal is the act's, so it gets no notice, though the apps hear of the end all the
+/// same. A session no tab runs gets its notice once its machine connects (`deliver_notices`).
+pub async fn closed_extends(hub: &Hub, account: &Arc<Account>, closed: Vec<Uuid>, asked: Option<Uuid>) {
+    if closed.is_empty() {
+        return;
+    }
+    push_confirmations(hub, account).await;
+    let Some(hub) = hub.arc() else { return };
+    let account = account.clone();
+    tokio::spawn(async move {
+        for id in closed.into_iter().filter(|id| Some(*id) != asked) {
+            let told = match hub.db.confirmation(account.id, id).await {
+                Ok(Some(held)) => {
+                    if let Err(e) = closed_row(&hub, account.id, &held.confirmation).await {
+                        eprintln!("pinned-server: the extend {id} closed with its box has no denied row in account {}'s trail: {e}", account.id);
+                    }
+                    notify(&hub, &account, &held).await.map(drop)
+                }
+                Ok(None) => Ok(()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = told {
+                eprintln!("pinned-server: the session whose extend {id} closed with its box gets its notice later: {e}");
+            }
+        }
+    });
+}
+
+/// The trail row of an extend ask that the box's end closed: denied with the box's end, as the
+/// owner's decision writes a denied ask's row.
+async fn closed_row(hub: &Hub, account: Uuid, asked: &Confirmation) -> Result<(), String> {
+    let machine = Uuid::parse_str(&asked.machine).map_err(|e| e.to_string())?;
+    let trail = Trail { hub, account, machine, tab: &asked.tab, role: asked.role, action: &asked.action, args: surface::summary(&asked.args), request_id: asked.request_id.as_deref(), task: Default::default() };
+    trail.write(AuditOutcome::Denied, crate::db::EXTEND_BOX_ENDED).await
+}
+
+/// Whether the session already asked this act with its `request_id`, so the hold answers it.
+async fn asked_before(hub: &Hub, account: &Account, caller: &Caller, act: &AgentAct) -> Result<bool, String> {
+    let Some(request_id) = act.request_id.as_deref().filter(|id| !id.is_empty()) else { return Ok(false) };
+    Ok(hub.db.asked_confirmation(account.id, caller.machine, &caller.tab, &act.action, request_id).await?.is_some())
+}
+
+/// How long an extend that waits for the owner counts against new asks for its box. An older one
+/// no longer blocks them; its approval checks the box again, so it cannot pass the Box budget. It
+/// still counts toward the account's cap: the owner still sees it waiting.
+const EXTENDS_COUNTED_FOR: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How many extend asks of all of an account's boxes may wait for the owner at once, counted as
+/// `waiting_extends` counts them. One more is refused before it waits. An ask for a box that has
+/// ended, ending or gone, can never extend anything and does not count; the owner still sees it.
+const MAX_WAITING_EXTENDS_PER_ACCOUNT: usize = 10;
+
+const TOO_MANY_EXTENDS: &str = "too many box extends are waiting for the owner; answer some first";
+
+/// The account's extends that wait for the owner, as the machine each is for, what it adds and
+/// when it was asked (unix seconds): each above zero, as `Db::waiting_extends` counts them.
+async fn waiting_extends(hub: &Hub, account: &Account) -> Result<Vec<(Option<Uuid>, f64, i64)>, String> {
+    Ok(hub
+        .db
+        .confirmations(account.id)
+        .await?
+        .iter()
+        .filter(|asked| asked.decision.is_none() && asked.action == "extend_box")
+        .filter_map(|asked| Some((asked.args["machine"].as_str().and_then(|m| Uuid::parse_str(m).ok()), asked.args["extra_usd"].as_f64()?, asked.at)))
+        .filter(|(_, usd, _)| *usd > 0.0)
+        .collect())
 }
 
 /// Runs the call as the app runs it: a `HubCall` through the hub's own path, a `Call` on its
@@ -342,10 +535,22 @@ async fn run_workflow(hub: &Arc<Hub>, account: &Arc<Account>, caller: &Caller, i
 /// The user's decision on confirmation `id`, from a signed-in client of `account`. `entered` is
 /// what they typed in the app for a credential action. It never reaches the trail, the stored
 /// confirmation, the notice or an error, and a credential action whose run fails waits again.
-pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: bool, entered: BTreeMap<String, String>) -> Result<Value, String> {
+/// `_reason` is why the user said no, when they said; U2 shows it to the session that asked.
+pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: bool, entered: BTreeMap<String, String>, _reason: Option<String>) -> Result<Value, String> {
     let unknown = || format!("no confirmation {id} waits");
     let hide = |error: &str| surface::hide_entered(error, &entered);
     let key = Uuid::parse_str(id).map_err(|_| unknown())?;
+    // An extend's decision is marked and its budget set in its box's turn, so no ask is checked in
+    // between, when the extend no longer waits and the box does not have it yet. It needs no turn of
+    // the account's: a decision only takes an extend off what waits, never puts one back (an extend
+    // asks for nothing typed, so it is never reopened), so it cannot lift the account past its cap.
+    let turn = match hub.db.confirmation(account.id, key).await?.map(|held| held.confirmation) {
+        Some(asked) if asked.action == "extend_box" && asked.decision.is_none() => match asked.args["machine"].as_str().and_then(|m| Uuid::parse_str(m).ok()) {
+            Some(machine) => Some(ExtendTurn::take(hub, account.id, machine).await?),
+            None => None,
+        },
+        _ => None,
+    };
     let typed = if approve { typed_args(hub, account, key, &entered).await.map_err(|e| hide(&e))? } else { None };
     let held = hub.db.decide_confirmation(account.id, key, approve).await?.ok_or_else(unknown)?;
     let asked = &held.confirmation;
@@ -369,6 +574,7 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
             Err(e) => (Decision::Approved, format!("failed: {}", hide(&e)), Value::Null),
         },
     };
+    end_turn(turn).await;
     note_task(&trail, &asked.action, &asked.args, &result, String::new());
     if decision == Decision::Approved {
         match outcome.strip_prefix("failed: ") {
@@ -446,6 +652,10 @@ async fn typed_args(hub: &Hub, account: &Account, key: Uuid, entered: &BTreeMap<
 /// Runs an approved confirmation with `args` for the session that asked, on the machine it named.
 async fn rerun(hub: &Arc<Hub>, account: &Arc<Account>, action: &'static Action, asked: &Confirmation, args: &Value) -> Result<Value, String> {
     let call = surface::parse(action, args)?;
+    // A confirmation held before the refusal of review settings changes nothing when approved now: it ends as failed.
+    if let Parsed::Hub(hub_call) = &call {
+        refuse_review_setting(hub_call)?;
+    }
     let target = match asked.target.as_deref() {
         Some(named) => crate::remote::resolve(hub, account, named).await?.0,
         None => asked.machine.clone(),

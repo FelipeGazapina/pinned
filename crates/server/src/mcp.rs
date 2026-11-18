@@ -736,6 +736,7 @@ mod tests {
             message: message.map(str::to_owned),
             resume_at: None,
             held: false,
+            compacting: false,
             connector: None,
             subject: None,
             opened: 1,
@@ -762,8 +763,10 @@ mod tests {
             asleep: false,
             headless: false,
             stopped: None,
+            stopped_on_error: None,
             questions: None,
             read_only: false,
+            plans: vec![],
         }
     }
 

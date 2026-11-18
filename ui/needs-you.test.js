@@ -7,6 +7,7 @@ const read = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8
 const chat = read("global-chat.js");
 const model = read("redesign-model.js");
 const agentSurface = read("agent-surface.js");
+const needsYou = read("gui-needs-you.js");
 const decl = (src, start) => {
   const from = src.indexOf(start);
   assert.ok(from >= 0, `missing ${start}`);
@@ -34,6 +35,8 @@ function page(world) {
     },
     Intl,
     SHELL_PAGES: {},
+    // The whole page script runs here, and it listens for a team switch.
+    document: { addEventListener: () => {} },
     pageView: { addEventListener: () => {} },
     esc: (text) => String(text ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`),
     clock: new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", timeZone: "UTC" }),
@@ -104,6 +107,14 @@ test("an approval carries its command, Decline, Approve and Open; one whose menu
   assert.match(card.html, /class="ticker ny-when" data-since="1794420480000"/, "it waited since the thread last reported, on a ticking clock");
   const later = shown(run, `thread:${unread.key}`);
   assert.deepEqual([later.head, later.pre, later.buttons], ["Approval api · macbook", "psql -f orders.sql", ["open Open"]]);
+});
+
+test("a turn that stopped on an API error shows its error with Try again and Dismiss, and no answer box", () => {
+  const error = "API Error: Connection lost mid-response. The response above may be incomplete.";
+  const broke = tab("Port the grid", { status: "needs-input", interrupted: true, message: "Claude is waiting for your input", stopped_on_error: error, updated: S - 200 }, { machine: "book", project: "site" });
+  const run = page({ items: [item(broke, "stopped", { error })] });
+  const card = shown(run, `thread:${broke.key}`);
+  assert.deepEqual([card.head, card.name, card.line, card.typed, card.buttons], ["Stopped on error site · macbook", "Port the grid", error, null, ["continue Try again", "dismiss Dismiss"]]);
 });
 
 test("a question offers one button per option and the typed answer; a multi-step set only Open", () => {
@@ -266,4 +277,61 @@ test("while an answer is on its way the card's controls are disabled, and once s
   assert.match(html("sent"), /Answered\. The thread goes on\./);
   assert.match(html("missed"), /data-ny="approve"[\s\S]*Open the thread to answer it\./, "a refused answer keeps the controls and says why");
   assert.match(html(null), /<fieldset class="ny-fields">/);
+});
+
+test("an agent card says Asked by once, with no arguments, with a title-only action and with arguments", () => {
+  const base = { action: "pair_code", machine: "mini", machine_name: "mac-mini", role: "worker", title: "Tidy the README.", at: S - 45 };
+  const run = page({
+    agents: [
+      { ...base, id: "c4", args: {} },
+      { ...base, id: "c5", action: "extend_box", args: { machine: "box-1", extra_usd: 1.5 } },
+      { ...base, id: "c6", args: { code: "x" } },
+    ],
+  });
+  for (const key of ["agent:c4", "agent:c5", "agent:c6"]) {
+    const html = shown(run, key).html;
+    assert.equal(html.match(/Asked by/g)?.length ?? 0, 1, `${key} says Asked by once: ${html}`);
+  }
+});
+
+test("an approval, a question and a plan card draw the same markup as before", () => {
+  const card = (kind, extra) => ({ key: `thread:${kind}`, kind, title: "Tidy the README", where: "pinned · mac-mini", machine: "mini", since: 1794420480000, tab: null, limit: null, confirmation: null, ...extra });
+  const run = page({});
+  const html = (c) => run("needsYouCardHtml(args.card)", { card: c });
+  assert.equal(html(card("approval", { line: null, ask: { kind: "approval", text: null, command: "git push origin readme-tidy", choices: [approve, decline], typed: false } })), "<article class=\"ny-card\" data-key=\"thread:approval\" data-kind=\"approval\" aria-label=\"Approval: Tidy the README\"><div class=\"ny-head\"><span class=\"status-glyph\" data-glyph=\"needs\" style=\"--glyph-size: 10px\" aria-hidden=\"true\"></span><span class=\"ny-kind\">Approval</span><span class=\"ny-where\">pinned · mac-mini</span><span class=\"ticker ny-when\" data-since=\"1794420480000\"></span></div><div class=\"ny-name\">Tidy the README</div><pre>git push origin readme-tidy</pre><fieldset class=\"ny-fields\"><div class=\"ny-actions\"><button type=\"button\" class=\"ny-secondary\" data-ny=\"decline\">Decline</button><button type=\"button\" class=\"ny-primary\" data-ny=\"approve\">Approve</button><button type=\"button\" class=\"ny-link\" data-ny=\"open\">Open</button></div></fieldset></article>");
+  assert.equal(html(card("question", { line: "Which hero image?", ask: { kind: "question", text: "Which hero image?", command: null, typed: true, choices: [{ label: "The product screenshot", about: "Already in the repo", choice: { option: 1 } }] } })), "<article class=\"ny-card\" data-key=\"thread:question\" data-kind=\"question\" aria-label=\"Question: Tidy the README\"><div class=\"ny-head\"><span class=\"status-glyph\" data-glyph=\"needs\" style=\"--glyph-size: 10px\" aria-hidden=\"true\"></span><span class=\"ny-kind\">Question</span><span class=\"ny-where\">pinned · mac-mini</span><span class=\"ticker ny-when\" data-since=\"1794420480000\"></span></div><div class=\"ny-name\">Tidy the README</div><p class=\"ny-line\">Which hero image?</p><fieldset class=\"ny-fields\"><div class=\"ny-options\"><button type=\"button\" class=\"ny-option\" data-ny=\"option\" data-option=\"1\"><span class=\"ny-label\">The product screenshot</span><span class=\"ny-about\">Already in the repo</span></button><form class=\"ny-typed\" data-ny-form><input type=\"text\" name=\"answer\" placeholder=\"Type or dictate another answer\" aria-label=\"Type or dictate another answer\" autocomplete=\"off\" enterkeyhint=\"send\"><button type=\"submit\" class=\"ny-send\">Send</button></form></div></fieldset></article>");
+  assert.equal(html(card("plan", { line: null, ask: { kind: "plan", text: "1. Add a hello comment", command: null, choices: [{ label: "Yes, and use auto mode", about: null, choice: { option: 1 } }], typed: false } })), "<article class=\"ny-card\" data-key=\"thread:plan\" data-kind=\"plan\" aria-label=\"Plan: Tidy the README\"><div class=\"ny-head\"><span class=\"status-glyph\" data-glyph=\"needs\" style=\"--glyph-size: 10px\" aria-hidden=\"true\"></span><span class=\"ny-kind\">Plan</span><span class=\"ny-where\">pinned · mac-mini</span><span class=\"ticker ny-when\" data-since=\"1794420480000\"></span></div><div class=\"ny-name\">Tidy the README</div><fieldset class=\"ny-fields\"><div class=\"ny-actions\"><button type=\"button\" class=\"ny-primary\" data-ny=\"plan\">Approve plan</button><button type=\"button\" class=\"ny-link\" data-ny=\"open\">Open</button></div></fieldset></article>");
+});
+
+/** The heading's title, evaluated with `teamsNow` as the team the page reads. */
+function titleOf(team) {
+  const context = { teamsNow: team };
+  vm.createContext(context);
+  vm.runInContext([line(needsYou, "const needsYouTeamCurrent"), line(needsYou, "const needsYouTitle")].join("\n"), context);
+  return () => vm.runInContext("needsYouTitle()", context);
+}
+
+test("the Needs you heading says Personal while a team is current, and reads as before with none", () => {
+  assert.equal(titleOf({ id: "t1", name: "North Studio" })(), "Needs you · Personal");
+  assert.equal(titleOf(null)(), "Needs you");
+});
+
+test("teams:changed repaints the open Needs you headings, and to no team they read as before", () => {
+  const heads = [{ textContent: "Needs you" }, { textContent: "Needs you" }];
+  const context = {
+    teamsNow: { id: "t1", name: "North Studio" },
+    needsYouLive: {},
+    pageView: { querySelectorAll: () => heads },
+    document: { addEventListener: (type, fn) => (context.onTeams = fn) },
+  };
+  vm.createContext(context);
+  vm.runInContext(
+    [line(needsYou, "const needsYouTeamCurrent"), line(needsYou, "const needsYouTitle"), decl(needsYou, "function paintNeedsYouTitle"), line(needsYou, 'document.addEventListener("teams:changed"')].join("\n"),
+    context,
+  );
+  context.onTeams();
+  assert.deepEqual(heads.map((h) => h.textContent), ["Needs you · Personal", "Needs you · Personal"]);
+  context.teamsNow = null;
+  context.onTeams();
+  assert.deepEqual(heads.map((h) => h.textContent), ["Needs you", "Needs you"]);
 });

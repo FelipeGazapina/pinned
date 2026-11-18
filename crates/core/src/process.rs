@@ -8,6 +8,8 @@ use std::sync::Mutex;
 #[allow(clippy::disallowed_methods)]
 pub fn command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
+    #[cfg(test)]
+    crate::machine::parent::inherit(&mut command);
     for (key, value) in fixes_for_children() {
         match value {
             Some(value) => command.env(key, value),
@@ -24,6 +26,17 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut command = Command::new(program);
     command.creation_flags(CREATE_NO_WINDOW);
+    #[cfg(test)]
+    crate::machine::parent::inherit(&mut command);
+    command
+}
+
+/// A session or agent pinned runs on a terminal of its own, starting from pinned's environment.
+pub fn pty_command(program: impl AsRef<OsStr>) -> portable_pty::CommandBuilder {
+    #[allow(unused_mut)]
+    let mut command = portable_pty::CommandBuilder::new(program);
+    #[cfg(test)]
+    crate::machine::parent::inherit(&mut command);
     command
 }
 

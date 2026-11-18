@@ -242,9 +242,44 @@ impl View {
 pub struct Accounts {
     dir: Option<PathBuf>,
     home: PathBuf,
-    /// Where the built-in Claude account's home is, instead of the environment's or `~/.claude`.
+    /// Where the built-in Claude account's home is, instead of the one the user exported or `~/.claude`.
     claude_home: Option<PathBuf>,
+    /// The homes the user exported for the built-in accounts.
+    exported: ExportedHomes,
     added: Mutex<Vec<Account>>,
+}
+
+/// The CLI homes the user exported in the shell the node started from, which the built-in
+/// accounts run on in place of the CLI's default one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExportedHomes(Vec<(Provider, PathBuf)>);
+
+impl ExportedHomes {
+    /// The home the user exported for `provider`'s built-in account.
+    pub fn of(&self, provider: Provider) -> Option<&Path> {
+        self.0.iter().find(|(p, _)| *p == provider).map(|(_, home)| home.as_path())
+    }
+}
+
+/// Which of the CLI homes in `env`, the node's own environment, the built-in accounts keep: one
+/// the user exported in their own shell. None while `env` carries any other session variable: a
+/// node started from inside a session that dropped only part of them would otherwise hand that
+/// session's account home to the built-in account. Never one under the `accounts` folder of a
+/// pinned data folder, `own_dir` or one that keeps `accounts.json`, which is an added account's.
+/// Never a relative one, which the node and each CLI would resolve against different folders.
+pub fn exported_homes(env: &[(String, String)], own_dir: Option<&Path>) -> ExportedHomes {
+    let homes: Vec<&str> = Provider::ALL.into_iter().map(|p| p.spec().home_env).filter(|name| !name.is_empty()).collect();
+    let session = crate::machine::INHERITED_SESSION_ENV.iter().filter(|name| !homes.contains(name));
+    if session.into_iter().any(|name| env.iter().any(|(key, _)| key == name)) {
+        return ExportedHomes::default();
+    }
+    let data_dir = |dir: &Path| own_dir == Some(dir) || dir.join(FILE).is_file();
+    let added = |home: &Path| home.ancestors().any(|a| a.file_name().is_some_and(|name| name == "accounts") && a.parent().is_some_and(data_dir));
+    let exported = Provider::ALL.into_iter().filter(|p| !p.spec().home_env.is_empty()).filter_map(|p| {
+        let home = env.iter().find(|(key, _)| key == p.spec().home_env).map(|(_, value)| PathBuf::from(value)).filter(|home| home.is_absolute())?;
+        (!added(&home)).then_some((p, home))
+    });
+    ExportedHomes(exported.collect())
 }
 
 impl Accounts {
@@ -252,7 +287,18 @@ impl Accounts {
     /// where the built-in accounts' CLIs keep their logins.
     pub fn load(dir: Option<&Path>, home: PathBuf) -> Accounts {
         let added = dir.and_then(|d| std::fs::read(d.join(FILE)).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        Accounts { dir: dir.map(Path::to_path_buf), home, claude_home: None, added: Mutex::new(added) }
+        Accounts { dir: dir.map(Path::to_path_buf), home, claude_home: None, exported: ExportedHomes::default(), added: Mutex::new(added) }
+    }
+
+    /// The built-in accounts run on the homes the user exported.
+    pub fn with_exported_homes(mut self, homes: ExportedHomes) -> Accounts {
+        self.exported = homes;
+        self
+    }
+
+    /// The home the user exported for `provider`'s built-in account, when the node keeps it.
+    pub fn exported_home(&self, provider: Provider) -> Option<&Path> {
+        self.exported.of(provider)
     }
 
     /// The built-in Claude account's home moved to `home`, when there is one.
@@ -359,25 +405,25 @@ impl Accounts {
         Ok(())
     }
 
-    /// The CLI home the account's sessions run on. A built-in account's sessions inherit pinned's
-    /// own `home_env`, when it has one.
+    /// The CLI home the account's sessions run on. A built-in account's is the one the user
+    /// exported, else the CLI's default one: its sessions never inherit pinned's own `home_env`
+    /// otherwise, which may name another account's home.
     pub fn home(&self, account: &Account) -> PathBuf {
         let spec = account.provider.spec();
-        match (&self.dir, &self.claude_home) {
-            (Some(dir), _) if !account.is_builtin() => dir.join("accounts").join(&account.id),
-            (_, Some(claude_home)) if account.provider == Provider::Claude => claude_home.clone(),
+        let exported = self.exported_home(account.provider).filter(|_| account.is_builtin());
+        match (&self.dir, &self.claude_home, exported) {
+            (Some(dir), _, _) if !account.is_builtin() => dir.join("accounts").join(&account.id),
+            (_, Some(claude_home), _) if account.provider == Provider::Claude => claude_home.clone(),
+            (_, _, Some(exported)) => exported.to_path_buf(),
             _ if spec.home_env.is_empty() => self.home.clone(),
-            _ => std::env::var_os(spec.home_env).map_or_else(|| self.home.join(spec.default_home), PathBuf::from),
+            _ => self.home.join(spec.default_home),
         }
     }
 
-    /// What every process of the account runs with. A built-in account sets no home, so its CLI
-    /// keeps the login it had before pinned knew about accounts.
+    /// What every process of the account runs with. A built-in account sets only the home the
+    /// user exported, so its CLI keeps the login it had before pinned knew about accounts.
     pub fn env(&self, account: &Account) -> Vec<(String, String)> {
-        let mut env = vec![];
-        if !account.is_builtin() {
-            env.push((account.provider.spec().home_env.to_owned(), self.home(account).display().to_string()));
-        }
+        let mut env: Vec<(String, String)> = self.home_env(account).into_iter().collect();
         env.push((ACCOUNT_ENV.to_owned(), account.id.clone()));
         if account.auth == Auth::OpenCodeGo {
             if let Some(key) = self.key(account) {
@@ -387,15 +433,34 @@ impl Accounts {
         env
     }
 
+    /// The variable that points the account's CLI at its home: an added account's own one, a
+    /// built-in account's only when the user exported it.
+    pub fn home_env(&self, account: &Account) -> Option<(String, String)> {
+        let home_env = account.provider.spec().home_env.to_owned();
+        if account.is_builtin() {
+            return self.exported_home(account.provider).map(|_| (home_env, self.home(account).display().to_string()));
+        }
+        Some((home_env, self.home(account).display().to_string()))
+    }
+
+    /// What any process of the account's CLI starts with: its env and nothing a parent left.
+    pub(crate) fn child_env(&self, account: &Account) -> crate::machine::ChildEnv<'static> {
+        crate::machine::ChildEnv::new(&[], self.env(account))
+    }
+
     /// Asks the account's CLI, at `bin`, who is signed in. A Go account is signed in while its key
     /// file holds a key. Its empty home would otherwise look signed out.
     pub fn status(&self, account: &Account, bin: &Path, path_env: Option<&str>) -> Status {
+        // The CLI keeps its login in the home: this crate's tests stop here in a real home.
+        #[cfg(test)]
+        crate::machine::refuse_real_home();
         if account.auth == Auth::OpenCodeGo {
             return Status { signed_in: self.key(account).is_some(), plan: Some("OpenCode Go".into()), ..Status::default() };
         }
         let spec = account.provider.spec();
         let mut cmd = crate::process::command(bin);
-        cmd.args(spec.status).envs(self.env(account)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        self.child_env(account).apply(&mut cmd);
+        cmd.args(spec.status).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(path) = path_env {
             cmd.env("PATH", path);
         }
@@ -534,6 +599,112 @@ mod tests {
         assert_eq!(accounts.home(&accounts.get("codex").unwrap()), PathBuf::from("/Users/ana/.codex"));
         let mode = |a: &Account| std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(accounts.home(a)).unwrap().permissions()) & 0o777;
         assert_eq!((mode(&work), mode(&side)), (0o700, 0o700));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The user's home, absolute on every platform: on Windows `Path::is_absolute` needs a drive.
+    fn ana() -> PathBuf {
+        PathBuf::from(if cfg!(windows) { r"C:\Users\ana" } else { "/Users/ana" })
+    }
+
+    /// `name` in the user's home, as the shell would export it.
+    fn in_ana(name: &str) -> String {
+        ana().join(name).display().to_string()
+    }
+
+    /// The environment of a shell the user started the node from, with the homes they exported.
+    fn exported_in_own_shell(claude: &str, codex: &str) -> Vec<(String, String)> {
+        [("HOME", ana().display().to_string().as_str()), ("PATH", "/usr/bin:/bin"), ("CLAUDE_CONFIG_DIR", claude), ("CODEX_HOME", codex)].into_iter().map(|(k, v)| (k.to_owned(), v.to_owned())).collect()
+    }
+
+    #[test]
+    fn a_home_the_user_exported_stays_the_built_in_accounts_home() {
+        use crate::machine::tests::assert_starts_with_only;
+        let dir = temp("exported");
+        let (claude_own, codex_own) = (in_ana("claude-own"), in_ana("codex-own"));
+        let exported = exported_homes(&exported_in_own_shell(&claude_own, &codex_own), Some(&dir));
+        let accounts = Accounts::load(Some(&dir), ana()).with_exported_homes(exported);
+        let work = accounts.add(Provider::Claude, "work", Auth::Login).unwrap();
+        let side = accounts.add(Provider::Codex, "side", Auth::Login).unwrap();
+        let (claude, codex) = (Account::builtin(Provider::Claude), Account::builtin(Provider::Codex));
+        let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+        assert_eq!(accounts.home(&claude), ana().join("claude-own"));
+        assert_eq!(accounts.home(&codex), ana().join("codex-own"));
+        assert_eq!(accounts.exported_home(Provider::Claude), Some(ana().join("claude-own").as_path()));
+        assert_eq!(accounts.home_env(&claude), Some(pair("CLAUDE_CONFIG_DIR", &claude_own)));
+        assert_eq!(accounts.env(&claude), [pair("CLAUDE_CONFIG_DIR", &claude_own), pair("PINNED_ACCOUNT", "claude")]);
+        assert_eq!(accounts.env(&codex), [pair("CODEX_HOME", &codex_own), pair("PINNED_ACCOUNT", "codex")]);
+        assert_starts_with_only(&accounts.child_env(&claude), &[("CLAUDE_CONFIG_DIR", claude_own.as_str()), ("PINNED_ACCOUNT", "claude")]);
+        assert_starts_with_only(&accounts.child_env(&codex), &[("CODEX_HOME", codex_own.as_str()), ("PINNED_ACCOUNT", "codex")]);
+        // An added account runs on its own home, never the exported one.
+        let (work_home, side_home) = (dir.join("accounts").join("work").display().to_string(), dir.join("accounts").join("side").display().to_string());
+        assert_eq!(accounts.home(&work), PathBuf::from(&work_home));
+        assert_eq!(accounts.env(&work), [pair("CLAUDE_CONFIG_DIR", &work_home), pair("PINNED_ACCOUNT", "work")]);
+        assert_eq!(accounts.env(&side), [pair("CODEX_HOME", &side_home), pair("PINNED_ACCOUNT", "side")]);
+        assert_starts_with_only(&accounts.child_env(&work), &[("CLAUDE_CONFIG_DIR", work_home.as_str()), ("PINNED_ACCOUNT", "work")]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_exported_home_beside_any_other_session_variable_is_dropped() {
+        let mut checked = 0;
+        for name in crate::machine::INHERITED_SESSION_ENV.into_iter().filter(|name| !["CLAUDE_CONFIG_DIR", "CODEX_HOME"].contains(name)) {
+            let mut env = exported_in_own_shell(&in_ana("claude-own"), &in_ana("codex-own"));
+            env.push((name.to_owned(), "1".to_owned()));
+            let accounts = Accounts::load(None, ana()).with_exported_homes(exported_homes(&env, None));
+            assert_eq!(accounts.home(&Account::builtin(Provider::Claude)), ana().join(".claude"), "kept beside {name}");
+            assert_eq!(accounts.home(&Account::builtin(Provider::Codex)), ana().join(".codex"), "kept beside {name}");
+            assert_eq!(accounts.env(&Account::builtin(Provider::Claude)), [("PINNED_ACCOUNT".to_owned(), "claude".to_owned())], "kept beside {name}");
+            checked += 1;
+        }
+        assert_eq!(checked, 25);
+        // The same home with nothing else is kept.
+        let accounts = Accounts::load(None, ana()).with_exported_homes(exported_homes(&exported_in_own_shell(&in_ana("claude-own"), &in_ana("codex-own")), None));
+        assert_eq!(accounts.home(&Account::builtin(Provider::Claude)), ana().join("claude-own"));
+    }
+
+    #[test]
+    fn a_relative_exported_home_is_dropped() {
+        // The node resolves a relative home against its own cwd and each CLI against the project's.
+        let homes = |claude: &str, codex: &str| {
+            let accounts = Accounts::load(None, ana()).with_exported_homes(exported_homes(&exported_in_own_shell(claude, codex), None));
+            (accounts.home(&Account::builtin(Provider::Claude)), accounts.home(&Account::builtin(Provider::Codex)))
+        };
+        assert_eq!(homes(".claude-work", "codex-work"), (ana().join(".claude"), ana().join(".codex")));
+        assert_eq!(homes(&in_ana("claude-own"), &in_ana("codex-own")), (ana().join("claude-own"), ana().join("codex-own")));
+    }
+
+    #[test]
+    fn an_exported_home_under_a_pinned_data_folders_accounts_is_dropped() {
+        let own = temp("exported-own");
+        let other = temp("exported-other");
+        std::fs::write(other.join(FILE), "[]").unwrap();
+        let plain = temp("exported-plain");
+        let home_of = |claude: String| {
+            let accounts = Accounts::load(Some(&own), "/Users/ana".into()).with_exported_homes(exported_homes(&exported_in_own_shell(&claude, "/Users/ana/codex-own"), Some(&own)));
+            accounts.home(&Account::builtin(Provider::Claude))
+        };
+        assert_eq!(home_of(format!("{}/accounts/x", own.display())), PathBuf::from("/Users/ana/.claude"), "the node's own data folder");
+        assert_eq!(home_of(format!("{}/accounts/x", other.display())), PathBuf::from("/Users/ana/.claude"), "another node's data folder");
+        assert_eq!(home_of(format!("{}/accounts/x", plain.display())), PathBuf::from(format!("{}/accounts/x", plain.display())), "a folder pinned keeps nothing in");
+        for dir in [own, other, plain] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn a_default_account_session_starts_with_no_other_accounts_home() {
+        use crate::machine::tests::assert_starts_with_only;
+        let dir = temp("child-env");
+        let accounts = Accounts::load(Some(&dir), "/Users/ana".into());
+        let work = accounts.add(Provider::Claude, "work", Auth::Login).unwrap();
+        let side = accounts.add(Provider::Codex, "side", Auth::Login).unwrap();
+        assert_starts_with_only(&accounts.child_env(&Account::builtin(Provider::Claude)), &[("PINNED_ACCOUNT", "claude")]);
+        assert_starts_with_only(&accounts.child_env(&Account::builtin(Provider::Codex)), &[("PINNED_ACCOUNT", "codex")]);
+        let work_home = dir.join("accounts").join("work").display().to_string();
+        assert_starts_with_only(&accounts.child_env(&work), &[("CLAUDE_CONFIG_DIR", work_home.as_str()), ("PINNED_ACCOUNT", "work")]);
+        let side_home = dir.join("accounts").join("side").display().to_string();
+        assert_starts_with_only(&accounts.child_env(&side), &[("CODEX_HOME", side_home.as_str()), ("PINNED_ACCOUNT", "side")]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

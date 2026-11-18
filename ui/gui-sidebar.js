@@ -306,7 +306,10 @@ function noteReturns() {
   for (const key of workingKeys) if (!now.has(key)) returnedAt.set(key, nowS());
   workingKeys = now;
 }
-const rowTabs = () => [...threadList.querySelectorAll(".thread-row")].map((r) => tabByKey(r.dataset.tab)).filter(Boolean);
+function rowTabs() {
+  if (threadListStale) drawThreadList();
+  return [...threadList.querySelectorAll(".thread-row")].map((r) => tabByKey(r.dataset.tab)).filter(Boolean);
+}
 
 function markThreadSeen(tab) {
   if (!tab || !guiOn() || document.hidden) return;
@@ -507,7 +510,31 @@ function renderSidebar() {
   for (const key of selected) if (!tabByKey(key)) selected.delete(key);
   noteReturns();
   const scope = projectGroups().find((g) => g.key === ui.project);
-  if (!scope && !projectListsPending()) ui.project = "";
+  // A render that drew without projects keeps the filter, to be checked by the render the loader sends.
+  if (!scope && !projectsWaiting && !projectListsPending()) ui.project = "";
+  for (const id of machines.keys()) noteThreadsSeen(id, tabs.filter((t) => t.machine === id).length);
+  if (threadListShown()) drawThreadList(scope);
+  else threadListStale = true;
+  renderSyncAlert();
+  drawSidebarToggle();
+  tickDurations();
+  scheduleWake();
+  modelChanged();
+}
+
+/** The thread list is on screen: the phone's Threads screen, or the open sidebar on a wider one. A
+ * hidden sidebar keeps its layout box, so drawing it there costs what drawing it in view does. */
+const threadListShown = () => (document.body.dataset.phoneScreen ? document.body.dataset.phoneScreen === "threads" : ui.sidebarOpen);
+/** A render left the list as it was, since it was off screen; it is drawn when it comes back or a row is read. */
+let threadListStale = false;
+new MutationObserver(() => {
+  if (!threadListStale || !threadListShown()) return;
+  drawThreadList();
+  tickDurations();
+}).observe(document.body, { attributeFilter: ["data-phone-screen", "data-sidebar"] });
+
+function drawThreadList(scope = projectGroups().find((g) => g.key === ui.project)) {
+  threadListStale = false;
   const where = scope ? projectWhere(PinnedProjects.sessionOn(scope.checkouts, machineDirectory())) : "";
   const trigger = `<span class="lead">Threads in</span>${projectNameMark(scope?.name ?? "All projects")}${where}${icon("chevron-down")}`;
   if (projectFilter.innerHTML !== trigger) projectFilter.innerHTML = trigger;
@@ -516,17 +543,11 @@ function renderSidebar() {
   const needle = ui.search.trim().toLowerCase();
   document.getElementById("search-clear").hidden = !ui.search;
   const list = needle ? searchRows(inScope, needle) : shelfRows(inScope);
-  for (const id of machines.keys()) noteThreadsSeen(id, tabs.filter((t) => t.machine === id).length);
   const away = offlineMachines(machines, { local: LOCAL, threadsSeen, seen: lastSeen, name: machineName });
   threadList.replaceChildren(...away.map(machineNote), ...list);
   if (!list.length) threadList.insertAdjacentHTML("beforeend", `<p class="empty" role="status">${tabs.length ? "No threads found" : emptyListText(away.length > 0)}</p>`);
   threadList.querySelectorAll(".thread-row").forEach((row, i) => i < 9 && (row.dataset.jump = `${MOD_LABEL}${i + 1}`));
   document.getElementById("new-thread").dataset.tipSub = projectCount() > 1 ? `New thread in current project: Shift+click (${MOD_LABEL}⇧N)` : "";
-  renderSyncAlert();
-  drawSidebarToggle();
-  tickDurations();
-  scheduleWake();
-  modelChanged();
 }
 
 /** What the closed sidebar holds: how many things wait on you (agents' approvals and blocked
@@ -1266,8 +1287,11 @@ const syncAlert = document.getElementById("sync-alert");
 syncAlert.onclick = (e) => e.target.closest("button") && openSettings("machines");
 
 function renderSyncAlert() {
-  const stopped = account ? [...machines.keys()].filter((id) => machines.get(id).syncStopped) : [];
-  const html = stopped.length ? `${icon("circle-alert")}<span>Sync stopped on ${esc(stopped.map(machineName).join(", "))}</span><button type="button">Review</button>` : "";
+  const limit = account ? [...machines.values()].map((m) => m.syncLimit).find(Boolean) : null;
+  const stopped = account && !limit ? [...machines.keys()].filter((id) => machines.get(id).syncStopped) : [];
+  const html = limit
+    ? `${icon("circle-alert")}<span>${esc(limit)}</span>`
+    : stopped.length ? `${icon("circle-alert")}<span>Sync stopped on ${esc(stopped.map(machineName).join(", "))}</span><button type="button">Review</button>` : "";
   if (syncAlert.innerHTML !== html) syncAlert.innerHTML = html;
   syncAlert.hidden = !html;
 }
@@ -1541,7 +1565,7 @@ window.addEventListener("keydown", (e) => {
 }, true);
 
 function startRename(tab, where = "row") {
-  if (where === "header") {
+  if (where === "header" || !threadListShown()) {
     const title = document.querySelector("#chat-head .crumb button.title");
     if (!title) return;
     const input = Object.assign(document.createElement("input"), { className: "rename", value: threadTitle(tab), spellcheck: false });
@@ -1948,9 +1972,16 @@ function projectListsPending() {
   return onlineMachines().some((id) => machines.get(id).projects === undefined);
 }
 
+/** Set when a render drew without projects: project-groups-load.js is a module, so it sets `PinnedProjects` after the classic scripts run. */
+let projectsWaiting = false;
 /** The sidebar's projects: `{ key, name, tab, tabs, checkouts }`. `tab` is the group's first thread, or null when the folder has none.
  * `grouping` defaults to the sidebar's Project grouping; account-wide views pass true, since a project there is its repo on every machine. */
 function projectGroups(grouping = !!sideSettings.grouping) {
+  if (!globalThis.PinnedProjects) {
+    projectsWaiting = true;
+    return [];
+  }
+  projectsWaiting = false;
   const threads = [];
   for (const tab of tabs) {
     if (isGlobalOrchestratorTab(tab)) continue;
@@ -1960,6 +1991,9 @@ function projectGroups(grouping = !!sideSettings.grouping) {
   const listed = Object.fromEntries([...machines].map(([id, machine]) => [id, machine.projects ?? []]));
   return sortedProjects(PinnedProjects.groupProjects({ threads, listed, grouping }), (g) => g.tabs);
 }
+document.addEventListener("projects:loaded", () => {
+  if (projectsWaiting && guiOn()) renderSidebar();
+});
 function projectNameMark(name) {
   const text = esc(name);
   return `<span class="label" title="${text}">${text}</span>`;

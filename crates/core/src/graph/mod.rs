@@ -5,6 +5,7 @@
 //! `migrate` builds the graph a fixed-pipeline connector already is. `project` writes the legacy
 //! fields back for apps that predate graphs. `runner` walks a graph without doing any I/O.
 
+use crate::connectors::{Assignee, By, LinearScope};
 use crate::vercel::Chosen;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -183,11 +184,37 @@ pub struct SessionSetup {
 pub enum Watch {
     LinearLabel { label: String },
     SlackMention { channel: String },
-    SlackMessage { channel: String },
+    SlackMessage {
+        channel: String,
+        /// Also read the top-level posts of apps and integrations, never the account's own bots.
+        #[serde(default)]
+        apps: bool,
+    },
     /// Runs only when another graph `call`s it.
     Called,
     /// No poller: runs only when someone runs it now.
     Manual,
+    /// `Trigger::LinearStatus`: empty `from` or `to` is any status.
+    LinearStatus {
+        #[serde(default)]
+        from: String,
+        #[serde(default)]
+        to: String,
+        #[serde(default)]
+        scope: LinearScope,
+        #[serde(default)]
+        by: By,
+    },
+    /// `Trigger::LinearAssigned`.
+    LinearAssigned {
+        to: Assignee,
+        #[serde(default)]
+        scope: LinearScope,
+        #[serde(default)]
+        by: By,
+    },
+    /// `Trigger::Schedule`: a cron in `tz`, an IANA zone.
+    Schedule { schedule: crate::schedule::Schedule, tz: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
