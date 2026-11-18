@@ -3209,7 +3209,7 @@ mod tests {
         let refusal = "the account's synced projects would pass 0 MB from a box: a box only pulls the account's files";
         *hub.refuse.borrow_mut() = Some(refusal.to_owned());
 
-        let done = sync_plugins_with(&hub, &mut State::default(), &boxed, SystemTime::now(), None).unwrap();
+        let done = sync_plugins(&hub, &mut State::default(), &boxed, SystemTime::now()).unwrap();
         assert!(matches!(&done.push, Push::Refused { error, .. } if error == refusal), "{:?}", done.push);
         assert_eq!(done.pulled, vec!["user-skills/ship/SKILL.md".to_owned()]);
         assert_eq!(std::fs::read_to_string(box_home.join(".claude/skills/ship/SKILL.md")).unwrap(), "---\nname: ship\ndescription: Ship the branch\n---\n");
