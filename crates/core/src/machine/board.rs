@@ -1,26 +1,265 @@
-//! The machine side of the team board (U11).
+//! The machine side of the team board (U11). One board per root task, the task a Captain's plan
+//! step or list links, kept in `boards/<task>.json` in the config dir of the Captain's machine.
+//! The file holds what pinned and the workers wrote (notes, handoffs, blocks, settled progress);
+//! the rest of a view is read from the task records when it is asked for.
 
 use super::Machine;
-use crate::board::{BoardEvent, BoardView};
+use crate::board::{BoardBlock, BoardEvent, BoardHandoff, BoardNote, BoardProgress, BoardView};
+use crate::delegate::{Parent, Task, WorkState};
 use crate::team_tools::{BoardNoteArgs, BoardRead};
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+/// Held from a board's read to its write, so two notes never drop one another.
+static WRITING: Mutex<()> = Mutex::new(());
 
 impl Machine {
-    /// `Call::Board`: the board of the Captain of `tab`, or only `task`'s part. Empty for now.
-    pub(super) fn board(&self, _tab: &str, _task: Option<&str>) -> Result<BoardView, String> {
-        Ok(BoardView::default())
+    /// `Call::Board`: the stored board of `task`'s root task, or only `task`'s part when it is a
+    /// worker under it; without `task`, every board the plans of the Captain of `tab` link.
+    pub(super) fn board(&self, tab: &str, task: Option<&str>) -> Result<BoardView, String> {
+        let Some(task) = task else {
+            let mut whole = BoardView::default();
+            for root in self.captain_roots(tab) {
+                let view = self.board_view(&root, None);
+                whole.progress.extend(view.progress);
+                whole.notes.extend(view.notes);
+                whole.handoffs.extend(view.handoffs);
+                whole.blocks.extend(view.blocks);
+                whole.spend.cents += view.spend.cents;
+            }
+            return Ok(whole);
+        };
+        let root = self.root_of(task);
+        Ok(self.board_view(&root, (root != task).then_some(task)))
     }
 
-    /// U11's hook: pinned writes `event` of task `task` to its Captain's board. Nothing keeps a
-    /// board yet.
-    pub(super) fn board_write(&self, _task: &str, _event: BoardEvent) {}
-
-    pub(super) fn board_note(&self, _tab: Option<&str>, _task: Option<&str>, _call: BoardNoteArgs) -> Result<String, String> {
-        super::team::not_yet("board_note")
+    /// U11's hook: pinned writes `event` of task `task` to its root task's board, when it has one.
+    pub(super) fn board_write(&self, task: &str, event: BoardEvent) {
+        let root = self.root_of(task);
+        if !self.has_board(&root) {
+            return;
+        }
+        let progress = match &event {
+            BoardEvent::Settled { task } => self.delegates.get(task).map(|task| progress_of(&task)),
+            _ => None,
+        };
+        let written = self.write_board(&root, |board| match event {
+            BoardEvent::Settled { .. } => {
+                if let Some(progress) = progress {
+                    board.progress.retain(|p| p.task != progress.task);
+                    board.progress.push(progress);
+                }
+            }
+            BoardEvent::Note(note) => board.notes.push(note),
+            BoardEvent::Handoff(handoff) => board.handoffs.push(handoff),
+            BoardEvent::Block(block) => board.blocks.push(block),
+        });
+        if let Err(e) = written {
+            eprintln!("pinned: the board of {root} was not saved ({e})");
+        }
     }
 
-    pub(super) fn board_read(&self, _tab: Option<&str>, _task: Option<&str>, _call: BoardRead) -> Result<String, String> {
-        super::team::not_yet("board_read")
+    /// `board_note`: one line about one file inside the worker's folder, on its root task's
+    /// board. It wakes nobody and types into no thread.
+    pub(super) fn board_note(&self, tab: Option<&str>, task: Option<&str>, call: BoardNoteArgs) -> Result<String, String> {
+        let (task, root) = self.worker_board(tab, task, "board_note")?;
+        let cwd = self.delegates.get(&task).map(|task| task.cwd).ok_or_else(|| format!("no task {task}. Nothing was noted."))?;
+        let file = crate::board::cite(&cwd, &call.file)?;
+        let text = crate::board::note_text(&call.text)?;
+        let note = BoardNote { by: task, file, text, at: super::unix_millis() };
+        self.write_board(&root, |board| board.notes.push(note))?;
+        Ok(format!("Noted on the board of {root}. Nobody was told; workers read it with board_read."))
     }
+
+    /// `board_read`: the notes of the caller's board, or of one task's part of it, in one fence.
+    /// A worker reads its own root task's board; a Captain reads the boards its plans link.
+    pub(super) fn board_read(&self, tab: Option<&str>, task: Option<&str>, call: BoardRead) -> Result<String, String> {
+        let not_yours = |of: &str| Err(format!("task {of} is not on your board. Nothing was read."));
+        let roots = if self.caller_task(tab, task).is_some() {
+            vec![self.worker_board(tab, task, "board_read")?.1]
+        } else if let Some(tab) = tab.filter(|tab| self.captain_session(tab).ok().flatten().is_some()) {
+            self.captain_roots(tab)
+        } else {
+            return Err("board_read is for a Captain or a worker of a planned task, and this session is neither. Nothing was read.".into());
+        };
+        let notes: Vec<BoardNote> = match call.task.as_deref() {
+            Some(of) => {
+                let root = self.root_of(of);
+                if !roots.contains(&root) {
+                    return not_yours(of);
+                }
+                self.load_board(&root).notes.into_iter().filter(|note| of == root || note.by == of).collect()
+            }
+            None => roots.iter().flat_map(|root| self.load_board(root).notes).collect(),
+        };
+        Ok(crate::board::fenced(&notes))
+    }
+
+    /// The task a team tool's caller runs: the headless child's own, or the worker thread's.
+    fn caller_task(&self, tab: Option<&str>, task: Option<&str>) -> Option<String> {
+        task.filter(|task| !task.is_empty()).map(str::to_owned).or_else(|| self.tab(tab?, |t| t.task.clone()).ok().flatten())
+    }
+
+    /// The caller's task and its root task, which must keep a board.
+    fn worker_board(&self, tab: Option<&str>, task: Option<&str>, tool: &str) -> Result<(String, String), String> {
+        let task = self.caller_task(tab, task).ok_or_else(|| format!("{tool} is for a worker of a planned task, and this session runs no task. Nothing changed."))?;
+        let root = self.root_of(&task);
+        if !self.has_board(&root) {
+            return Err(format!("task {task} has no board: only work a Captain's plan step started keeps one. Nothing changed."));
+        }
+        Ok((task, root))
+    }
+
+    /// The task at the top of `task`'s tree: the one a Captain started.
+    fn root_of(&self, task: &str) -> String {
+        let mut root = task.to_owned();
+        // A loop in the parents would be a broken registry; the walk stops anyway.
+        for _ in 0..64 {
+            match self.delegates.get(&root).map(|task| task.parent) {
+                Some(Parent::Task(parent)) => root = parent,
+                _ => break,
+            }
+        }
+        root
+    }
+
+    /// A root task keeps a board once a plan step or list links it.
+    fn has_board(&self, root: &str) -> bool {
+        self.plans.lock().unwrap().linked_tasks().iter().any(|task| task == root) || self.board_file(root).is_some_and(|file| file.is_file())
+    }
+
+    /// The root tasks the plans of the Captain of `tab` link.
+    fn captain_roots(&self, tab: &str) -> Vec<String> {
+        let Some(session) = self.captain_session(tab).ok().flatten() else { return vec![] };
+        let mut roots = self.plans.lock().unwrap().get(&session).map(crate::plan::linked_task_ids).unwrap_or_default();
+        let mut seen = std::collections::HashSet::new();
+        roots.retain(|root| seen.insert(root.clone()));
+        roots
+    }
+
+    fn board_file(&self, root: &str) -> Option<PathBuf> {
+        let safe = !root.is_empty() && root.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        Some(self.orchestration_dir.as_ref()?.join("boards").join(format!("{root}.json"))).filter(|_| safe)
+    }
+
+    /// What the board of `root` holds on disk; nothing when it has no file or the file is unreadable.
+    fn load_board(&self, root: &str) -> BoardView {
+        self.board_file(root).and_then(|file| std::fs::read(file).ok()).and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+    }
+
+    /// Runs `write` on the stored board of `root` and saves it: a private temp file, flushed, then
+    /// renamed over the last save.
+    fn write_board(&self, root: &str, write: impl FnOnce(&mut BoardView)) -> Result<(), String> {
+        let file = self.board_file(root).ok_or("this machine keeps no boards. Nothing changed.")?;
+        let _held = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+        let mut board = self.load_board(root);
+        write(&mut board);
+        if board.notes.len() > crate::board::MAX_NOTES {
+            board.notes.drain(..board.notes.len() - crate::board::MAX_NOTES);
+        }
+        let saved = (|| {
+            use std::io::Write;
+            let dir = file.parent().expect("a board file sits in a folder");
+            std::fs::create_dir_all(dir)?;
+            let tmp = file.with_extension("json.tmp");
+            let _ = std::fs::remove_file(&tmp);
+            let written = crate::private::file().create_new(true).open(&tmp).and_then(|mut f| {
+                f.write_all(&serde_json::to_vec(&board).expect("a board serializes"))?;
+                f.sync_all()
+            });
+            if let Err(e) = written {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+            std::fs::rename(&tmp, &file)
+        })();
+        saved.map_err(|e| format!("the board of {root} was not saved: {e}"))
+    }
+
+    /// The board of `root` as a client reads it: what was written, with progress, handoffs, blocks
+    /// and spend read from the task records now. `only` keeps one task's part.
+    fn board_view(&self, root: &str, only: Option<&str>) -> BoardView {
+        let stored = self.load_board(root);
+        let mut ids = self.delegates.running();
+        ids.extend(self.delegates.records().into_iter().map(|record| record.id));
+        ids.extend(stored.progress.iter().map(|p| p.task.clone()));
+        ids.push(root.to_owned());
+        ids.sort();
+        ids.dedup();
+        let tasks: Vec<Task> = ids.iter().filter_map(|id| self.delegates.get(id)).filter(|task| self.root_of(&task.id) == root).collect();
+        let mine = |id: &str| only.is_none_or(|only| only == id);
+        let mut view = BoardView {
+            progress: stored.progress.into_iter().filter(|p| mine(&p.task) && !tasks.iter().any(|task| task.id == p.task)).collect(),
+            notes: stored.notes.into_iter().filter(|note| mine(&note.by)).collect(),
+            handoffs: stored.handoffs.into_iter().filter(|h| mine(&h.from) || mine(&h.to)).collect(),
+            blocks: stored.blocks.into_iter().filter(|block| mine(&block.task)).collect(),
+            ..BoardView::default()
+        };
+        let mut usd = 0.0;
+        for task in tasks.iter().filter(|task| mine(&task.id)) {
+            view.progress.push(progress_of(task));
+            view.handoffs.extend(handoffs_of(task, &tasks));
+            view.blocks.extend(blocks_of(task));
+            usd += task.usage.cost_usd.unwrap_or(0.0) + task.usage.box_usd.unwrap_or(0.0);
+        }
+        view.progress.sort_by_key(|p| p.at);
+        view.handoffs.sort_by_key(|h| h.at);
+        view.blocks.sort_by_key(|b| b.at);
+        // Only the workers' own spend is on the record; a Captain's coordination has no field yet.
+        view.spend.cents = (usd * 100.0).round().max(0.0) as u64;
+        view
+    }
+}
+
+fn at_of(task: &Task) -> u64 {
+    task.ended.unwrap_or(task.started)
+}
+
+fn progress_of(task: &Task) -> BoardProgress {
+    BoardProgress { task: task.id.clone(), title: task.title.clone(), state: task.state.as_str().into(), at: at_of(task) }
+}
+
+/// The links of a handoff chain that reach `task`, and each review round that sent findings back to it.
+fn handoffs_of(task: &Task, tasks: &[Task]) -> Vec<BoardHandoff> {
+    let mut handoffs = vec![];
+    if let Some(link) = task.chain.as_ref().filter(|link| link.index > 0) {
+        let before = tasks.iter().find(|other| other.chain.as_ref().is_some_and(|l| l.root == link.root && l.index + 1 == link.index));
+        let from = match before {
+            Some(before) => before.id.clone(),
+            None if link.index == 1 => link.root.clone(),
+            None => return handoffs,
+        };
+        handoffs.push(BoardHandoff { from, to: task.id.clone(), at: task.started });
+    }
+    for round in task.reviews.iter().filter(|round| round.state == crate::reviewer::ReviewState::Sent) {
+        handoffs.push(BoardHandoff { from: format!("review round {}", round.round), to: task.id.clone(), at: at_of(task) });
+    }
+    handoffs
+}
+
+/// What `task` waits on: the user, its own workers, a time budget it ran past, or tools it said
+/// it NEEDS.
+fn blocks_of(task: &Task) -> Vec<BoardBlock> {
+    let block = |why: String| BoardBlock { task: task.id.clone(), why, at: at_of(task) };
+    let mut blocks = vec![];
+    if !task.state.terminal() {
+        if task.run.user_wait.is_some() || task.remote.as_ref().is_some_and(|remote| remote.waiting.is_some()) {
+            blocks.push(block("waits on the user".into()));
+        }
+        if task.state == WorkState::WaitingForChildren {
+            blocks.push(block("waits on its workers".into()));
+        }
+        if task.run.told_late {
+            blocks.push(block("runs past its time budget".into()));
+        }
+    }
+    if task.state != WorkState::Cancelled {
+        let said = [task.newest_text.as_deref(), task.summary.as_deref()];
+        let mut needs: Vec<String> = said.into_iter().flatten().flat_map(str::lines).map(str::trim).filter(|line| line.starts_with("NEEDS")).map(|line| line.chars().take(crate::board::NOTE_CHARS).collect()).collect();
+        needs.dedup();
+        blocks.extend(needs.into_iter().map(block));
+    }
+    blocks
 }
 
 #[cfg(test)]

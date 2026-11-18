@@ -52,7 +52,8 @@ mod tests {
     #[test]
     fn every_team_tool_answers_that_it_is_not_available_yet() {
         let m = Machine::new(launch(), None, None, |_| {});
-        for name in crate::team_tools::NAMES {
+        // U11 turned the board tools on: `machine/board.rs` tests them.
+        for name in crate::team_tools::NAMES.into_iter().filter(|name| !name.starts_with("board_")) {
             let args = match name {
                 "task_fix" | "board_read" => json!({ "taskId": "t1" }),
                 "feature_map_set" => json!({ "feature": "login", "files": [] }),
