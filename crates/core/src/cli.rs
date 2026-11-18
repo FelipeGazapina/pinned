@@ -22,10 +22,7 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
             hooks::statusline();
             return Some(0);
         }
-        team_hook::SUBCOMMAND => {
-            team_hook::run();
-            return Some(0);
-        }
+        team_hook::SUBCOMMAND => return Some(team_hook::run()),
         team_call::SUBCOMMAND => return Some(team_call::main(rest)),
         reminders::SUBCOMMAND => {
             reminders::serve(first != Some(reminders::NO_REMINDERS));

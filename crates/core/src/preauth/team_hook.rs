@@ -67,12 +67,48 @@ impl HookEnv {
     }
 }
 
-/// Runs inside the hook process. Prints a deny, or nothing so Claude Code's own permissions decide.
-pub fn run() {
-    let payload = crate::hooks::hook_payload();
-    if let Some(output) = decide(&payload, &HookEnv::from_process(), crate::hooks::ask) {
-        println!("{output}");
+/// What a session reads when the hook itself failed: it panicked, or did not answer in time.
+pub const COULD_NOT_CHECK: &str = "pinned could not check this tool call, so it did not run";
+
+/// pinned writes this hook with no `timeout`, so Claude Code's default for a command hook holds
+/// (60 s, longer in newer releases), past which it lets the call run. The watchdog denies first.
+const WATCHDOG: std::time::Duration = std::time::Duration::from_secs(58);
+
+/// Runs inside the hook process and returns its exit code. Prints a deny, or nothing so Claude
+/// Code's own permissions decide. It fails closed: Claude Code lets a call run when its hook exits
+/// with any code but 2 or times out, so a panic, or no answer before the watchdog, is a deny with
+/// exit code 2.
+pub fn run() -> i32 {
+    std::panic::set_hook(Box::new(|_| {}));
+    std::thread::spawn(|| {
+        std::thread::sleep(watchdog());
+        std::process::exit(fail_closed());
+    });
+    let decided = std::panic::catch_unwind(|| decide(&crate::hooks::hook_payload(), &HookEnv::from_process(), crate::hooks::ask));
+    match decided {
+        Ok(output) => {
+            if let Some(output) = output {
+                println!("{output}");
+            }
+            0
+        }
+        Err(_) => fail_closed(),
     }
+}
+
+/// Prints the deny, with its reason on stderr, which Claude Code reads with exit code 2.
+fn fail_closed() -> i32 {
+    println!("{}", deny(COULD_NOT_CHECK));
+    eprintln!("{COULD_NOT_CHECK}");
+    2
+}
+
+fn watchdog() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(ms) = std::env::var("PINNED_HOOK_TEST_WATCHDOG_MS").ok().and_then(|ms| ms.parse().ok()) {
+        return std::time::Duration::from_millis(ms);
+    }
+    WATCHDOG
 }
 
 /// The hook's stdout for one PreToolUse payload: `None` when the call may go on (not a team box, no
@@ -643,8 +679,7 @@ mod tests {
     #[test]
     #[ignore = "the hook's own process, which a_hook_that_panics_or_stalls_denies_its_call_with_exit_code_2 starts"]
     fn the_hook_process() {
-        run();
-        std::process::exit(0);
+        std::process::exit(run());
     }
 
     #[test]
