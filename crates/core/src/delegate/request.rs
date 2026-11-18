@@ -102,7 +102,12 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         Some(Value::Bool(heavy)) => Some(*heavy),
         Some(other) => return Err(format!("heavy must be true or false, not {other}")),
     };
-    Ok(Request {
+    let then = match args.get("then") {
+        None | Some(Value::Null) => vec![],
+        Some(Value::Array(then)) => then.iter().map(|p| p.as_str().map(str::trim).filter(|p| !p.is_empty()).map(str::to_owned).ok_or("then must be a list of profile names")).collect::<Result<_, _>>()?,
+        Some(_) => return Err("then must be a list of profile names".into()),
+    };
+    let request = Request {
         task,
         title,
         target: Target {
@@ -125,7 +130,12 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         client_request_id,
         heavy,
         plan_step: optional_str(&args["planStep"]),
-    })
+        profile: optional_str(&args["profile"]),
+        then,
+    };
+    crate::profiles::admit(&request)?;
+    crate::chain::admit(&request)?;
+    Ok(request)
 }
 
 /// The budget notice and the run limit, in ms, under a time limit of `ceiling_ms`: the limit asked

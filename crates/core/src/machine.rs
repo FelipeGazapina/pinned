@@ -19,6 +19,14 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+// The agent team's machine side, one module per area, so each unit edits its own file.
+mod board;
+mod chain;
+mod feature_map;
+mod profiles;
+mod reviewer;
+mod team;
+
 const MODEL_MENU_FILE: &str = "claude-model-menu.json";
 
 /// A tab keeps this much of its session's output, replayed to a viewer that attaches late.
@@ -1583,6 +1591,7 @@ impl Machine {
                 let views: Vec<crate::plan::PlanView> = kept.iter().filter(|p| plan.as_deref().is_none_or(|id| p.id == id)).map(|p| crate::plan::derive(p, &facts)).collect();
                 Ok(json!(views))
             }
+            Call::Board { tab, task } => json(self.board(&tab, task.as_deref())?),
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text).map_err(NotTyped::for_person)?),
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
@@ -4962,6 +4971,7 @@ impl Machine {
                 Message::TaskReview { tab, task, id, verdict, note } => machine.task_review(tab, task, &id, &verdict, note),
                 Message::DelegationStats { days } => machine.delegation_stats(days),
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
+                Message::Team { tab, task, tool } => machine.team_tool(tab.as_deref(), task.as_deref(), tool),
                 Message::Guard { tab, tool, input } => machine.guard(&tab, &tool, &input),
                 message => other(message),
             };
@@ -5613,6 +5623,8 @@ impl Machine {
     /// new task is linked to the step or list it names once the task exists.
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
         let caller = Self::require_caller(tab, parent_task)?;
+        crate::profiles::admit(&request)?;
+        crate::chain::admit(&request)?;
         // A replayed request answers with the task it started, which is already linked.
         let link = match request.plan_step.clone() {
             Some(step) if self.delegates.requested(&caller.key(), request.client_request_id.as_deref()).is_none() => {
@@ -6090,7 +6102,11 @@ impl Machine {
             self.arm_delegate_pass();
             return true;
         }
+        if error.is_none() && self.review_turn_end(&task, tab) {
+            return true;
+        }
         let parent = self.delegates.settle_thread(&task, reply, error, event.resume_at, self.thread_steps(tab), self.launch.path_env.as_deref());
+        self.board_write(&task, crate::board::BoardEvent::Settled { task: task.clone() });
         // A thread for another machine's tab sends its end back through the hub on the next pass.
         if self.tab(tab, |t| t.origin.is_some()).unwrap_or(false) {
             self.arm_delegate_pass();
@@ -13241,6 +13257,22 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!((&got["effective"]["review_diffs"], &got["effective"]["second_opinion"]), (&json!(true), &json!(false)), "taste_get still shows both");
         let set: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2}"#).unwrap()).unwrap();
         assert_eq!(set["effective"]["parallel"], json!(2), "a field the agent may change still changes");
+
+        // The Reviewer's settings and the worker profiles are the user's own: the taste tools read them and never name them.
+        let mut user = m.local_tastes();
+        user.set_reviewer(crate::reviewer::ReviewerPatch { rounds: Some(4), ..Default::default() }).unwrap();
+        m.set_local_reviewer(crate::reviewer::ReviewerPatch { rounds: Some(4), ..Default::default() }).unwrap();
+        let before = m.local_tastes();
+        assert_eq!(before.reviewer, user.reviewer);
+        for (patch, named) in [(r#"{"reviewer":{"rounds":1}}"#, "reviewer is"), (r#"{"parallel":3,"worker_profiles":{"account":[]}}"#, "worker_profiles is"), (r#"{"reviewer":{},"worker_profiles":{}}"#, "reviewer and worker_profiles are")] {
+            let refused = tool(&chat, &format!(r#""name":"taste_set","scope":"captains","patch":{patch}"#)).unwrap_err();
+            assert!(refused.contains(&format!("{named} the user's own, set only on the Way of working page; nothing changed")), "{refused}");
+        }
+        assert!(tool(&chat, r#""name":"taste_reset","scope":"captains","field":"reviewer""#).is_err());
+        assert!(tool(&chat, r#""name":"taste_reset","scope":"captains","field":"worker_profiles""#).is_err());
+        assert_eq!(m.local_tastes(), before, "a refused call changed the way of working");
+        let got: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_get","scope":"captains""#).unwrap()).unwrap();
+        assert_eq!((&got["reviewer"]["rounds"], &got["worker_profiles"]["account"]), (&json!(4), &json!([])), "taste_get reads them");
         let _ = std::fs::remove_dir_all(dir);
     }
 

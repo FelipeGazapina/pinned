@@ -1009,6 +1009,8 @@ impl Hub {
                 };
                 return self.change_tastes(account, reset).await;
             }
+            HubCall::SetReviewer { patch } => return self.change_tastes(account, |tastes| tastes.set_reviewer(patch)).await,
+            HubCall::SetWorkerProfiles { project, profiles } => return self.change_tastes(account, |tastes| tastes.set_worker_profiles(project.as_deref(), profiles)).await,
             HubCall::GetBoxSize { repo, size } => return json(crate::boxes::box_size(self, account, repo.as_deref(), size).await?),
             HubCall::SetBoxSize { repo, size } => {
                 let scope = match repo {
@@ -1057,7 +1059,7 @@ impl Hub {
             }
             HubCall::Act { .. } => return Err("only an agent session on a machine acts".into()),
             HubCall::Confirmations => return json(self.db.confirmations(account.id).await?),
-            HubCall::DecideConfirmation { id, approve, entered } => return crate::surface::decide(self, account, &id, approve, entered).await,
+            HubCall::DecideConfirmation { id, approve, entered, reason } => return crate::surface::decide(self, account, &id, approve, entered, reason).await,
             HubCall::Unlock { .. } => return Err("only the app unlocks, on its own connection".into()),
             HubCall::AgentAudit { before, limit } => {
                 let limit = i64::from(limit.unwrap_or(50).clamp(1, 200));

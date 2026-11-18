@@ -502,6 +502,13 @@ pub enum Call {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan: Option<String>,
     },
+    /// `board::BoardView`: the team board of the Captain of `tab`, or only `task`'s part of it.
+    /// Kept apart from `Plan`. Empty until U11 fills it in.
+    Board {
+        tab: TabId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+    },
     /// `null`. Types `text` into the session as one prompt and submits it.
     Prompt { tab: TabId, text: String },
     /// `workspace::Workspace` of the tab's folder.
@@ -1293,9 +1300,23 @@ pub enum HubCall {
     /// starts a Capitão or the global orchestrator.
     GetTastes,
     /// `taste::Tastes`, once `patch` is applied to `scope` as `Tastes::set` does.
-    SetTaste { scope: TasteScope, patch: TastePatch },
+    SetTaste {
+        scope: TasteScope,
+        #[serde(deserialize_with = "crate::taste::patch_without_user_only")]
+        patch: TastePatch,
+    },
     /// `taste::Tastes`, once `field` of `scope` is back to what it inherits.
     ResetTasteField { scope: TasteScope, field: TasteField },
+    /// `taste::Tastes`, once `patch` is applied to the Reviewer's settings as `Tastes::set_reviewer`
+    /// does. The user's own: no agent may call it.
+    SetReviewer { patch: crate::reviewer::ReviewerPatch },
+    /// `taste::Tastes`, once `profiles` are the worker profiles of `project`, or the account's
+    /// without it, as `Tastes::set_worker_profiles` does. The user's own: no agent may call it.
+    SetWorkerProfiles {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        profiles: Vec<crate::profiles::WorkerProfile>,
+    },
     /// From a machine: `true` when the account had no tastes and took these, a signed-out app's own.
     ImportTastes { tastes: Tastes },
     /// `taste::BoxSizeChoice`: the size a box cloning `repo` opens at when its call names `size`,
@@ -1436,6 +1457,9 @@ pub enum HubCall {
         approve: bool,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         entered: BTreeMap<String, String>,
+        /// Why the user said no, when they said. Carried to `surface::decide`; U2 shows it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// From a signed-in client: `surface::Unlocked`, once `password` is the account's. Until its
     /// `until`, this connection runs the calls only the owner makes.
@@ -1820,6 +1844,42 @@ mod tests {
         assert_eq!(serde_json::to_value(&frame).unwrap(), expected);
         let parsed: T = serde_json::from_value(expected.clone()).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), expected);
+    }
+
+    #[test]
+    fn the_agent_team_calls_round_trip_and_an_older_decision_reads_without_a_reason() {
+        let old: HubCall = serde_json::from_value(json!({ "cmd": "decide_confirmation", "id": "c1", "approve": false })).unwrap();
+        assert!(matches!(old, HubCall::DecideConfirmation { reason: None, .. }));
+        round_trip(
+            HubCall::DecideConfirmation { id: "c1".into(), approve: false, entered: BTreeMap::new(), reason: Some("not on main".into()) },
+            json!({ "cmd": "decide_confirmation", "id": "c1", "approve": false, "reason": "not on main" }),
+        );
+        round_trip(Call::Board { tab: "tab-1".into(), task: None }, json!({ "cmd": "board", "tab": "tab-1" }));
+        round_trip(Call::Board { tab: "tab-1".into(), task: Some("t2".into()) }, json!({ "cmd": "board", "tab": "tab-1", "task": "t2" }));
+        round_trip(
+            HubCall::SetReviewer { patch: crate::reviewer::ReviewerPatch { rounds: Some(3), ..Default::default() } },
+            json!({ "cmd": "set_reviewer", "patch": { "rounds": 3 } }),
+        );
+        round_trip(HubCall::SetWorkerProfiles { project: None, profiles: vec![] }, json!({ "cmd": "set_worker_profiles", "profiles": [] }));
+        round_trip(
+            HubCall::SetWorkerProfiles { project: Some("github.com/acme/site".into()), profiles: serde_json::from_value(json!([{ "name": "scout" }])).unwrap() },
+            json!({ "cmd": "set_worker_profiles", "project": "github.com/acme/site", "profiles": [{ "name": "scout", "skills": [], "tools": [], "access": "edit", "delivers": "", "by": "user" }] }),
+        );
+    }
+
+    #[test]
+    fn set_taste_refuses_a_patch_that_names_a_users_own_setting() {
+        for (patch, error) in [
+            (json!({ "reviewer": { "rounds": 5 } }), "reviewer is the user's own, set only on the Way of working page; nothing changed"),
+            (json!({ "parallel": 2, "worker_profiles": {} }), "worker_profiles is the user's own, set only on the Way of working page; nothing changed"),
+            (json!({ "reviewer": {}, "worker_profiles": {} }), "reviewer and worker_profiles are the user's own, set only on the Way of working page; nothing changed"),
+        ] {
+            let call = serde_json::from_value::<HubCall>(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": patch }));
+            let e = call.err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(e.starts_with(error), "{e}");
+        }
+        let plain = serde_json::from_value::<HubCall>(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "parallel": 2 } })).unwrap();
+        assert!(matches!(plain, HubCall::SetTaste { patch: TastePatch { parallel: Some(2), .. }, .. }));
     }
 
     #[test]
@@ -2440,9 +2500,9 @@ mod tests {
 
     #[test]
     fn a_decision_without_typed_fields_keeps_its_old_shape_and_mcp_servers_takes_both_fields_as_optional() {
-        round_trip(HubCall::DecideConfirmation { id: "c1".into(), approve: true, entered: BTreeMap::new() }, json!({ "cmd": "decide_confirmation", "id": "c1", "approve": true }));
+        round_trip(HubCall::DecideConfirmation { id: "c1".into(), approve: true, entered: BTreeMap::new(), reason: None }, json!({ "cmd": "decide_confirmation", "id": "c1", "approve": true }));
         let typed = BTreeMap::from([("key".to_owned(), "lin_api_x".to_owned())]);
-        round_trip(HubCall::DecideConfirmation { id: "c1".into(), approve: true, entered: typed }, json!({ "cmd": "decide_confirmation", "id": "c1", "approve": true, "entered": { "key": "lin_api_x" } }));
+        round_trip(HubCall::DecideConfirmation { id: "c1".into(), approve: true, entered: typed, reason: None }, json!({ "cmd": "decide_confirmation", "id": "c1", "approve": true, "entered": { "key": "lin_api_x" } }));
         round_trip(Call::McpServers { account: None, path: None }, json!({ "cmd": "mcp_servers" }));
         round_trip(Call::McpServers { account: Some("work".into()), path: Some("/w/site".into()) }, json!({ "cmd": "mcp_servers", "account": "work", "path": "/w/site" }));
         assert!(Call::McpServers { account: None, path: None }.may_wait());

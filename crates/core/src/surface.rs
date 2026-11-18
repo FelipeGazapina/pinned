@@ -180,6 +180,7 @@ pub const ACTIONS: &[Action] = &[
     n("repo_look", Excluded, "the global orchestrator's repo_overview, repo_read and repo_search, which the hub sends after its permission and rate checks").named("node_repo_look"),
     n("thread", Read, "A session's conversation items from byte from of its transcript (0: the start) and the offset to read next. node_read_session reads its end.").wired(),
     n("plan", Read, "A Captain session's plans with their lists and steps, or the one plan given by plan. A session that is not a Captain keeps none.").wired(),
+    n("board", Read, "A Captain session's team board: its workers' progress, notes, handoffs, blocks and spend, or only task's part of it.").wired(),
     n("prompt", Write, "Types text into another running session as one prompt and submits it. A Captain takes enqueue instead, and the global orchestrator takes tell_orchestrator.").wired(),
     n("workspace", Excluded, GIT),
     n("pull_request", Excluded, GIT),
@@ -318,6 +319,8 @@ pub const ACTIONS: &[Action] = &[
     h("set_taste", Confirm, "Changes fields of one scope of the account's way of working.").wired(),
     h("reset_taste_field", Confirm, "Makes a field of one scope of the way of working inherit again.").wired(),
     h("import_tastes", Excluded, "a signed-out app's one-time move of its way of working"),
+    h("set_reviewer", Excluded, "review rules and the reviewer's settings are the user's own"),
+    h("set_worker_profiles", Excluded, "worker profiles are the user's own: propose one with profile_propose"),
     h("get_box_size", Read, "The size a box cloning repo opens at when its call names none, and which setting chose it: call, project, account or built_in. Without repo, the account's. With size, what a call naming that size gets.").wired(),
     h("set_box_size", Confirm, "Sets the default box size, small, medium or large, of repo's project, or the account's without repo. Leaving size out clears it: the project follows the account's again, and the account's goes back to small.").wired(),
     h("read_session", Read, "Any session's state and last items, found on the account's online machines by its tab id, on machine when given.").wired(),
@@ -652,7 +655,7 @@ impl ActorRole {
         match tab {
             t if t.orchestrator_global => ActorRole::GlobalOrchestrator,
             TabView { role: Some(Role::Orchestrator), .. } => ActorRole::Captain,
-            TabView { role: Some(Role::Worker), .. } => ActorRole::Worker,
+            TabView { role: Some(Role::Worker | Role::Reviewer), .. } => ActorRole::Worker,
             t if t.taste_chat => ActorRole::TasteChat,
             t if t.connector.is_some() => ActorRole::Workflow,
             _ => ActorRole::Session,
@@ -1095,6 +1098,16 @@ mod tests {
         assert_eq!(find("read_session").map(|a| a.side), Some(Side::Hub));
         assert_eq!(find("node_read_session").map(|a| (a.side, a.cmd)), Some((Side::Node, "read_session")));
         assert!(find("node_tabs").is_none());
+    }
+
+    #[test]
+    fn the_reviewer_and_worker_profiles_are_written_only_by_the_user() {
+        for name in ["set_reviewer", "set_worker_profiles"] {
+            let action = find(name).unwrap_or_else(|| panic!("no action {name}"));
+            assert_eq!((action.side, action.class, action.wired, action.starts_work), (Side::Hub, Excluded, false, false), "{name}");
+        }
+        assert!(find("set_reviewer").unwrap().about.contains("the user's own"));
+        assert_eq!(find("board").map(|a| (a.side, a.class, a.wired)), Some((Side::Node, Read, true)));
     }
 
     #[test]

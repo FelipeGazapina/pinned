@@ -352,6 +352,8 @@ pub fn hub_rule(call: &HubCall) -> Rule {
         | HubCall::GetTastes { .. }
         | HubCall::SetTaste { .. }
         | HubCall::ResetTasteField { .. }
+        | HubCall::SetReviewer { .. }
+        | HubCall::SetWorkerProfiles { .. }
         | HubCall::Delegate { .. }
         | HubCall::RemoteTask { .. }
         | HubCall::RemoteEnded { .. }
