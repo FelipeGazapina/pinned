@@ -670,22 +670,21 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
 }
 
 /// Runs a connection the hub accepted: sends what `incoming` queues and hands each text frame to `on_text`.
-/// Ok means the hub closed it.
-async fn pump<W, R>(mut sink: W, mut stream: R, mut incoming: channel::UnboundedReceiver<Outgoing>, mut on_text: impl FnMut(&str)) -> Result<(), Fault>
+/// Ok means the hub closed it. Its writes run beside the reads, so it keeps answering the hub and
+/// checking the silence while a send waits on a hub that is busy writing too (#468).
+async fn pump<W, R>(sink: W, mut stream: R, incoming: channel::UnboundedReceiver<Outgoing>, mut on_text: impl FnMut(&str)) -> Result<(), Fault>
 where
     W: futures_util::Sink<Frame, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
     R: futures_util::Stream<Item = Result<Frame, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
-    let mut ping = tokio::time::interval(PING);
+    let ping = tokio::sync::Notify::new();
+    let writer = write(sink, incoming, &ping);
+    tokio::pin!(writer);
+    let mut pinging = tokio::time::interval(PING);
     let mut heard = tokio::time::Instant::now();
     loop {
         tokio::select! {
-            Some(outgoing) = incoming.recv() => {
-                sink.send(Frame::Text(outgoing.text.into())).await.map_err(transport)?;
-                if let Some(wrote) = outgoing.wrote {
-                    let _ = wrote.send(());
-                }
-            }
+            fault = &mut writer => return Err(fault),
             frame = stream.next() => {
                 heard = tokio::time::Instant::now();
                 match frame {
@@ -695,12 +694,39 @@ where
                     Some(Err(e)) => return Err(transport(e)),
                 }
             }
-            _ = ping.tick() => {
+            _ = pinging.tick() => {
                 if heard.elapsed() > SILENT {
                     return Err(Fault::Transport("the hub stopped answering".into()));
                 }
-                sink.send(Frame::Ping(Default::default())).await.map_err(transport)?;
+                ping.notify_one();
             }
+        }
+    }
+}
+
+/// Sends what `incoming` queues in order, a ping first when one is due. Returns the fault that ended
+/// it: a send that outlasts `write_budget` means the hub stopped reading, and the link redials.
+async fn write<W>(mut sink: W, mut incoming: channel::UnboundedReceiver<Outgoing>, ping: &tokio::sync::Notify) -> Fault
+where
+    W: futures_util::Sink<Frame, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    loop {
+        let (frame, bytes, wrote) = tokio::select! {
+            biased;
+            _ = ping.notified() => (Frame::Ping(Default::default()), 0, None),
+            Some(outgoing) = incoming.recv() => {
+                let bytes = outgoing.text.len();
+                (Frame::Text(outgoing.text.into()), bytes, outgoing.wrote)
+            }
+        };
+        match tokio::time::timeout(write_budget(bytes), sink.send(frame)).await {
+            Ok(Ok(())) => {
+                if let Some(wrote) = wrote {
+                    let _ = wrote.send(());
+                }
+            }
+            Ok(Err(e)) => return transport(e),
+            Err(_) => return Fault::Transport("the hub stopped reading".into()),
         }
     }
 }
@@ -2436,7 +2462,7 @@ mod pump_tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_hub_that_sends_but_never_reads_is_left_once_a_send_stalls_for_a_minute() {
+    async fn a_hub_that_sends_but_never_reads_is_left_once_a_send_outlasts_its_budget() {
         let (socket, mut hub) = pair().await;
         let (_out, ended, _heard) = link(socket, &["m".repeat(BIG)]);
         let started = tokio::time::Instant::now();
@@ -2454,6 +2480,7 @@ mod pump_tests {
         })
         .await;
         assert_eq!(ended, Ok(Err(Fault::Transport("the hub stopped reading".into()))));
-        assert_eq!(started.elapsed().as_secs(), 60);
+        // A minute, and 64 s for 2 MiB at 32 KiB/s.
+        assert_eq!(started.elapsed().as_secs(), 124);
     }
 }
