@@ -3465,12 +3465,20 @@ impl Machine {
         }
     }
 
-    /// Hands `message` to `project`'s Capitão: on this machine when the project is here and
-    /// `machine` names no other, else on the machine the hub finds.
-    fn send_to_captain(&self, project: &str, machine: Option<&str>, message: &str, request_id: &str) -> Result<Handoff, String> {
+    /// Hands `message` from the global orchestrator in `caller` to `project`'s Capitão: on this
+    /// machine when the project is here and `machine` names no other, else on the machine the hub
+    /// finds. Here, an orchestrator that asks for its permission prompts reaches no Capitão that
+    /// skips them and opens none, as an agent's enqueue.
+    fn send_to_captain(&self, caller: &str, project: &str, machine: Option<&str>, message: &str, request_id: &str) -> Result<Handoff, String> {
         let sender = self.global_settings().name;
         match self.local_project(project, machine) {
-            Some(path) => self.enqueue_to_captain(&path.display().to_string(), message, request_id, &sender, None),
+            Some(path) => {
+                let full = self.tab(caller, |t| t.child_access() == crate::delegate::Access::Full).unwrap_or(false);
+                let asking = (!full).then(|| {
+                    format!("the Captain of {} skips its permission prompts and your session asks for them, so your message can't reach it; the user can switch that Captain to ask for permissions", path.display())
+                });
+                self.hand_to_captain(&path.display().to_string(), message, request_id, &sender, None, full && full_access_by_default(), asking)
+            }
             None => self.route_remote(project, machine, message, request_id, &sender),
         }
     }
@@ -3866,7 +3874,7 @@ impl Machine {
             }
             ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: None } => {
                 only_global()?;
-                text_json(self.send_to_captain(&project, machine.as_deref(), &message, &request_id)?)
+                text_json(self.send_to_captain(tab, &project, machine.as_deref(), &message, &request_id)?)
             }
             ProjectTool::ReadCaptain { project, machine } => {
                 only_global()?;
@@ -12259,6 +12267,7 @@ while True:
         let claude = recording_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
         let path = m.open_project(project).display().to_string();
+        let global = m.open_global_orchestrator().unwrap();
         let overview: Arc<Mutex<Option<Value>>> = Arc::default();
         let relayed: Arc<Mutex<Vec<Value>>> = Arc::default();
         let (seen_overview, seen_relays) = (overview.clone(), relayed.clone());
@@ -12275,15 +12284,15 @@ while True:
             json!({ "cmd": "relay", "request_id": request_id, "to": { "kind": "captain", "machine": machine, "path": path, "text": "Ship it.", "sender": "Orchestrator", "busy": "queue" } })
         };
 
-        assert_eq!(m.send_to_captain("m-book:/w/site", None, "Ship it.", "r-1"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 1 }));
-        assert_eq!(m.send_to_captain("/w/site", Some("m-book"), "Ship it.", "r-2"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 2 }));
-        assert_eq!(m.send_to_captain("github.com/o/site", None, "Ship it.", "r-3"), Err("github.com/o/site is not a project on this machine, and the hub can't list the other machines' projects (this hub runs pinned 0.17.19, which can't answer that yet): name it as <machine id>:<path>".into()));
+        assert_eq!(m.send_to_captain(&global, "m-book:/w/site", None, "Ship it.", "r-1"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 1 }));
+        assert_eq!(m.send_to_captain(&global, "/w/site", Some("m-book"), "Ship it.", "r-2"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 2 }));
+        assert_eq!(m.send_to_captain(&global, "github.com/o/site", None, "Ship it.", "r-3"), Err("github.com/o/site is not a project on this machine, and the hub can't list the other machines' projects (this hub runs pinned 0.17.19, which can't answer that yet): name it as <machine id>:<path>".into()));
         let mine = format!("m-mini:{path}");
-        assert_eq!(m.send_to_captain(&mine, None, "Ship it.", "r-4"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 3 }), "without the hub's id for it, this machine's own id names another");
+        assert_eq!(m.send_to_captain(&global, &mine, None, "Ship it.", "r-4"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 3 }), "without the hub's id for it, this machine's own id names another");
         assert_eq!(*relayed.lock().unwrap(), [relay("r-1", "m-book", "/w/site"), relay("r-2", "m-book", "/w/site"), relay("r-4", "m-mini", &path)]);
 
         m.set_hub_id("m-mini".into(), "mini".into());
-        let here = m.send_to_captain(&mine, None, "Ship it.", "r-5").unwrap();
+        let here = m.send_to_captain(&global, &mine, None, "Ship it.", "r-5").unwrap();
         assert_eq!(started(&claude, here.tab())[8], "[Orchestrator] Ship it.");
         assert_eq!(relayed.lock().unwrap().len(), 3, "a project named by this machine's id went to the hub");
 
@@ -12293,15 +12302,15 @@ while True:
             json!({ "projects": [{ "key": "github.com/o/site", "name": "site", "repo": "github.com/o/site", "checkouts": checkouts }], "waiting": [], "machines": machines })
         };
         *overview.lock().unwrap() = Some(site(vec![checkout("m-book", "MacBook", true), checkout("m-old", "iMac", false)]));
-        assert_eq!(m.send_to_captain("github.com/o/site", None, "Ship it.", "r-6"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 4 }));
+        assert_eq!(m.send_to_captain(&global, "github.com/o/site", None, "Ship it.", "r-6"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 4 }));
         *overview.lock().unwrap() = Some(site(vec![checkout("m-book", "MacBook", true), checkout("m-air", "Air", true)]));
-        assert_eq!(m.send_to_captain("github.com/o/site", None, "Ship it.", "r-7"), Err("github.com/o/site is on MacBook, Air: pass machine to pick one".into()));
-        assert_eq!(m.send_to_captain("github.com/o/site", Some("air"), "Ship it.", "r-8"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 5 }));
-        assert_eq!(m.send_to_captain("github.com/o/site", Some("@MacBook"), "Ship it.", "r-9"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 6 }));
-        assert_eq!(m.send_to_captain("Air:/w/site", None, "Ship it.", "r-10"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 7 }));
-        assert_eq!(m.send_to_captain("@imac:/w/new", None, "Ship it.", "r-11"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 8 }), "a folder the overview doesn't list yet");
-        assert_eq!(m.send_to_captain("m-book:/w/site", None, "Ship it.", "r-12"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 9 }));
-        assert_eq!(m.send_to_captain("github.com/o/site", Some("@Studio"), "Ship it.", "r-13"), Err("github.com/o/site is not a project on Studio".into()));
+        assert_eq!(m.send_to_captain(&global, "github.com/o/site", None, "Ship it.", "r-7"), Err("github.com/o/site is on MacBook, Air: pass machine to pick one".into()));
+        assert_eq!(m.send_to_captain(&global, "github.com/o/site", Some("air"), "Ship it.", "r-8"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 5 }));
+        assert_eq!(m.send_to_captain(&global, "github.com/o/site", Some("@MacBook"), "Ship it.", "r-9"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 6 }));
+        assert_eq!(m.send_to_captain(&global, "Air:/w/site", None, "Ship it.", "r-10"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 7 }));
+        assert_eq!(m.send_to_captain(&global, "@imac:/w/new", None, "Ship it.", "r-11"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 8 }), "a folder the overview doesn't list yet");
+        assert_eq!(m.send_to_captain(&global, "m-book:/w/site", None, "Ship it.", "r-12"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 9 }));
+        assert_eq!(m.send_to_captain(&global, "github.com/o/site", Some("@Studio"), "Ship it.", "r-13"), Err("github.com/o/site is not a project on Studio".into()));
         let targets: Vec<(Value, Value)> = relayed.lock().unwrap()[3..].iter().map(|r| (r["to"]["machine"].clone(), r["to"]["path"].clone())).collect();
         let to = |machine: &str, path: &str| (json!(machine), json!(path));
         assert_eq!(targets, [to("m-book", "/w/site"), to("m-air", "/w/site"), to("m-book", "/w/site"), to("m-air", "/w/site"), to("m-old", "/w/new"), to("m-book", "/w/site")]);
