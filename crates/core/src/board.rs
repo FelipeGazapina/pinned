@@ -115,6 +115,9 @@ pub fn format_char(c: char) -> bool {
 /// The most notes one task keeps on a board; its own older ones go first.
 pub const NOTES_BY: usize = 20;
 
+/// The most handoffs, and the most blocks, one board stores; older ones go first.
+pub const MAX_STORED: usize = 200;
+
 /// The most notes one board keeps; older ones go first.
 pub const MAX_NOTES: usize = 200;
 

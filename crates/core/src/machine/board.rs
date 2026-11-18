@@ -587,6 +587,29 @@ mod tests {
         assert_eq!(t.m.board(&t.captain, Some(&t.root)).unwrap().notes, vec![], "nothing was noted");
     }
 
+    #[test]
+    fn a_needs_line_is_needs_then_a_non_letter_and_each_shows_once() {
+        let t = team("needs");
+        let mut worker = t.m.delegates.get(&t.worker).unwrap();
+        worker.newest_text = Some("NEEDS Bash\nNEEDSLESS chatter\nNEEDSy\n  NEEDS: Read\nsomething\nNEEDS Bash\nNEEDS\nNEEDS: Read".into());
+        worker.summary = Some("NEEDS Bash\nNEEDS".into());
+        let why: Vec<String> = blocks_of(&worker).into_iter().map(|b| b.why).collect();
+        assert_eq!(why, ["NEEDS Bash", "NEEDS: Read", "NEEDS"]);
+    }
+
+    #[test]
+    fn stored_handoffs_and_blocks_keep_the_newest_200() {
+        let t = team("stored-caps");
+        for n in 0..crate::board::MAX_STORED + 5 {
+            t.m.board_write(&t.worker, BoardEvent::Handoff(BoardHandoff { from: format!("h{n}"), to: t.worker.clone(), at: n as u64 }));
+            t.m.board_write(&t.worker, BoardEvent::Block(BoardBlock { task: t.worker.clone(), why: format!("b{n}"), at: n as u64 }));
+        }
+        let stored = t.m.read_board(&t.root).unwrap();
+        assert_eq!((stored.handoffs.len(), stored.blocks.len()), (200, 200));
+        assert_eq!((stored.handoffs[0].from.as_str(), stored.blocks[0].why.as_str()), ("h5", "b5"), "the oldest went");
+        assert_eq!(stored.handoffs.last().unwrap().from, "h204");
+    }
+
     /// A second Captain (`cap-b`) in the same app, whose plan links one root task with one worker.
     fn foreign_captain(t: &Team) -> (String, String, String) {
         let project = t.dir.join("app");
