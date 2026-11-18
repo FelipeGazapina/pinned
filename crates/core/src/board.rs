@@ -219,7 +219,8 @@ pub fn cite(cwd: &std::path::Path, file: &str) -> Result<String, String> {
 
 /// `text` made safe to sit on one line inside the fence: no line break, no run of backticks or
 /// tildes that could close or open a fence, no invisible or direction-changing character, runs
-/// of whitespace folded to one space, and no copy of the header.
+/// of whitespace folded to one space, and no copy of the header. `fenced` checks the joined line
+/// for the header again.
 pub fn neutral(text: &str) -> String {
     let mapped: String = text
         .chars()
@@ -231,7 +232,11 @@ pub fn neutral(text: &str) -> String {
             c => c,
         })
         .collect();
-    let mut line = mapped.split_whitespace().collect::<Vec<_>>().join(" ");
+    without_header(mapped.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// `line` with every copy of the header, in any letter case, replaced.
+fn without_header(mut line: String) -> String {
     loop {
         // ASCII lowercasing keeps every byte where it was, so `at` points into `line` too.
         let Some(at) = line.to_ascii_lowercase().find(HEADER) else { break };
@@ -247,7 +252,10 @@ pub fn fenced(notes: &[BoardNote]) -> String {
         text.push_str("(no notes yet)\n");
     }
     for note in notes {
-        text.push_str(&format!("- {} on {}: {}\n", neutral(&note.by), neutral(&note.file), neutral(&note.text)));
+        // Each field is neutral alone; the joined line is checked again, for a header spelled across fields.
+        let line = format!("- {} on {}: {}", neutral(&note.by), neutral(&note.file), neutral(&note.text));
+        text.push_str(&without_header(line));
+        text.push('\n');
     }
     text.push_str("```");
     text
