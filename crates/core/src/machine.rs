@@ -504,9 +504,11 @@ struct Screen {
     read: Option<(u64, Option<Blocker>)>,
 }
 
-/// Why a prompt was not typed: the screen shows a menu or dialog, or the write failed.
+/// Why a prompt was not typed: the screen shows a menu or dialog, the session skips its
+/// permission prompts and the sender may not reach such a session, or the write failed.
 enum NotTyped {
     Blocked(Blocker),
+    Skips,
     Failed(String),
 }
 
@@ -519,6 +521,7 @@ impl NotTyped {
         match self {
             NotTyped::Blocked(Blocker::Menu) => MENU_UP.into(),
             NotTyped::Blocked(Blocker::Dialog) => DIALOG_UP.into(),
+            NotTyped::Skips => "this session skips its permission prompts, so a message from an agent that asks for them can't reach it; the user can switch it to ask for permissions".into(),
             NotTyped::Failed(error) => error,
         }
     }
@@ -528,6 +531,7 @@ impl NotTyped {
         match self {
             NotTyped::Blocked(Blocker::Menu) => format!("{tab} is waiting for its user to answer a menu, so nothing was typed. Try again after the user answers it."),
             NotTyped::Blocked(Blocker::Dialog) => format!("{tab} has a dialog open in its terminal, so nothing was typed. Try again later."),
+            NotTyped::Skips => format!("{tab} skips its permission prompts and your session asks for them, so your message can't reach it; the user can switch it to ask for permissions"),
             NotTyped::Failed(error) => error,
         }
     }
@@ -4004,8 +4008,11 @@ impl Machine {
         }
         if let Call::Prompt { tab, text } = &call {
             self.may_prompt(caller, tab)?;
+            // A caller that asks for its prompts, or one this machine does not know, reaches no
+            // session that skips them, as with enqueue.
+            let asking = self.tab(caller, |t| t.child_access() != crate::delegate::Access::Full).unwrap_or(true);
             // Typed text from another agent says who sent it, as enqueue's does.
-            return json(self.type_prompt(tab, &format!("[{}] {}", self.sender_of(caller), pinned_lines::guard(text))).map_err(|e| e.for_agent(tab))?);
+            return json(self.type_prompt_unless_bypass(tab, &format!("[{}] {}", self.sender_of(caller), pinned_lines::guard(text)), asking).map_err(|e| e.for_agent(tab))?);
         }
         if matches!(call, Call::OpenGlobalOrchestrator) && !self.tab(caller, |t| global::is_global(&t.env)).unwrap_or(false) {
             return Err("open_global_orchestrator is for the global orchestrator's own session".into());
@@ -4644,7 +4651,7 @@ impl Machine {
                 self.emit_tabs();
                 true
             }
-            Err(NotTyped::Failed(_)) => false,
+            Err(NotTyped::Skips | NotTyped::Failed(_)) => false,
         }
     }
 
@@ -4752,11 +4759,21 @@ impl Machine {
     /// see a prompt.
     /// Nothing is typed while the screen shows a menu or dialog, held prompts included.
     fn type_prompt(&self, tab: &str, text: &str) -> Result<(), NotTyped> {
+        self.type_prompt_unless_bypass(tab, text, false)
+    }
+
+    /// `type_prompt`, which with `refuse_bypass` types nothing into a session that skips its
+    /// permission prompts, decided on the same read of the tab that types.
+    fn type_prompt_unless_bypass(&self, tab: &str, text: &str, refuse_bypass: bool) -> Result<(), NotTyped> {
+        if refuse_bypass && self.tab(tab, |t| t.bypass).map_err(NotTyped::Failed)? {
+            return Err(NotTyped::Skips);
+        }
         self.awake(tab).map_err(NotTyped::Failed)?;
         // Read under the screen lock alone: held across the write, a paste larger than the pty's
         // free input would block it, and the reader thread would wait on the lock for good.
         let blocker = self.blocker(tab);
         let wrote = self.tab(tab, |t| match t.session.as_mut() {
+            _ if refuse_bypass && t.bypass => Err(NotTyped::Skips),
             Some(s) if s.raw() => {
                 if let Some(blocker) = blocker {
                     return Err(NotTyped::Blocked(blocker));
