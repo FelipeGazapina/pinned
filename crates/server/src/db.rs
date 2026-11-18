@@ -1419,9 +1419,21 @@ impl Db {
         row.as_ref().map(|r| readable(box_row(r))).transpose()
     }
 
-    /// Adds to the row's budget, kept in its spec beside the run.
+    /// Adds to the row's budget, kept in its spec beside the run. Only a box that still runs takes
+    /// it: one that moved to ending since its extend was checked keeps its budget, and reads so.
     pub async fn set_box_budget(&self, account: Uuid, id: &str, budget: f64) -> Result<(), String> {
-        self.client().await?.execute("update boxes set spec = spec || jsonb_build_object('budget_usd', $2::float8) where id = $1 and account = $3", &[&id, &budget, &account]).await.map_err(err)?;
+        let written = self
+            .client()
+            .await?
+            .execute(
+                "update boxes set spec = spec || jsonb_build_object('budget_usd', $2::float8) where id = $1 and account = $3 and phase in ('creating', 'booting', 'running')",
+                &[&id, &budget, &account],
+            )
+            .await
+            .map_err(err)?;
+        if written == 0 {
+            return Err("this box is already ending".into());
+        }
         Ok(())
     }
 
@@ -1851,6 +1863,37 @@ impl Db {
         Ok(self.client().await?.query_one(query, &[&account]).await.map_err(err)?.get(0))
     }
 
+    /// Closes the account's extend_box asks still waiting for the box on `machine`, which ended. An
+    /// ask names its box as its args hold it, in any spelling `Uuid::parse_str` reads, so the asks
+    /// are matched by the id they parse to, as the turn count in `surface` matches them. Each reads
+    /// denied with `EXTEND_BOX_ENDED`, an outcome the sweep of interrupted decisions leaves as it is.
+    /// It runs after the box's move to ending is committed, so an ask stored meanwhile is either
+    /// closed here or finds the box ending once stored, and closes itself. Answers the asks it closed.
+    pub async fn close_extends(&self, account: Uuid, machine: Uuid) -> Result<Vec<Uuid>, String> {
+        let client = self.client().await?;
+        let waiting = client
+            .query("select id, args->>'machine' from agent_confirmations where account = $1 and action = 'extend_box' and decided_at is null", &[&account])
+            .await
+            .map_err(err)?;
+        let ids: Vec<Uuid> = waiting
+            .iter()
+            .filter(|row| row.get::<_, Option<String>>(1).and_then(|named| Uuid::parse_str(&named).ok()) == Some(machine))
+            .map(|row| row.get(0))
+            .collect();
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rows = client
+            .query(
+                "update agent_confirmations set decided_at = now(), approved = false, outcome = $3, result = 'null'::jsonb
+                 where account = $1 and id = any($2) and decided_at is null returning id",
+                &[&account, &ids, &EXTEND_BOX_ENDED],
+            )
+            .await
+            .map_err(err)?;
+        Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
     /// Decides the account's waiting confirmation `id`, once: None when it is unknown, another
     /// account's, or decided already.
     pub async fn decide_confirmation(&self, account: Uuid, id: Uuid, approved: bool) -> Result<Option<Held>, String> {
@@ -2216,6 +2259,9 @@ const AGENT_REQUEST_MINUTES: i32 = 10;
 const AGENT_CODE_MINUTES: i32 = 5;
 pub const AGENT_ACCESS_SECS: i64 = 3600;
 const AGENT_REFRESH_DAYS: i32 = 30;
+/// What an extend_box ask still waiting for the owner reads as once its box ends.
+pub const EXTEND_BOX_ENDED: &str = "the box ended before the owner answered";
+
 /// A call still pending this long was cut off, as by a hub restart, so its outcome is unknown.
 const AGENT_CALL_STALE_SECS: i64 = 600;
 
