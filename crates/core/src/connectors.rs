@@ -4912,6 +4912,11 @@ impl Connectors {
         guard
     }
 
+    /// The last check's result, or none before the first check. Read only, for the hub's logs.
+    pub fn last_check(&self) -> Option<Check> {
+        self.checked.lock().unwrap().clone()
+    }
+
     /// Counts only, for the hub's census.
     pub fn census(&self) -> ConnectorsCensus {
         ConnectorsCensus {
