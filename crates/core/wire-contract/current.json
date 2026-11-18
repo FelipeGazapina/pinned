@@ -3939,6 +3939,13 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "plan_step": {
+                "description": "The step or list of the calling Captain's plan this task drives: a step id or a list id.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -16428,6 +16435,13 @@
                 "description": "Whether the account's placement policy places this worker, over its rule for heavy work.",
                 "type": [
                   "boolean",
+                  "null"
+                ]
+              },
+              "plan_step": {
+                "description": "The step or list of the calling Captain's plan this task drives: a step id or a list id.",
+                "type": [
+                  "string",
                   "null"
                 ]
               }
@@ -32000,6 +32014,13 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "plan_step": {
+                "description": "The step or list of the calling Captain's plan this task drives: a step id or a list id.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -41215,6 +41236,13 @@
                 "description": "Whether the account's placement policy places this worker, over its rule for heavy work.",
                 "type": [
                   "boolean",
+                  "null"
+                ]
+              },
+              "plan_step": {
+                "description": "The step or list of the calling Captain's plan this task drives: a step id or a list id.",
+                "type": [
+                  "string",
                   "null"
                 ]
               }
@@ -78108,6 +78136,13 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "plan_step": {
+                "description": "The step or list of the calling Captain's plan this task drives: a step id or a list id.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -83670,6 +83705,13 @@
                 "description": "Whether the account's placement policy places this worker, over its rule for heavy work.",
                 "type": [
                   "boolean",
+                  "null"
+                ]
+              },
+              "plan_step": {
+                "description": "The step or list of the calling Captain's plan this task drives: a step id or a list id.",
+                "type": [
+                  "string",
                   "null"
                 ]
               }

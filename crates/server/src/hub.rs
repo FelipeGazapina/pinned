@@ -521,7 +521,8 @@ impl Hub {
     /// longer than 30 days, so an account whose machines never come back keeps none past them. Runs
     /// at most once per `HELD_EXPIRY_EVERY`, or on the next tick after a run that deleted a full
     /// batch; a call before that, or one whose delete failed, deletes nothing and returns 0. A
-    /// failure is logged without any row's text.
+    /// failure is logged without any row's text. Each run first expires the trigger fires
+    /// (`expire_trigger_fires`).
     pub async fn expire_held_ends(&self) -> u64 {
         {
             let mut last = self.held_expired.lock().unwrap();
@@ -530,6 +531,7 @@ impl Hub {
             }
             *last = Some(Instant::now());
         }
+        self.expire_trigger_fires().await;
         match self.db.expire_all_held_ends(crate::db::HELD_EXPIRY_BATCH).await {
             Ok(0) => 0,
             Ok(n) => {
@@ -544,6 +546,16 @@ impl Hub {
                 eprintln!("pinned-server: could not expire the held ends older than 30 days: {e}");
                 0
             }
+        }
+    }
+
+    /// Deletes every trigger's claimed fire older than 7 days, in the hourly run of
+    /// `expire_held_ends`. A failure is logged without any row's text.
+    async fn expire_trigger_fires(&self) {
+        match self.db.expire_trigger_fires().await {
+            Ok(0) => {}
+            Ok(n) => eprintln!("pinned-server: {n} trigger fires older than 7 days expired"),
+            Err(e) => eprintln!("pinned-server: could not expire the trigger fires older than 7 days: {e}"),
         }
     }
 
@@ -1896,7 +1908,21 @@ pub(crate) struct Persisted {
     writes: Arc<Writes>,
     /// `Hub::refuse_run_saves`.
     refuse_runs: Arc<AtomicBool>,
+    /// Where `claim_fire` claims the account's fires; none in a test of the writes alone.
+    fires: Option<Fires>,
 }
+
+/// The account's row in `trigger_fires`, and the runtime its database connection runs on.
+struct Fires {
+    db: Db,
+    account: Uuid,
+    runtime: tokio::runtime::Handle,
+}
+
+/// How long `PgStorage::claim_fire` waits for the database before it answers an error. A check
+/// claims its changes one at a time and stops at the first claim that answers an error, so a
+/// stalled database holds a check up for one `CLAIM_WAIT` at most, within its call timeout.
+const CLAIM_WAIT: Duration = Duration::from_secs(10);
 
 /// The name of the listed project that holds `cwd`, the innermost one, else the folder's own name.
 fn project_name(projects: &[ProjectView], cwd: &str) -> String {
@@ -1956,6 +1982,7 @@ fn prompt_outcome(answer: Result<Value, Unanswered>) -> Result<bool, String> {
 
 impl PgStorage {
     fn new(db: Db, account: Uuid, stored: db::Connectors, refuse_runs: Arc<AtomicBool>) -> PgStorage {
+        let fires_db = db.clone();
         let write: store_writes::Write = Arc::new(move |account, version, doc| {
             let db = db.clone();
             Box::pin(async move {
@@ -1986,10 +2013,11 @@ impl PgStorage {
                 }
             })
         });
-        PgStorage::with_writer(account, stored, refuse_runs, write)
+        let fires = Fires { db: fires_db, account, runtime: tokio::runtime::Handle::current() };
+        PgStorage::with_writer(account, stored, refuse_runs, write, Some(fires))
     }
 
-    fn with_writer(account: Uuid, stored: db::Connectors, refuse_runs: Arc<AtomicBool>, write: store_writes::Write) -> PgStorage {
+    fn with_writer(account: Uuid, stored: db::Connectors, refuse_runs: Arc<AtomicBool>, write: store_writes::Write, fires: Option<Fires>) -> PgStorage {
         let mut doc = stored.store;
         let runs = doc.as_object_mut().and_then(|map| map.remove("runs")).and_then(|value| serde_json::to_vec(&value).ok()).unwrap_or_default();
         let store = (doc != serde_json::json!({})).then(|| serde_json::to_vec(&doc).unwrap());
@@ -1998,6 +2026,7 @@ impl PgStorage {
             keys: Mutex::new(stored.secrets),
             writes: Writes::start(account, u64::try_from(stored.version).unwrap_or(0), write),
             refuse_runs,
+            fires,
         }))
     }
 
@@ -2078,6 +2107,38 @@ impl Storage for PgStorage {
         if keys.remove(name).is_some() {
             self.0.writes.queue_secrets(keys.clone());
         }
+    }
+
+    /// The calls of the store that wait on Postgres: the claim must be the database's, so two
+    /// hubs on it see one winner. The hub's runtime has many threads, and this one hands its
+    /// other tasks to them while it waits.
+    fn claim_fire(&self, workflow: &str, key: &str, claimer: &str, retry: bool) -> Result<bool, String> {
+        let Some(fires) = &self.0.fires else { return Err("no database to claim the fire in".into()) };
+        let claim = async {
+            tokio::time::timeout(CLAIM_WAIT, fires.db.claim_fire(fires.account, workflow, key, claimer, retry))
+                .await
+                .map_err(|_| "could not claim the fire: the database did not answer".to_owned())?
+        };
+        wait_on_fires(fires, claim)
+    }
+
+    fn release_fire(&self, workflow: &str, key: &str, claimer: &str) -> Result<(), String> {
+        let Some(fires) = &self.0.fires else { return Err("no database to release the fire in".into()) };
+        let release = async {
+            tokio::time::timeout(CLAIM_WAIT, fires.db.release_fire(fires.account, workflow, key, claimer))
+                .await
+                .map_err(|_| "could not give back the fire: the database did not answer".to_owned())?
+        };
+        wait_on_fires(fires, release)
+    }
+}
+
+/// Waits for a `trigger_fires` call from a check, on the runtime of its database connection.
+fn wait_on_fires<T>(fires: &Fires, call: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
+    match tokio::runtime::Handle::try_current().map(|current| current.runtime_flavor()) {
+        Err(_) => fires.runtime.block_on(call),
+        Ok(tokio::runtime::RuntimeFlavor::CurrentThread) => Err("could not claim the fire: a single-threaded runtime cannot wait for it".into()),
+        Ok(_) => tokio::task::block_in_place(|| fires.runtime.block_on(call)),
     }
 }
 
@@ -2484,7 +2545,7 @@ mod tests {
             })
         };
         let stored = db::Connectors { store: serde_json::json!({ "runs": [] }), secrets: BTreeMap::new(), version: 0 };
-        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write);
+        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write, None);
         for n in 0..20 {
             storage.save(format!(r#"{{"n":{n}}}"#).as_bytes()).unwrap();
             storage.save_runs(format!(r#"[{{"run":{n}}}]"#).as_bytes()).unwrap();
@@ -2516,7 +2577,7 @@ mod tests {
             })
         };
         let stored = db::Connectors { store: serde_json::json!({}), secrets: BTreeMap::new(), version: 0 };
-        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write);
+        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write, None);
         let nested = |n: usize| format!("{}0{}", "[".repeat(n), "]".repeat(n));
         let store_at = |n: usize| format!(r#"{{"s":"[[\\\"{{","deep":{}}}"#, nested(n - 1));
         assert!(storage.save(store_at(200).as_bytes()).is_err(), "a store 200 deep is refused, not taken and dropped");
@@ -2555,7 +2616,7 @@ mod tests {
             })
         };
         let stored = db::Connectors { store: serde_json::json!({}), secrets: BTreeMap::new(), version: 0 };
-        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write);
+        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write, None);
         for store in [
             r#"{"a":"x\u0000y"}"#,
             r#"{"a\u0000":1}"#,

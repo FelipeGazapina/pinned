@@ -260,6 +260,29 @@ fn a_fixed_in_label_set_by_hand_wins_and_a_label_or_tag_that_is_no_version_is_ig
     wait_state(&mut ana, 4, fixed("0.18.7"));
 }
 
+/// The owner corrects a version the poller already gave from a release: the label set by hand after the report
+/// reads fixed still wins, on the next poll, and a label that is no version leaves it where it is.
+#[test]
+fn a_fixed_in_label_set_by_hand_after_the_report_reads_fixed_moves_it_to_that_version() {
+    let fake = Fake::start();
+    let hub = polling("poller_late_label", Some(&fake));
+    let mut ana = signed_up(&hub, "ana@example.test");
+    let merged = now() + 600;
+    assert_eq!(send(&mut ana, "Upload stops", None), 1);
+    // Still open, so the poller searches on whatever it does with the first.
+    assert_eq!(send(&mut ana, "Sync is slow", None), 2);
+    fake.github.add_merged_pull(1, 40, &iso(merged));
+    fake.github.close(1, "completed", None);
+    fake.github.add_release("v0.18.7", &iso(merged + 20));
+    wait_state(&mut ana, 1, fixed("0.18.7"));
+
+    fake.github.add_label(1, "fixed-in:latest");
+    fake.settle();
+    assert_eq!(state(&mut ana, 1), fixed("0.18.7"), "a label that is no version moved a fixed report");
+    fake.github.add_label(1, "fixed-in:0.18.9");
+    wait_state(&mut ana, 1, fixed("0.18.9"));
+}
+
 #[test]
 fn a_reopened_issue_is_open_again_or_answered_if_it_had_been() {
     let fake = Fake::start();

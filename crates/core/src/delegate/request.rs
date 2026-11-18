@@ -124,6 +124,7 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         tools,
         client_request_id,
         heavy,
+        plan_step: optional_str(&args["planStep"]),
     })
 }
 

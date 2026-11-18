@@ -847,11 +847,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The guard runs before a hand-over test builds its machine.
+    #[test]
+    fn a_hand_over_test_in_a_real_home_stops_the_test_process() {
+        pinned_core::machine::assert_refused_in_a_real_home("self_update::tests::a_failed_hand_over_keeps_nudging_the_tabs_it_reopens");
+    }
+
     #[test]
     fn a_failed_hand_over_keeps_nudging_the_tabs_it_reopens() {
         use pinned_core::accounts::Provider;
         use pinned_core::machine::{Event, Launch};
         use pinned_core::wire::Call;
+        pinned_core::machine::refuse_real_home();
         let dir = std::env::temp_dir().join(format!("pinned-hand-over-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("app")).unwrap();

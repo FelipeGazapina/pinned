@@ -141,12 +141,13 @@ pub async fn poll_once(db: &Db, github: &Github, started: i64) -> Result<(), Str
 }
 
 async fn tracked_rows(client: &tokio_postgres::Client) -> Result<Vec<Row>, String> {
-    // Open, answered, or closed as completed and so maybe not yet in a release. Any account's.
+    // Open, answered, closed as completed and so maybe not yet in a release, or fixed, for a version the owner
+    // labels by hand later. Any account's.
     let found = client
         .query(
             "select id, issue, state, sent_at, seen_comments, own_comments from reports
              where issue is not null and sent_at is not null
-               and (state->>'state' in ('open', 'answered') or (state->>'state' = 'closed' and state->>'reason' = 'completed'))",
+               and (state->>'state' in ('open', 'answered', 'fixed') or (state->>'state' = 'closed' and state->>'reason' = 'completed'))",
             &[],
         )
         .await
@@ -195,6 +196,15 @@ async fn judge(github: &Github, issue: &Tracked, rows: &[&Row], releases: &mut O
     let mut changes = vec![];
     for row in rows {
         let (mut state, mut seen) = (row.state.clone(), row.seen_comments);
+        if let ReportState::Fixed { version: was } = &row.state {
+            // A fixed report stays where it is, but for a version the owner labels by hand on the issue, still
+            // closed as completed, later.
+            let completed = !issue.open && issue.state_reason.as_deref() == Some("completed");
+            if let Some(version) = labelled(issue).filter(|v| completed && v != was) {
+                changes.push(Change { id: row.id, stored: row.stored.clone(), state: ReportState::Fixed { version }, seen_comments: seen, state_changed: true, seen_changed: false });
+            }
+            continue;
+        }
         if issue.open {
             if !matches!(state, ReportState::Answered { .. }) {
                 let reopened = matches!(state, ReportState::Closed { .. });
@@ -247,7 +257,7 @@ fn answer(comments: &[Comment], sent_at: i64, ours: &HashSet<i64>) -> Option<i64
 /// The release that carries the fix of an issue closed as completed: a `fixed-in:x.y.z` label set by hand, else the
 /// first release published after the fix landed (the closing commit, or the merged pull request that mentioned it).
 async fn fixed_in(github: &Github, issue: &Tracked, releases: &mut Option<Vec<Release>>) -> Result<Option<String>, String> {
-    if let Some(version) = issue.labels.iter().find_map(|l| l.strip_prefix(FIXED_IN).and_then(version)) {
+    if let Some(version) = labelled(issue) {
         return Ok(Some(version));
     }
     let timeline = github.timeline(issue.number).await.map_err(github_failed)?;
@@ -273,6 +283,11 @@ async fn fixed_in(github: &Github, issue: &Tracked, releases: &mut Option<Vec<Re
         .filter(|(at, _)| *at > landed)
         .min_by_key(|(at, _)| *at)
         .map(|(_, version)| version))
+}
+
+/// The version of the issue's `fixed-in:x.y.z` label, set by hand.
+fn labelled(issue: &Tracked) -> Option<String> {
+    issue.labels.iter().find_map(|l| l.strip_prefix(FIXED_IN).and_then(version))
 }
 
 /// `x.y.z` of `v?x.y.z`, or None for anything else.

@@ -12,6 +12,8 @@ use std::time::Duration;
 /// Set on a Go session so the statusline can ask Go for usage. Never a login account.
 pub const KEY_ENV: &str = "PINNED_OPENCODE_GO_KEY";
 pub const BASE_URL: &str = "https://opencode.ai/inference/go/anthropic";
+/// Points a Go session at another gateway, a test's or a local proxy's.
+pub const BASE_ENV: &str = "PINNED_OPENCODE_GO_BASE";
 pub const MODELS_URL: &str = "https://opencode.ai/inference/go/v1/models";
 pub const USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
 pub const DEFAULT_OPUS_MODEL: &str = "kimi-k3";
@@ -95,21 +97,32 @@ pub fn models() -> Vec<ModelChoice> {
         .collect()
 }
 
+/// What a Go session sets besides `KEY_ENV`, in the order `env` sets them.
+pub const SESSION_ENV: [&str; 6] = [
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+];
+
 /// What a Go session adds after pinned has stripped a parent shell's Anthropic variables.
 pub fn env(key: &str) -> Vec<(String, String)> {
     let key = key.trim().to_owned();
-    vec![
-        (KEY_ENV.to_owned(), key.clone()),
-        ("ANTHROPIC_BASE_URL".into(), gateway_from(std::env::var("PINNED_OPENCODE_GO_BASE").ok().as_deref())),
-        ("ANTHROPIC_AUTH_TOKEN".into(), key),
-        ("ANTHROPIC_DEFAULT_OPUS_MODEL".into(), DEFAULT_OPUS_MODEL.into()),
-        ("ANTHROPIC_DEFAULT_SONNET_MODEL".into(), DEFAULT_SONNET_MODEL.into()),
-        ("ANTHROPIC_DEFAULT_HAIKU_MODEL".into(), DEFAULT_HAIKU_MODEL.into()),
-        ("ANTHROPIC_SMALL_FAST_MODEL".into(), SMALL_FAST_MODEL.into()),
-    ]
+    let values = [
+        gateway_from(std::env::var(BASE_ENV).ok().as_deref()),
+        key.clone(),
+        DEFAULT_OPUS_MODEL.into(),
+        DEFAULT_SONNET_MODEL.into(),
+        DEFAULT_HAIKU_MODEL.into(),
+        SMALL_FAST_MODEL.into(),
+    ];
+    std::iter::once((KEY_ENV.to_owned(), key)).chain(SESSION_ENV.iter().map(|name| name.to_string()).zip(values)).collect()
 }
 
-fn gateway_from(value: Option<&str>) -> String {
+/// The gateway a Go session gets when `BASE_ENV` is `value`.
+pub fn gateway_from(value: Option<&str>) -> String {
     value.and_then(allowed_override).unwrap_or_else(|| BASE_URL.to_owned())
 }
 
@@ -231,8 +244,8 @@ pub fn prepare_home(home: &std::path::Path) -> Result<(), String> {
 pub fn clear_login(home: &std::path::Path, claude: &std::path::Path, path_env: Option<&str>) {
     let _ = std::fs::remove_file(home.join(".credentials.json"));
     let mut cmd = crate::process::command(claude);
+    crate::machine::ChildEnv::new(&[], vec![("CLAUDE_CONFIG_DIR".into(), home.display().to_string())]).apply(&mut cmd);
     cmd.args(["auth", "logout"])
-        .env("CLAUDE_CONFIG_DIR", home)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
