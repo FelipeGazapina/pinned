@@ -83,4 +83,35 @@ mod tests {
         assert!(tastes.worker_profiles.account.is_empty() && tastes.worker_profiles.projects.is_empty(), "only proposed changed");
         assert_eq!(crate::profiles::resolve(&tastes, None, "scout"), Err(crate::profiles::Unresolved::NotApproved("scout".into())));
     }
+
+    #[test]
+    fn a_linked_machine_sends_the_orchestrators_proposal_to_the_hub_and_nobody_elses() {
+        use std::sync::{Arc, Mutex};
+        let dir = tempfile::tempdir().unwrap();
+        let m = Machine::new(launch(), Some(dir.path().into()), None, |_| {});
+        let sent: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+        let seen = sent.clone();
+        m.set_hub(Arc::new(move |call| {
+            seen.lock().unwrap().push(serde_json::to_value(&call).unwrap());
+            let mut tastes = Tastes::default();
+            if let crate::wire::HubCall::ProposeWorkerProfile { profile, .. } = call {
+                tastes.propose_worker_profile(profile)?;
+            }
+            Ok(serde_json::to_value(tastes).unwrap())
+        }));
+        let tab = |env| m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env, false, None);
+        let (captain, worker, plain, global) = (tab(role_env(Role::Orchestrator, "/repo".as_ref())), tab(role_env(Role::Worker, "/repo".as_ref())), tab(vec![]), tab(crate::global_orchestrator::env()));
+        let refused = "profile_propose is the Orchestrator's own: a Captain or a worker cannot propose a profile";
+        for (tab, task) in [(Some(captain.as_str()), None), (Some(worker.as_str()), None), (Some(plain.as_str()), None), (None, Some("t1")), (Some(global.as_str()), Some("t1"))] {
+            assert_eq!(m.profile_propose(tab, task, proposal("scout")), Err(refused.into()), "{tab:?} {task:?}");
+        }
+        assert!(sent.lock().unwrap().is_empty(), "a refused proposal sent nothing");
+
+        let answer = m.profile_propose(Some(&global), None, proposal(" scout ")).unwrap();
+        assert!(answer.contains("scout waits for the user"), "{answer}");
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!((&sent[0]["cmd"], &sent[0]["tab"], &sent[0]["profile"]["name"]), (&serde_json::json!("propose_worker_profile"), &serde_json::json!(global), &serde_json::json!(" scout ")));
+        assert_eq!(m.local_tastes().worker_profiles, Default::default(), "the hub keeps a linked machine's proposal, not this machine");
+    }
 }
