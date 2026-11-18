@@ -11623,7 +11623,7 @@ exec sleep 30
     fn a_submit_is_local_only_when_its_first_word_is_a_built_in_local_command() {
         let lines = [
             (&b"/effort\r"[..], true),
-            (b"  /model opus\r", true),
+            (b"  /model opus\r", false),
             (b"/model opus\x7f\x7f\r", true),
             (b"\x1b[C/effort\r", true),
             (b"\x1b[200~/effort\x1b[201~\r", true),
@@ -11642,7 +11642,7 @@ exec sleep 30
             assert!(note_draft(&mut draft, keys), "{keys:?} is a submit");
             assert_eq!(draft.sent_local, local, "{keys:?}");
         }
-        assert!(local_command("/model opus") && local_command(" /effort"));
+        assert!(local_command("/model opus") && !local_command(" /effort"));
         assert!(!local_command("/models") && !local_command("/effort\nand more") && !local_command("Run /effort"));
     }
 
@@ -12177,6 +12177,65 @@ while True:
     #[cfg(unix)]
     fn a_typed_unknown_slash_command_waits_for_done() {
         a_typed_line_holds_the_queue_until_done("enqueue-typed-skill", b"/review\r");
+    }
+
+    /// `/statusline` asks the model to launch an agent, so it starts a turn: it waits for Done.
+    #[test]
+    #[cfg(unix)]
+    fn a_typed_statusline_waits_for_done() {
+        a_typed_line_holds_the_queue_until_done("enqueue-typed-statusline", b"/statusline\r");
+    }
+
+    /// Claude Code takes a line with leading spaces as a prompt, not a command.
+    #[test]
+    #[cfg(unix)]
+    fn a_typed_line_with_leading_spaces_waits_for_done() {
+        a_typed_line_holds_the_queue_until_done("enqueue-typed-spaces", b"  /model opus\r");
+    }
+
+    /// `/model` opens a picker that Up, Down and Enter drive: those Enters start no turn either.
+    #[test]
+    #[cfg(unix)]
+    fn a_local_commands_picker_does_not_hold_the_captains_queue() {
+        let dir = temp("enqueue-picker");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.write_input(&tab, b"/model\r").unwrap();
+        m.write_input(&tab, b"\x1b[B").unwrap();
+        m.write_input(&tab, b"\r").unwrap();
+        backdate(&m, &tab, 11);
+        assert!(m.tab(&tab, |t| t.notice_idle()).unwrap(), "the picker's Enter held the queue for a Done that never comes");
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
+        let both = b"/model\r\x1b[B\r\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r";
+        assert_eq!(typed(&file, both), both);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A prompt typed after a local command is a turn: the picker's allowance ends at the first printable key.
+    #[test]
+    #[cfg(unix)]
+    fn a_prompt_typed_after_a_local_command_waits_for_done() {
+        let dir = temp("enqueue-after-local");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.write_input(&tab, b"/model\r").unwrap();
+        m.write_input(&tab, b"hi\r").unwrap();
+        backdate(&m, &tab, 11);
+        assert!(!m.tab(&tab, |t| t.notice_idle()).unwrap(), "a prompt typed after a local command reads idle");
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(std::fs::read(&file).unwrap(), b"/model\rhi\r");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// No typed line, a local command included, lets the queue in while claude compacts.
