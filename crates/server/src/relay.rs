@@ -94,7 +94,8 @@ async fn overview(hub: &Hub, account: &Account, from: Source<'_>) -> Result<Valu
     }))
     .await;
     if let Source::Machine(from) = from {
-        let settings = machines.iter().zip(&looks).filter_map(|(m, look)| Some((m.id.as_str(), m.name.as_str(), &look.as_ref()?.settings)));
+        // A box is never the host, so its settings do not count, though its projects and tabs still show.
+        let settings = machines.iter().zip(&looks).filter(|(m, _)| !account.dedicated(&m.id)).filter_map(|(m, look)| Some((m.id.as_str(), m.name.as_str(), &look.as_ref()?.settings)));
         let (host, host_name) = the_host(settings)?;
         if host != from {
             return Err(not_host(account, from, &host_name, "list the account's projects"));
@@ -393,7 +394,8 @@ fn not_host(account: &Account, from: &str, host_name: &str, what: &str) -> Strin
 /// rather than caching, because a machine's settings also change in its own app, which the hub
 /// never sees.
 async fn host(hub: &Hub, account: &Account) -> Result<(MachineId, String), String> {
-    let online = account.online();
+    // A box is never the host, so it is not asked.
+    let online: Vec<_> = account.online().into_iter().filter(|(id, _)| !account.dedicated(id)).collect();
     let answers = join_all(online.iter().map(|(id, _)| hub.call_machine(account, id, Call::GlobalOrchestratorSettings, HOST_WAIT))).await;
     the_host(online.iter().zip(&answers).map(|((id, name), answer)| (id.as_str(), name.as_str(), answer)))
 }
