@@ -106,7 +106,12 @@ pub fn box_may_send(call: &HubCall) -> Result<(), String> {
         | HubCall::RunWorkflow { .. }
         | HubCall::GenerateWorkflow { .. } => WORKFLOWS,
         // Its way of working, which every session starts with.
-        HubCall::SetTaste { .. } | HubCall::ResetTasteField { .. } | HubCall::ImportTastes { .. } => TASTES,
+        HubCall::SetTaste { .. }
+        | HubCall::ResetTasteField { .. }
+        | HubCall::ImportTastes { .. }
+        | HubCall::SetReviewer { .. }
+        | HubCall::SetWorkerProfiles { .. }
+        | HubCall::ProposeWorkerProfile { .. } => TASTES,
         // Its MCP servers, which every machine loads into its sessions.
         HubCall::SaveMcpServer { .. } | HubCall::EnableMcpServer { .. } | HubCall::RemoveMcpServer { .. } | HubCall::ImportMcpServer { .. } => MCP,
         // Sessions on its other machines: a worker there, a Capitão's messages.
@@ -209,6 +214,16 @@ mod tests {
         assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "sync_pull", "project": "pinned:plugins", "paths": ["user-skills/ship/SKILL.md"] }))), Ok(()));
         assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "save_idea", "title": "An iPad app" }))), Err("a box may not change the account's ideas and reports".to_owned()));
         assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "set_taste", "scope": { "kind": "orchestrator" }, "patch": {} }))), Err("a box may not change the account's way of working".to_owned()));
+    }
+
+    #[test]
+    fn a_box_may_not_set_the_reviewer_or_the_worker_profiles() {
+        let refused = Err(refusal("way of working"));
+        assert_eq!(refused, Err("a box may not change the account's way of working".to_owned()));
+        let profile = serde_json::json!({ "name": "reviewer-lite" });
+        assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "set_reviewer", "patch": { "rounds": 2 } }))), refused);
+        assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "set_worker_profiles", "profiles": [profile.clone()] }))), refused);
+        assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "propose_worker_profile", "tab": "tab-1", "profile": profile }))), refused);
     }
 
     #[test]
