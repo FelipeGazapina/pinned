@@ -3,6 +3,7 @@ use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, Limit
 use crate::team_call::TEAM_BOX_ENV;
 use crate::stats::{ThreadStats, Tally};
 use crate::pinned_lines;
+use crate::delegate::{Asker, Part};
 use crate::wire::{CutBySleep, Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Handoff, Progress};
 use crate::taste::{self, TasteField, TastePatch, TasteScope, Tastes};
@@ -28,13 +29,13 @@ pub const OUTPUT_KEEP: usize = 256 * 1024;
 const RECORDS_PER_SEND: usize = 100;
 const RECORDS_RETRY: Duration = Duration::from_secs(60);
 const LIMIT_MARGIN_SECS: u64 = 5;
-/// A prompt typed before the session took the terminal. `guarded` came from a source that may not
-/// reach a session that skips its permission prompts: it is dropped, not typed, if the session does
-/// by the time it takes the terminal.
+/// A prompt typed before the session took the terminal. `guarded` names its sender when that
+/// sender asks for its permission prompts: it is dropped, not typed, if the session skips them by
+/// the time it takes the terminal, and the user and the sender are told.
 #[derive(Clone, Debug, PartialEq)]
 struct Held {
     text: String,
-    guarded: bool,
+    guarded: Option<Asker>,
 }
 
 impl PartialEq<&str> for Held {
@@ -736,6 +737,9 @@ struct Tab {
     started: Option<SystemTime>,
     /// Extra `claude` arguments for the first start only, so a restart doesn't redo the task.
     launch: Vec<String>,
+    /// `launch` ends with this prompt from a sender that asks for its permission prompts: the start
+    /// leaves it out when the tab skips them by then.
+    launch_guard: Option<(String, Asker)>,
     /// The conversation has no process: `launch` resumes it once something needs it. Clients see
     /// the tab as running.
     asleep: bool,
@@ -1622,7 +1626,11 @@ impl Machine {
                 let views: Vec<crate::plan::PlanView> = kept.iter().filter(|p| plan.as_deref().is_none_or(|id| p.id == id)).map(|p| crate::plan::derive(p, &[])).collect();
                 Ok(json!(views))
             }
-            Call::Prompt { tab, text, refuse_bypass } => json(self.type_prompt_unless_bypass(&tab, &text, refuse_bypass).map_err(NotTyped::for_person)?),
+            Call::Prompt { tab, text, refuse_bypass } => {
+                // The hub sends an external agent's message, whose sender has no tab here.
+                let guard = refuse_bypass.then(|| Asker { name: "an agent outside this machine".into(), tab: None });
+                json(self.type_prompt_unless_bypass(&tab, &text, guard).map_err(NotTyped::for_person)?)
+            }
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
                 json(workspace::Workspace { scratch: cwd == self.scratch, ..workspace::of(&cwd) })
@@ -2494,6 +2502,14 @@ impl Machine {
                 t.tally = Tally::default();
             }
             let mut args = std::mem::take(&mut t.launch);
+            // The prompt of a sender that asks for its permission prompts is left out once the tab skips them.
+            let dropped = match t.launch_guard.take() {
+                Some((line, from)) if t.bypass && args.last() == Some(&line) => {
+                    args.pop();
+                    Some(from)
+                }
+                _ => None,
+            };
             t.owes_turn = t.claude_session.is_none() && !args.is_empty();
             let asked = args.clone();
             t.bare = t.claude_session.as_deref().is_some_and(|session| args == crate::delegate::resume_args(t.account.provider, session));
@@ -2502,11 +2518,12 @@ impl Machine {
             if let Some(model) = t.model.clone().filter(|_| !args.iter().any(|a| a == "--model")) {
                 args.extend(["--model".to_owned(), model]);
             }
-            Some((t.cwd.clone(), t.account.clone(), t.program, args, t.env.clone(), t.bypass, asked, slept))
+            Some((t.cwd.clone(), t.account.clone(), t.program, args, t.env.clone(), t.bypass, asked, slept, dropped))
         })?;
-        let Some((cwd, account, program, args, env, bypass, asked, slept)) = prepared else {
+        let Some((cwd, account, program, args, env, bypass, asked, slept, dropped)) = prepared else {
             return self.tab(tab, |t| t.cwd.display().to_string());
         };
+        self.tell_dropped(tab, dropped.as_slice());
         let mut args = args;
         let mut prompt = vec![];
         if self.device_agents.as_ref().is_some_and(|f| f.exists()) {
@@ -2706,15 +2723,23 @@ impl Machine {
     /// Turns the tab's permission skipping on or off and returns its folder. Claude reads the flag
     /// only at launch, so the tab restarts on its own conversation.
     pub fn set_bypass(&self, tab: &str, on: bool, cols: u16, rows: u16) -> Result<String, String> {
-        let unchanged = self.tab(tab, |t| {
+        let (unchanged, dropped) = self.tab(tab, |t| {
             let unchanged = t.bypass == on && t.live();
             t.bypass = on;
             // A prompt held for the session that asked is not for one that skips its prompts.
+            let mut dropped = vec![];
             if on {
-                t.held.retain(|held| !held.guarded);
+                t.held.retain(|held| match &held.guarded {
+                    Some(from) => {
+                        dropped.push(from.clone());
+                        false
+                    }
+                    None => true,
+                });
             }
-            unchanged.then(|| t.cwd.display().to_string())
+            (unchanged.then(|| t.cwd.display().to_string()), dropped)
         })?;
+        self.tell_dropped(tab, &dropped);
         match unchanged {
             Some(cwd) => Ok(cwd),
             None => self.restart_claude(tab, cols, rows),
@@ -2989,11 +3014,13 @@ impl Machine {
             if blocked {
                 clear_since = None;
             } else if since.elapsed() >= HELD_SETTLE {
+                let mut dropped = vec![];
                 let wrote = machine.tab(&tab, |t| {
                     let Some(s) = t.session.as_mut() else { return false };
                     let mut wrote = false;
                     for held in std::mem::take(&mut t.held) {
-                        if held.guarded && t.bypass {
+                        if let (Some(from), true) = (&held.guarded, t.bypass) {
+                            dropped.push(from.clone());
                             continue;
                         }
                         if s.write(&paste(&held.text)).is_ok() {
@@ -3003,6 +3030,7 @@ impl Machine {
                     }
                     wrote
                 });
+                machine.tell_dropped(&tab, &dropped);
                 if wrote == Ok(true) {
                     machine.arm_delegate_pass();
                 }
@@ -3377,7 +3405,7 @@ impl Machine {
     /// With `asking`, the sender asks for its permission prompts: a Capitão that skips them, running
     /// or stopped, takes nothing and the call fails with `asking`.
     #[allow(clippy::too_many_arguments)]
-    fn hand_to_captain(&self, path: &str, text: &str, request_id: &str, sender: &str, busy: Option<BusyPolicy>, full: bool, asking: Option<String>) -> Result<Handoff, String> {
+    fn hand_to_captain(&self, path: &str, text: &str, request_id: &str, sender: &str, busy: Option<BusyPolicy>, full: bool, asking: Option<(String, Asker)>) -> Result<Handoff, String> {
         let (request_id, text) = (request_id.trim(), text.trim());
         if request_id.is_empty() {
             return Err("request_id is required".into());
@@ -3396,7 +3424,7 @@ impl Machine {
         let tab = self.open_captain(path, full)?;
         let project = canonical(path);
         let sender = if sender.trim().is_empty() { settings.name } else { global::Settings { name: sender.to_owned(), ..global::Settings::default() }.cleaned().name };
-        let handoff = self.hand_to(&tab, &format!("[{sender}] {}", pinned_lines::guard(text)), request_id, busy.unwrap_or(settings.busy), &sent, asking.as_deref())?;
+        let handoff = self.hand_to(&tab, &format!("[{sender}] {}", pinned_lines::guard(text)), request_id, busy.unwrap_or(settings.busy), &sent, asking.as_ref())?;
         let progress = match handoff {
             Handoff::Busy { .. } => return Ok(handoff),
             Handoff::Queued { .. } => Progress::Queued,
@@ -3435,7 +3463,7 @@ impl Machine {
     /// instead of typing it keeps a startup dialog from taking its Enter. With `asking`, a tab that
     /// skips its permission prompts takes nothing and the call fails with `asking`; that is decided
     /// on the same read of the tab as its state, and again when a start is set up.
-    fn hand_to(&self, tab: &str, line: &str, request_id: &str, busy: BusyPolicy, sent: &global::Ledger, asking: Option<&str>) -> Result<Handoff, String> {
+    fn hand_to(&self, tab: &str, line: &str, request_id: &str, busy: BusyPolicy, sent: &global::Ledger, asking: Option<&(String, Asker)>) -> Result<Handoff, String> {
         #[derive(PartialEq)]
         enum Ready {
             /// It skips its permission prompts and the sender asks for them.
@@ -3457,14 +3485,17 @@ impl Machine {
         })?;
         let id = tab.to_owned();
         match ready {
-            Ready::Skips => Err(asking.unwrap_or_default().to_owned()),
+            Ready::Skips => Err(asking.map(|(refusal, _)| refusal.clone()).unwrap_or_default()),
             Ready::Stopped | Ready::Fresh => {
                 self.tab(tab, |t| {
-                    if let (Some(refusal), true) = (asking, t.bypass) {
-                        return Err(refusal.to_owned());
+                    if let (Some((refusal, _)), true) = (asking, t.bypass) {
+                        return Err(refusal.clone());
                     }
                     let mut args = t.claude_session.as_deref().map(|session| crate::delegate::resume_args(t.account.provider, session)).unwrap_or_default();
-                    args.push(if line.starts_with('-') { format!("\n{line}") } else { line.to_owned() });
+                    let prompt = if line.starts_with('-') { format!("\n{line}") } else { line.to_owned() };
+                    // The start reads again whether the tab skips its prompts, where it launches.
+                    t.launch_guard = asking.map(|(_, from)| (prompt.clone(), from.clone()));
+                    args.push(prompt);
                     t.launch = args;
                     Ok(())
                 })??;
@@ -3475,11 +3506,15 @@ impl Machine {
                 }
                 Ok(Handoff::Started { tab: id })
             }
-            Ready::Idle if self.write_notice(tab, line) == Ok(true) => Ok(Handoff::Delivered { tab: id }),
+            // Whether it skips its prompts is read again where the line is typed.
+            Ready::Idle if self.write_parts(tab, vec![Part { text: line.to_owned(), guarded: asking.map(|(_, from)| from.clone()), request: None }]).is_ok_and(|typed| typed.is_some_and(|dropped| dropped.is_empty())) => {
+                Ok(Handoff::Delivered { tab: id })
+            }
+            Ready::Idle if asking.is_some() && self.tab(tab, |t| t.bypass)? => Err(asking.map(|(refusal, _)| refusal.clone()).unwrap_or_default()),
             Ready::Idle | Ready::Busy if busy == BusyPolicy::Refuse => Ok(Handoff::Busy { tab: id }),
             Ready::Idle | Ready::Busy => {
                 let session = self.tab(tab, |t| t.claude_session.clone())?;
-                self.delegates.queue_request(tab, session, line.to_owned(), request_id.to_owned());
+                self.delegates.queue_request(tab, session, line.to_owned(), request_id.to_owned(), asking.map(|(_, from)| from.clone()));
                 self.arm_delegate_pass();
                 self.emit_tabs();
                 Ok(Handoff::Queued { position: sent.queued_on(tab) + 1, tab: id })
@@ -3498,7 +3533,7 @@ impl Machine {
         match self.local_project(project, machine) {
             Some(path) => {
                 let asking = (!full).then(|| {
-                    format!("the Captain of {} skips its permission prompts and your session asks for them, so your message can't reach it; the user can switch that Captain to ask for permissions", path.display())
+                    (format!("the Captain of {} skips its permission prompts and your session asks for them, so your message can't reach it; the user can switch that Captain to ask for permissions", path.display()), self.asker(caller))
                 });
                 self.hand_to_captain(&path.display().to_string(), message, request_id, &sender, None, full && full_access_by_default(), asking)
             }
@@ -4053,7 +4088,8 @@ impl Machine {
             // session that skips them, as with enqueue.
             let asking = *refuse_bypass || self.tab(caller, |t| t.child_access() != crate::delegate::Access::Full).unwrap_or(true);
             // Typed text from another agent says who sent it, as enqueue's does.
-            return json(self.type_prompt_unless_bypass(tab, &format!("[{}] {}", self.sender_of(caller), pinned_lines::guard(text)), asking).map_err(|e| e.for_agent(tab))?);
+            let guard = asking.then(|| self.asker(caller));
+            return json(self.type_prompt_unless_bypass(tab, &format!("[{}] {}", self.sender_of(caller), pinned_lines::guard(text)), guard).map_err(|e| e.for_agent(tab))?);
         }
         if matches!(call, Call::OpenGlobalOrchestrator) && !self.tab(caller, |t| global::is_global(&t.env)).unwrap_or(false) {
             return Err("open_global_orchestrator is for the global orchestrator's own session".into());
@@ -4108,7 +4144,7 @@ impl Machine {
         // A caller that asks for its prompts reaches no Captain that skips them, running or stopped;
         // `hand_to` decides it on the tab's state as it hands the message over.
         let asking = (!full).then(|| {
-            format!("the Captain of {} skips its permission prompts and your session asks for them, so your message can't reach it; the user can switch that Captain to ask for permissions", project.display())
+            (format!("the Captain of {} skips its permission prompts and your session asks for them, so your message can't reach it; the user can switch that Captain to ask for permissions", project.display()), self.asker(caller))
         });
         if !running && !(skips && asking.is_some()) {
             let limits = self.limits_in(caller, &project);
@@ -4800,12 +4836,13 @@ impl Machine {
     /// see a prompt.
     /// Nothing is typed while the screen shows a menu or dialog, held prompts included.
     fn type_prompt(&self, tab: &str, text: &str) -> Result<(), NotTyped> {
-        self.type_prompt_unless_bypass(tab, text, false)
+        self.type_prompt_unless_bypass(tab, text, None)
     }
 
-    /// `type_prompt`, which with `refuse_bypass` types nothing into a session that skips its
-    /// permission prompts, decided on the same read of the tab that types.
-    fn type_prompt_unless_bypass(&self, tab: &str, text: &str, refuse_bypass: bool) -> Result<(), NotTyped> {
+    /// `type_prompt`, which for a sender `guard` that asks for its permission prompts types nothing
+    /// into a session that skips them, decided on the same read of the tab that types.
+    fn type_prompt_unless_bypass(&self, tab: &str, text: &str, guard: Option<Asker>) -> Result<(), NotTyped> {
+        let refuse_bypass = guard.is_some();
         if refuse_bypass && self.tab(tab, |t| t.bypass).map_err(NotTyped::Failed)? {
             return Err(NotTyped::Skips);
         }
@@ -4813,6 +4850,7 @@ impl Machine {
         // Read under the screen lock alone: held across the write, a paste larger than the pty's
         // free input would block it, and the reader thread would wait on the lock for good.
         let blocker = self.blocker(tab);
+        let mut dropped = vec![];
         let wrote = self.tab(tab, |t| match t.session.as_mut() {
             _ if refuse_bypass && t.bypass => Err(NotTyped::Skips),
             Some(s) if s.raw() => {
@@ -4824,7 +4862,8 @@ impl Machine {
                     s.write(&std::mem::take(&mut t.keys)).map_err(failed)?;
                 }
                 for held in std::mem::take(&mut t.held) {
-                    if held.guarded && t.bypass {
+                    if let (Some(from), true) = (&held.guarded, t.bypass) {
+                        dropped.push(from.clone());
                         continue;
                     }
                     s.write(&paste(&held.text)).map_err(failed)?;
@@ -4835,16 +4874,18 @@ impl Machine {
                 Ok(true)
             }
             Some(_) => {
-                t.held.push(Held { text: text.to_owned(), guarded: refuse_bypass });
+                t.held.push(Held { text: text.to_owned(), guarded: guard.clone() });
                 Ok(false)
             }
             // A start under way has given it no process yet.
             None if t.starting => {
-                t.held.push(Held { text: text.to_owned(), guarded: refuse_bypass });
+                t.held.push(Held { text: text.to_owned(), guarded: guard.clone() });
                 Ok(false)
             }
             None => Err(NotTyped::Failed(format!("tab {tab} has no running session"))),
-        }).map_err(NotTyped::Failed)??;
+        });
+        self.tell_dropped(tab, &dropped);
+        let wrote = wrote.map_err(NotTyped::Failed)??;
         if wrote {
             self.arm_delegate_pass();
         }
@@ -6386,39 +6427,97 @@ impl Machine {
         if self.blocker(tab).is_some() {
             return;
         }
-        let Some((text, ids, claim)) = self.delegates.claim_news(tab) else { return };
-        if self.write_notice(tab, &text) != Ok(true) {
-            self.delegates.release_notice(&ids);
-            self.delegates.release_claim(claim);
-        } else {
-            self.delegates.confirm_notice(&ids);
-            let typed = self.delegates.confirm_claim(claim);
-            self.sent.lock().unwrap().typed(&typed);
-            self.emit_tabs();
+        let Some((parts, ids, claim)) = self.delegates.claim_news_parts(tab) else { return };
+        let requests: Vec<(Option<String>, bool)> = parts.iter().map(|part| (part.request.clone(), part.guarded.is_some())).collect();
+        match self.write_parts(tab, parts) {
+            Ok(Some(dropped)) => {
+                self.delegates.confirm_notice(&ids);
+                let mut typed = self.delegates.confirm_claim(claim);
+                // A dropped request started no turn.
+                if !dropped.is_empty() {
+                    typed.retain(|request| !requests.iter().any(|(r, guarded)| *guarded && r.as_ref() == Some(request)));
+                }
+                self.sent.lock().unwrap().typed(&typed);
+                self.tell_dropped(tab, &dropped);
+                self.emit_tabs();
+            }
+            _ => {
+                self.delegates.release_notice(&ids);
+                self.delegates.release_claim(claim);
+            }
         }
     }
 
-    /// Writes `text` into a raw session. `Ok(false)` when the session has not taken the terminal,
-    /// which leaves the notice unclaimed so a later idle can type it. Queuing it is not delivery.
-    /// Also `Ok(false)` while the screen shows a menu or dialog: the notice waits for it to close.
-    fn write_notice(&self, tab: &str, text: &str) -> Result<bool, String> {
+    /// Writes the queued `parts` into a raw session as one paste. A part whose sender asks for its
+    /// permission prompts is left out when the session skips them, decided on the read that types.
+    /// `Ok(None)` when the session has not taken the terminal, is not idle, or shows a menu or
+    /// dialog: nothing was typed or left out, so a later idle can type them. Else the senders left out.
+    fn write_parts(&self, tab: &str, parts: Vec<Part>) -> Result<Option<Vec<Asker>>, String> {
         if self.blocker(tab).is_some() {
-            return Ok(false);
+            return Ok(None);
         }
         self.tab(tab, |t| {
             if !t.notice_idle() {
-                return Ok(false);
+                return Ok(None);
             }
             match t.session.as_mut() {
                 Some(s) if s.raw() => {
-                    s.write(&paste(text)).map_err(|e| e.to_string())?;
-                    t.turn_pending = Some(Instant::now());
-                    Ok(true)
+                    let (dropped, kept): (Vec<Part>, Vec<Part>) = parts.into_iter().partition(|part| part.guarded.is_some() && t.bypass);
+                    if !kept.is_empty() {
+                        s.write(&paste(&kept.into_iter().map(|part| part.text).collect::<Vec<_>>().join("\n"))).map_err(|e| e.to_string())?;
+                        t.turn_pending = Some(Instant::now());
+                    }
+                    Ok(Some(dropped.into_iter().filter_map(|part| part.guarded).collect()))
                 }
-                Some(_) => Ok(false),
+                Some(_) => Ok(None),
                 None => Err(format!("tab {tab} has no running session")),
             }
         })?
+    }
+
+    /// Who the agent in `caller` is to the user and to the session it sends to, when its message is
+    /// dropped: its tab's name, and its tab to hear of it.
+    fn asker(&self, caller: &str) -> Asker {
+        Asker { name: self.name_of(caller), tab: Some(caller.to_owned()) }
+    }
+
+    /// The tab's title, or its folder's name, as one line a notice can hold.
+    fn name_of(&self, tab: &str) -> String {
+        let name = self.tab(tab, |t| t.title.clone().filter(|title| !title.trim().is_empty()).or_else(|| t.cwd.file_name().map(|n| n.to_string_lossy().into_owned()))).ok().flatten();
+        pinned_lines::flat(name.as_deref().unwrap_or(tab), pinned_lines::HEADER_CHARS)
+    }
+
+    /// Tells the user in `tab`'s thread, and each sender in `dropped` through its tab's news, that a
+    /// message from it was dropped because `tab` skips its permission prompts. Neither quotes it.
+    fn tell_dropped(&self, tab: &str, dropped: &[Asker]) {
+        if dropped.is_empty() {
+            return;
+        }
+        let captain = self.name_of(tab);
+        for from in dropped {
+            let sender = pinned_lines::flat(&from.name, pinned_lines::HEADER_CHARS);
+            self.note_in_thread(tab, &format!("A message from {sender} was not delivered: this session switched to Full access and the sender asks for permissions. Send it yourself if you want it here."));
+            let Some(to) = from.tab.as_deref() else { continue };
+            let Ok(session) = self.tab(to, |t| t.claude_session.clone()) else { continue };
+            self.delegates.queue_report(to, session, format!("[pinned] Your message to {captain} was not delivered: the user switched it to Full access and your session asks for permissions. The user can send it from that tab."));
+        }
+        self.arm_delegate_pass();
+        self.emit_tabs();
+    }
+
+    /// Shows `text` in the tab's thread as pinned's own line, for the user alone: it goes into the
+    /// transcript as a line claude does not read as a turn, or, before the conversation has one,
+    /// as the tab's message.
+    fn note_in_thread(&self, tab: &str, text: &str) {
+        static NOTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let written = self.transcript(tab).and_then(|file| {
+            let n = NOTES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let line = json!({ "type": thread::NOTE_LINE, "noteId": format!("pinned-note:{}:{n}", unix_now()), "timestamp": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true), "text": text });
+            std::fs::OpenOptions::new().append(true).open(&file).and_then(|mut f| std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes())).map_err(|e| e.to_string())
+        });
+        if written.is_err() {
+            let _ = self.tab(tab, |t| t.message = Some(text.to_owned()));
+        }
     }
 
     /// One tick of the sleep watch. A sleep it finds is saved, and claims the failed turns whose
@@ -6750,6 +6849,7 @@ impl Machine {
             starting: false,
             started: None,
             launch,
+            launch_guard: None,
             headless: false,
             stopped: None,
             asleep: false,
@@ -6895,6 +6995,11 @@ impl Machine {
         let wants = event.status == AgentStatus::Done || (event.status == AgentStatus::Working && event.prompt.is_some());
         if !wants {
             return Default::default();
+        }
+        // What a sender that asks for its permission prompts queued is not for a session that skips them.
+        if self.tab(tab, |t| t.bypass).unwrap_or(false) {
+            let dropped = self.delegates.drop_guarded(tab);
+            self.tell_dropped(tab, &dropped);
         }
         let Some((text, ids, claim)) = self.delegates.claim_news(tab) else { return Default::default() };
         (text, Some(Taken { tab: tab.to_owned(), ids, claim, pending: None }))
@@ -16185,9 +16290,9 @@ Have another model review a risky change before it goes ahead.";
         let targets = [tabs[1].clone(), tabs[2].clone(), tabs[3].clone()];
         for (tab, title) in targets.iter().zip(["Site", "Docs", "Api"]) {
             assert!(!m.view(tab).unwrap().bypass, "the precondition: the session asks for its permission prompts");
-            m.tab(tab, |t| t.title = Some(title.into())).unwrap();
             m.call(Call::Wake { tab: tab.clone(), cols: 80, rows: 24 }).unwrap();
             assert_eq!(act_as(&m, &sender, "prompt", json!({ "tab": tab, "text": "Drop the tables." })), Ok(Value::Null));
+            m.tab(tab, |t| t.title = Some(title.into())).unwrap();
         }
         (m, dir, claude, sender, targets)
     }
@@ -16245,13 +16350,10 @@ Have another model review a risky change before it goes ahead.";
         let session = format!("{name}-{}", std::process::id());
         let (m, dir, claude, tabs) = restored_idle_with(name, &[&session], |app| role_env(Role::Orchestrator, app));
         let captain = tabs[0].clone();
-        m.tab(&captain, |t| {
-            t.bypass = false;
-            t.title = Some("Site".into());
-        })
-        .unwrap();
+        m.tab(&captain, |t| t.bypass = false).unwrap();
         m.call(Call::Wake { tab: captain.clone(), cols: 80, rows: 24 }).unwrap();
         wait_for("the terminal", || m.tab(&captain, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
+        m.tab(&captain, |t| t.title = Some("Site".into())).unwrap();
         m.record_event(AgentEvent { session: Some(session.clone()), ..hook(&captain, AgentStatus::Working) });
         let global = m.open_global_orchestrator().unwrap();
         m.tab(&global, |t| {
@@ -16290,6 +16392,8 @@ Have another model review a risky change before it goes ahead.";
         let session = m.tab(&captain, |t| t.claude_session.clone()).unwrap();
         m.set_bypass(&captain, true, 80, 24).unwrap();
         wait_for("the terminal", || m.tab(&captain, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
+        // The restart left the tab without the title the test gave it.
+        m.tab(&captain, |t| t.title = Some("Site".into())).unwrap();
         m.record_event(AgentEvent { session: session.clone(), ..hook(&captain, AgentStatus::Done) });
         wait_for("the queue to empty", || m.delegates.queued().get(&captain).is_none());
         let news = heard(&m, &claude, &global, &dropped_for_sender("Site"));
@@ -16537,7 +16641,7 @@ Have another model review a risky change before it goes ahead.";
         let screen = format!("\x1b[2J\x1b[H{}\r\nsome text\r\n", "\u{2594}".repeat(20));
         let hold = |tab: &str| {
             let session = m.tab(tab, |t| {
-                t.held.push(Held { text: "Run the tests.".into(), guarded: false });
+                t.held.push(Held { text: "Run the tests.".into(), guarded: None });
                 t.screen.clone()
             });
             show(&m, tab, &screen);

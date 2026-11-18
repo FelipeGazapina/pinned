@@ -45,6 +45,24 @@ pub struct ThreadEnd {
 /// How many taken notices a machine remembers: a hub resends only those decided in the last week.
 const NOTICES_KEPT: usize = 4000;
 
+/// The sender of a message that asks for its permission prompts, told with the user when the
+/// message is dropped because its session switched to skip them. `tab` is the sender's tab on this
+/// machine, none for one elsewhere.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Asker {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab: Option<String>,
+}
+
+/// One queued text `claim_news_parts` took: `guarded` when its sender asks for its permission
+/// prompts, so it reaches no session that skips them.
+pub struct Part {
+    pub text: String,
+    pub guarded: Option<Asker>,
+    pub request: Option<String>,
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Report {
     tab: String,
@@ -61,6 +79,9 @@ struct Report {
     /// The orchestrator's `request_id` this text delivers, so the machine knows when it was typed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     request: Option<String>,
+    /// Its sender asks for its permission prompts: it is dropped, not typed, into a session that skips them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    guarded: Option<Asker>,
 }
 
 struct Agent {
@@ -533,7 +554,7 @@ impl Delegates {
                 } else if ran >= task.run.budget_ms && !task.run.told_late {
                     task.run.told_late = true;
                     if let (Parent::Tab(tab), true) = (&task.parent, announces(task)) {
-                        late.push(Report { tab: tab.clone(), session: task.parent_session.clone(), text: late_line(task, ran), claimed: false, claim: 0, task: Some(task.id.clone()), request: None });
+                        late.push(Report { tab: tab.clone(), session: task.parent_session.clone(), text: late_line(task, ran), claimed: false, claim: 0, task: Some(task.id.clone()), request: None, guarded: None });
                     }
                 }
             }
@@ -1088,6 +1109,11 @@ impl Delegates {
     /// `claim_notice`, and the claim that holds the tab's reports until `confirm_claim` or
     /// `release_claim` ends it.
     pub fn claim_news(&self, tab: &str) -> Option<(String, Vec<String>, u64)> {
+        self.claim_news_parts(tab).map(|(parts, ids, claim)| (parts.into_iter().map(|part| part.text).collect::<Vec<_>>().join("\n"), ids, claim))
+    }
+
+    /// `claim_news`, each line apart, so a guarded one can be left out where it is typed.
+    pub fn claim_news_parts(&self, tab: &str) -> Option<(Vec<Part>, Vec<String>, u64)> {
         let mut tasks = self.tasks.lock().unwrap();
         self.reports.lock().unwrap().retain(|report| report.claimed || !stale(report, &tasks));
         let ready: Vec<usize> = tasks
@@ -1103,7 +1129,7 @@ impl Delegates {
         if ready.is_empty() && pending.is_empty() {
             return None;
         }
-        let mut lines: Vec<String> = ready.iter().map(|index| notice_line(&tasks[*index])).collect();
+        let mut lines: Vec<Part> = ready.iter().map(|index| Part { text: notice_line(&tasks[*index]), guarded: None, request: None }).collect();
         let ids: Vec<String> = ready.iter().map(|index| tasks[*index].id.clone()).collect();
         for index in &ready {
             tasks[*index].claim();
@@ -1112,12 +1138,12 @@ impl Delegates {
         for index in pending {
             reports[index].claimed = true;
             reports[index].claim = claim;
-            lines.push(reports[index].text.clone());
+            lines.push(Part { text: reports[index].text.clone(), guarded: reports[index].guarded.clone(), request: reports[index].request.clone() });
         }
         drop(reports);
         drop(tasks);
         self.persist();
-        Some((lines.join("\n"), ids, claim))
+        Some((lines, ids, claim))
     }
 
     /// Whether `claim_notice` has something for `tab`.
@@ -1177,12 +1203,30 @@ impl Delegates {
     }
 
     pub fn queue_report(&self, tab: &str, session: Option<String>, text: String) {
-        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, claim: 0, task: None, request: None });
+        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, claim: 0, task: None, request: None, guarded: None });
     }
 
     /// Queues a message from the global orchestrator, typed with the tab's other news once it is idle.
-    pub fn queue_request(&self, tab: &str, session: Option<String>, text: String, request: String) {
-        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, claim: 0, task: None, request: Some(request) });
+    /// With `guarded`, its sender asks for its permission prompts.
+    pub fn queue_request(&self, tab: &str, session: Option<String>, text: String, request: String, guarded: Option<Asker>) {
+        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, claim: 0, task: None, request: Some(request), guarded });
+    }
+
+    /// Takes out the tab's queued texts whose senders ask for their permission prompts, which no
+    /// session that skips them may read, and returns those senders.
+    pub fn drop_guarded(&self, tab: &str) -> Vec<Asker> {
+        let mut dropped = vec![];
+        self.reports.lock().unwrap().retain(|report| match &report.guarded {
+            Some(from) if report.tab == tab && !report.claimed => {
+                dropped.push(from.clone());
+                false
+            }
+            _ => true,
+        });
+        if !dropped.is_empty() {
+            self.persist();
+        }
+        dropped
     }
 
     /// Whether the notice `key` was already taken, queued or typed.
@@ -1222,7 +1266,7 @@ impl Delegates {
                 notices.drain(..extra);
             }
         }
-        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, claim: 0, task: Some(id.to_owned()), request: None });
+        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, claim: 0, task: Some(id.to_owned()), request: None, guarded: None });
         true
     }
 
@@ -1845,7 +1889,7 @@ fn pending_report(task: &mut Task) -> Option<Report> {
         span(QUIET_AFTER_REPLY_MS),
         task.id
     );
-    Some(Report { tab: tab.clone(), session: task.parent_session.clone(), text, claimed: false, claim: 0, task: Some(task.id.clone()), request: None })
+    Some(Report { tab: tab.clone(), session: task.parent_session.clone(), text, claimed: false, claim: 0, task: Some(task.id.clone()), request: None, guarded: None })
 }
 
 const SHELL_TASK: &str = "local_bash";
@@ -2594,9 +2638,9 @@ mod tests {
     #[test]
     fn ending_one_claim_leaves_another_claims_reports_alone() {
         let delegates = Delegates::default();
-        delegates.queue_request("tab-1", None, "[Orchestrator] Ship the form.".into(), "r-1".into());
+        delegates.queue_request("tab-1", None, "[Orchestrator] Ship the form.".into(), "r-1".into(), None);
         let (_, _, hook) = delegates.claim_news("tab-1").unwrap();
-        delegates.queue_request("tab-1", None, "[Orchestrator] Then the footer.".into(), "r-2".into());
+        delegates.queue_request("tab-1", None, "[Orchestrator] Then the footer.".into(), "r-2".into(), None);
         let (text, _, typed) = delegates.claim_news("tab-1").unwrap();
         assert_eq!(text, "[Orchestrator] Then the footer.");
         delegates.release_claim(hook);

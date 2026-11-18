@@ -13,6 +13,8 @@ const READ_LIMIT: u64 = 8 << 20;
 const REPLY_LOOK: u64 = 256 << 10;
 /// The line `fork` adds to a copy, naming the session it was copied from.
 pub const FORK_LINE: &str = "pinned-fork";
+/// A line pinned adds to a transcript for the user alone, shown as a `Note`: claude never reads it as a turn.
+pub const NOTE_LINE: &str = "pinned-note";
 
 #[derive(Serialize, Debug, PartialEq, Clone, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -633,6 +635,7 @@ pub(crate) fn items_of(line: &Value) -> Vec<Item> {
             vec![Item::Compaction { id, at, before: tokens("preTokens"), after: tokens("postTokens") }]
         }
         Some(FORK_LINE) => vec![Item::Fork { id: format!("fork:{at}"), at, source: str_of(&line["sourceSession"]) }],
+        Some(NOTE_LINE) => vec![Item::Note { id: str_of(&line["noteId"]), at, text: str_of(&line["text"]) }],
         Some("user") => user_items(&line["message"]["content"], &line["toolUseResult"], id, at),
         Some("attachment") if line["attachment"]["type"] == "queued_command" && line["attachment"]["origin"]["kind"] == "human" => {
             match spoken(line["attachment"]["prompt"].as_str().unwrap_or_default()) {
