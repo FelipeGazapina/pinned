@@ -10,6 +10,7 @@
 //! session. `Limits` is that group, resolved.
 
 use crate::connectors::BoxSize;
+use crate::profiles::{ProfileAuthor, WorkerProfile};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -844,13 +845,68 @@ impl Tastes {
         }
     }
 
-    /// Whether every scope, each project resolved, passes `Taste::check`.
+    /// Whether every scope, each project resolved, passes `Taste::check`, the Reviewer passes
+    /// `Reviewer::check`, and every list of worker profiles passes the checks of its own write.
     pub fn check(&self) -> Result<(), String> {
         self.orchestrator.check()?;
         self.captains.check()?;
         self.placement.check()?;
-        self.projects.keys().try_for_each(|repo| self.resolve(&TasteScope::Project { repo: repo.clone() }).check())
+        self.projects.keys().try_for_each(|repo| self.resolve(&TasteScope::Project { repo: repo.clone() }).check())?;
+        self.reviewer.check()?;
+        let profiles = &self.worker_profiles;
+        std::iter::once(&profiles.account).chain(profiles.projects.values()).chain([&profiles.proposed]).try_for_each(|list| check_profiles(list))?;
+        profiles.check_caps()?;
+        if profiles.proposed.len() > MAX_PROPOSED {
+            return Err(too_many_proposed());
+        }
+        Ok(())
     }
+
+    /// `HubCall::ProposeWorkerProfile`: `profile`, its name trimmed and written as an
+    /// orchestrator's, waits in `proposed` for the user, in place of a proposal of the same name.
+    /// Nothing outside `proposed` changes, and nothing at all when it fails `WorkerProfile::check`
+    /// or `MAX_PROPOSED` others already wait.
+    pub fn propose_worker_profile(&mut self, mut profile: WorkerProfile) -> Result<(), String> {
+        profile.name = profile.name.trim().to_owned();
+        profile.by = ProfileAuthor::Orchestrator;
+        profile.check()?;
+        let proposed = &mut self.worker_profiles.proposed;
+        match proposed.iter().position(|p| same_name(&p.name, &profile.name)) {
+            Some(at) => proposed[at] = profile,
+            None if proposed.len() >= MAX_PROPOSED => return Err(too_many_proposed()),
+            None => proposed.push(profile),
+        }
+        Ok(())
+    }
+
+    /// Removes the proposals named in `names`, as `HubCall::SetWorkerProfiles` drops them.
+    pub fn drop_proposed(&mut self, names: &[String]) {
+        self.worker_profiles.proposed.retain(|p| !names.iter().any(|name| same_name(&p.name, name)));
+    }
+}
+
+/// The most proposed worker profiles that wait for the user at once.
+pub const MAX_PROPOSED: usize = 20;
+
+fn too_many_proposed() -> String {
+    format!("{MAX_PROPOSED} proposed profiles already wait for the user to take or drop; nothing changed")
+}
+
+/// Profile names match trimmed and without case, as `Tastes::set_worker_profiles` compares them.
+fn same_name(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
+}
+
+/// Each profile passes `WorkerProfile::check` and no two share a name.
+fn check_profiles(list: &[WorkerProfile]) -> Result<(), String> {
+    let mut names = std::collections::BTreeSet::new();
+    for profile in list {
+        profile.check()?;
+        if !names.insert(profile.name.trim().to_lowercase()) {
+            return Err(format!("two profiles are named {}", profile.name.trim()));
+        }
+    }
+    Ok(())
 }
 
 /// Which setting chose a box's size, as the app names it.

@@ -277,7 +277,7 @@ fn tool_definitions(reminders: bool, child: bool, seat: Seat) -> Value {
         tools.push(stats_tool());
     }
     tools.extend(project_tools().into_iter().filter(|(audience, _)| offered(*audience)).map(|(_, tool)| tool));
-    tools.extend(crate::team_tools::offered(&crate::team_tools::TeamSeat { captain: seat == Seat::Captain, worker: seat == Seat::Worker || child, child }));
+    tools.extend(crate::team_tools::offered(&crate::team_tools::TeamSeat { captain: seat == Seat::Captain, worker: seat == Seat::Worker || child, child, orchestrator: global }));
     Value::Array(tools)
 }
 
@@ -1579,7 +1579,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
         assert_eq!(offered(Some("worker"), None), today);
         assert_eq!(offered(Some("orchestrator"), None), [&today[..], &CAPTAIN_TOOLS].concat());
-        assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &["delegation_stats"], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session", "repo_overview", "repo_read", "repo_search"]].concat());
+        assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &["delegation_stats"], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session", "repo_overview", "repo_read", "repo_search", "profile_propose"]].concat());
         assert_eq!(offered(Some("taste-chat"), None), [&today[..], &["taste_get", "taste_set", "taste_reset"]].concat(), "only a taste chat may change the way of working");
         assert_eq!(offered(Some("taste-chat"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a taste chat's delegated child can't");
         assert_eq!(offered(Some("global-orchestrator"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a delegated child plays no role");

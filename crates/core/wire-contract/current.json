@@ -6644,7 +6644,7 @@
                 ]
               },
               {
-                "description": "`taste::Tastes`, once `profiles` are the worker profiles of `project`, or the account's\nwithout it, as `Tastes::set_worker_profiles` does. The user's own: no agent may call it.",
+                "description": "`taste::Tastes`, once `profiles` are the worker profiles of `project`, or the account's\nwithout it, as `Tastes::set_worker_profiles` does, and the proposals named in\n`drop_proposed` are gone, in the same write. Approving a proposal sends the list with its\nrow and its name in `drop_proposed`; discarding one sends the list unchanged. The user's\nown: no agent may call it.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -6662,11 +6662,38 @@
                     "items": {
                       "$ref": "#/$defs/WorkerProfile"
                     }
+                  },
+                  "drop_proposed": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
                   }
                 },
                 "required": [
                   "cmd",
                   "profiles"
+                ]
+              },
+              {
+                "description": "From a machine only: `taste::Tastes`, once `profile` waits in `proposed` for the user, as\n`Tastes::propose_worker_profile` writes it. The hub takes it only when `tab` is a Captain or\nthe global orchestrator on that machine; `profile_propose` sends it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "propose_worker_profile"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "profile": {
+                    "$ref": "#/$defs/WorkerProfile"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "profile"
                 ]
               },
               {
@@ -10540,7 +10567,7 @@
               },
               "access": {
                 "$ref": "#/$defs/ProfileAccess",
-                "default": "edit"
+                "default": "read_only"
               },
               "model": {
                 "anyOf": [
@@ -19474,7 +19501,7 @@
                 ]
               },
               {
-                "description": "`taste::Tastes`, once `profiles` are the worker profiles of `project`, or the account's\nwithout it, as `Tastes::set_worker_profiles` does. The user's own: no agent may call it.",
+                "description": "`taste::Tastes`, once `profiles` are the worker profiles of `project`, or the account's\nwithout it, as `Tastes::set_worker_profiles` does, and the proposals named in\n`drop_proposed` are gone, in the same write. Approving a proposal sends the list with its\nrow and its name in `drop_proposed`; discarding one sends the list unchanged. The user's\nown: no agent may call it.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -19492,11 +19519,38 @@
                     "items": {
                       "$ref": "#/$defs/WorkerProfile"
                     }
+                  },
+                  "drop_proposed": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
                   }
                 },
                 "required": [
                   "cmd",
                   "profiles"
+                ]
+              },
+              {
+                "description": "From a machine only: `taste::Tastes`, once `profile` waits in `proposed` for the user, as\n`Tastes::propose_worker_profile` writes it. The hub takes it only when `tab` is a Captain or\nthe global orchestrator on that machine; `profile_propose` sends it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "propose_worker_profile"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "profile": {
+                    "$ref": "#/$defs/WorkerProfile"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "profile"
                 ]
               },
               {
@@ -23266,7 +23320,7 @@
               },
               "access": {
                 "$ref": "#/$defs/ProfileAccess",
-                "default": "edit"
+                "default": "read_only"
               },
               "model": {
                 "anyOf": [
@@ -28466,7 +28520,7 @@
                 ]
               },
               {
-                "description": "`taste::Tastes`, once `profiles` are the worker profiles of `project`, or the account's\nwithout it, as `Tastes::set_worker_profiles` does. The user's own: no agent may call it.",
+                "description": "`taste::Tastes`, once `profiles` are the worker profiles of `project`, or the account's\nwithout it, as `Tastes::set_worker_profiles` does, and the proposals named in\n`drop_proposed` are gone, in the same write. Approving a proposal sends the list with its\nrow and its name in `drop_proposed`; discarding one sends the list unchanged. The user's\nown: no agent may call it.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -28484,11 +28538,38 @@
                     "items": {
                       "$ref": "#/$defs/WorkerProfile"
                     }
+                  },
+                  "drop_proposed": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
                   }
                 },
                 "required": [
                   "cmd",
                   "profiles"
+                ]
+              },
+              {
+                "description": "From a machine only: `taste::Tastes`, once `profile` waits in `proposed` for the user, as\n`Tastes::propose_worker_profile` writes it. The hub takes it only when `tab` is a Captain or\nthe global orchestrator on that machine; `profile_propose` sends it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "propose_worker_profile"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "profile": {
+                    "$ref": "#/$defs/WorkerProfile"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "profile"
                 ]
               },
               {
@@ -32509,7 +32590,7 @@
               },
               "access": {
                 "$ref": "#/$defs/ProfileAccess",
-                "default": "edit"
+                "default": "read_only"
               },
               "model": {
                 "anyOf": [
@@ -38189,7 +38270,7 @@
                 ]
               },
               {
-                "description": "`taste::Tastes`, once `profiles` are the worker profiles of `project`, or the account's\nwithout it, as `Tastes::set_worker_profiles` does. The user's own: no agent may call it.",
+                "description": "`taste::Tastes`, once `profiles` are the worker profiles of `project`, or the account's\nwithout it, as `Tastes::set_worker_profiles` does, and the proposals named in\n`drop_proposed` are gone, in the same write. Approving a proposal sends the list with its\nrow and its name in `drop_proposed`; discarding one sends the list unchanged. The user's\nown: no agent may call it.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -38207,11 +38288,38 @@
                     "items": {
                       "$ref": "#/$defs/WorkerProfile"
                     }
+                  },
+                  "drop_proposed": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
                   }
                 },
                 "required": [
                   "cmd",
                   "profiles"
+                ]
+              },
+              {
+                "description": "From a machine only: `taste::Tastes`, once `profile` waits in `proposed` for the user, as\n`Tastes::propose_worker_profile` writes it. The hub takes it only when `tab` is a Captain or\nthe global orchestrator on that machine; `profile_propose` sends it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "propose_worker_profile"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "profile": {
+                    "$ref": "#/$defs/WorkerProfile"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "profile"
                 ]
               },
               {
@@ -42126,7 +42234,7 @@
               },
               "access": {
                 "$ref": "#/$defs/ProfileAccess",
-                "default": "edit"
+                "default": "read_only"
               },
               "model": {
                 "anyOf": [
@@ -63907,7 +64015,7 @@
               },
               "access": {
                 "$ref": "#/$defs/ProfileAccess",
-                "default": "edit"
+                "default": "read_only"
               },
               "model": {
                 "anyOf": [
@@ -64662,7 +64770,7 @@
               },
               "access": {
                 "$ref": "#/$defs/ProfileAccess",
-                "default": "edit"
+                "default": "read_only"
               },
               "model": {
                 "anyOf": [

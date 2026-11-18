@@ -110,6 +110,8 @@ pub struct TeamSeat {
     pub worker: bool,
     /// A delegated headless child.
     pub child: bool,
+    /// The global orchestrator, above every project.
+    pub orchestrator: bool,
 }
 
 /// Every team tool's name, in the order `offered` lists them.
@@ -155,9 +157,9 @@ fn feature_map_set_offered(_seat: &TeamSeat) -> bool {
     false
 }
 
-/// U5 turns `profile_propose` on.
-fn profile_propose_offered(_seat: &TeamSeat) -> bool {
-    false
+/// The global orchestrator alone proposes profiles; a Captain or a worker is never offered it.
+fn profile_propose_offered(seat: &TeamSeat) -> bool {
+    seat.orchestrator && !seat.captain && !seat.worker && !seat.child
 }
 
 /// U11 turns `board_note` on.
@@ -186,7 +188,26 @@ pub fn definition(name: &str) -> Option<Value> {
             json!({ "feature": { "type": "string" }, "files": { "type": "array", "items": { "type": "string" } }, "about": { "type": "string" } }),
             &["feature", "files"],
         ),
-        "profile_propose" => ("Propose a worker profile for the user to take or drop.", json!({ "profile": { "type": "object" }, "why": { "type": "string" } }), &["profile"]),
+        "profile_propose" => (
+            "Propose a worker profile for the user to take or drop on the Way of working page. It only waits there: delegate_task cannot name a proposed profile until the user takes it into a list.",
+            json!({
+                "profile": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "skills": { "type": "array", "description": "Installed skills only, as the skills action lists them.", "items": { "type": "object", "properties": { "name": { "type": "string" }, "enabled": { "type": "boolean" } }, "required": ["name", "enabled"] } },
+                        "tools": { "type": "array", "items": { "type": "string" } },
+                        "access": { "type": "string", "enum": ["read_only", "edit"] },
+                        "model": { "type": "object", "description": "Leave it out for the ladder's rung.", "properties": { "provider": { "type": "string" }, "model": { "type": "string" } }, "required": ["model"] },
+                        "effort": { "type": "string" },
+                        "delivers": { "type": "string", "description": "What the worker hands back, in one line." },
+                    },
+                    "required": ["name"],
+                },
+                "why": { "type": "string" },
+            }),
+            &["profile"],
+        ),
         "board_note" => ("Leave a note about one file on your Captain's board.", json!({ "file": { "type": "string" }, "text": { "type": "string", "maxLength": crate::board::NOTE_CHARS } }), &["file", "text"]),
         "board_read" => ("Read your Captain's board, or one task's part of it.", json!({ "taskId": task_id }), &[]),
         "ask_worker" => ("Ask another worker of your chain a question.", json!({ "taskId": task_id, "question": { "type": "string" } }), &["taskId", "question"]),
@@ -204,6 +225,18 @@ mod tests {
         for seat in [TeamSeat::default(), TeamSeat { captain: true, ..TeamSeat::default() }, TeamSeat { worker: true, ..TeamSeat::default() }, TeamSeat { worker: true, child: true, ..TeamSeat::default() }] {
             assert_eq!(offered(&seat), Vec::<Value>::new(), "{seat:?}");
         }
+        assert_eq!(offered(&TeamSeat { orchestrator: true, ..TeamSeat::default() }), vec![definition("profile_propose").unwrap()], "the orchestrator's one tool");
+    }
+
+    #[test]
+    fn only_the_orchestrator_is_offered_profile_propose() {
+        let listed = |seat: TeamSeat| offered(&seat).iter().map(|tool| tool["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert!(listed(TeamSeat { orchestrator: true, ..TeamSeat::default() }).contains(&"profile_propose".to_owned()));
+        for seat in [TeamSeat::default(), TeamSeat { captain: true, ..TeamSeat::default() }, TeamSeat { worker: true, ..TeamSeat::default() }, TeamSeat { worker: true, child: true, ..TeamSeat::default() }] {
+            assert!(!listed(seat).contains(&"profile_propose".to_owned()), "{seat:?}");
+        }
+        let schema = definition("profile_propose").unwrap();
+        assert_eq!(schema["inputSchema"]["properties"]["profile"]["required"], json!(["name"]));
     }
 
     #[test]
