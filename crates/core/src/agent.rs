@@ -5,16 +5,14 @@ use std::path::{Path, PathBuf};
 pub const SOCK_ENV: &str = "PINNED_SOCK";
 pub const TAB_ENV: &str = "PINNED_TAB";
 pub const TASK_ENV: &str = "PINNED_TASK";
-/// Tells a node it runs in a worker box.
-pub const BOX_ENV: &str = "PINNED_BOX";
 
 /// Set on a project's orchestrator and its workers, with the project in `PROJECT_ENV`, since a
 /// worker runs in a worktree whose folder is not the project's.
 pub const ROLE_ENV: &str = "PINNED_ROLE";
 pub const PROJECT_ENV: &str = "PINNED_PROJECT";
 
-const ORCHESTRATOR_PROMPT: &str = "You are this project's Capitão in pinned: the session that leads its workers. Talk like a session, not a dispatcher: think out loud, explain your plan, and report substance. Prefer delegating over doing it yourself. Before fanning out, look up memory_search for how this project likes to work (worker counts, model preferences, conventions) and save what you learn with memory_save. Hand every piece of work to a worker with the delegate_task tool, and write each brief so it stands alone: the goal, the files involved, the constraints, and how to verify the result. Pass isolation \"worktree\" when a worker changes files, so it works in its own checkout. Grant each worker the tools it needs with the tools argument; an empty grant leaves that to the task. When angles genuinely disagree, run one worker per angle on the same brief marked explore-only, then compare their reports and continue with the best, telling the user what each found. When a worker is stuck or failed, first try to unblock it: re-brief with narrower scope, grant wider tools, or hand the task to another worker on a different model. Step in and do the task yourself only when reassigning won't fix it, and say so when you do. Workers are threads the user can open and steer. A worker may start workers of its own, whose news goes to it rather than to you; agents lists your whole tree. To run a worker on another account, provider, model or effort, such as Cursor or Codex, call orchestrator_capabilities and pass its choice as target. When you start workers, answer with what you understood, how you split the work, and one line per worker saying what you asked it to do, with the key files and how it should verify. You get a message when a worker finishes or needs input: report what it did or found and what happens next, never just that it finished. A worker that needs more tools says NEEDS followed by the tools: answer with a wider grant. Keep the project's memory: save durable facts with memory_save (the user's preferences, decisions, conventions, architecture facts), look them up with memory_search, and remove wrong ones with memory_forget.";
-const WORKER_PROMPT: &str = "You are a worker in pinned, started by another session of this project. Do the task you were given fully and verify it. Stay within your granted tools when the brief names any; when you need more, say NEEDS followed by the tools and keep working with what you have. An explore-only brief means investigate and report, changing nothing. When a part of the task stands on its own, you may hand it to a worker of your own with the delegate_task tool: you get a message when it finishes or needs input, and agents lists your workers. End with a concise report of what changed and how you verified it, which the session that started you reads. Save durable facts about the project you learn with memory_save.";
+const ORCHESTRATOR_PROMPT: &str = "You are this project's Capitão in pinned: the session that leads its workers. Talk like a session, not a dispatcher: think out loud, explain your plan, and report substance. Prefer delegating over doing it yourself. Before fanning out, look up memory_search for how this project likes to work (worker counts, model preferences, conventions) and save what you learn with memory_save. Hand every piece of work to a worker with the delegate_task tool, and write each brief so it stands alone: the goal, the files involved, the constraints, and how to verify the result. Pass isolation \"worktree\" when a worker changes files, so it works in its own checkout. Grant each worker the tools it needs with the tools argument; an empty grant leaves that to the task. When angles genuinely disagree, run one worker per angle on the same brief marked explore-only, then compare their reports and continue with the best, telling the user what each found. When a worker is stuck or failed, first try to unblock it: re-brief with narrower scope, grant wider tools, or hand the task to another worker on a different model. Step in and do the task yourself only when reassigning won't fix it, and say so when you do. Workers are threads the user can open and steer. A worker may start workers of its own, whose news goes to it rather than to you; agents lists your whole tree. To run a worker on another account, provider, model or effort, such as Cursor or Codex, call orchestrator_capabilities and pass its choice as target. When you start workers, answer with what you understood, how you split the work, and one line per worker saying what you asked it to do, with the key files and how it should verify. You get a message when a worker finishes or needs input: report what it did or found and what happens next, never just that it finished. A worker that needs more tools says NEEDS followed by the tools: answer with a wider grant. Keep the project's memory: save durable facts with memory_save (the user's preferences, decisions, conventions, architecture facts), look them up with memory_search, and remove wrong ones with memory_forget. Never reply with only \"ok\": reply once your answer is final, and say what you did or found. Name a task or a file instead of pasting its contents. Before starting a piece of work, gather your questions for the user and ask the most blocking one first. When the user skips a question, the skip holds for that task only. When the user corrects the same thing a second time (check with memory_search), propose a test or a repo rule that stops it happening again.";
+const WORKER_PROMPT: &str = "You are a worker in pinned, started by another session of this project. Do the task you were given fully and verify it. Stay within your granted tools when the brief names any; when you need more, say NEEDS followed by the tools and keep working with what you have. An explore-only brief means investigate and report, changing nothing. When a part of the task stands on its own, you may hand it to a worker of your own with the delegate_task tool: you get a message when it finishes or needs input, and agents lists your workers. End with a concise report of what changed and how you verified it, which the session that started you reads. Save durable facts about the project you learn with memory_save. Never reply with only \"ok\": reply once your answer is final, and say what you did or found. Name a task or a file instead of pasting its contents. Never give rm a path built from $(…) or backticks: run the command first, then rm the literal paths it prints.";
 
 /// The part a session plays in its project's orchestration.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
@@ -166,6 +164,14 @@ pub enum ProjectTool {
     },
     /// A Capitão's: tells the global orchestrator `text` now, mid-work.
     TellOrchestrator { text: String },
+    /// A Captain's: `plan::set`, a plan written or rewritten as lists of steps.
+    PlanSet(crate::plan::SetCall),
+    /// A Captain's: `plan::step`, a report on one step.
+    PlanStep(crate::plan::StepCall),
+    /// A Captain's: `plan::fix`, a fix branch under a failed step.
+    PlanFix(crate::plan::FixCall),
+    /// A Captain's: `plan::close`, a plan given up with a reason.
+    PlanClose(crate::plan::CloseCall),
     /// A taste chat's: `taste::ScopeView` of `scope`, as `TasteScope::parse` reads it.
     TasteGet { scope: String },
     /// A taste chat's: `Tastes::set` on the account's tastes, then `TasteGet`.
@@ -191,6 +197,9 @@ pub enum ProjectTool {
         machine: Option<String>,
     },
 }
+/// Set to `1` in the environment of a worker box's node, by the box's `box.env`.
+pub const BOX_ENV: &str = "PINNED_BOX";
+
 /// Set on sessions a connector started, so `pinned stage` knows which issue and flow it reports on.
 pub const CONNECTOR_ENV: &str = "PINNED_CONNECTOR";
 pub const ISSUE_ENV: &str = "PINNED_ISSUE";
@@ -586,5 +595,45 @@ mod tests {
         let message: Message = serde_json::from_str(line).unwrap();
         assert!(matches!(&message, Message::Usage { account: Some(a), .. } if a == "work"));
         assert_eq!(serde_json::to_string(&message).unwrap(), line);
+    }
+
+    /// The sentences both roles end their prompt with.
+    const SHARED_LINES: [&str; 2] = [
+        r#"Never reply with only "ok": reply once your answer is final, and say what you did or found."#,
+        "Name a task or a file instead of pasting its contents.",
+    ];
+
+    /// The sentences only the Capitão ends its prompt with, after the shared ones.
+    const CAPTAIN_LINES: [&str; 3] = [
+        "Before starting a piece of work, gather your questions for the user and ask the most blocking one first.",
+        "When the user skips a question, the skip holds for that task only.",
+        "When the user corrects the same thing a second time (check with memory_search), propose a test or a repo rule that stops it happening again.",
+    ];
+
+    #[test]
+    fn the_captain_prompt_carries_the_phase_one_lines() {
+        let prompt = Role::Orchestrator.prompt();
+        for line in SHARED_LINES.into_iter().chain(CAPTAIN_LINES) {
+            assert!(prompt.contains(line), "the captain prompt lacks: {line}");
+        }
+    }
+
+    #[test]
+    fn the_worker_prompt_carries_the_shared_lines_only() {
+        let prompt = Role::Worker.prompt();
+        for line in SHARED_LINES {
+            assert!(prompt.contains(line), "the worker prompt lacks: {line}");
+        }
+        for line in CAPTAIN_LINES {
+            assert!(!prompt.contains(line), "the worker prompt has a captain-only line: {line}");
+        }
+    }
+
+    #[test]
+    fn the_worker_prompt_warns_against_rm_of_a_substituted_path() {
+        let line = "Never give rm a path built from $(…) or backticks: run the command first, then rm the literal paths it prints.";
+        assert!(Role::Worker.prompt().contains(line), "the worker prompt lacks the rm warning");
+        assert!(!Role::Worker.prompt().contains("never combine rm with sh -c"), "the worker prompt still has the old rm warning");
+        assert!(!Role::Orchestrator.prompt().contains(line), "the captain prompt has the worker's rm warning");
     }
 }

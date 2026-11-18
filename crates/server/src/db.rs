@@ -224,11 +224,27 @@ alter table team_run_queue add column if not exists granted_at timestamptz;
 alter table team_run_queue add column if not exists run uuid;
 -- How many of the team's turns found a waiting row's bot unreadable (`teams::queue::UNREAD_PASSES`).
 alter table team_run_queue add column if not exists unread_passes integer not null default 0;
+-- Since when, and why, the team's waiting line is held (`teams::queue::take_and_start`): its owner sees it.
+alter table teams add column if not exists line_held_at timestamptz;
+alter table teams add column if not exists line_held_why text;
 alter table team_runs add column if not exists reserved_at timestamptz;
 -- A run's limit call the limits tick opened (`teams::calls::tick`): the only call that counts as
 -- its limit call (`teams::db::runs_at_limit`). A session's own ask never sets it.
 alter table team_calls add column if not exists opened_by_hub boolean not null default false;
+-- One fire per trigger event (`Db::claim_fire`): the row of the call that claimed the key, kept
+-- `FIRES_FOR_DAYS` (`Db::expire_trigger_fires`).
+create table if not exists trigger_fires (account uuid not null references accounts on delete cascade,
+  workflow text not null, key text not null, at timestamptz not null default now(),
+  primary key (account, workflow, key));
+create index if not exists trigger_fires_at on trigger_fires (at);
+-- The `Connectors` that claimed the fire: its retry of a claim whose insert timed out wins.
+alter table trigger_fires add column if not exists claimer text;
 ";
+/// How long the hub keeps a trigger's claimed fire, in days: `connectors::FIRES_KEPT`.
+const FIRES_FOR_DAYS: u64 = 7;
+const _: () = assert!(FIRES_FOR_DAYS * 24 * 60 * 60 == pinned_core::connectors::FIRES_KEPT.as_secs());
+// A change older than the catch-up is never claimed, so a dropped claim never fires again.
+const _: () = assert!(pinned_core::connectors::CATCH_UP.as_secs() < FIRES_FOR_DAYS * 24 * 60 * 60);
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";
 /// The most held ends one hub-wide expiry run deletes.
@@ -675,7 +691,7 @@ async fn needed(client: &Client, needs: &Needs<'_>) -> Result<bool, tokio_postgr
 }
 
 /// Whether Postgres refused `e` for waiting on a lock past `LOCK_LIMIT`.
-fn lock_refused(e: &tokio_postgres::Error) -> bool {
+pub(crate) fn lock_refused(e: &tokio_postgres::Error) -> bool {
     e.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE)
 }
 
@@ -971,7 +987,7 @@ impl Db {
         let replaced: i64 = stored.iter().filter(|(path, _)| replacing.contains(path.as_str())).map(|(_, (_, size))| size).sum();
         let incoming: i64 = files.iter().map(|(_, data, _, _)| data.len() as i64).sum();
         if incoming > replaced && used - replaced + incoming > SYNC_QUOTA {
-            return Err(format!("{}{} MB; delete old sessions to sync more", sync::LIMIT_REFUSAL, SYNC_QUOTA >> 20));
+            return Err(format!("{}{} MB; nothing is deleted, the push is refused", sync::LIMIT_REFUSAL, SYNC_QUOTA >> 20));
         }
         // A file with a base goes first, so another machine's push landing since the check above
         // refuses this push before any of its files is kept.
@@ -1312,6 +1328,48 @@ impl Db {
             .map_err(err)
     }
 
+    /// Claims the account's one fire of `workflow` for the event `key` for `claimer`: true when
+    /// this call stored the claim, false when one is stored already, by this hub or another on the
+    /// database. With `retry`, a claim `claimer` stored already answers true: its earlier insert
+    /// answered an error, but may have committed.
+    pub async fn claim_fire(&self, account: Uuid, workflow: &str, key: &str, claimer: &str, retry: bool) -> Result<bool, String> {
+        let client = self.client().await?;
+        let stored = client
+            .execute(
+                "insert into trigger_fires (account, workflow, key, claimer) values ($1, $2, $3, $4) on conflict do nothing",
+                &[&account, &workflow, &key, &claimer],
+            )
+            .await
+            .map_err(err)?;
+        if stored == 1 || !retry {
+            return Ok(stored == 1);
+        }
+        let mine = client
+            .query_opt("select 1 from trigger_fires where account = $1 and workflow = $2 and key = $3 and claimer = $4", &[&account, &workflow, &key, &claimer])
+            .await
+            .map_err(err)?;
+        Ok(mine.is_some())
+    }
+
+    /// Drops `claimer`'s claim of the fire `key`, whose run did not start.
+    pub async fn release_fire(&self, account: Uuid, workflow: &str, key: &str, claimer: &str) -> Result<(), String> {
+        self.client()
+            .await?
+            .execute("delete from trigger_fires where account = $1 and workflow = $2 and key = $3 and claimer = $4", &[&account, &workflow, &key, &claimer])
+            .await
+            .map_err(err)?;
+        Ok(())
+    }
+
+    /// Deletes the claimed fires of any account older than `FIRES_FOR_DAYS`, and returns how many.
+    pub async fn expire_trigger_fires(&self) -> Result<u64, String> {
+        self.client()
+            .await?
+            .execute(&format!("delete from trigger_fires where at <= now() - interval '{FIRES_FOR_DAYS} days'"), &[])
+            .await
+            .map_err(err)
+    }
+
     /// Deletes up to `HELD_EXPIRY_BATCH` of the account's held ends older than `HELD_FOR`, and
     /// returns how many. Bounded, as it runs on every connection of a machine over the hub's one
     /// shared connection; the rest go on the next connection or the hub-wide run.
@@ -1376,14 +1434,32 @@ impl Db {
         Ok(rows.iter().map(box_row).collect())
     }
 
+    /// The machines of the account's boxes that have not ended: each is creating, booting or running.
+    pub async fn live_boxes(&self, account: Uuid) -> Result<Vec<Uuid>, String> {
+        let rows = self.client().await?.query("select machine from boxes where account = $1 and phase in ('creating', 'booting', 'running')", &[&account]).await.map_err(err)?;
+        Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
     pub async fn box_of(&self, account: Uuid, machine: Uuid) -> Result<Option<BoxRow>, String> {
         let row = self.client().await?.query_opt(&format!("select {BOX_COLUMNS} from boxes where account = $1 and machine = $2"), &[&account, &machine]).await.map_err(err)?;
         row.as_ref().map(|r| readable(box_row(r))).transpose()
     }
 
-    /// Adds to the row's budget, kept in its spec beside the run.
+    /// Adds to the row's budget, kept in its spec beside the run. Only a box that still runs takes
+    /// it: one that moved to ending since its extend was checked keeps its budget, and reads so.
     pub async fn set_box_budget(&self, account: Uuid, id: &str, budget: f64) -> Result<(), String> {
-        self.client().await?.execute("update boxes set spec = spec || jsonb_build_object('budget_usd', $2::float8) where id = $1 and account = $3", &[&id, &budget, &account]).await.map_err(err)?;
+        let written = self
+            .client()
+            .await?
+            .execute(
+                "update boxes set spec = spec || jsonb_build_object('budget_usd', $2::float8) where id = $1 and account = $3 and phase in ('creating', 'booting', 'running')",
+                &[&id, &budget, &account],
+            )
+            .await
+            .map_err(err)?;
+        if written == 0 {
+            return Err("this box is already ending".into());
+        }
         Ok(())
     }
 
@@ -1773,6 +1849,17 @@ impl Db {
         Ok((row.get(0), false))
     }
 
+    /// The id of the confirmation the session in `tab` on `machine` asked with `action` and `request_id`, if it asked one.
+    pub async fn asked_confirmation(&self, account: Uuid, machine: Uuid, tab: &str, action: &str, request_id: &str) -> Result<Option<Uuid>, String> {
+        let row = self
+            .client()
+            .await?
+            .query_opt("select id from agent_confirmations where account = $1 and machine = $2 and tab = $3 and action = $4 and request_id = $5", &[&account, &machine, &tab, &action, &request_id])
+            .await
+            .map_err(err)?;
+        Ok(row.map(|r| r.get(0)))
+    }
+
     /// The account's confirmation `id`.
     pub async fn confirmation(&self, account: Uuid, id: Uuid) -> Result<Option<Held>, String> {
         let query = format!("select {CONFIRMATION_COLUMNS} from agent_confirmations c left join machines m on m.id = c.machine and m.account = c.account where c.account = $1 and c.id = $2");
@@ -1789,6 +1876,48 @@ impl Db {
                where c.account = $1 and c.decided_at is not null order by c.decided_at desc limit 20)"
         );
         Ok(self.client().await?.query(&query, &[&account]).await.map_err(err)?.iter().map(|r| held(r).confirmation).collect())
+    }
+
+    /// How many of the account's extend_box confirmations wait, each adding an amount above zero to
+    /// a box that has not ended, read without listing them. It never counts more than the turn's
+    /// count does: an ask that names its box other than as the box's id reads is left to that one.
+    pub async fn waiting_extends(&self, account: Uuid) -> Result<i64, String> {
+        let query = "select count(*) from agent_confirmations where account = $1 and decided_at is null and action = 'extend_box'
+                       and case when jsonb_typeof(args->'extra_usd') = 'number' then (args->>'extra_usd')::float8 > 0 else false end
+                       and exists (select 1 from boxes where boxes.account = $1 and boxes.machine::text = lower(agent_confirmations.args->>'machine')
+                                   and boxes.phase in ('creating', 'booting', 'running'))";
+        Ok(self.client().await?.query_one(query, &[&account]).await.map_err(err)?.get(0))
+    }
+
+    /// Closes the account's extend_box asks still waiting for the box on `machine`, which ended. An
+    /// ask names its box as its args hold it, in any spelling `Uuid::parse_str` reads, so the asks
+    /// are matched by the id they parse to, as the turn count in `surface` matches them. Each reads
+    /// denied with `EXTEND_BOX_ENDED`, an outcome the sweep of interrupted decisions leaves as it is.
+    /// It runs after the box's move to ending is committed, so an ask stored meanwhile is either
+    /// closed here or finds the box ending once stored, and closes itself. Answers the asks it closed.
+    pub async fn close_extends(&self, account: Uuid, machine: Uuid) -> Result<Vec<Uuid>, String> {
+        let client = self.client().await?;
+        let waiting = client
+            .query("select id, args->>'machine' from agent_confirmations where account = $1 and action = 'extend_box' and decided_at is null", &[&account])
+            .await
+            .map_err(err)?;
+        let ids: Vec<Uuid> = waiting
+            .iter()
+            .filter(|row| row.get::<_, Option<String>>(1).and_then(|named| Uuid::parse_str(&named).ok()) == Some(machine))
+            .map(|row| row.get(0))
+            .collect();
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rows = client
+            .query(
+                "update agent_confirmations set decided_at = now(), approved = false, outcome = $3, result = 'null'::jsonb
+                 where account = $1 and id = any($2) and decided_at is null returning id",
+                &[&account, &ids, &EXTEND_BOX_ENDED],
+            )
+            .await
+            .map_err(err)?;
+        Ok(rows.iter().map(|row| row.get(0)).collect())
     }
 
     /// Decides the account's waiting confirmation `id`, once: None when it is unknown, another
@@ -2156,6 +2285,9 @@ const AGENT_REQUEST_MINUTES: i32 = 10;
 const AGENT_CODE_MINUTES: i32 = 5;
 pub const AGENT_ACCESS_SECS: i64 = 3600;
 const AGENT_REFRESH_DAYS: i32 = 30;
+/// What an extend_box ask still waiting for the owner reads as once its box ends.
+pub const EXTEND_BOX_ENDED: &str = "the box ended before the owner answered";
+
 /// A call still pending this long was cut off, as by a hub restart, so its outcome is unknown.
 const AGENT_CALL_STALE_SECS: i64 = 600;
 

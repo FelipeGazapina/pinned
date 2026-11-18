@@ -1,5 +1,6 @@
 use crate::accounts::{self, Account, Accounts, Auth, Provider};
-use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, LimitWindow, Message, ProjectTool, Role, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
+use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, LimitWindow, Message, ProjectTool, Role, Usage, BOX_ENV, CONNECTOR_ENV, ISSUE_ENV, PROJECT_ENV, ROLE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
+use crate::team_call::TEAM_BOX_ENV;
 use crate::stats::{ThreadStats, Tally};
 use crate::pinned_lines;
 use crate::wire::{CutBySleep, Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
@@ -147,8 +148,8 @@ pub struct Launch {
     /// start fails.
     pub starting_limit: Duration,
     /// The folder the built-in Claude account's sessions, transcripts and `.claude.json` live in,
-    /// instead of `$CLAUDE_CONFIG_DIR` or `~/.claude`. Only a test that runs a node in its own
-    /// process sets it.
+    /// instead of the home the user exported or `~/.claude`. Only a test that runs a node in its
+    /// own process sets it.
     pub claude_home: Option<PathBuf>,
 }
 
@@ -194,19 +195,24 @@ impl Launch {
         self.bins.get(&provider).cloned().unwrap_or_else(|| provider.spec().bin.into())
     }
 
+    /// What a tab's session starts with: pinned's socket, its tab, the tutorial helper, then
+    /// `env`, its account's and its kind's.
+    pub(crate) fn child_env(&self, account: &Account, tab: &str, env: &[(String, String)]) -> ChildEnv<'static> {
+        let strip: &'static [&'static str] = if account.auth == Auth::OpenCodeGo { &crate::opencode_go::STRIP_ENV } else { &[] };
+        let mut set = vec![
+            (SOCK_ENV.to_owned(), self.sock.display().to_string()),
+            (TAB_ENV.to_owned(), tab.to_owned()),
+            (plugin::HELPER_ENV.to_owned(), self.tutorial_helper.display().to_string()),
+        ];
+        set.extend(env.iter().cloned());
+        ChildEnv::new(strip, set)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf], mcp: Option<&mcp::SessionFiles>) -> CommandBuilder {
         let provider = account.provider;
         let spec = provider.spec();
-        let mut cmd = CommandBuilder::new(self.bin(provider));
-        for key in INHERITED_SESSION_ENV {
-            cmd.env_remove(key);
-        }
-        if account.auth == Auth::OpenCodeGo {
-            for key in crate::opencode_go::STRIP_ENV {
-                cmd.env_remove(key);
-            }
-        }
+        let mut cmd = crate::process::pty_command(self.bin(provider));
         match program {
             Program::Agent => {
                 if spec.harness {
@@ -236,7 +242,6 @@ impl Launch {
                         .iter()
                         .find(|(key, _)| key == "CODEX_HOME")
                         .map(|(_, value)| PathBuf::from(value))
-                        .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
                         .unwrap_or_else(|| home().join(".codex"));
                     let user = crate::delegate::codex_user_notify(&std::fs::read_to_string(home.join("config.toml")).unwrap_or_default());
                     cmd.args(crate::delegate::codex_notify_flag(&self.exe, &user));
@@ -251,12 +256,7 @@ impl Launch {
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        cmd.env(SOCK_ENV, &self.sock);
-        cmd.env(TAB_ENV, tab);
-        cmd.env(plugin::HELPER_ENV, &self.tutorial_helper);
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
+        self.child_env(account, tab, env).apply(&mut cmd);
         if let Some(path) = &self.path_env {
             cmd.env("PATH", path);
         }
@@ -264,10 +264,13 @@ impl Launch {
     }
 }
 
-/// What a Claude Code session or a parent shell can leak into a pinned session. pinned strips
-/// them before it applies the account's own env, so a nested Claude session is not mistaken for
-/// this one and a stale Go marker cannot make a login account report Go usage.
-pub(crate) const INHERITED_SESSION_ENV: [&str; 12] = [
+/// What a Claude Code session, a pinned session or a parent shell can leak into a pinned session:
+/// what names who or what a session is, and the CLI homes that name its account. Every session
+/// and agent process pinned starts drops them all through `ChildEnv` before it sets what its kind
+/// is meant to have, so a nested Claude session is not mistaken for this one, a node started from
+/// inside a worker hands no role or project to its threads, a stale Go marker cannot make a login
+/// account report Go usage, and a built-in account never runs on another account's home.
+pub const INHERITED_SESSION_ENV: [&str; 27] = [
     "CLAUDECODE",
     "CLAUDE_PID",
     "CLAUDE_EFFORT",
@@ -280,12 +283,177 @@ pub(crate) const INHERITED_SESSION_ENV: [&str; 12] = [
     "CLAUDE_CODE_MESSAGING_TOKEN",
     "CLAUDE_CODE_SSE_PORT",
     "PINNED_OPENCODE_GO_KEY",
+    SOCK_ENV,
+    TAB_ENV,
+    TASK_ENV,
+    ROLE_ENV,
+    PROJECT_ENV,
+    accounts::ACCOUNT_ENV,
+    plugin::HELPER_ENV,
+    CONNECTOR_ENV,
+    ISSUE_ENV,
+    SLACK_CHANNEL_ENV,
+    SLACK_THREAD_ENV,
+    BOX_ENV,
+    TEAM_BOX_ENV,
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
 ];
+
+/// Facts about the machine the node runs on rather than about a session: a box's sessions are
+/// meant to know they run in one, for `pinned call` and the team's hook. A session gets one only
+/// as the node's own `1`.
+const MACHINE_FACTS: [&str; 2] = [BOX_ENV, TEAM_BOX_ENV];
 
 /// The environment a headless `claude -p` gets, and the variables it must drop before applying it.
 pub struct Headless<'a> {
     pub env: &'a [(String, String)],
     pub strip: &'a [&'a str],
+}
+
+impl Headless<'_> {
+    /// What the headless `claude -p` starts with: its account's env and nothing a parent left.
+    pub(crate) fn child_env(&self) -> ChildEnv<'_> {
+        ChildEnv::new(self.strip, self.env.to_vec())
+    }
+}
+
+/// What a session or agent process pinned starts changes in the environment it would inherit:
+/// every `INHERITED_SESSION_ENV` name and `strip` removed, then exactly `set`. A session starts
+/// only with what its kind sets, never with a role, project, tab or account the node was started with.
+pub(crate) struct ChildEnv<'a> {
+    pub(crate) strip: &'a [&'a str],
+    pub(crate) set: Vec<(String, String)>,
+}
+
+impl<'a> ChildEnv<'a> {
+    pub(crate) fn new(strip: &'a [&'a str], set: Vec<(String, String)>) -> ChildEnv<'a> {
+        ChildEnv { strip, set }
+    }
+
+    /// What a child of a process whose variables `parent` looks up removes and then sets. A parent
+    /// that carries a non-empty Go key, or the gateway a Go session would get, runs inside a Go
+    /// session, so the gateway and models it carries are that session's and no other kind's.
+    fn changes(&self, parent: impl Fn(&str) -> Option<String>) -> (Vec<&'a str>, Vec<(String, String)>) {
+        let gateway = || crate::opencode_go::gateway_from(parent(crate::opencode_go::BASE_ENV).as_deref());
+        let inside_go = parent(crate::opencode_go::KEY_ENV).is_some_and(|key| !key.trim().is_empty()) || parent("ANTHROPIC_BASE_URL").is_some_and(|url| url.trim_end_matches('/') == gateway());
+        let go: &[&str] = if inside_go { &crate::opencode_go::SESSION_ENV } else { &[] };
+        let remove = INHERITED_SESSION_ENV.iter().chain(go).chain(self.strip).copied().collect();
+        let facts = MACHINE_FACTS.iter().filter(|key| parent(key).as_deref() == Some("1")).map(|key| (key.to_string(), "1".to_owned()));
+        (remove, facts.chain(self.set.iter().cloned()).collect())
+    }
+
+    /// The environment a child of a process with `parent` gets.
+    #[cfg(test)]
+    pub(crate) fn of(&self, parent: &[(String, String)]) -> Vec<(String, String)> {
+        let (remove, set) = self.changes(|key| parent.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()));
+        let mut env: Vec<(String, String)> = parent.iter().filter(|(key, _)| !remove.contains(&key.as_str())).cloned().collect();
+        for (key, value) in set {
+            env.retain(|(k, _)| *k != key);
+            env.push((key, value));
+        }
+        env
+    }
+
+    /// Applies the change to `cmd`, which would otherwise inherit pinned's own environment.
+    pub(crate) fn apply(&self, cmd: &mut impl ChildCommand) {
+        let (remove, set) = self.changes(node_var);
+        for key in remove {
+            cmd.remove_var(key);
+        }
+        for (key, value) in set {
+            cmd.set_var(&key, &value);
+        }
+    }
+
+    /// No session variable at all, for a probe of a CLI or a user's shell.
+    pub(crate) fn none() -> ChildEnv<'static> {
+        ChildEnv::new(&[], vec![])
+    }
+}
+
+/// The environment the node started with, which decides the homes the built-in accounts keep. A
+/// test binary reads only the one a test gave it, so no test runs on the user's own homes.
+fn node_env() -> Vec<(String, String)> {
+    #[cfg(test)]
+    if let Some(env) = parent::env() {
+        return env;
+    }
+    if test_binary() {
+        return vec![];
+    }
+    std::env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect()
+}
+
+/// The node's own variable `key`, which a child inherits unless `ChildEnv` changes it.
+fn node_var(key: &str) -> Option<String> {
+    #[cfg(test)]
+    if let Some(env) = parent::env() {
+        return env.into_iter().find(|(k, _)| k == key).map(|(_, value)| value);
+    }
+    std::env::var(key).ok()
+}
+
+/// The node environment a test hands the code it runs on this thread, in place of the process's:
+/// what decides the built-in accounts' homes, what `ChildEnv` looks up, and what every command
+/// `process::command` and `process::pty_command` build inherits.
+#[cfg(test)]
+pub(crate) mod parent {
+    use super::ChildCommand;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static PARENT: RefCell<Option<Vec<(String, String)>>> = const { RefCell::new(None) };
+    }
+
+    /// Runs `f` as if the node had started with `env`.
+    pub(crate) fn with<R>(env: Vec<(String, String)>, f: impl FnOnce() -> R) -> R {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                PARENT.with(|parent| parent.borrow_mut().take());
+            }
+        }
+        PARENT.with(|parent| *parent.borrow_mut() = Some(env));
+        let _reset = Reset;
+        f()
+    }
+
+    /// The environment `with` gave this thread.
+    pub(crate) fn env() -> Option<Vec<(String, String)>> {
+        PARENT.with(|parent| parent.borrow().clone())
+    }
+
+    /// Gives `cmd` what a child would inherit from the node `with` started.
+    pub(crate) fn inherit(cmd: &mut impl ChildCommand) {
+        for (key, value) in env().unwrap_or_default() {
+            cmd.set_var(&key, &value);
+        }
+    }
+}
+
+/// A process about to start, whose environment `ChildEnv` sets.
+pub(crate) trait ChildCommand {
+    fn remove_var(&mut self, key: &str);
+    fn set_var(&mut self, key: &str, value: &str);
+}
+
+impl ChildCommand for std::process::Command {
+    fn remove_var(&mut self, key: &str) {
+        self.env_remove(key);
+    }
+    fn set_var(&mut self, key: &str, value: &str) {
+        self.env(key, value);
+    }
+}
+
+impl ChildCommand for CommandBuilder {
+    fn remove_var(&mut self, key: &str) {
+        self.env_remove(key);
+    }
+    fn set_var(&mut self, key: &str, value: &str) {
+        self.env(key, value);
+    }
 }
 
 /// Appends `bytes` to `kept` and keeps its last `limit` bytes. Room is made before the bytes go
@@ -552,6 +720,8 @@ struct Tab {
     bypass: bool,
     /// Claude Code's id for the conversation in progress, known once a hook reports it.
     claude_session: Option<String>,
+    /// The session a fresh start left, whose plans go to the next session a hook reports.
+    left_session: Option<String>,
     /// `claude_session`'s transcript as read so far, which starts over whenever the session changes.
     tally: Tally,
     last_found_transcript: Option<PathBuf>,
@@ -671,8 +841,11 @@ impl Tab {
 
     /// The tab as clients see it. `turns` are the projects whose Capitão runs a turn that a message
     /// from the global orchestrator started.
-    fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>, work: &HashMap<String, crate::delegate::WorkCost>) -> TabView {
+    /// `plans` is every Captain session's plans, of which a Captain's tab glances at its own.
+    fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>, work: &HashMap<String, crate::delegate::WorkCost>, plans: &crate::plan_store::PlanStore) -> TabView {
         let role = role_of(&self.env);
+        let captain = matches!(role, Some((Role::Orchestrator, _))) && !global::is_global(&self.env);
+        let plans = self.claude_session.as_deref().filter(|_| captain).and_then(|s| plans.get(s)).map(|p| crate::plan::glance_list(p, &[])).unwrap_or_default();
         let compacting = self.compacting();
         TabView {
             id: id.to_owned(),
@@ -721,6 +894,7 @@ impl Tab {
             stopped_on_error: self.stopped_on_error.clone(),
             questions: None,
             read_only: self.child_access() == crate::delegate::Access::ReadOnly,
+            plans,
         }
     }
 
@@ -892,6 +1066,8 @@ pub struct Machine {
     turns: global::Turns,
     /// The questionnaires agents put to the user here. Takes no other lock while held.
     questions: Mutex<crate::questions::Questions>,
+    /// Every Captain session's plans, by its Claude session id.
+    plans: Mutex<crate::plan_store::PlanStore>,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
@@ -1016,19 +1192,20 @@ impl Machine {
         // Seeds taste.json from the old cost style, then moves the old worker cap into it.
         taste::migrate_worker_cap(dir.as_deref());
         let home = home();
+        let exported = accounts::exported_homes(&node_env(), dir.as_deref());
+        let accounts = Accounts::load(dir.as_deref(), home.clone()).with_claude_home(launch.claude_home.clone()).with_exported_homes(exported);
         // A test must never write the user's own claude config.
-        let builtin_claude_config = match (&launch.claude_home, test_binary(), std::env::var_os("CLAUDE_CONFIG_DIR")) {
-            (Some(claude_home), ..) => claude_home.clone(),
-            (None, true, _) => dir.clone().unwrap_or_else(std::env::temp_dir).join("home"),
-            (None, false, Some(config)) => PathBuf::from(config),
-            (None, false, None) => home.clone(),
+        let builtin_claude_config = match (&launch.claude_home, accounts.exported_home(Provider::Claude), test_binary()) {
+            (Some(claude_home), _, _) => claude_home.clone(),
+            (None, Some(exported), _) => exported.to_path_buf(),
+            (None, None, true) => dir.clone().unwrap_or_else(std::env::temp_dir).join("home"),
+            (None, None, false) => home.clone(),
         }
         .join(".claude.json");
         let global_dir = if test_binary() { dir.clone().unwrap_or_else(std::env::temp_dir).join("home") } else { home.clone() }.join(global::FOLDER[0]).join(global::FOLDER[1]);
         let default_cwd = open
             .or_else(|| projects::recent(&projects).first().map(|p| p.path.clone()))
             .unwrap_or_else(|| home.clone());
-        let accounts = Accounts::load(dir.as_deref(), home.clone()).with_claude_home(launch.claude_home.clone());
         let machine = Arc::new_cyclic(|me| Machine {
             launch,
             default_cwd,
@@ -1088,6 +1265,7 @@ impl Machine {
             turns: sent.turns(),
             sent: Mutex::new(sent),
             questions: Mutex::new(crate::questions::Questions::load(dir.as_deref())),
+            plans: Mutex::new(crate::plan_store::PlanStore::load(dir.as_deref())),
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
             next_listener: AtomicU64::new(1),
@@ -1400,6 +1578,13 @@ impl Machine {
             Call::CancelSetupToken { account } => json(self.setup_tokens.cancel(&account)),
             Call::SwitchAccount { tab, account, cols, rows } => json(self.switch_account(&tab, &account, cols, rows)?),
             Call::Thread { tab, from, limit, before } => json(self.thread_page(&tab, from, limit, before)?),
+            Call::Plan { tab, plan } => {
+                let session = self.captain_session(&tab)?;
+                let plans = self.plans.lock().unwrap();
+                let kept = session.as_deref().and_then(|s| plans.get(s)).map_or(&[][..], |p| &p.plans[..]);
+                let views: Vec<crate::plan::PlanView> = kept.iter().filter(|p| plan.as_deref().is_none_or(|id| p.id == id)).map(|p| crate::plan::derive(p, &[])).collect();
+                Ok(json!(views))
+            }
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text).map_err(NotTyped::for_person)?),
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
@@ -1473,7 +1658,10 @@ impl Machine {
                 book.save(&file)?;
                 json(book)
             }
-            Call::UsageLimits => json(usage::limits(&self.launch.bin(Provider::Claude), &home(), self.launch.path_env.as_deref())?),
+            Call::UsageLimits => {
+                let env: Vec<(String, String)> = self.accounts.home_env(&Account::builtin(Provider::Claude)).into_iter().collect();
+                json(usage::limits(&self.launch.bin(Provider::Claude), &home(), &env, self.launch.path_env.as_deref())?)
+            }
             Call::PullRequestFilterOptions { paths, kind, query } => json(pulls::filter_options(&home(), self.launch.path_env.as_deref(), &self.gh_repos(&paths), kind, &query)?),
             Call::PullRequestFiles { host, repo, number } => json(pulls::files(&home(), self.launch.path_env.as_deref(), &host, &repo, number)?),
             Call::PageMeta { url, frame_by } => json(panel::page_meta(&url, frame_by.as_deref())?),
@@ -1612,10 +1800,16 @@ impl Machine {
             history::restore(&cwd, &tree)?;
         }
         // Before the first prompt there is nothing to resume, so claude starts a new conversation.
-        self.tab(tab, |t| {
+        let old = self.tab(tab, |t| {
             t.launch = new.iter().flat_map(|id| ["--resume".to_owned(), id.clone()]).collect();
-            t.claude_session = new.clone();
+            match &new {
+                Some(_) => std::mem::replace(&mut t.claude_session, new.clone()),
+                None => None,
+            }
         })?;
+        if let Some(new) = &new {
+            self.carry_plans(tab, old, new);
+        }
         self.relaunch(tab, cols, rows)
     }
 
@@ -1781,7 +1975,9 @@ impl Machine {
         let turns = self.turns.lock().unwrap().clone();
         let queued = self.delegates.queued();
         let work = self.delegates.work_costs();
-        let views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns, &queued, &work)).collect();
+        let plans = self.plans.lock().unwrap();
+        let views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns, &queued, &work, &plans)).collect();
+        drop(plans);
         let mut views: Vec<TabView> = views.into_iter().map(|v| self.shown(v)).collect();
         views.sort_by_key(|v| v.opened);
         views
@@ -1791,7 +1987,8 @@ impl Machine {
         let turns = self.turns.lock().unwrap().clone();
         let queued = self.delegates.queued();
         let work = self.delegates.work_costs();
-        self.tab(tab, |t| t.view(tab, &turns, &queued, &work)).map(|v| self.shown(v))
+        let view = { let plans = self.plans.lock().unwrap(); self.tab(tab, |t| t.view(tab, &turns, &queued, &work, &plans)) };
+        view.map(|v| self.shown(v))
     }
 
     /// `view` with the questionnaire open on its tab, which makes it a question mid-turn.
@@ -1841,6 +2038,20 @@ impl Machine {
     fn headless_env(&self, tab: &str) -> Result<Vec<(String, String)>, String> {
         let account = self.tab(tab, |t| t.account.clone())?;
         Ok(self.accounts.env(&if account.provider == Provider::Claude { account } else { Account::builtin(Provider::Claude) }))
+    }
+
+    /// The env a tab's session runs with: its account's, then the tab's own.
+    fn launch_env(&self, account: &Account, env: Vec<(String, String)>) -> Vec<(String, String)> {
+        [self.accounts.env(account), env].concat()
+    }
+
+    /// What a headless delegate driver starts with: its account's env, pinned's socket and its task.
+    fn delegate_env(&self, account: &Account, task: &str) -> ChildEnv<'static> {
+        let mut env = self.accounts.env(account);
+        env.push((SOCK_ENV.to_owned(), self.launch.sock.display().to_string()));
+        env.push((TASK_ENV.to_owned(), task.to_owned()));
+        let strip: &'static [&'static str] = if account.auth == Auth::OpenCodeGo { &crate::opencode_go::STRIP_ENV } else { &[] };
+        ChildEnv::new(strip, env)
     }
 
     /// What a headless call must strip before it applies `headless_env`. A Go tab must not keep a
@@ -2242,7 +2453,7 @@ impl Machine {
             }
             // Without launch arguments this is a fresh conversation, not the one recorded before.
             if t.launch.is_empty() {
-                t.claude_session = None;
+                t.left_session = t.claude_session.take().or(t.left_session.take());
                 t.tally = Tally::default();
             }
             let mut args = std::mem::take(&mut t.launch);
@@ -2289,7 +2500,7 @@ impl Machine {
             args.extend(["--append-system-prompt".to_owned(), prompt.join("\n\n")]);
         }
         self.save_sessions();
-        let env = [self.accounts.env(&account), env].concat();
+        let env = self.launch_env(&account, env);
         let plugin_dirs = self.shared_plugin_dirs(&account);
         let mcp = if program == Program::Agent { self.session_mcp(&account, &cwd) } else { None };
         let first_run = program == Program::Agent && account.provider == Provider::Claude;
@@ -2861,12 +3072,17 @@ impl Machine {
         if let Some(task) = self.thread_task(tab, false) {
             let _ = self.delegates.cancel_tree(&task, "its thread was closed", path.as_deref());
         }
-        let (closed, owned, last) = {
+        let (closed, owned, last, gone) = {
             let mut tabs = self.tabs.lock().unwrap();
             let closed = tabs.remove(tab);
             let owned: Vec<PathBuf> = tabs.values().filter_map(|t| t.made.clone()).collect();
-            (closed, owned, tabs.is_empty())
+            // A session no other tab holds is gone, and its plans with it.
+            let gone = closed.as_ref().and_then(|t| t.claude_session.clone().or(t.left_session.clone())).filter(|s| !tabs.values().any(|t| t.claude_session.as_ref() == Some(s)));
+            (closed, owned, tabs.is_empty(), gone)
         };
+        if let Some(session) = gone {
+            self.plans.lock().unwrap().drop_session(&session);
+        }
         let made = closed.as_ref().and_then(|t| t.made.clone());
         drop(closed);
         self.delegates.drop_kept_worktrees(tab, &owned, path.as_deref());
@@ -3054,7 +3270,7 @@ impl Machine {
             let turns = self.turns.lock().unwrap().clone();
             let queued = self.delegates.queued();
             let tabs = self.tabs.lock().unwrap();
-            tabs.iter().map(|(id, t)| (t.view(id, &turns, &queued, &HashMap::new()), t.idle_for_archive())).collect()
+            tabs.iter().map(|(id, t)| (t.view(id, &turns, &queued, &HashMap::new(), &Default::default()), t.idle_for_archive())).collect()
         };
         let candidates: Vec<(TabView, bool)> = candidates.into_iter().map(|(view, idle)| (self.shown(view), idle)).collect();
         let looked = Instant::now();
@@ -3532,6 +3748,36 @@ impl Machine {
         });
     }
 
+    /// The Claude session of `tab` when it is a project's Captain, which keeps its plans by it.
+    /// None for any other seat, or a Captain whose session has not started.
+    fn captain_session(&self, tab: &str) -> Result<Option<String>, String> {
+        self.tab(tab, |t| match role_of(&t.env) {
+            Some((Role::Orchestrator, _)) if !global::is_global(&t.env) => t.claude_session.clone(),
+            _ => None,
+        })
+    }
+
+    /// Moves the plans `tab` kept under the session `old` to `new`, the session it holds now. A tab
+    /// that resumed a session with plans of its own takes none over and adds none; its old ones go.
+    /// A session another tab still holds keeps its plans there too.
+    fn carry_plans(&self, tab: &str, old: Option<String>, new: &str) {
+        let Some(old) = old.filter(|old| old != new) else { return };
+        let still_held = self.tabs.lock().unwrap().iter().any(|(id, t)| id != tab && t.claude_session.as_deref() == Some(old.as_str()));
+        if self.plans.lock().unwrap().carry(&old, new, still_held) {
+            self.emit_tabs();
+        }
+    }
+
+    /// Refuses a plan write while another open tab holds `session`: both would write the same
+    /// plans, each without the other's.
+    fn sole_holder(&self, session: &str) -> Result<(), String> {
+        let holders = self.tabs.lock().unwrap().values().filter(|t| t.claude_session.as_deref() == Some(session)).count();
+        if holders > 1 {
+            return Err("another open tab holds this session; close one to keep its plans".into());
+        }
+        Ok(())
+    }
+
     fn project_tool(&self, tab: &str, tool: ProjectTool) -> Result<String, String> {
         let global = self.tab(tab, |t| global::is_global(&t.env))?;
         let only_global = || if global { Ok(()) } else { Err("only the global orchestrator has this tool".to_owned()) };
@@ -3591,17 +3837,37 @@ impl Machine {
             }
             ProjectTool::TasteSet { scope, patch } => {
                 let scope = TasteScope::parse(&scope)?;
+                taste::refuse_review_settings(patch.review_settings())?;
                 let call = HubCall::SetTaste { scope: scope.clone(), patch: patch.clone() };
                 text_json(self.change_tastes(call, |tastes| tastes.set(&scope, patch))?.view(&scope))
             }
             ProjectTool::TasteReset { scope, field } => {
                 let scope = TasteScope::parse(&scope)?;
+                taste::refuse_review_settings(field.review_setting())?;
                 let call = HubCall::ResetTasteField { scope: scope.clone(), field };
                 let reset = |tastes: &mut Tastes| {
                     tastes.reset(&scope, field);
                     Ok(())
                 };
                 text_json(self.change_tastes(call, reset)?.view(&scope))
+            }
+            ProjectTool::PlanSet(_) | ProjectTool::PlanStep(_) | ProjectTool::PlanFix(_) | ProjectTool::PlanClose(_) => {
+                let session = self.captain_session(tab)?.ok_or("only a project's Captain keeps a plan")?;
+                self.sole_holder(&session)?;
+                let now = unix_millis();
+                let written = self.plans.lock().unwrap().write(&session, |plans| match tool {
+                    ProjectTool::PlanSet(call) => crate::plan::set(plans, call, now, &[], now),
+                    ProjectTool::PlanStep(call) => crate::plan::step(plans, call, &[], now),
+                    ProjectTool::PlanFix(call) => crate::plan::fix(plans, call, &[], now),
+                    ProjectTool::PlanClose(call) => crate::plan::close(plans, call, &[], now),
+                    _ => unreachable!("only plan tools reach here"),
+                });
+                // The Captain's glance rides on its tab, so the account's clients read it in the next tabs.
+                let (answer, changed) = written?;
+                if changed {
+                    self.emit_tabs();
+                }
+                Ok(answer)
             }
             ProjectTool::TellOrchestrator { text } => match self.tab(tab, |t| role_of(&t.env))? {
                 Some((Role::Orchestrator, project)) => text_json(self.report_up(tab, &project, text, vec![])?),
@@ -3994,7 +4260,7 @@ impl Machine {
     /// The workers `from` sees, one per line, each indented under the worker that started it:
     /// the orchestrator sees every worker of its project, any other thread the ones it started.
     fn workers(&self, from: &str, project: &Path) -> String {
-        let workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new(), &HashMap::new(), &HashMap::new())).collect();
+        let workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new(), &HashMap::new(), &HashMap::new(), &Default::default())).collect();
         let mut workers: Vec<TabView> = workers.into_iter().map(|w| self.shown(w)).collect();
         workers.sort_by_key(|w| w.opened);
         let everyone = self.tab(from, |t| role_of(&t.env)).ok().flatten().is_some_and(|(role, _)| role == Role::Orchestrator);
@@ -4139,19 +4405,7 @@ impl Machine {
     /// One share per Claude home. A test binary under `deps` shares only homes inside its config dir.
     pub fn plugin_shares(&self) -> Vec<sync::PluginShare> {
         let Some(config) = self.sync_file.as_ref().and_then(|file| file.parent()).map(Path::to_path_buf) else { return vec![] };
-        let dir = config.join("synced-plugins");
-        let mut homes = vec![home().join(".claude")];
-        for account in self.accounts.list() {
-            if account.provider == Provider::Claude {
-                homes.push(self.accounts.home(&account));
-            }
-        }
-        homes.sort();
-        homes.dedup();
-        if test_binary() {
-            homes.retain(|path| path.starts_with(&config));
-        }
-        homes.into_iter().map(|claude_home| sync::PluginShare { claude_home, dir: dir.clone() }).collect()
+        plugin_shares(&self.accounts, &config, test_binary())
     }
 
     fn places(&self) -> skills::Places {
@@ -4527,6 +4781,8 @@ impl Machine {
             .iter()
             .filter_map(|id| self.tab(id, |t| t.claude_session.clone()).ok().flatten().map(|session| (session, id.clone())))
             .collect();
+        // Plans of a session no restored tab holds have nothing left to show on.
+        self.plans.lock().unwrap().keep_only(&sessions.iter().map(|(session, _)| session.as_str()).collect());
         self.delegates.rebind(&sessions);
         self.resume_workers(&sessions);
         if self.delegates.has_pending() {
@@ -5144,7 +5400,7 @@ impl Machine {
 
     /// What the thread `tab` waits on the user for right now, or None while it waits on nothing.
     fn thread_ask(&self, tab: &str) -> Option<crate::delegate::RemoteAsk> {
-        let view = self.shown(self.tab(tab, |t| t.view(tab, &HashSet::new(), &HashMap::new(), &HashMap::new())).ok()?);
+        let view = self.shown(self.tab(tab, |t| t.view(tab, &HashSet::new(), &HashMap::new(), &HashMap::new(), &Default::default())).ok()?);
         if global::waiting_kind(&view) != Some(global::WaitingKind::NeedsInput) {
             return None;
         }
@@ -5650,18 +5906,12 @@ impl Machine {
                 reminders: self.launch.reminders,
             },
         );
-        let mut env = self.accounts.env(&account);
-        env.push((SOCK_ENV.to_owned(), self.launch.sock.display().to_string()));
-        env.push((TASK_ENV.to_owned(), task.id.clone()));
+        let child = self.delegate_env(&account, &task.id);
         let id = task.id.clone();
         let me = self.me.clone();
         let path_env = self.launch.path_env.clone();
-        let mut strip: Vec<&str> = INHERITED_SESSION_ENV.to_vec();
-        if account.auth == Auth::OpenCodeGo {
-            strip.extend_from_slice(&crate::opencode_go::STRIP_ENV);
-        }
         let pid = match spawn(
-            ChildSpec { bin: &bin, argv: &argv, cwd: &cwd, env: &env, path: self.launch.path_env.as_deref(), strip: &strip },
+            ChildSpec { bin: &bin, argv: &argv, cwd: &cwd, env: &child.set, path: self.launch.path_env.as_deref(), strip: child.strip },
             move |event| {
                 // The child's MCP config lives as long as its output does, which ends with it.
                 let _ = &mcp;
@@ -6390,6 +6640,7 @@ impl Machine {
             env,
             bypass,
             claude_session,
+            left_session: None,
             tally: Tally::default(),
             last_found_transcript: None,
             interrupted: false,
@@ -6484,10 +6735,12 @@ impl Machine {
     /// Hooks report the session on every event, since /clear or /resume inside claude swaps it.
     /// True when the session is new to the tab.
     fn record_session(&self, tab: &str, session: String, reported_cwd: Option<&str>) -> bool {
-        let Ok((new, changed, task)) = self.tab(tab, |t| {
+        let Ok((new, changed, task, old)) = self.tab(tab, |t| {
             let new = t.claude_session.as_ref() != Some(&session);
+            let mut old = None;
             if new {
                 t.tally = Tally::default();
+                old = t.claude_session.take().or(t.left_session.take());
             }
             let mut changed = new;
             // An orchestrator steps into its workers' worktrees to review them, and stays in the project.
@@ -6497,10 +6750,13 @@ impl Machine {
                 changed = true;
             }
             t.claude_session = Some(session.clone());
-            (new, changed, t.task.clone())
+            (new, changed, t.task.clone(), old)
         }) else {
             return false;
         };
+        if new {
+            self.carry_plans(tab, old, &session);
+        }
         if let Some(task) = task {
             self.delegates.set_worker_session(&task, &session);
         }
@@ -6921,12 +7177,11 @@ const NO_HOME: &str = "HOME is empty or unset";
 #[cfg(windows)]
 const NO_HOME: &str = "USERPROFILE is empty or unset";
 
-/// What a process a test starts must not inherit: every login variable, and every variable a
-/// pinned session, workflow, team call or box sets.
+/// What a process a test starts must not inherit: every variable `INHERITED_SESSION_ENV` names, and
+/// the logins of `REAL_HOME_VARIABLES`. The logins are not in that list, because a box's sessions
+/// keep its Claude and GitHub logins, so only a test's node drops them.
 pub fn session_variables() -> impl Iterator<Item = &'static str> {
-    use crate::agent::{BOX_ENV, CONNECTOR_ENV, ISSUE_ENV, PROJECT_ENV, ROLE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV};
-    let session = [PROJECT_ENV, ROLE_ENV, crate::accounts::ACCOUNT_ENV, crate::plugin::HELPER_ENV, CONNECTOR_ENV, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV, crate::team_call::TEAM_BOX_ENV, BOX_ENV];
-    REAL_HOME_VARIABLES.into_iter().chain(session)
+    INHERITED_SESSION_ENV.into_iter().chain(REAL_HOME_VARIABLES)
 }
 
 /// What marks `home` and the environment as a person's real Claude or pinned home, by name only: a
@@ -7030,6 +7285,20 @@ pub fn assert_refused_in_a_real_home(name: &str) {
 /// The one line a refused test process prints: the marks it found, by name.
 fn refusal(marks: &[&str]) -> Option<String> {
     (!marks.is_empty()).then(|| format!("pinned tests refuse to run in a real home: found {}; run them with a temporary HOME and without these variables", marks.join(", ")))
+}
+
+/// One share per Claude home of `accounts`, pulled into `config`: the built-in account's is the
+/// one its sessions run on, an exported home when the node keeps one. `inside` keeps only the
+/// homes inside `config`.
+fn plugin_shares(accounts: &Accounts, config: &Path, inside: bool) -> Vec<sync::PluginShare> {
+    let dir = config.join("synced-plugins");
+    let mut homes: Vec<PathBuf> = accounts.list().iter().filter(|account| account.provider == Provider::Claude).map(|account| accounts.home(account)).collect();
+    homes.sort();
+    homes.dedup();
+    if inside {
+        homes.retain(|path| path.starts_with(config));
+    }
+    homes.into_iter().map(|claude_home| sync::PluginShare { claude_home, dir: dir.clone() }).collect()
 }
 
 impl Machine {
@@ -7405,6 +7674,10 @@ fn login_shell_path() -> Option<String> {
 #[cfg(windows)]
 fn login_shell_path() -> Option<String> {
     None
+}
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 fn unix_now() -> u64 {
@@ -9486,6 +9759,299 @@ pub(crate) mod tests {
         assert_eq!(cmd.get_env("PINNED_TAB").and_then(|v| v.to_str()), Some("tab-1"));
     }
 
+    /// Every variable that names who or what a session is, as a parent could leave it.
+    pub(crate) const SESSION_NAMES: [&str; 27] = [
+        "PINNED_ROLE",
+        "PINNED_PROJECT",
+        "PINNED_TAB",
+        "PINNED_TASK",
+        "PINNED_SOCK",
+        "PINNED_ACCOUNT",
+        "PINNED_BOX",
+        "PINNED_TEAM_BOX",
+        "PINNED_TUTORIAL_HELPER",
+        "PINNED_CONNECTOR",
+        "PINNED_ISSUE",
+        "PINNED_SLACK_CHANNEL",
+        "PINNED_SLACK_THREAD",
+        "PINNED_OPENCODE_GO_KEY",
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "CLAUDECODE",
+        "CLAUDE_PID",
+        "CLAUDE_EFFORT",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_EXECPATH",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_SESSION_ATTENDED",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_CODE_MESSAGING_TOKEN",
+        "CLAUDE_CODE_SSE_PORT",
+    ];
+
+    /// A parent that carries every session variable with a value no session is started with.
+    pub(crate) fn inherited() -> Vec<(String, String)> {
+        let mut env: Vec<(String, String)> = SESSION_NAMES.iter().map(|k| (k.to_string(), "inherited-xyz".to_owned())).collect();
+        env.push(("HOME".into(), "/home/ana".into()));
+        env
+    }
+
+    /// Asserts that a child of `inherited()` keeps none of its session values and gets exactly `expected` of them.
+    pub(crate) fn assert_starts_with_only(child: &ChildEnv, expected: &[(&str, &str)]) {
+        let env = child.of(&inherited());
+        let leftovers: Vec<_> = env.iter().filter(|(_, v)| v == "inherited-xyz").collect();
+        assert!(leftovers.is_empty(), "the child inherited {leftovers:?}");
+        let session: BTreeMap<&str, &str> = env.iter().filter(|(k, _)| SESSION_NAMES.contains(&k.as_str())).map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(session, expected.iter().copied().collect::<BTreeMap<_, _>>());
+        assert!(env.contains(&("HOME".into(), "/home/ana".into())), "the child lost a variable no session sets: {env:?}");
+    }
+
+    #[test]
+    fn the_session_variables_a_test_hands_a_child_are_every_one_pinned_drops() {
+        let names = |list: &[&str]| list.iter().map(|name| name.to_string()).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(names(&SESSION_NAMES), names(&INHERITED_SESSION_ENV));
+    }
+
+    /// A node environment that carries every session variable with a value no session is started with.
+    fn every_session_variable() -> Vec<(String, String)> {
+        INHERITED_SESSION_ENV.iter().map(|name| (name.to_string(), "inherited-xyz".to_owned())).collect()
+    }
+
+    /// A program that writes the environment it started with beside itself, then exits.
+    #[cfg(unix)]
+    fn env_recorder(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, "#!/bin/sh\n/usr/bin/env > \"$0.env.part\"\n/bin/mv \"$0.env.part\" \"$0.env\"\n").unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// Asserts that the command `env_recorder` ran as started with none of the node's session
+    /// values and exactly `expected` of the session variables.
+    #[cfg(unix)]
+    fn assert_spawned_with_only(recorder: &Path, expected: &[(&str, &str)]) {
+        let file = PathBuf::from(format!("{}.env", recorder.display()));
+        wait_for("the command to record its environment", || file.is_file());
+        let text = std::fs::read_to_string(&file).unwrap();
+        let env: Vec<(&str, &str)> = text.lines().filter_map(|line| line.split_once('=')).collect();
+        let leftovers: Vec<_> = env.iter().filter(|(_, v)| *v == "inherited-xyz").collect();
+        assert!(leftovers.is_empty(), "the command inherited {leftovers:?}");
+        let session: BTreeMap<&str, &str> = env.iter().filter(|(k, _)| INHERITED_SESSION_ENV.contains(k)).copied().collect();
+        assert_eq!(session, expected.iter().copied().collect::<BTreeMap<_, _>>());
+    }
+
+    #[test]
+    fn a_tab_command_starts_only_with_what_its_kind_sets() {
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let cmd = parent::with(every_session_variable(), || m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None));
+        let session: BTreeMap<&str, &str> = INHERITED_SESSION_ENV.iter().filter_map(|name| Some((*name, cmd.get_env(name)?.to_str()?))).collect();
+        assert_eq!(session, BTreeMap::from([("PINNED_SOCK", "k"), ("PINNED_TAB", "tab-1"), ("PINNED_TUTORIAL_HELPER", "t"), ("PINNED_ACCOUNT", "claude")]));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_delegate_driver_starts_only_with_what_its_kind_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = env_recorder(dir.path(), "driver");
+        let env = [("PINNED_ACCOUNT", "claude"), ("PINNED_SOCK", "k"), ("PINNED_TASK", "task-1")].map(|(k, v)| (k.to_owned(), v.to_owned()));
+        let spec = crate::delegate::ChildSpec { bin: &bin, argv: &[], cwd: dir.path(), env: &env, path: None, strip: &[] };
+        parent::with(every_session_variable(), || crate::delegate::spawn(spec, |_| {})).unwrap();
+        assert_spawned_with_only(&bin, &[("PINNED_ACCOUNT", "claude"), ("PINNED_SOCK", "k"), ("PINNED_TASK", "task-1")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_title_run_starts_only_with_what_its_kind_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = env_recorder(dir.path(), "claude");
+        let env = [("PINNED_ACCOUNT".to_owned(), "claude".to_owned())];
+        let headless = Headless { env: &env, strip: &[] };
+        let _ = parent::with(every_session_variable(), || crate::titles::regenerate(&bin, &headless, dir.path(), None, "", "a thread"));
+        assert_spawned_with_only(&bin, &[("PINNED_ACCOUNT", "claude")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_review_guide_run_starts_only_with_what_its_kind_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = env_recorder(dir.path(), "claude");
+        let gh = dir.path().join("gh");
+        let view = r#"{"number":1,"title":"t","body":"","baseRefName":"main","headRefOid":"abc","reviews":[]}"#;
+        std::fs::write(&gh, format!("#!/bin/sh\ncase \"$2\" in view) echo '{view}';; *) echo 'diff';; esac\n")).unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let env = [("PINNED_ACCOUNT".to_owned(), "claude".to_owned())];
+        let headless = Headless { env: &env, strip: &[] };
+        let path = dir.path().display().to_string();
+        let store = dir.path().join("guides");
+        parent::with(every_session_variable(), || crate::panel::guide(dir.path(), "https://github.com/acme/app/pull/1", true, &store, &bin, &headless, Some(&path))).unwrap();
+        assert_spawned_with_only(&bin, &[("PINNED_ACCOUNT", "claude")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_commit_message_run_starts_only_with_what_its_kind_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        let bin = env_recorder(dir.path(), "claude");
+        let env = [("PINNED_ACCOUNT".to_owned(), "claude".to_owned())];
+        let headless = Headless { env: &env, strip: &[] };
+        parent::with(every_session_variable(), || crate::branches::run_step(&repo, &crate::branches::GitStep::Message { files: vec![] }, &bin, &headless, None)).unwrap();
+        assert_spawned_with_only(&bin, &[("PINNED_ACCOUNT", "claude")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_account_status_probe_starts_only_with_what_its_kind_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = env_recorder(dir.path(), "claude");
+        let accounts = Accounts::load(None, "/Users/ana".into());
+        parent::with(every_session_variable(), || accounts.status(&Account::builtin(Provider::Claude), &bin, None));
+        assert_spawned_with_only(&bin, &[("PINNED_ACCOUNT", "claude")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_setup_token_run_starts_only_with_what_its_kind_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = env_recorder(dir.path(), "claude");
+        let env = [("PINNED_ACCOUNT".to_owned(), "claude".to_owned())];
+        let tokens = crate::setup_token::SetupTokens::default();
+        let _ = parent::with(every_session_variable(), || tokens.run("claude", &bin, &env, Duration::from_secs(20)));
+        assert_spawned_with_only(&bin, &[("PINNED_ACCOUNT", "claude")]);
+    }
+
+    /// A machine in `root` whose node started with `env`.
+    fn machine_started_with(root: &Path, env: Vec<(String, String)>) -> Arc<Machine> {
+        parent::with(env, || Machine::new(launch(), Some(root.join("config")), Some("/repo".into()), |_| {}))
+    }
+
+    #[test]
+    fn a_home_the_user_exported_is_where_the_built_in_account_resumes_and_syncs() {
+        let root = tempfile::tempdir().unwrap();
+        let own = root.path().join("claude-own");
+        let shell = |extra: &[(&str, &str)]| -> Vec<(String, String)> {
+            [("PATH", "/usr/bin:/bin"), ("CLAUDE_CONFIG_DIR", own.to_str().unwrap())].iter().chain(extra).map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        };
+        let session = "6f1c2a9e-0000-4000-8000-000000000001";
+        let transcript = own.join("projects").join("-repo").join(format!("{session}.jsonl"));
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, "{}\n").unwrap();
+        let account = Account::builtin(Provider::Claude);
+
+        let m = machine_started_with(root.path(), shell(&[]));
+        assert_eq!(m.accounts.home(&account), own, "the home a resume and sync read");
+        assert_eq!(m.find_transcript(&account, session), Some(transcript.clone()));
+        assert_eq!(m.claude_config(&account), own.join(".claude.json"));
+        let cmd = m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None);
+        assert_eq!(cmd.get_env("CLAUDE_CONFIG_DIR").and_then(|v| v.to_str()), own.to_str());
+
+        let m = machine_started_with(root.path(), shell(&[("PINNED_ROLE", "worker")]));
+        assert_eq!(m.accounts.home(&account), home().join(".claude"));
+        assert_eq!(m.find_transcript(&account, session), None);
+        let cmd = m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None);
+        assert_eq!(cmd.get_env("CLAUDE_CONFIG_DIR"), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_limits_probe_runs_on_the_built_in_accounts_home_and_inherits_no_session_variable() {
+        let root = tempfile::tempdir().unwrap();
+        let own = root.path().join("claude-own");
+        let probe = |name: &str, env: Vec<(String, String)>| {
+            let bin = env_recorder(root.path(), name);
+            let m = parent::with(env.clone(), || Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, bin.clone())]), ..launch() }, Some(root.path().join(name).with_extension("config")), Some("/repo".into()), |_| {}));
+            let _ = parent::with(env, || m.call(Call::UsageLimits));
+            bin
+        };
+        let exported = vec![("PATH".to_owned(), "/usr/bin:/bin".to_owned()), ("CLAUDE_CONFIG_DIR".to_owned(), own.display().to_string())];
+        assert_spawned_with_only(&probe("claude-exported", exported.clone()), &[("CLAUDE_CONFIG_DIR", own.to_str().unwrap())]);
+        let mut inherited = exported.clone();
+        inherited.push((ROLE_ENV.to_owned(), "inherited-xyz".to_owned()));
+        assert_spawned_with_only(&probe("claude-inherited", inherited), &[]);
+    }
+
+    #[test]
+    fn a_plain_thread_starts_only_with_what_its_kind_sets() {
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let child = m.launch.child_env(&account, "tab-1", &m.launch_env(&account, vec![]));
+        assert_starts_with_only(&child, &[("PINNED_SOCK", "k"), ("PINNED_TAB", "tab-1"), ("PINNED_TUTORIAL_HELPER", "t"), ("PINNED_ACCOUNT", "claude")]);
+    }
+
+    #[test]
+    fn a_project_orchestrator_starts_only_with_what_its_kind_sets() {
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let child = m.launch.child_env(&account, "tab-2", &m.launch_env(&account, role_env(Role::Orchestrator, Path::new("/work/app"))));
+        assert_starts_with_only(
+            &child,
+            &[("PINNED_SOCK", "k"), ("PINNED_TAB", "tab-2"), ("PINNED_TUTORIAL_HELPER", "t"), ("PINNED_ACCOUNT", "claude"), ("PINNED_ROLE", "orchestrator"), ("PINNED_PROJECT", "/work/app")],
+        );
+    }
+
+    #[test]
+    fn a_worker_starts_only_with_what_its_kind_sets() {
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let child = m.launch.child_env(&account, "tab-3", &m.launch_env(&account, role_env(Role::Worker, Path::new("/work/app"))));
+        assert_starts_with_only(
+            &child,
+            &[("PINNED_SOCK", "k"), ("PINNED_TAB", "tab-3"), ("PINNED_TUTORIAL_HELPER", "t"), ("PINNED_ACCOUNT", "claude"), ("PINNED_ROLE", "worker"), ("PINNED_PROJECT", "/work/app")],
+        );
+    }
+
+    #[test]
+    fn the_global_orchestrator_starts_only_with_what_its_kind_sets() {
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let child = m.launch.child_env(&account, "tab-4", &m.launch_env(&account, global::env()));
+        assert_starts_with_only(&child, &[("PINNED_SOCK", "k"), ("PINNED_TAB", "tab-4"), ("PINNED_TUTORIAL_HELPER", "t"), ("PINNED_ACCOUNT", "claude"), ("PINNED_ROLE", "global-orchestrator")]);
+    }
+
+    #[test]
+    fn a_connector_session_starts_only_with_what_its_kind_sets() {
+        let m = machine();
+        let account = Account::builtin(Provider::Codex);
+        let tab_env = vec![(CONNECTOR_ENV.to_owned(), "c1".to_owned()), (crate::agent::ISSUE_ENV.to_owned(), "uuid".to_owned()), (crate::agent::SLACK_THREAD_ENV.to_owned(), "1.2".to_owned())];
+        let child = m.launch.child_env(&account, "tab-5", &m.launch_env(&account, tab_env));
+        assert_starts_with_only(
+            &child,
+            &[("PINNED_SOCK", "k"), ("PINNED_TAB", "tab-5"), ("PINNED_TUTORIAL_HELPER", "t"), ("PINNED_ACCOUNT", "codex"), ("PINNED_CONNECTOR", "c1"), ("PINNED_ISSUE", "uuid"), ("PINNED_SLACK_THREAD", "1.2")],
+        );
+    }
+
+    #[test]
+    fn a_headless_delegate_starts_only_with_what_its_kind_sets() {
+        let m = machine();
+        assert_starts_with_only(&m.delegate_env(&Account::builtin(Provider::Cursor), "task-9"), &[("PINNED_ACCOUNT", "cursor"), ("PINNED_SOCK", "k"), ("PINNED_TASK", "task-9")]);
+    }
+
+    #[test]
+    fn a_headless_claude_beside_a_tab_starts_only_with_its_accounts_env() {
+        let m = machine();
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Codex), vec![], role_env(Role::Worker, Path::new("/repo")), false, None);
+        let env = m.headless_env(&tab).unwrap();
+        let headless = Headless { env: &env, strip: m.headless_strip(&tab).unwrap() };
+        assert_starts_with_only(&headless.child_env(), &[("PINNED_ACCOUNT", "claude")]);
+    }
+
+    #[test]
+    fn a_probe_or_a_shell_starts_with_no_session_variable() {
+        assert_starts_with_only(&ChildEnv::new(&[], vec![]), &[]);
+    }
+
+    #[test]
+    fn a_box_fact_reaches_a_session_only_as_the_nodes_own_one() {
+        let parent = [("PINNED_BOX".to_owned(), "1".to_owned()), ("PINNED_TEAM_BOX".to_owned(), "1".to_owned()), ("PINNED_ROLE".to_owned(), "worker".to_owned())];
+        let env = ChildEnv::new(&[], vec![]).of(&parent);
+        assert_eq!(env, [("PINNED_BOX".to_owned(), "1".to_owned()), ("PINNED_TEAM_BOX".to_owned(), "1".to_owned())]);
+    }
+
     #[test]
     fn each_shared_plugin_folder_is_its_own_plugin_dir() {
         let dir = temp("plugin-argv");
@@ -9641,6 +10207,7 @@ pub(crate) mod tests {
     const THEME_SCREEN: &str = " Choose the text style that looks best with your terminal";
     const TRUST_SCREEN: &str = " Quick safety check: Is this a project you created or one you trust?  No, exit  Yes, I trust this folder";
     const BYPASS_SCREEN: &str = " WARNING: Claude Code running in Bypass Permissions mode  No, exit  Yes, I accept";
+    const MCP_SCREEN: &str = " New MCP server found in this project: fs  MCP servers may execute code or access system resources. All tool calls require approval.  ❯ 1. Use this MCP server  2. Use this and all future MCP servers in this project  3. Continue without using this MCP server  Enter confirm / Esc cancel";
 
     /// Starts a worker thread from a tab in `parent_dir` and returns its task id.
     #[cfg(unix)]
@@ -9667,6 +10234,26 @@ pub(crate) mod tests {
         let thread = m.view(&info.thread.unwrap().tab).unwrap();
         assert_eq!((thread.running, thread.status, thread.message.as_deref()), (true, Some(AgentStatus::Failed), Some(reason.as_str())), "the session stays open for the user to answer");
         assert!(!keys.exists(), "the trust prompt of a folder pinned did not make is never answered");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_on_the_project_mcp_approval_dialog_fails_its_task_with_the_reason() {
+        let root = temp("first-run-mcp-approval");
+        let (claude, keys) = claude_on_screens(&root, &[MCP_SCREEN]);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.join("config")), None, |_| {});
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let task = delegate_from(&m, &app, "shared");
+        wait_for("the task to fail", || m.delegates.get(&task).is_some_and(|t| t.state.terminal()));
+        let info = m.delegates.get(&task).unwrap();
+        let reason = format!("Claude Code is waiting for approval of this project's MCP servers in {}; open the session to answer it", app.display());
+        assert_eq!((info.state.as_str(), info.error.as_deref()), ("failed", Some(reason.as_str())));
+        let thread = m.view(&info.thread.unwrap().tab).unwrap();
+        assert_eq!((thread.running, thread.status, thread.message.as_deref()), (true, Some(AgentStatus::Failed), Some(reason.as_str())), "the session stays open for the user to answer");
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!keys.exists(), "nothing was typed into the project's MCP approval dialog");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -9704,6 +10291,119 @@ pub(crate) mod tests {
         std::thread::sleep(Duration::from_millis(500));
         assert!(!keys.exists(), "nothing was typed into the warning");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A node started inside an OpenCode Go session: its key and every variable its kind sets,
+    /// beside every session variable.
+    fn inside_a_go_session() -> Vec<(String, String)> {
+        let mut env = inherited();
+        env.extend(crate::opencode_go::SESSION_ENV.iter().map(|name| (name.to_string(), "inherited-xyz".to_owned())));
+        env
+    }
+
+    /// The Go settings in `env`, by name.
+    fn go_settings(env: &[(String, String)]) -> BTreeMap<String, String> {
+        env.iter().filter(|(key, _)| crate::opencode_go::SESSION_ENV.contains(&key.as_str())).cloned().collect()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_login_account_started_inside_a_go_session_gets_none_of_its_settings() {
+        let root = temp("go-inside-login");
+        write_go_account(&root);
+        let m = accounts_machine(&root);
+        let parent = inside_a_go_session();
+        let claude = Account::builtin(Provider::Claude);
+        let tab = m.launch.child_env(&claude, "tab-1", &m.launch_env(&claude, vec![]));
+        assert_eq!(go_settings(&tab.of(&parent)), BTreeMap::new(), "a login account's tab");
+        assert_eq!(go_settings(&m.accounts.child_env(&claude).of(&parent)), BTreeMap::new(), "the status probe");
+        assert_eq!(go_settings(&ChildEnv::none().of(&parent)), BTreeMap::new(), "the limits probe");
+        assert_eq!(go_settings(&crate::setup_token::child_env(&m.accounts.env(&claude)).of(&parent)), BTreeMap::new(), "setup-token");
+        assert_eq!(go_settings(&m.delegate_env(&claude, "task-1").of(&parent)), BTreeMap::new(), "a delegate driver");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_go_session_started_inside_a_go_session_gets_exactly_its_own_settings() {
+        let root = temp("go-inside-go");
+        write_go_account(&root);
+        let m = accounts_machine(&root);
+        let go = m.accounts.get("go").unwrap();
+        let tab = m.launch.child_env(&go, "tab-1", &m.launch_env(&go, vec![]));
+        let env = tab.of(&inside_a_go_session());
+        let expected = [
+            ("ANTHROPIC_BASE_URL", "https://opencode.ai/inference/go/anthropic"),
+            ("ANTHROPIC_AUTH_TOKEN", "oc_sk_test"),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL", "kimi-k3"),
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL", "minimax-m3"),
+            ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-5-5"),
+            ("ANTHROPIC_SMALL_FAST_MODEL", "claude-haiku-5-5"),
+        ];
+        assert_eq!(go_settings(&env), expected.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<BTreeMap<_, _>>());
+        assert!(env.contains(&("PINNED_OPENCODE_GO_KEY".into(), "oc_sk_test".into())));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn without_a_go_key_a_login_session_keeps_the_anthropic_settings_the_user_exported() {
+        // A proxy or model the user set in their own shell is theirs: only a Go key marks them as a Go session's.
+        let m = machine();
+        let parent: Vec<(String, String)> = crate::opencode_go::SESSION_ENV.iter().map(|name| (name.to_string(), format!("own-{name}"))).collect();
+        let claude = Account::builtin(Provider::Claude);
+        let tab = m.launch.child_env(&claude, "tab-1", &m.launch_env(&claude, vec![]));
+        assert_eq!(go_settings(&tab.of(&parent)), go_settings(&parent));
+        assert_eq!(go_settings(&ChildEnv::none().of(&parent)).get("ANTHROPIC_BASE_URL").map(String::as_str), Some("own-ANTHROPIC_BASE_URL"));
+    }
+
+    /// What a login account's tab starts with when the node started with `parent`.
+    fn login_tab_env(parent: &[(&str, &str)]) -> Vec<(String, String)> {
+        let m = machine();
+        let parent: Vec<(String, String)> = parent.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let claude = Account::builtin(Provider::Claude);
+        m.launch.child_env(&claude, "tab-1", &m.launch_env(&claude, vec![])).of(&parent)
+    }
+
+    #[test]
+    fn a_login_session_started_beside_the_go_gateway_without_its_key_gets_neither_the_gateway_nor_its_token() {
+        // A wrapper that unset every PINNED_ variable still leaves the Go gateway and its key.
+        let base = crate::opencode_go::BASE_URL;
+        assert_eq!(go_settings(&login_tab_env(&[("ANTHROPIC_BASE_URL", base), ("ANTHROPIC_AUTH_TOKEN", "x")])), BTreeMap::new());
+        assert_eq!(go_settings(&login_tab_env(&[("ANTHROPIC_BASE_URL", &format!("{base}/")), ("ANTHROPIC_AUTH_TOKEN", "x")])), BTreeMap::new());
+        let local = [("PINNED_OPENCODE_GO_BASE", "http://127.0.0.1:8798"), ("ANTHROPIC_BASE_URL", "http://127.0.0.1:8798/"), ("ANTHROPIC_AUTH_TOKEN", "x")];
+        assert_eq!(go_settings(&login_tab_env(&local)), BTreeMap::new(), "the gateway override");
+    }
+
+    #[test]
+    fn a_login_session_keeps_the_users_own_proxy_and_token() {
+        let own = [("ANTHROPIC_BASE_URL", "https://example.invalid/anthropic"), ("ANTHROPIC_AUTH_TOKEN", "own-token")];
+        assert_eq!(go_settings(&login_tab_env(&own)), own.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<BTreeMap<_, _>>());
+    }
+
+    #[test]
+    fn an_empty_go_key_leaves_a_login_session_the_users_own_anthropic_settings() {
+        let own: Vec<(String, String)> = crate::opencode_go::SESSION_ENV
+            .iter()
+            .map(|name| (name.to_string(), if *name == "ANTHROPIC_BASE_URL" { "https://example.invalid/anthropic".to_owned() } else { format!("own-{name}") }))
+            .collect();
+        let mut parent: Vec<(&str, &str)> = own.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        parent.push((crate::opencode_go::KEY_ENV, ""));
+        assert_eq!(go_settings(&login_tab_env(&parent)), go_settings(&own));
+    }
+
+    #[test]
+    fn plugin_sync_shares_the_home_the_built_in_account_runs_on() {
+        // Absolute on every platform: on Windows `Path::is_absolute` needs a drive.
+        let ana = || PathBuf::from(if cfg!(windows) { r"C:\Users\ana" } else { "/Users/ana" });
+        let homes = |env: &[(&str, &str)]| {
+            let env: Vec<(String, String)> = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            let accounts = Accounts::load(None, ana()).with_exported_homes(accounts::exported_homes(&env, None));
+            super::plugin_shares(&accounts, Path::new("/c"), false).into_iter().map(|share| (share.claude_home, share.dir)).collect::<Vec<_>>()
+        };
+        let share = |home: PathBuf| (home, Path::new("/c").join("synced-plugins"));
+        let claude_own = ana().join("claude-own").display().to_string();
+        assert_eq!(homes(&[("CLAUDE_CONFIG_DIR", claude_own.as_str())]), [share(ana().join("claude-own"))], "a kept exported home");
+        assert_eq!(homes(&[]), [share(ana().join(".claude"))], "no exported home");
     }
 
     /// Writes a Go account and its key without validation, so a launch test stays offline.
@@ -12575,6 +13275,60 @@ Have another model review a risky change before it goes ahead.";
         let captains = m.call(Call::OpenTasteChat { scope: TasteScope::Captains, path: None }).unwrap().as_str().unwrap().to_owned();
         assert_eq!(m.view(&captains).unwrap().cwd, m.scratch.display().to_string(), "a scope with no project opens without one");
         assert_eq!(m.call(Call::OpenTasteChat { scope: TasteScope::Captains, path: Some(dir.join("gone").display().to_string()) }), Err(format!("{} is not a folder on this machine", dir.join("gone").display())));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_taste_chat_never_changes_the_review_settings_only_the_user_does() {
+        let dir = temp("taste-chat-review");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (sock, config) = (dir.join("pinned.sock"), dir.join("config"));
+        let claude = recording_claude(&dir);
+        let events = Arc::new(Mutex::new(vec![]));
+        let seen = events.clone();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), sock: sock.clone(), ..launch() }, Some(config), None, move |e| {
+            seen.lock().unwrap().push(serde_json::to_value(e).unwrap())
+        });
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = m.open_project(project.clone()).display().to_string();
+
+        let site = TasteScope::Project { repo: "github.com/acme/site".into() };
+        let chat = m.call(Call::OpenTasteChat { scope: site, path: Some(path) }).unwrap().as_str().unwrap().to_owned();
+        m.start_claude(&chat, 80, 24).unwrap();
+        let tool = |tab: &str, tool: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{tab}","tool":{{{tool}}}}}"#));
+        let before = m.local_tastes();
+        let one = "review_diffs is changed only by the user, on the Way of working page; nothing changed";
+        let other = "second_opinion is changed only by the user, on the Way of working page; nothing changed";
+        let both = "review_diffs and second_opinion are changed only by the user, on the Way of working page; nothing changed";
+
+        assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"review_diffs":false}"#), Err(one.into()));
+        assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"second_opinion":true}"#), Err(other.into()));
+        assert_eq!(tool(&chat, r#""name":"taste_set","scope":"project:github.com/acme/site","patch":{"review_diffs":false}"#), Err(one.into()));
+        assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2,"review_diffs":false}"#), Err(one.into()), "the allowed field in the same patch waits too");
+        assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2,"review_diffs":false,"second_opinion":true}"#), Err(both.into()));
+        assert_eq!(tool(&chat, r#""name":"taste_reset","scope":"captains","field":"review_diffs""#), Err(one.into()));
+        assert_eq!(tool(&chat, r#""name":"taste_reset","scope":"project:github.com/acme/site","field":"second_opinion""#), Err(other.into()));
+        assert_eq!(m.local_tastes(), before, "a refused call changed the way of working");
+        assert_eq!(events.lock().unwrap().iter().filter(|e| e["kind"] == "tastes-changed").count(), 0, "a refused call emitted a change");
+
+        let got: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_get","scope":"captains""#).unwrap()).unwrap();
+        assert_eq!((&got["effective"]["review_diffs"], &got["effective"]["second_opinion"]), (&json!(true), &json!(false)), "taste_get still shows both");
+        let set: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2}"#).unwrap()).unwrap();
+        assert_eq!(set["effective"]["parallel"], json!(2), "a field the agent may change still changes");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_way_of_working_page_still_changes_both_review_settings() {
+        let dir = temp("taste-page-review");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let site = TasteScope::Project { repo: "github.com/acme/site".into() };
+        let set = m.set_local_taste(&site, TastePatch { review_diffs: Some(false), second_opinion: Some(true), ..TastePatch::default() }).unwrap();
+        assert_eq!((set.resolve(&site).review_diffs, set.resolve(&site).second_opinion), (false, true));
+        let reset = m.reset_local_taste_field(&site, TasteField::ReviewDiffs).unwrap();
+        assert_eq!((reset.resolve(&site).review_diffs, reset.resolve(&site).second_opinion), (true, true), "a reset inherits the Captains' review setting");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -17188,5 +17942,218 @@ Have another model review a risky change before it goes ahead.";
     #[test]
     fn an_accounts_status_asked_in_a_real_home_stops_the_test_process() {
         assert_refused_in_a_real_home("accounts::tests::status_is_what_each_cli_reports_for_the_accounts_home");
+    }
+
+    /// A machine on its socket with a Captain of Claude session `cap-1` and a plain thread of
+    /// session `plain-1`, both in project `app` and saved to sessions.json.
+    #[cfg(unix)]
+    fn captain_and_thread(dir: &Path) -> (Arc<Machine>, PathBuf, PathBuf, String, String) {
+        let sock = dir.join("pinned.sock");
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(Launch { sock: sock.clone(), bins: BTreeMap::from([(Provider::Claude, thread_claude(dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = m.open_project(project.clone()).display().to_string();
+        let captain = m.open_orchestrator(&path).unwrap();
+        let thread = m.open_tab(Some(path), false).unwrap();
+        m.tab(&captain, |t| t.claude_session = Some("cap-1".into())).unwrap();
+        m.tab(&thread, |t| t.claude_session = Some("plain-1".into())).unwrap();
+        m.save_sessions();
+        (m, sock, project, captain, thread)
+    }
+
+    /// The plan glances `m` shows on `tab`, as a client reads them.
+    fn glances_on(m: &Machine, tab: &str) -> Value {
+        serde_json::to_value(&m.tabs().into_iter().find(|t| t.id == tab).unwrap().plans).unwrap()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_captains_plans_show_on_its_tab_come_back_with_its_resumed_session_and_go_with_it() {
+        let dir = temp("plans-kept");
+        let (m, sock, _project, captain, thread) = captain_and_thread(&dir);
+        // The Captain writes the way its MCP tools do: over the socket, as its tab.
+        let ask_as = |tab: &str, tool: Value| ask(&sock, &json!({ "kind": "project", "tab": tab, "tool": tool }).to_string());
+        let ship = json!({ "name": "plan_set", "title": "Ship the form", "lists": [{ "name": "Build", "steps": [{ "name": "Write" }, { "name": "Test" }] }, { "name": "Docs", "steps": [{ "name": "Guide" }] }] });
+        assert_eq!(ask_as(&captain, ship), Ok("p1 rev 1: Ship the form\nl1 Build: s1 pending, s2 pending\nl2 Docs: s3 pending".into()));
+        assert_eq!(ask_as(&captain, json!({ "name": "plan_step", "step": "s1", "state": "done" })), Ok("p1 rev 2: Ship the form\nl1 Build: s1 done, s2 pending\nl2 Docs: s3 pending".into()));
+        assert_eq!(ask_as(&captain, json!({ "name": "plan_step", "step": "s2", "state": "running" })), Ok("p1 rev 3: Ship the form\nl1 Build: s1 done, s2 running\nl2 Docs: s3 pending".into()));
+        let login = json!({ "name": "plan_set", "new": true, "title": "Fix login", "lists": [{ "name": "Fix", "steps": [{ "name": "Find" }] }] });
+        assert_eq!(ask_as(&captain, login), Ok("p2 rev 1: Fix login\nl3 Fix: s4 pending".into()));
+        let glances = json!([
+            { "id": "p1", "title": "Ship the form", "state": "working", "done": 1, "total": 3, "now": "Test", "strips": ["dr", "p"] },
+            { "id": "p2", "title": "Fix login", "state": "idle", "done": 0, "total": 1, "strips": ["p"] },
+        ]);
+        assert_eq!(glances_on(&m, &captain), glances);
+        assert_eq!(glances_on(&m, &thread), json!([]), "a plain thread shows no plan");
+
+        let ids = |answer: Value| answer.as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(ids(m.call(Call::Plan { tab: captain.clone(), plan: None }).unwrap()), ["p1", "p2"]);
+        let login = m.call(Call::Plan { tab: captain.clone(), plan: Some("p2".into()) }).unwrap();
+        assert_eq!(ids(login.clone()), ["p2"]);
+        assert_eq!(login[0]["lists"][0]["steps"][0], json!({ "id": "s4", "name": "Find", "what": "", "state": "pending", "why": null, "cost": null, "task": null, "fixes": [] }));
+        assert_eq!(m.call(Call::Plan { tab: captain.clone(), plan: Some("p9".into()) }), Ok(json!([])), "a plan the Captain no longer keeps reads as none");
+        assert_eq!(m.call(Call::Plan { tab: thread.clone(), plan: None }), Ok(json!([])), "a plain thread keeps no plan");
+
+        // A session that no tab holds after the restart is gone, and so are its plans.
+        let orphan = crate::plan::SetCall { title: Some("Old".into()), lists: vec![crate::plan::ListInput { id: None, name: "Old".into(), steps: vec![crate::plan::StepInput { id: None, name: "Gone".into(), what: None }] }], ..Default::default() };
+        m.plans.lock().unwrap().write("gone-1", |plans| crate::plan::set(plans, orphan, 1, &[], 1)).unwrap();
+        let saved = || std::fs::read_to_string(dir.join("config/plans.json")).unwrap();
+        assert!(saved().contains("gone-1"), "{}", saved());
+        m.quit();
+
+        let again = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, dir.join("claude"))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        again.restore_tabs();
+        let resumed = again.tabs().into_iter().find(|t| t.session.as_deref() == Some("cap-1")).unwrap().id;
+        assert_eq!(glances_on(&again, &resumed), glances, "the resumed Captain has its plans back");
+        assert_eq!(ids(again.call(Call::Plan { tab: resumed.clone(), plan: None }).unwrap()), ["p1", "p2"]);
+        assert!(again.plans.lock().unwrap().get("gone-1").is_none());
+        assert!(saved().contains("cap-1") && !saved().contains("gone-1"), "{}", saved());
+
+        again.close_tab(&resumed);
+        assert!(again.plans.lock().unwrap().get("cap-1").is_none(), "the Captain's session went with its tab");
+        assert!(!saved().contains("cap-1"), "{}", saved());
+        again.quit();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_plan_tool_forged_by_a_tab_that_is_not_a_captain_is_refused_and_stores_nothing() {
+        let dir = temp("plans-forged");
+        let (m, sock, project, captain, thread) = captain_and_thread(&dir);
+        let tools = [
+            json!({ "name": "plan_set", "title": "Not mine", "lists": [{ "name": "Build", "steps": [{ "name": "Write" }] }] }),
+            json!({ "name": "plan_step", "step": "s1", "state": "done" }),
+            json!({ "name": "plan_fix", "step": "s1", "steps": [{ "name": "Again" }] }),
+            json!({ "name": "plan_close", "plan": "p1", "reason": "Not mine." }),
+        ];
+        let refused = Err("only a project's Captain keeps a plan".to_owned());
+        for tool in &tools {
+            assert_eq!(ask(&sock, &json!({ "kind": "project", "tab": thread, "tool": tool }).to_string()), refused, "a plain thread: {tool}");
+        }
+        m.tab(&thread, |t| t.env = role_env(Role::Worker, &project)).unwrap();
+        for tool in &tools {
+            assert_eq!(ask(&sock, &json!({ "kind": "project", "tab": thread, "tool": tool }).to_string()), refused, "a worker: {tool}");
+        }
+        assert!(m.plans.lock().unwrap().get("plain-1").is_none());
+        assert!(!dir.join("config/plans.json").exists(), "nothing was written");
+        assert!(m.tabs().iter().all(|t| t.plans.is_empty()));
+        assert_eq!(ask(&sock, &json!({ "kind": "project", "tab": captain, "tool": tools[0] }).to_string()), Ok("p1 rev 1: Not mine\nl1 Build: s1 pending".into()), "the Captain itself may");
+        m.quit();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The Claude session of `tab`, which keeps its plans by it.
+    fn session_of(m: &Machine, tab: &str) -> String {
+        m.tab(tab, |t| t.claude_session.clone()).unwrap().expect("the tab holds a session")
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_captain_keeps_its_plans_when_clear_rewind_or_a_fresh_start_give_it_a_new_session() {
+        let dir = temp("plans-swap");
+        let (m, sock, project, captain, _thread) = captain_and_thread(&dir);
+        let ask_as = |tool: Value| ask(&sock, &json!({ "kind": "project", "tab": captain, "tool": tool }).to_string());
+        let ship = json!({ "name": "plan_set", "title": "Ship the form", "lists": [{ "name": "Build", "steps": [{ "name": "Write" }, { "name": "Test" }] }] });
+        assert_eq!(ask_as(ship), Ok("p1 rev 1: Ship the form\nl1 Build: s1 pending, s2 pending".into()));
+        let saved = || std::fs::read_to_string(dir.join("config/plans.json")).unwrap();
+        let kept_only = |session: &str, gone: &str| {
+            assert_eq!(glances_on(&m, &captain)[0]["title"], "Ship the form", "the glance still shows the plan on {session}");
+            let plans = m.plans.lock().unwrap();
+            assert!(plans.get(session).is_some() && plans.get(gone).is_none());
+            assert!(saved().contains(session) && !saved().contains(gone), "{}", saved());
+        };
+
+        // /clear and /resume: the hook reports another session.
+        m.record_session(&captain, "cap-2".into(), None);
+        kept_only("cap-2", "cap-1");
+        assert_eq!(ask_as(json!({ "name": "plan_step", "step": "s1", "state": "done" })), Ok("p1 rev 2: Ship the form\nl1 Build: s1 done, s2 pending".into()));
+
+        // A rewind resumes a copy of the conversation under a new id.
+        let account = m.tab(&captain, |t| t.account.clone()).unwrap();
+        let projects = m.accounts.home(&account).join("projects").join("app");
+        std::fs::create_dir_all(&projects).unwrap();
+        let line = |kind: &str, uuid: &str, minute: u8| json!({ "type": kind, "uuid": uuid, "sessionId": "cap-2", "timestamp": format!("2026-11-09T10:0{minute}:00Z"), "message": { "role": kind, "content": "hi" } }).to_string();
+        std::fs::write(projects.join("cap-2.jsonl"), [line("user", "u1", 0), line("assistant", "a1", 1), line("user", "u2", 2), line("assistant", "a2", 3)].join("\n") + "\n").unwrap();
+        m.rewind(&captain, "u2", false, 80, 24).unwrap();
+        let rewound = session_of(&m, &captain);
+        assert_ne!(rewound, "cap-2");
+        kept_only(&rewound, "cap-2");
+
+        // A fresh start drops the session id until the hook reports the new one.
+        m.relaunch(&captain, 80, 24).unwrap();
+        assert_eq!(m.tab(&captain, |t| t.claude_session.clone()).unwrap(), None);
+        m.record_session(&captain, "cap-3".into(), Some(&project.display().to_string()));
+        kept_only("cap-3", &rewound);
+        assert_eq!(ask_as(json!({ "name": "plan_step", "step": "s2", "state": "done" })), Ok("p1 rev 3: Ship the form\nl1 Build: s1 done, s2 done".into()));
+        m.quit();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_captain_that_resumes_a_session_another_tab_holds_writes_no_plan_until_one_closes() {
+        let dir = temp("plans-held");
+        let (m, sock, project, holder, other) = captain_and_thread(&dir);
+        let path = m.tab(&holder, |t| t.cwd.display().to_string()).unwrap();
+        let third = m.open_tab(Some(path), false).unwrap();
+        for tab in [&other, &third] {
+            m.tab(tab, |t| t.env = role_env(Role::Orchestrator, &project)).unwrap();
+        }
+        m.tab(&other, |t| t.claude_session = Some("cap-b".into())).unwrap();
+        m.tab(&third, |t| t.claude_session = Some("cap-c".into())).unwrap();
+        let ask_as = |tab: &str, tool: Value| ask(&sock, &json!({ "kind": "project", "tab": tab, "tool": tool }).to_string());
+        let plan = |title: &str| json!({ "name": "plan_set", "new": true, "title": title, "lists": [{ "name": "Build", "steps": [{ "name": "Write" }] }] });
+        let titles = |tab: &str| m.call(Call::Plan { tab: tab.to_owned(), plan: None }).unwrap().as_array().unwrap().iter().map(|p| p["title"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let held = Err("another open tab holds this session; close one to keep its plans".to_owned());
+        let saved = || std::fs::read_to_string(dir.join("config/plans.json")).unwrap();
+
+        // The resumed session has no plan yet, so the tab that resumed it brings its own.
+        assert!(ask_as(&other, plan("Fix login")).is_ok());
+        m.record_session(&other, "cap-1".into(), None);
+        assert_eq!(titles(&holder), ["Fix login"]);
+        assert_eq!(titles(&other), ["Fix login"], "reads still answer");
+        assert!(!saved().contains("cap-b"), "{}", saved());
+        for tab in [&holder, &other] {
+            assert_eq!(ask_as(tab, plan("Mine")), held);
+            assert_eq!(ask_as(tab, json!({ "name": "plan_step", "step": "s1", "state": "done" })), held);
+        }
+        assert_eq!(titles(&holder), ["Fix login"]);
+
+        // The resumed session has plans, so the tab that resumed it takes none over and adds none.
+        assert!(ask_as(&third, plan("Ship the form")).is_ok());
+        m.record_session(&third, "cap-1".into(), None);
+        assert_eq!(titles(&holder), ["Fix login"], "the holder lost no plan");
+        assert_eq!(titles(&third), ["Fix login"]);
+        assert!(m.plans.lock().unwrap().get("cap-c").is_none());
+        assert!(!saved().contains("cap-c") && !saved().contains("Ship the form"), "{}", saved());
+        assert_eq!(ask_as(&third, plan("Mine")), held);
+
+        m.close_tab(&other);
+        assert_eq!(ask_as(&holder, plan("Mine")), held, "a third tab still holds it");
+        m.close_tab(&third);
+        assert_eq!(titles(&holder), ["Fix login"], "closing a tab that shares the session keeps its plans");
+        assert_eq!(ask_as(&holder, json!({ "name": "plan_step", "step": "s1", "state": "done" })), Ok("p1 rev 2: Fix login\nl1 Build: s1 done".into()));
+        m.quit();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_step_reported_as_it_stands_saves_nothing() {
+        let dir = temp("plans-same");
+        let (m, sock, _project, captain, _thread) = captain_and_thread(&dir);
+        let ask_as = |tool: Value| ask(&sock, &json!({ "kind": "project", "tab": captain, "tool": tool }).to_string());
+        assert!(ask_as(json!({ "name": "plan_set", "title": "Ship the form", "lists": [{ "name": "Build", "steps": [{ "name": "Write" }] }] })).is_ok());
+        assert_eq!(ask_as(json!({ "name": "plan_step", "step": "s1", "state": "running" })), Ok("p1 rev 2: Ship the form\nl1 Build: s1 running".into()));
+        let file = dir.join("config/plans.json");
+        let saved = || (std::fs::read(&file).unwrap(), std::fs::metadata(&file).unwrap().modified().unwrap(), std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&file).unwrap()));
+        let before = saved();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(ask_as(json!({ "name": "plan_step", "step": "s1", "state": "running" })), Ok("p1 rev 2: Ship the form\nl1 Build: s1 running".into()));
+        assert_eq!(saved(), before, "the file was not written again");
+        m.quit();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

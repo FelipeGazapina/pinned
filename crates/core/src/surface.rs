@@ -179,6 +179,7 @@ pub const ACTIONS: &[Action] = &[
     n("switch_account", Write, "Moves a session's conversation to another agent account signed in on the machine and resumes it there.").wired(),
     n("repo_look", Excluded, "the global orchestrator's repo_overview, repo_read and repo_search, which the hub sends after its permission and rate checks").named("node_repo_look"),
     n("thread", Read, "A session's conversation items from byte from of its transcript (0: the start) and the offset to read next. node_read_session reads its end.").wired(),
+    n("plan", Read, "A Captain session's plans with their lists and steps, or the one plan given by plan. A session that is not a Captain keeps none.").wired(),
     n("prompt", Write, "Types text into another running session as one prompt and submits it. A Captain takes enqueue instead, and the global orchestrator takes tell_orchestrator.").wired(),
     n("workspace", Excluded, GIT),
     n("pull_request", Excluded, GIT),
@@ -835,9 +836,11 @@ pub fn notice_text(confirmation: &Confirmation, result: &Value) -> String {
     let action = &confirmation.action;
     let id = &confirmation.id;
     match confirmation.decision {
-        // What the hub kept of a denied request, in its own words, says what became of it.
-        Some(Decision::Denied) => match result {
-            Value::String(kept) => format!("[pinned] The user denied your {action} request ({id}). {kept}"),
+        Some(Decision::Denied) => match (confirmation.outcome.as_deref(), result) {
+            // Closed with no answer from the user, as an extend whose box ended: the hub's own words say why.
+            (Some(outcome), _) if outcome != "denied" => format!("[pinned] Your {action} request ({id}) was closed: {}. It did not run.", crate::pinned_lines::flat(outcome, crate::pinned_lines::FIELD_CHARS)),
+            // What the hub kept of a denied request, in its own words, says what became of it.
+            (_, Value::String(kept)) => format!("[pinned] The user denied your {action} request ({id}). {kept}"),
             _ => format!("[pinned] The user denied your {action} request ({id}). It did not run."),
         },
         _ => {
@@ -1626,5 +1629,13 @@ mod tests {
         assert_eq!(notice_text(&confirmation, &Value::Null), "[pinned] The user approved your remove_machine request (c1): done.");
         let denied = Confirmation { decision: Some(Decision::Denied), outcome: None, ..confirmation };
         assert_eq!(notice_text(&denied, &Value::Null), "[pinned] The user denied your remove_machine request (c1). It did not run.");
+    }
+
+    #[test]
+    fn a_request_closed_without_the_users_answer_says_why_in_its_notice() {
+        let closed = Confirmation { id: "c1".into(), at: 1, machine: "m1".into(), machine_name: "MacBook".into(), tab: "tab-1".into(), title: "Clean up".into(), role: ActorRole::Worker, action: "extend_box".into(), about: String::new(), args: json!({}), target: None, request_id: None, decision: Some(Decision::Denied), decided_at: Some(2), outcome: Some("the box ended before the owner answered".into()) };
+        assert_eq!(notice_text(&closed, &Value::Null), "[pinned] Your extend_box request (c1) was closed: the box ended before the owner answered. It did not run.");
+        let denied = Confirmation { outcome: Some("denied".into()), ..closed };
+        assert_eq!(notice_text(&denied, &Value::Null), "[pinned] The user denied your extend_box request (c1). It did not run.");
     }
 }
