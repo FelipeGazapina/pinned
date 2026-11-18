@@ -616,6 +616,8 @@ mod tests {
     /// One test, because the commands read the session's environment, which is process-wide.
     #[test]
     fn connector_commands_reach_the_harness_and_return_its_answer() {
+        // The guard reads the environment once; this test sets a session's socket in it for good.
+        crate::machine::refuse_real_home();
         let sock = std::env::temp_dir().join(format!("pinned-test-{}.sock", std::process::id()));
         listen(sock.clone(), |message| match message {
             Message::Stage { connector, subject: Subject::LinearIssue { issue }, stage: Stage::Coding } => Ok(format!("{connector} moved {issue}")),

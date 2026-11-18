@@ -1165,6 +1165,9 @@ impl Machine {
     /// A machine that keeps its sessions, projects and history in `dir`, or nothing without one,
     /// and opens new tabs on `open`, else the most recent project. Everything it reports goes to `events`.
     pub fn new(launch: Launch, dir: Option<PathBuf>, open: Option<PathBuf>, events: impl Fn(Event) + Send + Sync + 'static) -> Arc<Machine> {
+        // A machine's built-in Claude account is the home's Claude folder: this crate's tests stop here in a real home.
+        #[cfg(test)]
+        refuse_real_home();
         let projects_file = dir.as_ref().map(|d| d.join("projects.json"));
         let mut projects = dir
             .as_ref()
@@ -7209,6 +7212,141 @@ fn test_binary() -> bool {
 
 pub(crate) fn home() -> PathBuf {
     PathBuf::from(std::env::var_os(HOME_ENV).unwrap_or_default())
+}
+
+/// The variables a real Claude or pinned session, or a person's shell, sets. A test process that
+/// has one of them carries that session's login, key or socket.
+pub const REAL_HOME_VARIABLES: [&str; 11] = [
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CODEX_HOME",
+    crate::opencode_go::KEY_ENV,
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    SOCK_ENV,
+    TAB_ENV,
+    TASK_ENV,
+];
+
+/// The desktop app's bundle identifier: the name of its folder in the config and data dirs.
+const APP_ID: &str = "dev.personal-harness.pinned";
+
+/// The mark of a test process whose home is unset or empty.
+#[cfg(unix)]
+const NO_HOME: &str = "HOME is empty or unset";
+#[cfg(windows)]
+const NO_HOME: &str = "USERPROFILE is empty or unset";
+
+/// What a process a test starts must not inherit: every variable `INHERITED_SESSION_ENV` names, and
+/// the logins of `REAL_HOME_VARIABLES`. The logins are not in that list, because a box's sessions
+/// keep its Claude and GitHub logins, so only a test's node drops them.
+pub fn session_variables() -> impl Iterator<Item = &'static str> {
+    INHERITED_SESSION_ENV.into_iter().chain(REAL_HOME_VARIABLES)
+}
+
+/// What marks `home` and the environment as a person's real Claude or pinned home, by name only: a
+/// kind of file, or a variable's name, never a value or a path. `exists` probes a path without
+/// opening it; `is_set` tells whether a variable is set, to any value.
+pub fn real_home_marks(home: Option<&Path>, xdg_config: Option<&Path>, exists: impl Fn(&Path) -> bool, is_set: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    let mut marks = Vec::new();
+    // Without a home, `claude` and `codex` use the one in the system's user record, and an empty
+    // one would probe the working directory: nothing under it is probed.
+    match home.filter(|home| !home.as_os_str().is_empty()) {
+        None => marks.push(NO_HOME),
+        Some(home) => {
+            // An empty XDG_CONFIG_HOME reads as unset, which `<home>/.config` already covers.
+            let xdg = xdg_config.filter(|dir| !dir.as_os_str().is_empty());
+            let in_home = |file: &str| exists(&home.join(file));
+            // In `<home>/.config`, and in XDG_CONFIG_HOME when it is set elsewhere.
+            let in_config = |file: &str| in_home(&format!(".config/{file}")) || xdg.is_some_and(|dir| exists(&dir.join(file)));
+            if in_home(".claude.json") {
+                marks.push("a Claude config file in HOME");
+            }
+            if in_home(".claude") {
+                marks.push("a Claude folder in HOME");
+            }
+            if in_config("pinned/account.json") || in_home(".pinned/account.json") {
+                marks.push("a pinned account file in HOME");
+            }
+            if in_config("pinned/accounts") {
+                marks.push("a pinned accounts folder in HOME");
+            }
+            if in_config(APP_ID) || in_home(&format!("Library/Application Support/{APP_ID}")) || in_home(&format!("AppData/Roaming/{APP_ID}")) {
+                marks.push("a pinned app folder in HOME");
+            }
+            if in_config("gh/hosts.yml") || in_home("AppData/Roaming/GitHub CLI/hosts.yml") {
+                marks.push("a GitHub CLI login file in HOME");
+            }
+        }
+    }
+    marks.extend(REAL_HOME_VARIABLES.into_iter().filter(|name| is_set(name)));
+    marks
+}
+
+/// Stops a test process, once, before it reads or writes a real Claude or pinned home: one line to
+/// stderr naming what it found, then exit code 2.
+pub fn refuse_real_home() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let home = std::env::var_os(HOME_ENV).map(PathBuf::from);
+        let xdg_config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+        let marks = real_home_marks(home.as_deref(), xdg_config.as_deref(), |path| std::fs::symlink_metadata(path).is_ok(), |name| std::env::var_os(name).is_some());
+        if let Some(line) = refusal(&marks) {
+            // Straight to stderr: a test's captured output is lost when the process exits.
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "{line}");
+            std::process::exit(2);
+        }
+    });
+}
+
+/// Runs the test `name` of this test binary in a home that looks like a person's real one, built
+/// under the temp dir: a Claude config file and a Claude folder, no session's variable and no CLI on
+/// the PATH. Panics unless the guard stopped it with exit code 2 and its one line, before any test
+/// ended. The guard's wiring tests run a real test through each place that calls it.
+#[doc(hidden)]
+pub fn assert_refused_in_a_real_home(name: &str) {
+    let home = std::env::temp_dir().join(format!("pinned-real-home-{}-{}", name.replace("::", "-"), std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::create_dir_all(home.join("bin")).unwrap();
+    std::fs::write(home.join(".claude.json"), "{}").unwrap();
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.args(["--exact", name]).env(HOME_ENV, &home).env("PATH", home.join("bin")).env_remove("XDG_CONFIG_HOME");
+    for variable in REAL_HOME_VARIABLES {
+        command.env_remove(variable);
+    }
+    let (out, err) = (home.with_extension("stdout"), home.with_extension("stderr"));
+    command.stdout(std::fs::File::create(&out).unwrap()).stderr(std::fs::File::create(&err).unwrap());
+    // A test the guard misses runs in full, or hangs: it is stopped after a minute.
+    let mut child = command.spawn().unwrap();
+    let started = Instant::now();
+    let code = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status.code();
+        }
+        if started.elapsed() > Duration::from_secs(60) {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let (stdout, stderr) = (std::fs::read_to_string(&out).unwrap_or_default(), std::fs::read_to_string(&err).unwrap_or_default());
+    for path in [&out, &err] {
+        let _ = std::fs::remove_file(path);
+    }
+    let _ = std::fs::remove_dir_all(&home);
+    assert_eq!(code, Some(2), "{name} was not stopped in a real home\n{stdout}\n{stderr}");
+    assert_eq!(stderr.lines().collect::<Vec<_>>(), [refusal(&["a Claude config file in HOME", "a Claude folder in HOME"]).unwrap()], "{name}");
+    assert!(!stdout.contains("test result"), "{name} ended before the guard stopped it: {stdout}");
+}
+
+/// The one line a refused test process prints: the marks it found, by name.
+fn refusal(marks: &[&str]) -> Option<String> {
+    (!marks.is_empty()).then(|| format!("pinned tests refuse to run in a real home: found {}; run them with a temporary HOME and without these variables", marks.join(", ")))
 }
 
 /// One share per Claude home of `accounts`, pulled into `config`: the built-in account's is the
@@ -17709,6 +17847,163 @@ Have another model review a risky change before it goes ahead.";
             )
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A home that looks like a real one, built under the temp dir and never in the process's HOME.
+    fn fake_home(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pinned-fake-home-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn exists(path: &Path) -> bool {
+        std::fs::symlink_metadata(path).is_ok()
+    }
+
+    #[test]
+    fn a_home_with_claudes_files_is_refused_by_their_kind() {
+        let home = fake_home("claude");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(home.join(".claude.json"), "{}").unwrap();
+        let marks = real_home_marks(Some(&home), None, exists, |_| false);
+        assert_eq!(marks, ["a Claude config file in HOME", "a Claude folder in HOME"]);
+        let line = refusal(&marks).unwrap();
+        assert!(!line.contains(home.to_str().unwrap()), "the line names kinds, not the home: {line}");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_temp_home_with_nothing_in_it_is_not_refused() {
+        let home = fake_home("empty");
+        assert_eq!(real_home_marks(Some(&home), Some(&home.join("xdg")), exists, |_| false), Vec::<&str>::new());
+        assert_eq!(refusal(&[]), None);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// `claude` and `codex` then use the home in the system's user record: the real one.
+    #[test]
+    fn an_unset_home_is_refused_by_its_own_name() {
+        assert_eq!(real_home_marks(None, None, exists, |_| false), [NO_HOME]);
+        assert_eq!(real_home_marks(None, None, exists, |name| name == "GH_TOKEN"), [NO_HOME, "GH_TOKEN"]);
+    }
+
+    #[test]
+    fn an_empty_home_is_refused_by_its_own_name() {
+        assert_eq!(real_home_marks(Some(Path::new("")), None, exists, |_| false), [NO_HOME]);
+    }
+
+    /// The node's config dir and `dirs` read an empty XDG_CONFIG_HOME as unset: `~/.config`.
+    #[test]
+    fn an_empty_xdg_config_home_counts_as_the_homes_config_folder() {
+        let home = fake_home("empty-xdg");
+        std::fs::create_dir_all(home.join(".config/pinned")).unwrap();
+        std::fs::write(home.join(".config/pinned/account.json"), "{}").unwrap();
+        assert_eq!(real_home_marks(Some(&home), Some(Path::new("")), exists, |_| false), ["a pinned account file in HOME"]);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_pinned_account_file_is_refused_wherever_pinned_keeps_one() {
+        for (place, xdg) in [(".config/pinned", false), (".pinned", false), ("xdg/pinned", true)] {
+            let home = fake_home("account");
+            std::fs::create_dir_all(home.join(place)).unwrap();
+            std::fs::write(home.join(place).join("account.json"), "{}").unwrap();
+            let xdg = xdg.then(|| home.join("xdg"));
+            assert_eq!(real_home_marks(Some(&home), xdg.as_deref(), exists, |_| false), ["a pinned account file in HOME"], "{place}");
+            let _ = std::fs::remove_dir_all(home);
+        }
+    }
+
+    /// One folder, file or variable of each kind, in a home that has nothing else, gives that kind.
+    fn one_mark(name: &str, places: &[&str], xdg: bool) -> Vec<Vec<&'static str>> {
+        places
+            .iter()
+            .map(|place| {
+                let home = fake_home(name);
+                let path = home.join(place);
+                if place.ends_with(".yml") {
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(&path, "{}").unwrap();
+                } else {
+                    std::fs::create_dir_all(&path).unwrap();
+                }
+                let xdg = xdg.then(|| home.join("xdg"));
+                let marks = real_home_marks(Some(&home), xdg.as_deref(), exists, |_| false);
+                let _ = std::fs::remove_dir_all(home);
+                marks
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_desktop_apps_folder_and_an_accounts_folder_are_refused_wherever_pinned_keeps_them() {
+        let app = ".config/dev.personal-harness.pinned";
+        let apps = ["xdg/dev.personal-harness.pinned", "Library/Application Support/dev.personal-harness.pinned", "AppData/Roaming/dev.personal-harness.pinned"];
+        assert_eq!(one_mark("app", &[app], false), [["a pinned app folder in HOME"]]);
+        assert_eq!(one_mark("app", &apps, true), [["a pinned app folder in HOME"]; 3]);
+        assert_eq!(one_mark("added", &[".config/pinned/accounts", "xdg/pinned/accounts"], true), [["a pinned accounts folder in HOME"]; 2]);
+    }
+
+    #[test]
+    fn a_github_cli_login_file_is_refused_wherever_gh_keeps_one() {
+        let places = [".config/gh/hosts.yml", "xdg/gh/hosts.yml", "AppData/Roaming/GitHub CLI/hosts.yml"];
+        assert_eq!(one_mark("gh", &places, true), [["a GitHub CLI login file in HOME"]; 3]);
+    }
+
+    #[test]
+    fn each_sessions_variable_is_refused_by_its_name_and_never_its_value() {
+        let home = fake_home("variables");
+        let names = [
+            "CLAUDE_CONFIG_DIR",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CODEX_HOME",
+            "PINNED_OPENCODE_GO_KEY",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "PINNED_SOCK",
+            "PINNED_TAB",
+            "PINNED_TASK",
+        ];
+        for name in names {
+            let env = HashMap::from([(name, "fake-value-xyz")]);
+            let marks = real_home_marks(Some(&home), None, exists, |set| env.contains_key(set));
+            assert_eq!(marks, [name]);
+            let line = refusal(&marks).unwrap();
+            assert!(line.contains(name), "{line}");
+            for part in ["fake-value-xyz", "fake", "value", "xyz"] {
+                assert!(!line.contains(part), "the line shows part of the value: {line}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_config_and_a_dangling_claude_folder_are_refused_without_reading_them() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = fake_home("unreadable");
+        std::fs::write(home.join(".claude.json"), "{}").unwrap();
+        std::fs::set_permissions(home.join(".claude.json"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::os::unix::fs::symlink(home.join("gone"), home.join(".claude")).unwrap();
+        assert_eq!(real_home_marks(Some(&home), None, exists, |_| false), ["a Claude config file in HOME", "a Claude folder in HOME"]);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// A machine's built-in Claude account is the real Claude folder, and its CLIs come from the
+    /// PATH: this crate's tests stop at the first machine they build in a real home.
+    #[cfg(unix)]
+    #[test]
+    fn a_machine_built_in_a_real_home_stops_the_test_process() {
+        assert_refused_in_a_real_home("machine::tests::open_tab_rejects_a_path_that_is_not_a_folder");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_accounts_status_asked_in_a_real_home_stops_the_test_process() {
+        assert_refused_in_a_real_home("accounts::tests::status_is_what_each_cli_reports_for_the_accounts_home");
     }
 
     #[test]

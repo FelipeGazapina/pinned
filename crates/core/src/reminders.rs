@@ -1160,6 +1160,8 @@ mod tests {
     fn a_wait_returns_the_summary_while_a_second_call_answers_and_progress_is_sent() {
         use std::os::unix::net::UnixListener;
         use std::sync::{Arc, Mutex};
+        // The guard reads the environment once; this test sets a session's variables in it.
+        crate::machine::refuse_real_home();
         let _guard = session_env_lock();
         let dir = std::env::temp_dir().join(format!("pinned-mcp-wait-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1429,6 +1431,8 @@ fn restore_var(name: &str, value: Option<String>) {
 
     #[cfg(unix)]
     fn offered(role: Option<&str>, task: Option<&str>) -> Vec<String> {
+        // The guard reads the environment once; this test sets a session's variables in it.
+        crate::machine::refuse_real_home();
         let _guard = session_env_lock();
         let previous = (std::env::var(ROLE_ENV).ok(), std::env::var(TASK_ENV).ok(), std::env::var(TAB_ENV).ok());
         std::env::remove_var(TAB_ENV);
@@ -1457,6 +1461,8 @@ fn restore_var(name: &str, value: Option<String>) {
     #[cfg(unix)]
     fn over_socket(task: Option<&str>, requests: &[Value], answers: Vec<Result<String, String>>) -> (Vec<Value>, Vec<String>) {
         use std::io::{BufRead, Write};
+        // The guard reads the environment once; this test sets a session's variables in it.
+        crate::machine::refuse_real_home();
         let _guard = session_env_lock();
         let dir = std::env::temp_dir().join(format!("pinned-mcp-convex-{}-{}", std::process::id(), task.unwrap_or("none")));
         let _ = std::fs::remove_dir_all(&dir);
