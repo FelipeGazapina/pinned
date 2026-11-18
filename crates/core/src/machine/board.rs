@@ -420,9 +420,19 @@ mod tests {
     fn a_note_without_a_file_cite_is_refused() {
         let t = team("cite");
         let outside = t.dir.join("config").display().to_string();
-        for file in ["", "   ", "src/missing.rs", "../app/src/login.rs", "/etc/passwd", outside.as_str(), "src"] {
-            let answer = note(&t.m, &t.worker, file, "the token check moved");
-            assert!(answer.as_ref().is_err_and(|e| e.contains("file")), "{file:?}: {answer:?}");
+        let cases = [
+            ("", "it cites none".to_owned()),
+            ("   ", "it cites none".to_owned()),
+            (":12", "it cites none".to_owned()),
+            ("src/missing.rs", "src/missing.rs is not a file there".to_owned()),
+            ("src/missing.rs:3", "src/missing.rs is not a file there".to_owned()),
+            ("../app/src/login.rs", "../app/src/login.rs is not a path inside it".to_owned()),
+            ("/etc/passwd", "/etc/passwd is not a path inside it".to_owned()),
+            (outside.as_str(), format!("{outside} is not a path inside it")),
+            ("src", "src is not a file there".to_owned()),
+        ];
+        for (file, why) in cases {
+            assert_eq!(note(&t.m, &t.worker, file, "the token check moved"), cite_refused(&why), "{file:?}");
         }
         assert_eq!(t.m.board(&t.captain, Some(&t.root)).unwrap().notes, vec![], "nothing was noted");
         assert!(note(&t.m, &t.worker, "src/login.rs:12", "the token check moved").is_ok());
@@ -484,6 +494,53 @@ mod tests {
         }
         let nobody = read(&t.m, Some("tab-none"), None, None);
         assert!(nobody.is_err(), "{nobody:?}");
+        let (theirs, their_root, their_worker) = foreign_captain(&t);
+        noted(&t.m, &their_worker, "src/login.rs", "billing reads the token");
+        for (tab, of) in [(&theirs, &t.root), (&theirs, &t.worker), (&t.captain, &their_root)] {
+            assert_eq!(t.m.board(tab, Some(of)), Err(format!("task {of} is not on a board of your plans. Nothing was read.")), "{tab} asked for {of}");
+            assert_eq!(read(&t.m, Some(tab), None, Some(of)), Err(format!("task {of} is not on your board. Nothing was read.")), "{tab} asked for {of}");
+        }
+        let foreign = read(&t.m, Some(&theirs), None, None).unwrap();
+        assert!(foreign.contains("billing reads the token") && !foreign.contains("the token check moved"), "{foreign}");
+    }
+
+    #[test]
+    fn a_full_board_drops_its_oldest_notes_first() {
+        let t = team("drain");
+        let project = t.dir.join("app");
+        let authors: Vec<String> = (0..11).map(|n| task(&t.m, Parent::Task(t.root.clone()), &format!("Worker {n}"), &project)).collect();
+        for author in &authors {
+            for n in 0..crate::board::NOTES_BY {
+                noted(&t.m, author, "src/login.rs", &format!("{author} note {n}"));
+            }
+        }
+        let notes = t.m.read_board(&t.root).unwrap().notes;
+        assert_eq!(notes.len(), crate::board::MAX_NOTES);
+        assert!(!notes.iter().any(|n| n.by == authors[0]), "the first author's notes were the oldest");
+        assert_eq!(notes[0].text, format!("{} note 0", authors[1]));
+        assert_eq!(notes.last().unwrap().text, format!("{} note 19", authors[10]));
+    }
+
+    #[test]
+    fn two_writers_at_once_lose_no_note() {
+        let t = team("two-writers");
+        let second = task(&t.m, Parent::Task(t.root.clone()), "Review login", &t.dir.join("app"));
+        std::thread::scope(|scope| {
+            for author in [&t.worker, &second] {
+                let m = &t.m;
+                scope.spawn(move || {
+                    for n in 0..15 {
+                        noted(m, author, "src/login.rs", &format!("{author} note {n}"));
+                    }
+                });
+            }
+        });
+        let notes = t.m.read_board(&t.root).unwrap().notes;
+        assert_eq!(notes.len(), 30, "{notes:?}");
+        for author in [&t.worker, &second] {
+            let mine: Vec<String> = notes.iter().filter(|n| &n.by == author).map(|n| n.text.clone()).collect();
+            assert_eq!(mine, (0..15).map(|n| format!("{author} note {n}")).collect::<Vec<_>>());
+        }
     }
 
     fn cite_refused(why: &str) -> Result<String, String> {
