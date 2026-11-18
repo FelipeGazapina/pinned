@@ -113,6 +113,8 @@ create table if not exists agent_confirmations (id uuid primary key, account uui
   target text, result jsonb, unique (account, machine, tab, action, request_id));
 -- Why this act waits, when the hub says more than the action's own text: a schedule act's reason.
 alter table agent_confirmations add column if not exists about text;
+-- Why the user denied it, in their words, when they said.
+alter table agent_confirmations add column if not exists reason text;
 -- A scheduled task per row, as the `schedule::Task` it is (without its hub-computed last run), and
 -- the columns the scheduler reads. `next_at` is unix seconds, computed on every save.
 create table if not exists tasks (id uuid primary key, account uuid not null references accounts on delete cascade,
@@ -468,10 +470,12 @@ pub struct Held {
     pub session: Option<String>,
     /// What running it answered, as the agent may see it.
     pub result: Value,
+    /// Why the user denied it, when they said; the notice to the session carries it.
+    pub reason: Option<String>,
 }
 
 const CONFIRMATION_COLUMNS: &str = "c.id, extract(epoch from c.created_at)::bigint, c.machine, coalesce(m.name, ''), c.tab, c.title, c.role, c.action, c.args,
-  c.request_id, c.approved, extract(epoch from c.decided_at)::bigint, c.outcome, c.session, c.target, c.result, c.about";
+  c.request_id, c.approved, extract(epoch from c.decided_at)::bigint, c.outcome, c.session, c.target, c.result, c.about, c.reason";
 
 fn held(r: &tokio_postgres::Row) -> Held {
     let role: String = r.get(6);
@@ -494,7 +498,7 @@ fn held(r: &tokio_postgres::Row) -> Held {
         decided_at,
         outcome: r.get(12),
     };
-    Held { confirmation, session: r.get(13), result: r.get::<_, Option<Value>>(15).unwrap_or(Value::Null) }
+    Held { confirmation, session: r.get(13), result: r.get::<_, Option<Value>>(15).unwrap_or(Value::Null), reason: r.get(17) }
 }
 
 pub struct MachineRow {
@@ -1922,10 +1926,10 @@ impl Db {
 
     /// Decides the account's waiting confirmation `id`, once: None when it is unknown, another
     /// account's, or decided already.
-    pub async fn decide_confirmation(&self, account: Uuid, id: Uuid, approved: bool) -> Result<Option<Held>, String> {
+    pub async fn decide_confirmation(&self, account: Uuid, id: Uuid, approved: bool, reason: Option<&str>) -> Result<Option<Held>, String> {
         let client = self.client().await?;
         let taken = client
-            .execute("update agent_confirmations set decided_at = now(), approved = $3 where account = $1 and id = $2 and decided_at is null", &[&account, &id, &approved])
+            .execute("update agent_confirmations set decided_at = now(), approved = $3, reason = $4 where account = $1 and id = $2 and decided_at is null", &[&account, &id, &approved, &reason])
             .await
             .map_err(err)?;
         if taken == 0 {

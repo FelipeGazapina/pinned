@@ -526,12 +526,33 @@ async fn run_workflow(hub: &Arc<Hub>, account: &Arc<Account>, caller: &Caller, i
     Ok(account.started(id, Placement { machine: origin, tab }))
 }
 
+/// The longest reason a denial keeps, in chars.
+const REASON_MAX: usize = 300;
+
+/// A denial's reason as it is kept: trimmed, none when blank, cut at `REASON_MAX` chars with a
+/// "…". A control character, a newline included, refuses it: the notice is one line of the user's
+/// words, and a second line could pass for the hub's own.
+fn denial_reason(reason: Option<String>) -> Result<Option<String>, String> {
+    let Some(reason) = reason else { return Ok(None) };
+    let reason = reason.trim();
+    if reason.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')) {
+        return Err("the reason is one line of text".into());
+    }
+    Ok(match reason.char_indices().nth(REASON_MAX) {
+        _ if reason.is_empty() => None,
+        Some((end, _)) => Some(format!("{}…", &reason[..end])),
+        None => Some(reason.to_owned()),
+    })
+}
+
 /// The user's decision on confirmation `id`, from a signed-in client of `account`. `entered` is
 /// what they typed in the app for a credential action. It never reaches the trail, the stored
 /// confirmation, the notice or an error, and a credential action whose run fails waits again.
-/// `_reason` is why the user said no, when they said; U2 shows it to the session that asked.
-pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: bool, entered: BTreeMap<String, String>, _reason: Option<String>) -> Result<Value, String> {
+/// `reason` is why the user said no, when they said: one line, at most `REASON_MAX` chars. It is
+/// kept with a denial, never with an approval, and the session that asked hears it in its notice.
+pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: bool, entered: BTreeMap<String, String>, reason: Option<String>) -> Result<Value, String> {
     let unknown = || format!("no confirmation {id} waits");
+    let reason = if approve { None } else { denial_reason(reason)? };
     let hide = |error: &str| surface::hide_entered(error, &entered);
     let key = Uuid::parse_str(id).map_err(|_| unknown())?;
     // An extend's decision is marked and its budget set in its box's turn, so no ask is checked in
@@ -546,7 +567,7 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
         _ => None,
     };
     let typed = if approve { typed_args(hub, account, key, &entered).await.map_err(|e| hide(&e))? } else { None };
-    let held = hub.db.decide_confirmation(account.id, key, approve).await?.ok_or_else(unknown)?;
+    let held = hub.db.decide_confirmation(account.id, key, approve, reason.as_deref()).await?.ok_or_else(unknown)?;
     let asked = &held.confirmation;
     let machine = Uuid::parse_str(&asked.machine).map_err(|e| e.to_string())?;
     let trail = Trail { hub, account: account.id, machine, tab: &asked.tab, role: asked.role, action: &asked.action, args: surface::summary(&asked.args), request_id: asked.request_id.as_deref(), task: Default::default() };
@@ -579,7 +600,7 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
     let shown = surface::hide_entered_in(surface::redact(result.clone(), action.map_or(&[][..], |a| a.hides)), &entered);
     hub.db.finish_confirmation(account.id, key, &outcome, &shown).await?;
     push_confirmations(hub, account).await;
-    let decided = Held { confirmation: Confirmation { decision: Some(decision), outcome: Some(outcome.clone()), ..asked.clone() }, session: held.session.clone(), result: shown };
+    let decided = Held { confirmation: Confirmation { decision: Some(decision), outcome: Some(outcome.clone()), ..asked.clone() }, session: held.session.clone(), result: shown, reason: held.reason.clone() };
     let (hub_for_notice, account_for_notice) = (hub.clone(), account.clone());
     tokio::spawn(async move {
         match notify(&hub_for_notice, &account_for_notice, &decided).await {
@@ -663,7 +684,11 @@ async fn rerun(hub: &Arc<Hub>, account: &Arc<Account>, action: &'static Action, 
 /// False when no tab on its machine runs that session, so the notice waits.
 async fn notify(hub: &Hub, account: &Account, held: &Held) -> Result<bool, String> {
     let asked = &held.confirmation;
-    let call = Call::Notice { tab: asked.tab.clone(), session: held.session.clone(), text: surface::notice_text(asked, &held.result), id: asked.id.clone() };
+    let mut text = surface::notice_text(asked, &held.result);
+    if let (Some(Decision::Denied), Some(reason)) = (asked.decision, &held.reason) {
+        text.push_str(&format!(" The user said: \"{reason}\""));
+    }
+    let call = Call::Notice { tab: asked.tab.clone(), session: held.session.clone(), text, id: asked.id.clone() };
     let queued = hub.call_machine(account, &asked.machine, call, NOTICE_WAIT).await.map_err(String::from)?;
     if queued != Value::Bool(true) {
         return Ok(false);
