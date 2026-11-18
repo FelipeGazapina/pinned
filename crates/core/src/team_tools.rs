@@ -241,6 +241,34 @@ mod tests {
     }
 
     #[test]
+    fn the_delete_call_parses_and_the_schema_requires_what_the_struct_does() {
+        let set = definition("feature_map_set").unwrap();
+        assert_eq!(set["inputSchema"]["required"], json!(["feature", "files"]));
+        assert!(set["description"].as_str().unwrap().contains("files: []"), "the delete is spelled out");
+        let tool = request("feature_map_set", &json!({ "feature": "login", "files": [] })).unwrap();
+        assert_eq!(tool, TeamTool::FeatureMapSet(FeatureMapSet { feature: "login".into(), files: vec![], about: None }));
+        assert_eq!(request("feature_map_set", &json!({ "feature": "login" })).unwrap_err(), "feature_map_set: missing field `files`");
+    }
+
+    /// The names of `T`'s fields that have no serde default, as schemars derives them.
+    fn required_by_struct<T: schemars::JsonSchema>() -> Vec<String> {
+        let schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
+        let mut names: Vec<String> = schema["required"].as_array().map(|r| r.iter().map(|n| n.as_str().unwrap().to_owned()).collect()).unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn each_feature_map_schema_requires_exactly_the_fields_without_a_default() {
+        for (name, from_struct) in [("feature_map_set", required_by_struct::<FeatureMapSet>()), ("feature_map_read", required_by_struct::<FeatureMapRead>())] {
+            let mut listed: Vec<String> = definition(name).unwrap()["inputSchema"]["required"].as_array().unwrap().iter().map(|n| n.as_str().unwrap().to_owned()).collect();
+            listed.sort();
+            assert_eq!(listed, from_struct, "{name}");
+        }
+        assert_eq!(required_by_struct::<FeatureMapSet>(), ["feature", "files"], "the derive sees both without a default");
+    }
+
+    #[test]
     fn every_team_tool_has_a_definition_and_parses_by_its_name() {
         for name in NAMES {
             assert_eq!(definition(name).unwrap()["name"], name);
