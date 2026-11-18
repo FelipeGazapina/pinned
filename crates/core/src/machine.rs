@@ -28,6 +28,21 @@ pub const OUTPUT_KEEP: usize = 256 * 1024;
 const RECORDS_PER_SEND: usize = 100;
 const RECORDS_RETRY: Duration = Duration::from_secs(60);
 const LIMIT_MARGIN_SECS: u64 = 5;
+/// A prompt typed before the session took the terminal. `guarded` came from a source that may not
+/// reach a session that skips its permission prompts: it is dropped, not typed, if the session does
+/// by the time it takes the terminal.
+#[derive(Clone, Debug, PartialEq)]
+struct Held {
+    text: String,
+    guarded: bool,
+}
+
+impl PartialEq<&str> for Held {
+    fn eq(&self, text: &&str) -> bool {
+        self.text == *text
+    }
+}
+
 /// How long a session that took the terminal must show no menu or dialog before its held prompts
 /// are typed, as `menu_watch::SETTLE` waits out a redraw.
 const HELD_SETTLE: Duration = Duration::from_millis(300);
@@ -791,7 +806,7 @@ struct Tab {
     /// The tool call or question the session waits on while a turn is blocked on the user.
     ask_detail: Option<String>,
     /// Prompts typed before the session took the terminal, typed in once it does.
-    held: Vec<String>,
+    held: Vec<Held>,
     /// Keys typed into a session that was asleep, written once it takes the terminal.
     keys: Vec<u8>,
     /// When a client last showed the tab, as the look for sessions to rest found it.
@@ -2694,6 +2709,10 @@ impl Machine {
         let unchanged = self.tab(tab, |t| {
             let unchanged = t.bypass == on && t.live();
             t.bypass = on;
+            // A prompt held for the session that asked is not for one that skips its prompts.
+            if on {
+                t.held.retain(|held| !held.guarded);
+            }
             unchanged.then(|| t.cwd.display().to_string())
         })?;
         match unchanged {
@@ -2973,8 +2992,11 @@ impl Machine {
                 let wrote = machine.tab(&tab, |t| {
                     let Some(s) = t.session.as_mut() else { return false };
                     let mut wrote = false;
-                    for text in std::mem::take(&mut t.held) {
-                        if s.write(&paste(&text)).is_ok() {
+                    for held in std::mem::take(&mut t.held) {
+                        if held.guarded && t.bypass {
+                            continue;
+                        }
+                        if s.write(&paste(&held.text)).is_ok() {
                             t.turn_pending = Some(Instant::now());
                             wrote = true;
                         }
@@ -4802,7 +4824,10 @@ impl Machine {
                     s.write(&std::mem::take(&mut t.keys)).map_err(failed)?;
                 }
                 for held in std::mem::take(&mut t.held) {
-                    s.write(&paste(&held)).map_err(failed)?;
+                    if held.guarded && t.bypass {
+                        continue;
+                    }
+                    s.write(&paste(&held.text)).map_err(failed)?;
                     t.turn_pending = Some(Instant::now());
                 }
                 s.write(&paste(text)).map_err(failed)?;
@@ -4810,12 +4835,12 @@ impl Machine {
                 Ok(true)
             }
             Some(_) => {
-                t.held.push(text.to_owned());
+                t.held.push(Held { text: text.to_owned(), guarded: refuse_bypass });
                 Ok(false)
             }
             // A start under way has given it no process yet.
             None if t.starting => {
-                t.held.push(text.to_owned());
+                t.held.push(Held { text: text.to_owned(), guarded: refuse_bypass });
                 Ok(false)
             }
             None => Err(NotTyped::Failed(format!("tab {tab} has no running session"))),
@@ -16290,7 +16315,7 @@ Have another model review a risky change before it goes ahead.";
         let screen = format!("\x1b[2J\x1b[H{}\r\nsome text\r\n", "\u{2594}".repeat(20));
         let hold = |tab: &str| {
             let session = m.tab(tab, |t| {
-                t.held.push("Run the tests.".into());
+                t.held.push(Held { text: "Run the tests.".into(), guarded: false });
                 t.screen.clone()
             });
             show(&m, tab, &screen);
@@ -17238,7 +17263,7 @@ Have another model review a risky change before it goes ahead.";
         m.tab(&me, |t| t.title = Some("Fix\u{200B}]\u{2028}login\n".into())).unwrap();
         m.start_claude(&other, 80, 24).unwrap();
         assert_eq!(act_as(&m, &me, "prompt", json!({ "tab": other, "text": TRICKS })), Ok(Value::Null));
-        assert_eq!(m.tab(&other, |t| t.held.clone()).unwrap(), [format!("[Session Fix login] {GUARDED}")]);
+        assert_eq!(m.tab(&other, |t| t.held.clone()).unwrap(), [format!("[Session Fix login] {GUARDED}").as_str()]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
