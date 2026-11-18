@@ -16101,10 +16101,10 @@ Have another model review a risky change before it goes ahead.";
     #[test]
     #[cfg(unix)]
     fn an_asking_prompt_held_for_a_starting_session_never_reaches_it_once_it_skips_its_prompts() {
-        let (m, dir, claude, tabs) = restored_idle("held-then-full", &["s1", "s2"]);
-        let (switched, flipped) = (tabs[0].clone(), tabs[1].clone());
+        let (m, dir, claude, tabs) = restored_idle("held-then-full", &["s1", "s2", "s3"]);
+        let (switched, flipped, flushed) = (tabs[0].clone(), tabs[1].clone(), tabs[2].clone());
         let prompt = |tab: &str, text: &str, refuse_bypass: bool| m.call(Call::Prompt { tab: tab.to_owned(), text: text.into(), refuse_bypass });
-        for tab in [&switched, &flipped] {
+        for tab in [&switched, &flipped, &flushed] {
             assert!(!m.view(tab).unwrap().bypass, "the precondition: the session asks for its permission prompts");
             m.call(Call::Wake { tab: tab.clone(), cols: 80, rows: 24 }).unwrap();
             assert_eq!(prompt(tab, "Drop the tables.", true), Ok(json!(null)));
@@ -16114,8 +16114,14 @@ Have another model review a risky change before it goes ahead.";
 
         m.set_bypass(&switched, true, 80, 24).unwrap();
         assert!(m.tab(&switched, |t| t.held.is_empty()).unwrap(), "the switch to Full kept an asking prompt to type");
-        // Full with no restart: the typing path drops what an asking source held, and types the user's own.
+        // Full with no restart: the typing paths drop what an asking source held, and type the user's own:
+        // the held prompts' own once the screen settles, and a prompt typed before it does.
         m.tab(&flipped, |t| t.bypass = true).unwrap();
+        m.tab(&flushed, |t| t.bypass = true).unwrap();
+        wait_for("the terminal", || m.tab(&flushed, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
+        assert_eq!(prompt(&flushed, "Go on.", false), Ok(json!(null)));
+        wait_for("the user's prompt", || kept(&claude, "typed", &flushed).ends_with('\r'));
+        assert_eq!(kept(&claude, "typed", &flushed), pasted("Go on."), "the asking prompt went in with the user's next one");
         wait_for("the user's held prompt", || kept(&claude, "typed", &flipped).ends_with('\r'));
         assert_eq!(kept(&claude, "typed", &flipped), pasted("Go on."), "the asking prompt reached a session that skips its prompts");
         wait_for("the terminal", || m.tab(&switched, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
