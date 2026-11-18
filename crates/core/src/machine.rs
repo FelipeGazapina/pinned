@@ -16030,6 +16030,32 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn an_asking_prompt_held_for_a_starting_session_never_reaches_it_once_it_skips_its_prompts() {
+        let (m, dir, claude, tabs) = restored_idle("held-then-full", &["s1", "s2"]);
+        let (switched, flipped) = (tabs[0].clone(), tabs[1].clone());
+        let prompt = |tab: &str, text: &str, refuse_bypass: bool| m.call(Call::Prompt { tab: tab.to_owned(), text: text.into(), refuse_bypass });
+        for tab in [&switched, &flipped] {
+            assert!(!m.view(tab).unwrap().bypass, "the precondition: the session asks for its permission prompts");
+            m.call(Call::Wake { tab: tab.clone(), cols: 80, rows: 24 }).unwrap();
+            assert_eq!(prompt(tab, "Drop the tables.", true), Ok(json!(null)));
+        }
+        assert_eq!(prompt(&flipped, "Go on.", false), Ok(json!(null)));
+        assert_eq!(m.tab(&flipped, |t| t.held.clone()).unwrap(), ["Drop the tables.", "Go on."], "held until the session takes the terminal");
+
+        m.set_bypass(&switched, true, 80, 24).unwrap();
+        assert!(m.tab(&switched, |t| t.held.is_empty()).unwrap(), "the switch to Full kept an asking prompt to type");
+        // Full with no restart: the typing path drops what an asking source held, and types the user's own.
+        m.tab(&flipped, |t| t.bypass = true).unwrap();
+        wait_for("the user's held prompt", || kept(&claude, "typed", &flipped).ends_with('\r'));
+        assert_eq!(kept(&claude, "typed", &flipped), pasted("Go on."), "the asking prompt reached a session that skips its prompts");
+        wait_for("the terminal", || m.tab(&switched, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
+        std::thread::sleep(HELD_SETTLE * 2);
+        assert_eq!(kept(&claude, "typed", &switched), "", "the asking prompt reached the session switched to Full");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn held_prompts_wait_out_a_startup_menu() {
         let (m, dir, claude, tabs) = restored_idle("guard-held", &["s1"]);
         let tab = tabs[0].clone();
