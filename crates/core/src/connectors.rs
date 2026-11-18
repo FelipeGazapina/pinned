@@ -6797,7 +6797,7 @@ fn check_convex_step(graph: &Graph, connected: &[convex::Connection], had: Optio
 fn convex_note(connection: &convex::Connection, tables: Option<&[String]>) -> String {
     let on = format!("Convex deployment {} ({})", connection.id, connection.kind.name());
     let mut note = match tables {
-        None => format!("You may read {on}, which holds this project's data, with the tools convex_tables, convex_data, convex_query, convex_run and convex_logs."),
+        None => format!("You may read {on}, which holds this project's data, with the tools convex_tables, convex_data, convex_run and convex_logs."),
         Some(tables) => format!("You may read the tables {} of {on} with the tools convex_tables and convex_data. Queries and logs are off for this run.", tables.join(", ")),
     };
     if connection.kind == convex::Kind::Prod {
@@ -12341,6 +12341,32 @@ mod tests {
             assert_eq!(ask("tab-1", Ask::Tables { table: None }), Err("pinned lost the deploy key of `quick-lemur-789`. Paste it again on the Convex card in Settings, Connectors.".into()));
         }
 
+        /// The fixtures, counting every request that reaches them.
+        struct Counted(Replay, std::sync::atomic::AtomicUsize);
+
+        impl convex::client::Http for Counted {
+            fn send<'a>(&'a self, request: convex::client::Request) -> futures_util::future::BoxFuture<'a, Result<convex::client::Response, String>> {
+                self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.0.send(request)
+            }
+        }
+
+        #[test]
+        fn no_session_runs_its_own_convex_code_and_tables_still_read() {
+            let (connectors, _storage) = hub();
+            connect(&connectors, KEY, &[SITE]).unwrap();
+            let by_hand: TabView = serde_json::from_value(json!({ "id": "tab-1", "cwd": "/Users/f/site", "bypass": false, "running": true, "status": null, "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1 })).unwrap();
+            let tabs = [by_hand];
+            let find = |machine: &str, tab: &str| tabs.iter().find(|t| machine == "m1" && t.id == tab).cloned();
+            let http = Counted(replay(KEY), Default::default());
+            let ask = |ask: Ask| block_on(connectors.convex(&http, "m1", "tab-1", Some(SITE), &find, ask));
+            assert_eq!(ask(Ask::Query { code: "return process.env;".into() }), Err("pinned no longer runs arbitrary Convex code for a session; read tables with convex_data".into()));
+            assert_eq!(http.1.load(std::sync::atomic::Ordering::SeqCst), 0, "the refused query reached no Convex address");
+            let page = ask(Ask::Data { table: "invoices".into(), limit: Some(2), cursor: None, oldest_first: false }).unwrap();
+            assert!(page.as_str().unwrap().contains("\"documents\""), "{page}");
+            assert!(http.1.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        }
+
         fn with_convex(name: &str, workflows: Vec<Connector>) -> (Connectors, PathBuf) {
             let dir = temp_dir(name);
             let storage = FileStorage::new(dir.clone());
@@ -12373,7 +12399,7 @@ mod tests {
         fn the_opening_prompt_names_what_the_step_lets_the_session_read() {
             let everything = run_now_prompt("convex-note-all", vec![reads("quick-lemur-789", None)], vec![]);
             assert!(
-                everything.ends_with("Summarize the week.\n\nYou may read Convex deployment quick-lemur-789 (dev), which holds this project's data, with the tools convex_tables, convex_data, convex_query, convex_run and convex_logs. Anyone in the thread sees your reply. Quote only what the answer needs."),
+                everything.ends_with("Summarize the week.\n\nYou may read Convex deployment quick-lemur-789 (dev), which holds this project's data, with the tools convex_tables, convex_data, convex_run and convex_logs. Anyone in the thread sees your reply. Quote only what the answer needs."),
                 "a step no edge reaches still counts: {everything}"
             );
             let limited = run_now_prompt("convex-note-tables", vec![reads("happy-otter-123", Some(&["invoices", "customers"]))], vec![]);
