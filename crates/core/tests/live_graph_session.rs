@@ -357,6 +357,7 @@ fn trigger(id: &str) -> TriggerInput {
         title: "Live session check".into(),
         description: Some("Reply to the talks. Do not change the repository.".into()),
         url: "https://example.test/W8-1".into(),
+        change: None,
     }
 }
 

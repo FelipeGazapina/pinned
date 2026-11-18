@@ -232,14 +232,19 @@ alter table team_runs add column if not exists reserved_at timestamptz;
 -- its limit call (`teams::db::runs_at_limit`). A session's own ask never sets it.
 alter table team_calls add column if not exists opened_by_hub boolean not null default false;
 -- One fire per trigger event (`Db::claim_fire`): the row of the call that claimed the key, kept
--- `FIRES_FOR` (`Db::expire_trigger_fires`).
+-- `FIRES_FOR_DAYS` (`Db::expire_trigger_fires`).
 create table if not exists trigger_fires (account uuid not null references accounts on delete cascade,
   workflow text not null, key text not null, at timestamptz not null default now(),
   primary key (account, workflow, key));
 create index if not exists trigger_fires_at on trigger_fires (at);
+-- The `Connectors` that claimed the fire: its retry of a claim whose insert timed out wins.
+alter table trigger_fires add column if not exists claimer text;
 ";
-/// How long the hub keeps a trigger's claimed fire.
-const FIRES_FOR: &str = "interval '7 days'";
+/// How long the hub keeps a trigger's claimed fire, in days: `connectors::FIRES_KEPT`.
+const FIRES_FOR_DAYS: u64 = 7;
+const _: () = assert!(FIRES_FOR_DAYS * 24 * 60 * 60 == pinned_core::connectors::FIRES_KEPT.as_secs());
+// A change older than the catch-up is never claimed, so a dropped claim never fires again.
+const _: () = assert!(pinned_core::connectors::CATCH_UP.as_secs() < FIRES_FOR_DAYS * 24 * 60 * 60);
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";
 /// The most held ends one hub-wide expiry run deletes.
@@ -1323,23 +1328,44 @@ impl Db {
             .map_err(err)
     }
 
-    /// Claims the account's one fire of `workflow` for the event `key`: true when this call stored
-    /// the claim, false when one is stored already, by this hub or another on the database.
-    pub async fn claim_fire(&self, account: Uuid, workflow: &str, key: &str) -> Result<bool, String> {
-        let stored = self
-            .client()
-            .await?
-            .execute("insert into trigger_fires (account, workflow, key) values ($1, $2, $3) on conflict do nothing", &[&account, &workflow, &key])
+    /// Claims the account's one fire of `workflow` for the event `key` for `claimer`: true when
+    /// this call stored the claim, false when one is stored already, by this hub or another on the
+    /// database. With `retry`, a claim `claimer` stored already answers true: its earlier insert
+    /// answered an error, but may have committed.
+    pub async fn claim_fire(&self, account: Uuid, workflow: &str, key: &str, claimer: &str, retry: bool) -> Result<bool, String> {
+        let client = self.client().await?;
+        let stored = client
+            .execute(
+                "insert into trigger_fires (account, workflow, key, claimer) values ($1, $2, $3, $4) on conflict do nothing",
+                &[&account, &workflow, &key, &claimer],
+            )
             .await
             .map_err(err)?;
-        Ok(stored == 1)
+        if stored == 1 || !retry {
+            return Ok(stored == 1);
+        }
+        let mine = client
+            .query_opt("select 1 from trigger_fires where account = $1 and workflow = $2 and key = $3 and claimer = $4", &[&account, &workflow, &key, &claimer])
+            .await
+            .map_err(err)?;
+        Ok(mine.is_some())
     }
 
-    /// Deletes the claimed fires of any account older than `FIRES_FOR`, and returns how many.
+    /// Drops `claimer`'s claim of the fire `key`, whose run did not start.
+    pub async fn release_fire(&self, account: Uuid, workflow: &str, key: &str, claimer: &str) -> Result<(), String> {
+        self.client()
+            .await?
+            .execute("delete from trigger_fires where account = $1 and workflow = $2 and key = $3 and claimer = $4", &[&account, &workflow, &key, &claimer])
+            .await
+            .map_err(err)?;
+        Ok(())
+    }
+
+    /// Deletes the claimed fires of any account older than `FIRES_FOR_DAYS`, and returns how many.
     pub async fn expire_trigger_fires(&self) -> Result<u64, String> {
         self.client()
             .await?
-            .execute(&format!("delete from trigger_fires where at <= now() - {FIRES_FOR}"), &[])
+            .execute(&format!("delete from trigger_fires where at <= now() - interval '{FIRES_FOR_DAYS} days'"), &[])
             .await
             .map_err(err)
     }
