@@ -13,6 +13,15 @@ use std::sync::Mutex;
 /// Held from a board's read to its write, so two notes never drop one another.
 static WRITING: Mutex<()> = Mutex::new(());
 
+/// Why a stored board could not be used.
+#[derive(Debug)]
+enum BoardFault {
+    /// The file was read and is not a board: a write sets it aside.
+    Unparsed,
+    /// The file could not be read at all (permissions, a disk error): a write leaves it alone.
+    Unread(String),
+}
+
 impl Machine {
     /// `Call::Board`: the stored board of `task`'s root task, or only `task`'s part when it is a
     /// worker under it; without `task`, every board the plans of the Captain of `tab` link. A
@@ -168,19 +177,20 @@ impl Machine {
     }
 
     /// What the board of `root` holds on disk, for a view: nothing when it has no file, and nothing
-    /// when the file is unreadable, which the next write sets aside.
+    /// when the file cannot be read; the next write sets aside a file that does not parse and
+    /// refuses to touch one it cannot read.
     fn load_board(&self, root: &str) -> BoardView {
         self.read_board(root).unwrap_or_default()
     }
 
     /// The stored board of `root`, empty when it has no file yet; an error for a file that is there
     /// but cannot be read or parsed.
-    fn read_board(&self, root: &str) -> Result<BoardView, String> {
+    fn read_board(&self, root: &str) -> Result<BoardView, BoardFault> {
         let Some(file) = self.board_file(root) else { return Ok(BoardView::default()) };
         match std::fs::read(&file) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| BoardFault::Unparsed),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BoardView::default()),
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(BoardFault::Unread(e.to_string())),
         }
     }
 
@@ -191,7 +201,8 @@ impl Machine {
         let _held = WRITING.lock().unwrap_or_else(|e| e.into_inner());
         let mut board = match self.read_board(root) {
             Ok(board) => board,
-            Err(_) => {
+            Err(BoardFault::Unread(e)) => return Err(format!("the board of {root} could not be read: {e}. Nothing changed.")),
+            Err(BoardFault::Unparsed) => {
                 // Kept for whoever wants it back; its content is workers' text, so it is not logged.
                 let aside = file.with_extension(format!("json.corrupt-{}", super::unix_millis()));
                 std::fs::rename(&file, &aside).map_err(|e| format!("the board of {root} is unreadable and was not set aside: {e}. Nothing changed."))?;
