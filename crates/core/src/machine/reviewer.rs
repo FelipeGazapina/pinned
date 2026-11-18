@@ -345,7 +345,11 @@ mod tests {
             }
 
             fn end_turn(&self) {
-                self.m.record_event(event(&self.worker, AgentStatus::Done, Some(SUMMARY)));
+                self.end_turn_saying(SUMMARY);
+            }
+
+            fn end_turn_saying(&self, reply: &str) {
+                self.m.record_event(event(&self.worker, AgentStatus::Done, Some(reply)));
             }
 
             fn state(&self) -> String {
@@ -435,6 +439,20 @@ mod tests {
             assert!(!env.lines().any(|name| name == "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"), "the reviewer would load the worker's CLAUDE.md");
             assert_eq!(t.rounds().len(), 1);
             assert!(!ran_in.exists(), "the reviewer's folder was left behind");
+        }
+
+        #[test]
+        fn a_nul_byte_in_the_diff_or_summary_does_not_cancel_the_review() {
+            let t = team("nul", Switch::On, 6, SONNET);
+            // Git reads a file as text when its first 8000 bytes hold no NUL.
+            let mut text = "x".repeat(9000).into_bytes();
+            text.extend(b"\0after the nul\n");
+            std::fs::write(t.app.join("src/data.txt"), text).unwrap();
+            t.change(CHANGED, json!({ "findings": [] }));
+            t.end_turn_saying("Done.\u{0}Changed the parser.");
+            let (_, prompt, _) = t.reviewer();
+            assert!(prompt.contains("\\0after the nul") && prompt.contains("Done.\\0Changed"), "the NUL bytes are not shown as \\0");
+            assert_eq!(t.rounds().len(), 1);
         }
 
         #[test]
