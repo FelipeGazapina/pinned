@@ -223,11 +223,13 @@ mod tests {
         const SUMMARY: &str = "Changed the parser to count bytes.";
 
         /// A Claude Code that answers its sign-in check, stays up as a worker thread's session, and
-        /// as a headless reviewer (the only start that names --disallowedTools) records its
-        /// arguments NUL-separated in `<claude>.review` and prints `<claude>.answer`.
+        /// as a headless reviewer (the only start that names --disallowedTools) waits while
+        /// `<claude>.hold` exists, records its folder in `<claude>.cwd`, its variables' names in
+        /// `<claude>.env`, the JSON files it was given in `<claude>.mcp` and its arguments
+        /// NUL-separated in `<claude>.review`, and prints `<claude>.answer`.
         fn fake_claude(dir: &Path) -> PathBuf {
             let claude = dir.join("claude");
-            let script = "#!/bin/sh\nif [ \"$1 $2\" = \"auth status\" ]; then echo '{\"loggedIn\":true,\"email\":\"ana@acme.dev\"}'; exit 0; fi\ncase \" $* \" in *' --disallowedTools '*) printf '%s\\0' \"$@\" > \"$0.review.part\" && mv \"$0.review.part\" \"$0.review\"; cat \"$0.answer\"; exit 0;; esac\nexec sleep 30\n";
+            let script = "#!/bin/sh\nif [ \"$1 $2\" = \"auth status\" ]; then echo '{\"loggedIn\":true,\"email\":\"ana@acme.dev\"}'; exit 0; fi\ncase \" $* \" in *' --disallowedTools '*) while [ -f \"$0.hold\" ]; do sleep 0.05; done; pwd > \"$0.cwd\"; env | cut -d= -f1 > \"$0.env\"; : > \"$0.mcp\"; for a in \"$@\"; do case \"$a\" in *.json) [ -f \"$a\" ] && cat \"$a\" >> \"$0.mcp\";; esac; done; printf '%s\\0' \"$@\" > \"$0.review.part\" && mv \"$0.review.part\" \"$0.review\"; cat \"$0.answer\"; exit 0;; esac\nexec sleep 30\n";
             std::fs::write(&claude, script).unwrap();
             std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
             claude
@@ -370,8 +372,34 @@ mod tests {
             assert_eq!(fence[0], header + 1, "the fence does not follow the header: {prompt}");
             let fenced: Vec<&str> = prompt.lines().skip(fence[0] + 1).take(fence[1] - fence[0] - 1).collect();
             assert!(fenced.iter().any(|line| line.contains(CHANGED)) && fenced.iter().any(|line| line.contains(SUMMARY)), "the diff and summary are outside the fence: {prompt}");
-            let at = argv.iter().position(|a| a == "--disallowedTools").unwrap();
-            assert_eq!(&argv[at + 1..at + 5], ["Edit", "Write", "NotebookEdit", "Bash"], "the reviewer is not Role::Reviewer: {argv:?}");
+            assert_eq!(values(&argv, "--disallowedTools")[..4], ["Edit", "Write", "MultiEdit", "NotebookEdit"], "the reviewer is not Role::Reviewer: {argv:?}");
+            assert_eq!(t.rounds().len(), 1);
+        }
+
+        /// The values after `flag`, up to the next flag.
+        fn values(argv: &[String], flag: &str) -> Vec<String> {
+            let at = argv.iter().position(|a| a == flag).unwrap_or_else(|| panic!("no {flag}: {argv:?}"));
+            argv[at + 1..].iter().take_while(|a| !a.starts_with("--")).cloned().collect()
+        }
+
+        #[test]
+        fn the_reviewer_only_reads_and_has_no_mcp() {
+            let t = team("readonly", Switch::On, 6, SONNET);
+            t.change(CHANGED, json!({ "findings": [] }));
+            t.end_turn();
+            let (_, _, argv) = t.reviewer();
+            assert_eq!(values(&argv, "--permission-mode"), ["plan"], "the reviewer is not in plan mode: {argv:?}");
+            assert!(!argv.iter().any(|a| a == "--dangerously-skip-permissions"), "{argv:?}");
+            assert_eq!(values(&argv, "--allowedTools"), ["Read", "Grep", "Glob"], "the reviewer is not granted by an allow-list: {argv:?}");
+            let denied = values(&argv, "--disallowedTools");
+            for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "WebFetch", "WebSearch", "Task", "Agent"] {
+                assert!(denied.iter().any(|d| d == tool), "{tool} is not denied: {denied:?}");
+                assert!(crate::agent::Role::Reviewer.disallowed_tools().contains(&tool), "Role::Reviewer allows {tool}");
+            }
+            assert!(argv.iter().any(|a| a == "--strict-mcp-config"), "the reviewer may load MCP servers: {argv:?}");
+            assert_eq!(values(&argv, "--mcp-config").len(), 1, "the reviewer gets an MCP server: {argv:?}");
+            let mcp: Value = serde_json::from_str(&std::fs::read_to_string(t.claude.with_extension("mcp")).unwrap()).unwrap();
+            assert_eq!(mcp, json!({ "mcpServers": {} }));
             assert_eq!(t.rounds().len(), 1);
         }
 
