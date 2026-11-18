@@ -121,7 +121,8 @@ pub fn format_char(c: char) -> bool {
     )
 }
 
-/// The most notes one task keeps on a board; its own older ones go first.
+/// The most notes one author keeps on a board (a top-level task and the workers under it count as
+/// one author); its older ones go first.
 pub const NOTES_BY: usize = 20;
 
 /// The most handoffs, and the most blocks, one board stores; older ones go first.
@@ -130,13 +131,17 @@ pub const MAX_STORED: usize = 200;
 /// The most notes one board keeps; older ones go first.
 pub const MAX_NOTES: usize = 200;
 
-/// `board` cut to its caps after a write: each task's newest `NOTES_BY` notes, then the board's
-/// newest `MAX_NOTES`, and its newest `MAX_STORED` handoffs and blocks.
-pub fn trim(board: &mut BoardView) {
-    let mut by = std::collections::HashMap::new();
+/// `board` cut to its caps after a write: each author's newest `NOTES_BY` notes, then the
+/// board's newest `MAX_NOTES`, and its newest `MAX_STORED` progress lines, handoffs and blocks.
+/// `author` names whose cap a note counts against: the top-level task of the writer, so a worker
+/// cannot lift its cap by starting children.
+pub fn trim(board: &mut BoardView, author: impl Fn(&str) -> String) {
+    let mut authors: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+    let mut seen_by: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut keep = vec![true; board.notes.len()];
     for (i, note) in board.notes.iter().enumerate().rev() {
-        let seen = by.entry(note.by.as_str()).or_insert(0usize);
+        let key = authors.entry(note.by.as_str()).or_insert_with(|| author(&note.by)).clone();
+        let seen = seen_by.entry(key).or_insert(0usize);
         *seen += 1;
         keep[i] = *seen <= NOTES_BY;
     }

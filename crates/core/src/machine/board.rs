@@ -135,6 +135,19 @@ impl Machine {
         root
     }
 
+    /// The author a note of `by` counts against: the direct child of `root` that `by` descends from
+    /// (`by` itself when it is one, or the root, or not in the registry).
+    fn top_level(&self, root: &str, by: &str) -> String {
+        let mut at = by.to_owned();
+        for _ in 0..64 {
+            match self.delegates.get(&at).map(|task| task.parent) {
+                Some(Parent::Task(parent)) if parent != root => at = parent,
+                _ => break,
+            }
+        }
+        at
+    }
+
     /// A root task keeps a board once a plan step or list links it.
     fn has_board(&self, root: &str) -> bool {
         self.plans.lock().unwrap().linked_tasks().iter().any(|task| task == root) || self.board_file(root).is_some_and(|file| file.is_file())
@@ -187,7 +200,7 @@ impl Machine {
             }
         };
         write(&mut board);
-        crate::board::trim(&mut board);
+        crate::board::trim(&mut board, |by| self.top_level(root, by));
         let saved = (|| {
             use std::io::Write;
             let dir = file.parent().expect("a board file sits in a folder");
