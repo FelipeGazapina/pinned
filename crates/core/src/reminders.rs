@@ -277,7 +277,7 @@ fn tool_definitions(reminders: bool, child: bool, seat: Seat) -> Value {
         tools.push(stats_tool());
     }
     tools.extend(project_tools().into_iter().filter(|(audience, _)| offered(*audience)).map(|(_, tool)| tool));
-    tools.extend(crate::team_tools::offered(&crate::team_tools::TeamSeat { captain: seat == Seat::Captain, worker: seat == Seat::Worker || child, child }));
+    tools.extend(crate::team_tools::offered(&crate::team_tools::TeamSeat { captain: seat == Seat::Captain, worker: seat == Seat::Worker || child, child, orchestrator: global }));
     Value::Array(tools)
 }
 

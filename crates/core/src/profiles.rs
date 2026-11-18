@@ -8,9 +8,11 @@
 //! Owners: U5 (the lists, `profile_propose`), U6 (`delegate_task` with `profile`).
 
 use crate::delegate::Request;
+use crate::reviewer::Reviewer;
 use crate::taste::{ModelRef, SkillRef, Tastes};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 
 /// The account's worker profiles, kept in `Tastes::worker_profiles`.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
@@ -86,6 +88,11 @@ impl Tastes {
         }
         Ok(())
     }
+
+    /// `profile_propose`: keeps `profile` in `proposed` for the user.
+    pub fn propose_worker_profile(&mut self, _profile: WorkerProfile) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 impl WorkerProfile {
@@ -101,6 +108,44 @@ impl WorkerProfile {
         }
         Ok(())
     }
+
+    /// Whether every skill the profile names is one of `installed`, as the `skills` action lists them.
+    pub fn check_skills(&self, _installed: &[&str]) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// The built-in profiles, which every list starts from: Explorer, Implementer, Tester and the
+/// Reviewer, whose model, rules and rounds are `Tastes::reviewer`'s.
+pub fn seeds(_reviewer: &Reviewer, _project: Option<&str>) -> Vec<WorkerProfile> {
+    vec![]
+}
+
+/// The profiles `delegate_task` may name in `project`, or in any project when None.
+pub fn approved(_tastes: &Tastes, _project: Option<&str>) -> Vec<WorkerProfile> {
+    vec![]
+}
+
+/// Why `resolve` found no profile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unresolved {
+    /// An orchestrator proposed it and the user has not taken it.
+    NotApproved(String),
+    Unknown(String),
+}
+
+impl fmt::Display for Unresolved {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Unresolved::NotApproved(name) => write!(f, "{name} is only proposed: the user has not approved it"),
+            Unresolved::Unknown(name) => write!(f, "no profile is named {name}"),
+        }
+    }
+}
+
+/// The profile named `name` in `project`, or in any project when None.
+pub fn resolve(_tastes: &Tastes, _project: Option<&str>, name: &str) -> Result<WorkerProfile, Unresolved> {
+    Err(Unresolved::Unknown(name.trim().to_owned()))
 }
 
 /// `delegate_task`'s `profile`, which `parse_request` calls. U6 turns it on.
@@ -159,5 +204,94 @@ mod tests {
         assert_eq!(tastes, before);
         tastes.set_worker_profiles(Some("github.com/acme/site"), vec![]).unwrap();
         assert!(tastes.worker_profiles.projects.is_empty());
+    }
+
+    fn names(profiles: &[WorkerProfile]) -> Vec<&str> {
+        profiles.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    #[test]
+    fn the_seeds_are_there_on_empty_tastes() {
+        let tastes = Tastes::default();
+        for project in [None, Some("github.com/acme/site")] {
+            assert_eq!(names(&approved(&tastes, project)), ["Explorer", "Implementer", "Tester", "Reviewer"], "{project:?}");
+        }
+        let explorer = resolve(&tastes, None, "explorer").unwrap();
+        assert_eq!((explorer.access, explorer.model, explorer.by), (ProfileAccess::ReadOnly, None, ProfileAuthor::User));
+        assert_eq!(resolve(&tastes, None, "Implementer").unwrap().access, ProfileAccess::Edit);
+        let tester = resolve(&tastes, None, "Tester").unwrap();
+        assert!(tester.delivers.contains("screenshot") && tester.delivers.contains("only when the work changes a screen"), "{}", tester.delivers);
+        for seed in seeds(&tastes.reviewer, None) {
+            seed.check().unwrap();
+        }
+    }
+
+    #[test]
+    fn the_reviewer_seed_reads_its_model_and_rounds_from_the_reviewer() {
+        let mut tastes = Tastes::default();
+        let seed = resolve(&tastes, None, "Reviewer");
+        assert_eq!(seed.clone().map(|p| (p.model, p.access)), Ok((None, ProfileAccess::ReadOnly)), "no model set: the ladder picks it");
+        assert!(seed.unwrap().delivers.contains("2 rounds"));
+        let opus = ModelRef { provider: None, model: "claude-opus-5-5".into() };
+        tastes.reviewer.model = Some(opus.clone());
+        tastes.reviewer.rounds = 4;
+        tastes.reviewer.rules = vec![crate::reviewer::Rule { id: "A1".into(), text: "Tests first.".into(), replaces: None }];
+        let seed = resolve(&tastes, None, "reviewer").unwrap();
+        assert_eq!(seed.model, Some(opus));
+        assert!(seed.delivers.contains("4 rounds") && seed.delivers.contains("A1"), "{}", seed.delivers);
+        // A list of the user's names no second Reviewer: the Reviewer section sets it.
+        assert_eq!(tastes.set_worker_profiles(None, vec![profile("reviewer")]), Err("the Reviewer is set in its own section, so no profile takes its name".into()));
+        tastes.worker_profiles.account.push(profile("Reviewer"));
+        assert_eq!(names(&approved(&tastes, None)).iter().filter(|n| n.eq_ignore_ascii_case("reviewer")).count(), 1);
+        assert_eq!(resolve(&tastes, None, "Reviewer").unwrap().model, tastes.reviewer.model);
+    }
+
+    #[test]
+    fn a_project_profile_overrides_an_account_profile_of_the_same_name() {
+        let mut tastes = Tastes::default();
+        tastes.set_worker_profiles(None, vec![profile("scout"), WorkerProfile { delivers: "The account's tests.".into(), ..profile("Tester") }]).unwrap();
+        tastes.set_worker_profiles(Some("github.com/acme/site"), vec![WorkerProfile { access: ProfileAccess::Edit, delivers: "The site's scout.".into(), ..profile("Scout") }]).unwrap();
+        let delivers = |project, name| resolve(&tastes, project, name).map(|p| p.delivers);
+        assert_eq!(delivers(None, "scout"), Ok("A report.".into()));
+        assert_eq!(delivers(Some("github.com/acme/other"), "scout"), Ok("A report.".into()));
+        let site = resolve(&tastes, Some("github.com/acme/site"), "scout").unwrap();
+        assert_eq!((site.delivers.as_str(), site.access), ("The site's scout.", ProfileAccess::Edit));
+        assert_eq!(names(&approved(&tastes, Some("github.com/acme/site"))), ["Explorer", "Implementer", "Tester", "Reviewer", "Scout"]);
+        // The user's edit of a seed stands in for it.
+        assert_eq!(delivers(Some("github.com/acme/site"), "tester"), Ok("The account's tests.".into()));
+    }
+
+    #[test]
+    fn a_proposed_profile_cannot_be_resolved() {
+        let mut tastes = Tastes::default();
+        tastes.worker_profiles.proposed.push(WorkerProfile { by: ProfileAuthor::Orchestrator, ..profile("fixer") });
+        assert_eq!(resolve(&tastes, None, "fixer"), Err(Unresolved::NotApproved("fixer".into())));
+        assert_eq!(resolve(&tastes, Some("github.com/acme/site"), "Fixer"), Err(Unresolved::NotApproved("Fixer".into())));
+        assert_eq!(resolve(&tastes, None, "fixer").unwrap_err().to_string(), "fixer is only proposed: the user has not approved it");
+        assert_eq!(resolve(&tastes, None, "ghost"), Err(Unresolved::Unknown("ghost".into())));
+        assert!(!names(&approved(&tastes, None)).contains(&"fixer"));
+        // Once the user takes it into a list, it resolves.
+        tastes.set_worker_profiles(None, vec![profile("fixer")]).unwrap();
+        assert_eq!(resolve(&tastes, None, "fixer").unwrap().by, ProfileAuthor::User);
+    }
+
+    #[test]
+    fn a_proposal_lands_only_in_proposed() {
+        let mut tastes = Tastes::default();
+        tastes.propose_worker_profile(profile("fixer")).unwrap();
+        tastes.propose_worker_profile(WorkerProfile { delivers: "A fix.".into(), ..profile("Fixer") }).unwrap();
+        assert_eq!(tastes.worker_profiles.proposed, vec![WorkerProfile { delivers: "A fix.".into(), by: ProfileAuthor::Orchestrator, ..profile("Fixer") }], "the same name replaces, by the orchestrator");
+        assert_eq!((tastes.worker_profiles.account.len(), tastes.worker_profiles.projects.len()), (0, 0));
+        let before = tastes.clone();
+        assert_eq!(tastes.propose_worker_profile(profile(" ")), Err("every profile needs a name".into()));
+        assert_eq!(tastes.propose_worker_profile(profile("Reviewer")), Err("the Reviewer is set in its own section, so no profile takes its name".into()));
+        assert_eq!(tastes, before);
+    }
+
+    #[test]
+    fn a_profile_names_installed_skills_only() {
+        let skilled = WorkerProfile { skills: vec![SkillRef { name: "pstack:unslop".into(), enabled: true }], ..profile("writer") };
+        assert_eq!(skilled.check_skills(&["pstack:unslop", "bro"]), Ok(()));
+        assert_eq!(skilled.check_skills(&["unslop"]), Err("writer names pstack:unslop, which is no installed skill: name one the skills action lists".into()));
     }
 }

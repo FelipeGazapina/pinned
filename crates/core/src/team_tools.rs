@@ -110,6 +110,8 @@ pub struct TeamSeat {
     pub worker: bool,
     /// A delegated headless child.
     pub child: bool,
+    /// The global orchestrator, above every project.
+    pub orchestrator: bool,
 }
 
 /// Every team tool's name, in the order `offered` lists them.
@@ -204,6 +206,17 @@ mod tests {
         for seat in [TeamSeat::default(), TeamSeat { captain: true, ..TeamSeat::default() }, TeamSeat { worker: true, ..TeamSeat::default() }, TeamSeat { worker: true, child: true, ..TeamSeat::default() }] {
             assert_eq!(offered(&seat), Vec::<Value>::new(), "{seat:?}");
         }
+    }
+
+    #[test]
+    fn only_the_orchestrator_is_offered_profile_propose() {
+        let listed = |seat: TeamSeat| offered(&seat).iter().map(|tool| tool["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert!(listed(TeamSeat { orchestrator: true, ..TeamSeat::default() }).contains(&"profile_propose".to_owned()));
+        for seat in [TeamSeat::default(), TeamSeat { captain: true, ..TeamSeat::default() }, TeamSeat { worker: true, ..TeamSeat::default() }, TeamSeat { worker: true, child: true, ..TeamSeat::default() }] {
+            assert!(!listed(seat).contains(&"profile_propose".to_owned()), "{seat:?}");
+        }
+        let schema = definition("profile_propose").unwrap();
+        assert_eq!(schema["inputSchema"]["properties"]["profile"]["required"], json!(["name"]));
     }
 
     #[test]
