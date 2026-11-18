@@ -724,8 +724,10 @@ mod tests {
         noted(&t.m, &t.worker, "src/login.rs:3", "the token check moved");
         let answer = read(&t.m, Some(&t.captain), None, None).unwrap();
         assert_eq!(answer, format!("```text {HEADER}\n- {} on src/login.rs:3: the token check moved\n```", t.worker));
-        let empty = read(&t.m, Some(&t.captain), None, Some(&t.other_worker));
-        assert_eq!(empty, Err(format!("task {} is not on your board. Nothing was read.", t.other_worker)));
+        let quiet = read(&t.m, Some(&t.captain), None, Some(&t.other_worker));
+        assert_eq!(quiet, Ok(format!("```text {HEADER}\n(no notes yet)\n```")), "one task's part, empty, is still fenced");
+        let unplanned = read(&t.m, Some(&t.captain), None, Some(&t.unplanned_worker));
+        assert_eq!(unplanned, Err(format!("task {} is not on your board. Nothing was read.", t.unplanned_worker)));
     }
 
     #[test]
