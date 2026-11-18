@@ -2508,6 +2508,12 @@ impl Machine {
                 prompt.push(global::captain_prompt(&settings.name, settings.reports));
             }
         }
+        let (refused, profile) = self.profile_launch(tab);
+        if !refused.is_empty() {
+            args.push("--disallowedTools".to_owned());
+            args.extend(refused);
+        }
+        prompt.extend(profile);
         if !prompt.is_empty() {
             args.extend(["--append-system-prompt".to_owned(), prompt.join("\n\n")]);
         }
@@ -5238,6 +5244,7 @@ impl Machine {
             Claim::Full(working) => return Err(workers_full(working)),
             Claim::Fresh(task) => *task,
         };
+        self.delegate_started(&task.id, &request);
         self.delegates.set_placement(&task.id, placed);
         self.delegates.set_limits(&task.id, budget_ms, limit_ms);
         self.delegates.hold_to(&task.id, held);
@@ -5626,7 +5633,7 @@ impl Machine {
     /// new task is linked to the step or list it names once the task exists.
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
         let caller = Self::require_caller(tab, parent_task)?;
-        let request = self.profile_request(&caller, request)?;
+        let request = self.profile_request(&caller, None, request)?;
         let request = self.chain_request(&caller, request)?;
         // A replayed request answers with the task it started, which is already linked.
         let link = match request.plan_step.clone() {
@@ -5642,7 +5649,6 @@ impl Machine {
         let body = self.start_task(caller, tool, request.clone())?;
         let Ok(mut started) = serde_json::from_str::<Value>(&body) else { return Ok(body) };
         let Some(task) = started["taskId"].as_str().map(str::to_owned) else { return Ok(body) };
-        self.delegate_started(&task, &request);
         let Some((session, step, title)) = link else { return Ok(body) };
         let facts = self.plan_facts();
         let (linked, changed) = self
@@ -5684,7 +5690,7 @@ impl Machine {
         }
         let tastes = self.tastes();
         let limits = self.caller_limits_from(&tastes, caller.tab.as_deref().unwrap_or_default())?;
-        match crate::placement::route(&tastes.placement, &request) {
+        match self.profile_route(&request, crate::placement::route(&tastes.placement, &request)) {
             Route::Explicit => {
                 let placed = Placed { machine: String::new(), machine_name: String::new(), by: By::Explicit, reason: "the request names it".into(), skipped: vec![] };
                 match self.delegate_elsewhere(&caller, tool, request, limits, placed, false)? {
@@ -5752,6 +5758,9 @@ impl Machine {
             if placed.machine == own {
                 return self.start_here(caller, tool, request, limits, placed);
             }
+            if let Some(reason) = self.profile_stays_here(&request, &placed.machine) {
+                return self.start_here(caller, tool, request, limits, here(&reason, refused));
+            }
             let mut sent = request.clone();
             sent.target.machine = Some(placed.machine.clone());
             match self.delegate_elsewhere(caller, tool.clone(), sent, limits, placed.clone(), true)? {
@@ -5772,7 +5781,7 @@ impl Machine {
     fn start_for_origin(&self, origin: crate::delegate::Origin, request: crate::delegate::Request, repo: Option<String>, token: Option<String>) -> Result<String, String> {
         let key = origin.parent_key();
         let caller = crate::delegate::Caller { tab: Some(key.clone()), task: None };
-        let request = self.profile_request(&caller, request)?;
+        let request = self.profile_request(&caller, repo.as_deref(), request)?;
         let mut request = self.chain_request(&caller, request)?;
         if let Some(id) = self.delegates.for_origin(&key, &origin.task) {
             return self.delegates.started_json(&id).map(|value| value.to_string());
@@ -5803,11 +5812,7 @@ impl Machine {
             origin: Some(origin),
             placed: None,
         };
-        let body = self.launch_child(side, None, request.clone())?;
-        if let Some(task) = serde_json::from_str::<Value>(&body).ok().and_then(|started| started["taskId"].as_str().map(str::to_owned)) {
-            self.delegate_started(&task, &request);
-        }
-        Ok(body)
+        self.launch_child(side, None, request)
     }
 
     /// What a machine that is full answers a worker another machine sent it.
@@ -5918,6 +5923,7 @@ impl Machine {
             Claim::Full(working) => return Err(workers_full(working)),
             Claim::Fresh(task) => *task,
         };
+        self.delegate_started(&task.id, &request);
         if let Some(placed) = placed {
             self.delegates.set_placement(&task.id, placed);
         }
@@ -5973,10 +5979,12 @@ impl Machine {
             self.watch_thread(child, account.clone());
         }
         let mcp = self.session_mcp(&account, &cwd);
+        let profile = self.profile_block(&task.id);
         let argv = driver_args(
             account.provider,
             &SpawnSpec {
                 task: &brief,
+                profile: profile.as_deref(),
                 model: model.as_deref(),
                 effort: effort.as_deref(),
                 access,

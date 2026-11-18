@@ -43,6 +43,14 @@ fn prompt_arg(task: &str) -> String {
     if task.starts_with('-') { format!("\n{task}") } else { task.to_owned() }
 }
 
+/// The task a driver with no system prompt of its own gets: the profile's block first, in its fence.
+fn profiled_task(spec: &SpawnSpec) -> String {
+    match spec.profile {
+        Some(block) => crate::profiles::fenced(block, spec.task),
+        None => spec.task.to_owned(),
+    }
+}
+
 fn claude_args(spec: &SpawnSpec) -> Vec<String> {
     let mut args = vec![
         "-p".into(),
@@ -61,6 +69,14 @@ fn claude_args(spec: &SpawnSpec) -> Vec<String> {
         Access::Full => args.push("--dangerously-skip-permissions".into()),
         Access::Auto => args.extend(["--permission-mode".into(), "auto".into()]),
         Access::ReadOnly => args.extend(["--permission-mode".into(), "plan".into()]),
+    }
+    if let Some(block) = spec.profile {
+        // --disallowedTools takes any number of values, so the prompt's flag after it ends the list.
+        if spec.access == Access::ReadOnly {
+            args.push("--disallowedTools".into());
+            args.extend(crate::profiles::READ_ONLY_REFUSED.iter().map(|tool| (*tool).to_owned()));
+        }
+        args.extend(["--append-system-prompt".into(), block.to_owned()]);
     }
     let configs: Vec<String> = spec.mcp_config.into_iter().chain(spec.session_mcp.map(|files| files.file.as_path())).map(|config| config.display().to_string()).collect();
     if !configs.is_empty() {
@@ -97,7 +113,7 @@ fn codex_args(spec: &SpawnSpec) -> Vec<String> {
     if let Some(files) = spec.session_mcp {
         args.extend(files.codex_flags(spec.exe));
     }
-    args.push(prompt_arg(spec.task));
+    args.push(prompt_arg(&profiled_task(spec)));
     args
 }
 
@@ -118,7 +134,7 @@ fn cursor_args(spec: &SpawnSpec) -> Vec<String> {
     if let Some(model) = spec.model {
         args.extend(["--model".into(), model.into()]);
     }
-    args.push(prompt_arg(spec.task));
+    args.push(prompt_arg(&profiled_task(spec)));
     args
 }
 

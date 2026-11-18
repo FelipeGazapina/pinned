@@ -256,17 +256,89 @@ pub fn resolve(tastes: &Tastes, project: Option<&str>, name: &str) -> Result<Wor
     }
 }
 
-/// `delegate_task`'s `profile`, which `parse_request` calls. U6 turns it on.
+/// `delegate_task`'s `profile`, which `parse_request` calls: a name a list could hold. The machine
+/// that starts the task resolves it.
 pub fn admit(request: &Request) -> Result<(), String> {
-    match request.profile {
-        Some(_) => Err("profile is not available in this build".into()),
-        None => Ok(()),
+    match request.profile.as_deref() {
+        Some(name) if name.trim().chars().count() > MAX_NAME => Err(format!("profile is a name of at most {MAX_NAME} characters")),
+        _ => Ok(()),
     }
 }
 
-/// `delegate_task`'s schema for `profile`, offered once U6 turns it on.
+/// `delegate_task`'s schema for `profile`.
 pub fn delegate_property() -> Option<(&'static str, serde_json::Value)> {
-    None
+    let about = "A worker profile the user set on the Way of working page, by name: Explorer, Implementer, Tester, or one of the project's or the account's own. It sets the tools granted, the access, the model and effort when the call names none, and what the worker delivers. A proposed profile is not approved and is refused.";
+    Some(("profile", serde_json::json!({ "type": "string", "description": about })))
+}
+
+/// The tools a read-only profile's Claude worker is refused outright, on top of plan mode.
+pub const READ_ONLY_REFUSED: [&str; 5] = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"];
+
+/// The first pinned that applies a profile. An older machine takes `profile` as an unknown field
+/// and would run the worker without it, so a profile task never goes to one.
+pub const FIRST_VERSION: &str = "0.18.7";
+
+/// The line before the fence a Codex or Cursor worker gets its profile in.
+pub const FENCE_HEADER: &str = "The worker profile the user set for this task, between the fences:";
+
+/// Whether a machine that reports `version` applies a profile. An unknown version does not.
+pub fn applies_profiles(version: &str) -> bool {
+    let parts = |v: &str| -> Option<Vec<u64>> {
+        let v = v.trim().trim_start_matches('v');
+        let core = v.split(['-', '+']).next()?;
+        core.split('.').map(|n| n.parse().ok()).collect()
+    };
+    match (parts(version), parts(FIRST_VERSION)) {
+        (Some(have), Some(first)) if !have.is_empty() => have >= first,
+        _ => false,
+    }
+}
+
+/// `request` as `profile` sets it up: the profile's tools are the grant, a read-only profile runs
+/// in plan, its model and effort apply when the call names none, and its name is the task's role.
+pub fn apply(profile: &WorkerProfile, mut request: Request) -> Request {
+    if !profile.tools.is_empty() {
+        // The grant line leads the brief outside the fence, so a name that could break out of it is left out.
+        request.tools = profile.tools.iter().map(|tool| tool.trim().to_owned()).filter(|tool| !tool.is_empty() && !tool.contains('`') && !tool.chars().any(char::is_control)).collect();
+    }
+    if profile.access == ProfileAccess::ReadOnly {
+        request.interaction = crate::delegate::Interaction::Plan;
+    }
+    if request.target.model.is_none() {
+        request.target.model = profile.model.as_ref().map(|m| m.model.trim().to_owned());
+    }
+    if request.target.effort.is_none() {
+        request.target.effort.clone_from(&profile.effort);
+    }
+    request.role = Some(profile.name.clone());
+    request.profile = Some(profile.name.clone());
+    request
+}
+
+/// What a worker is told of the profile it runs as.
+pub fn block(profile: &WorkerProfile) -> String {
+    let mut lines = vec![format!("Worker profile, set by the user: {}", profile.name.trim())];
+    lines.push(match profile.access {
+        ProfileAccess::ReadOnly => format!("Access: read-only. You change no file and run no shell: {} are refused.", READ_ONLY_REFUSED.join(", ")),
+        ProfileAccess::Edit => "Access: you may edit.".to_owned(),
+    });
+    if !profile.tools.is_empty() {
+        lines.push(format!("Tools: {}", profile.tools.join(", ")));
+    }
+    let skills: Vec<&str> = profile.skills.iter().filter(|skill| skill.enabled).map(|skill| skill.name.as_str()).collect();
+    if !skills.is_empty() {
+        lines.push(format!("Skills: {}", skills.join(", ")));
+    }
+    if !profile.delivers.trim().is_empty() {
+        lines.push(format!("Delivers: {}", profile.delivers.trim()));
+    }
+    lines.join("\n")
+}
+
+/// `task` after `block` in one fence under `FENCE_HEADER`. The block holds no backtick, so nothing
+/// in it closes the fence.
+pub fn fenced(block: &str, task: &str) -> String {
+    format!("{FENCE_HEADER}\n```profile\n{}\n```\n\n{task}", block.replace('`', "'"))
 }
 
 #[cfg(test)]

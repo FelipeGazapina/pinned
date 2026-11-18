@@ -30,11 +30,93 @@ impl Machine {
         profiles.iter().try_for_each(|p| p.check_skills(&installed))
     }
 
-    /// `delegate_task`'s request as the profile it names sets it up. U6 resolves the profile;
-    /// until then one that names a profile is refused.
-    pub(super) fn profile_request(&self, _caller: &Caller, request: Request) -> Result<Request, String> {
+    /// `delegate_task`'s request as the profile it names sets it up (`profiles::apply`), resolved
+    /// on this machine's tastes, which are the account's while it is linked: the project's list over
+    /// the account's over the seeds, never `proposed`. The project is `repo`'s for a worker another
+    /// machine sent, else the caller's folder's. A model the profile names, used when the call names
+    /// none, is held to the caller's tier and effort here, so it is refused and never raised.
+    pub(super) fn profile_request(&self, caller: &Caller, repo: Option<&str>, request: Request) -> Result<Request, String> {
         crate::profiles::admit(&request)?;
+        let Some(name) = request.profile.clone() else { return Ok(request) };
+        let tastes = self.tastes();
+        let project = match repo {
+            Some(url) => super::repo_key(url),
+            None => self.caller_folder(caller).and_then(|cwd| super::git_remote(&cwd)).and_then(|url| super::repo_key(&url)),
+        };
+        let profile = crate::profiles::resolve(&tastes, project.as_deref(), &name).map_err(|unresolved| unresolved.to_string())?;
+        let named = request.target.model.is_some();
+        let request = crate::profiles::apply(&profile, request);
+        let local_tab = caller.tab.as_deref().filter(|tab| self.tab(tab, |_| ()).is_ok());
+        if let (false, Some(model), Some(tab)) = (named, request.target.model.as_deref(), local_tab) {
+            let limits = self.caller_limits_from(&tastes, tab)?;
+            limits.admit_unheld(Some(model), request.target.effort.as_deref(), &self.claude_models()).map_err(|e| format!("profile {}: {e}", profile.name))?;
+        }
         Ok(request)
+    }
+
+    /// The folder of the tab or task that calls, when it is on this machine.
+    fn caller_folder(&self, caller: &Caller) -> Option<std::path::PathBuf> {
+        if let Some(tab) = caller.tab.as_deref() {
+            return self.tab(tab, |t| t.cwd.clone()).ok();
+        }
+        self.delegates.lineage(caller.task.as_deref()?).map(|task| task.cwd)
+    }
+
+    /// The profile task `task` runs as, resolved now as `profile_request` resolved it, in the
+    /// project of the folder the task runs in. None for a task without one.
+    fn task_profile(&self, task: &str) -> Option<WorkerProfile> {
+        let record = self.delegates.get(task)?;
+        let project = super::git_remote(&record.cwd).and_then(|url| super::repo_key(&url));
+        crate::profiles::resolve(&self.tastes(), project.as_deref(), record.profile.as_deref()?).ok()
+    }
+
+    /// What a headless worker's driver gets of task `task`'s profile: its block.
+    pub(super) fn profile_block(&self, task: &str) -> Option<String> {
+        self.task_profile(task).map(|profile| crate::profiles::block(&profile))
+    }
+
+    /// What the Claude session of worker thread `tab` adds for its task's profile: the tools a
+    /// read-only task refuses, and the block for `--append-system-prompt`. The refusals follow the
+    /// task's record, so a profile that changed or went since still runs read-only.
+    pub(super) fn profile_launch(&self, tab: &str) -> (Vec<String>, Option<String>) {
+        let Some(task) = self.tab(tab, |t| t.task.clone()).ok().flatten() else { return (vec![], None) };
+        let Some(record) = self.delegates.get(&task).filter(|record| record.profile.is_some()) else { return (vec![], None) };
+        let refused = match record.access {
+            crate::delegate::Access::ReadOnly => crate::profiles::READ_ONLY_REFUSED.iter().map(|tool| (*tool).to_owned()).collect(),
+            _ => vec![],
+        };
+        (refused, self.profile_block(&task))
+    }
+
+    /// Why a task with a profile stays on this machine rather than go to `machine` (an id or a
+    /// name): the hub's `MachineStates` gives the pinned each machine reported when it connected,
+    /// and one below `profiles::FIRST_VERSION`, or one the hub can't name, would run it without.
+    pub(super) fn profile_stays_here(&self, request: &Request, machine: &str) -> Option<String> {
+        request.profile.as_ref()?;
+        let views = self.call_hub(crate::wire::HubCall::MachineStates).and_then(|value| serde_json::from_value::<Vec<crate::wire::MachineView>>(value).map_err(|e| e.to_string()));
+        let wanted = machine.trim();
+        let view = views.ok().and_then(|views| views.into_iter().find(|view| view.id == wanted || view.name.eq_ignore_ascii_case(wanted)));
+        match view {
+            Some(view) if crate::profiles::applies_profiles(&view.version) => None,
+            Some(view) => Some(format!("{} runs pinned {}, older than {}, the first that applies a worker profile, so it runs on the machine that asked", view.name, if view.version.is_empty() { "of an unknown version" } else { &view.version }, crate::profiles::FIRST_VERSION)),
+            None => Some(format!("the hub did not say which pinned {wanted} runs, and only {} or later applies a worker profile, so it runs on the machine that asked", crate::profiles::FIRST_VERSION)),
+        }
+    }
+
+    /// `route` for a request with a profile: a named machine too old to apply it, or a box, whose
+    /// pinned is not known before it starts, leaves the task on this machine.
+    pub(super) fn profile_route(&self, request: &Request, route: crate::placement::Route) -> crate::placement::Route {
+        use crate::placement::{By, Route};
+        if request.profile.is_none() || !matches!(route, Route::Explicit) {
+            return route;
+        }
+        if request.target.boxed.is_some() {
+            return Route::Here(By::Fallback, format!("a box's pinned is not known before it starts, and only {} or later applies a worker profile, so it runs on the machine that asked", crate::profiles::FIRST_VERSION));
+        }
+        match request.target.machine.as_deref().and_then(|machine| self.profile_stays_here(request, machine)) {
+            Some(reason) => Route::Here(By::Fallback, reason),
+            None => route,
+        }
     }
 
     /// `profile_propose`, the global orchestrator's alone: keeps the profile in `proposed`, which
@@ -238,7 +320,7 @@ mod tests {
         let tab = m.add_tab(dir.path().into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
         let refused = start(&m, &tab, json!({ "task": "Fix it.", "profile": "Deep" })).unwrap_err();
         assert!(refused.starts_with("profile Deep: claude-opus-5-5 is a high-tier model; this project allows up to mid"), "{refused}");
-        assert!(m.delegates.records().is_empty(), "a refused profile started nothing");
+        assert!(m.delegates.records().is_empty() && m.delegates.running().is_empty() && m.delegates.working_for(&format!("tab:{tab}")) == 0, "a refused profile started nothing");
 
         let task = task_of(&start(&m, &tab, json!({ "task": "Fix it.", "profile": "Deep", "target": { "model": "claude-sonnet-5-5" } })).unwrap());
         assert_eq!(after(&thread_args(&m, &claude, &task), "--model"), Some("claude-sonnet-5-5"), "the call's own model in the tier wins over the profile's");
@@ -260,7 +342,7 @@ mod tests {
         let sent = parse_request(&json!({ "task": "Fix it.", "profile": "fixer" })).unwrap();
         let refused = m.start_for_origin(origin, sent, Some("https://github.com/acme/app".into()), None).unwrap_err();
         assert!(refused.contains("not approved"), "another machine's request resolves on this machine's tastes too: {refused}");
-        assert!(m.delegates.records().is_empty(), "nothing started");
+        assert!(m.delegates.records().is_empty() && m.delegates.running().is_empty() && m.delegates.working_for(&format!("tab:{tab}")) == 0, "nothing started");
     }
 
     #[test]
@@ -296,7 +378,7 @@ mod tests {
         let after = m.delegates.get(&task).unwrap();
         assert_eq!((after.profile.as_deref(), after.role.as_deref(), after.access), (Some("Explorer"), Some("Explorer"), Access::ReadOnly));
         assert_eq!((after.profile, after.role, after.access), (before.profile, before.role, before.access));
-        assert_eq!(m.delegates.records().len(), 1);
+        assert_eq!(m.delegates.working_for(&format!("tab:{tab}")), 1, "one worker, the first");
     }
 
     #[test]
@@ -335,7 +417,7 @@ mod tests {
         let project = dir.path().join("app");
         std::fs::create_dir_all(&project).unwrap();
         for args in [vec!["init", "-q"], vec!["remote", "add", "origin", "https://github.com/acme/app.git"]] {
-            assert!(std::process::Command::new("git").args(&args).current_dir(&project).status().unwrap().success());
+            assert!(crate::process::command("git").args(&args).current_dir(&project).status().unwrap().success());
         }
         let claude = thread_claude(dir.path());
         let m = machine_with(dir.path(), std::collections::BTreeMap::from([(Provider::Claude, claude.clone())]));

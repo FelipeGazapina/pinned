@@ -617,6 +617,8 @@ pub enum StreamEvent {
 /// Headless argv for one provider. The binary is not included.
 pub struct SpawnSpec<'a> {
     pub task: &'a str,
+    /// The block of the worker profile the task runs as (`profiles::block`), when it has one.
+    pub profile: Option<&'a str>,
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
     pub access: Access,
@@ -679,6 +681,7 @@ mod tests {
     fn spec<'a>(task: &'a str, access: Access) -> SpawnSpec<'a> {
         SpawnSpec {
             task,
+            profile: None,
             model: None,
             effort: None,
             access,

@@ -28,7 +28,7 @@ lines named here.
 | `Machine::board_write(task, BoardEvent)` | `machine/board.rs`, called after a worker's task settles | Does nothing |
 | `Machine::chain_settled(task)` | `machine/chain.rs`, called after `board_write` | Does nothing |
 | `Machine::profile_request`, `Machine::chain_request` | `machine/profiles.rs`, `machine/chain.rs`, called from `start_delegate`, and from `start_for_origin` with the caller `tab:` the origin's parent key | Refuse `profile` and `then` |
-| `Machine::delegate_started(task, request)` | `machine/delegate_started.rs`, called once the task exists: after `start_task` in `start_delegate`, after `launch_child` in `start_for_origin`. A replayed request calls it again with the same task | Does nothing. U6 adds `Delegates::set_profile`, U12 `Delegates::set_chain` |
+| `Machine::delegate_started(task, request)` | `machine/delegate_started.rs`, called once, right after `Claim::Fresh` and before the worker is spawned: in `launch_child` (every start here, from `start_delegate` or `start_for_origin`) and in `delegate_elsewhere` (the caller's record of a task another machine runs). A replayed request answers the task it started without calling it (U6 moved it: it ran after `start_task` in `start_delegate`, so a retry with a different `profile` or `then` rewrote a running task, and after `launch_child`, so a worker could end before its record had them) | U6: `Delegates::set_profile`. U12 adds `Delegates::set_chain` |
 | `delegate_task` schema properties | `profiles::delegate_property`, `chain::delegate_property` | Return None, so the schema is unchanged |
 | Way of working sections | `ui/gui-reviewer.js` (`tasteReviewerHtml`, `TASTE_REVIEWER_ACTS`), `ui/gui-profiles.js` (`tasteProfilesHtml`, `TASTE_PROFILE_ACTS`) | Draw nothing |
 
