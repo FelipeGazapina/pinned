@@ -37,6 +37,9 @@ const MCP_IMPORT_WAIT: Duration = Duration::from_secs(20);
 const MAX_RECORDS_PER_CALL: usize = 500;
 /// Why `open_placed` refuses a run on a team's account.
 pub const TEAM_RUNS: &str = "a team's runs start only through its bots";
+/// Why the hub refuses a worker profile proposal: only a Captain's or the global orchestrator's
+/// session proposes one, through its machine.
+const NOT_AN_ORCHESTRATOR: &str = "only a Captain or the global orchestrator proposes a worker profile";
 /// How long the password the app took counts as the owner being there.
 const UNLOCK_FOR: Duration = Duration::from_secs(12 * 60 * 60);
 /// A run may clone a large repository before its session starts.
@@ -1010,7 +1013,15 @@ impl Hub {
                 return self.change_tastes(account, reset).await;
             }
             HubCall::SetReviewer { patch } => return self.change_tastes(account, |tastes| tastes.set_reviewer(patch)).await,
-            HubCall::SetWorkerProfiles { project, profiles } => return self.change_tastes(account, |tastes| tastes.set_worker_profiles(project.as_deref(), profiles)).await,
+            HubCall::SetWorkerProfiles { project, profiles, drop_proposed } => {
+                let set = |tastes: &mut Tastes| {
+                    tastes.set_worker_profiles(project.as_deref(), profiles)?;
+                    tastes.drop_proposed(&drop_proposed);
+                    Ok(())
+                };
+                return self.change_tastes(account, set).await;
+            }
+            HubCall::ProposeWorkerProfile { .. } => return Err(NOT_AN_ORCHESTRATOR.into()),
             HubCall::GetBoxSize { repo, size } => return json(crate::boxes::box_size(self, account, repo.as_deref(), size).await?),
             HubCall::SetBoxSize { repo, size } => {
                 let scope = match repo {
@@ -1254,6 +1265,16 @@ impl Hub {
         let _held = account.marks.lock().await;
         self.write_marks(account, vec![MarkChange { session, mark: Mark::Clear }]).await?;
         Ok(())
+    }
+
+    /// `HubCall::ProposeWorkerProfile` from `machine`, which it takes only when `tab` is a tab that
+    /// machine reports as a Captain or the global orchestrator.
+    pub async fn propose_worker_profile(&self, account: &Account, machine: &str, tab: &str, profile: pinned_core::profiles::WorkerProfile) -> Result<Value, String> {
+        let orchestrates = |t: &TabView| t.id == tab && (t.orchestrator_global || t.role == Some(pinned_core::agent::Role::Orchestrator));
+        if !account.tabs_of(machine).is_some_and(|tabs| tabs.iter().any(orchestrates)) {
+            return Err(NOT_AN_ORCHESTRATOR.into());
+        }
+        self.change_tastes(account, |tastes| tastes.propose_worker_profile(profile)).await
     }
 
     async fn change_tastes(&self, account: &Account, change: impl FnOnce(&mut Tastes) -> Result<(), String>) -> Result<Value, String> {

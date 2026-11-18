@@ -354,6 +354,7 @@ pub fn hub_rule(call: &HubCall) -> Rule {
         | HubCall::ResetTasteField { .. }
         | HubCall::SetReviewer { .. }
         | HubCall::SetWorkerProfiles { .. }
+        | HubCall::ProposeWorkerProfile { .. }
         | HubCall::Delegate { .. }
         | HubCall::RemoteTask { .. }
         | HubCall::RemoteEnded { .. }

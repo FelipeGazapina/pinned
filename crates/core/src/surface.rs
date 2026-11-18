@@ -321,6 +321,7 @@ pub const ACTIONS: &[Action] = &[
     h("import_tastes", Excluded, "a signed-out app's one-time move of its way of working"),
     h("set_reviewer", Excluded, "review rules and the reviewer's settings are the user's own"),
     h("set_worker_profiles", Excluded, "worker profiles are the user's own: propose one with profile_propose"),
+    h("propose_worker_profile", Excluded, "a Captain proposes a worker profile with profile_propose, which its machine sends"),
     h("get_box_size", Read, "The size a box cloning repo opens at when its call names none, and which setting chose it: call, project, account or built_in. Without repo, the account's. With size, what a call naming that size gets.").wired(),
     h("set_box_size", Confirm, "Sets the default box size, small, medium or large, of repo's project, or the account's without repo. Leaving size out clears it: the project follows the account's again, and the account's goes back to small.").wired(),
     h("read_session", Read, "Any session's state and last items, found on the account's online machines by its tab id, on machine when given.").wired(),

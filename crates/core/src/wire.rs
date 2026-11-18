@@ -1311,12 +1311,21 @@ pub enum HubCall {
     /// does. The user's own: no agent may call it.
     SetReviewer { patch: crate::reviewer::ReviewerPatch },
     /// `taste::Tastes`, once `profiles` are the worker profiles of `project`, or the account's
-    /// without it, as `Tastes::set_worker_profiles` does. The user's own: no agent may call it.
+    /// without it, as `Tastes::set_worker_profiles` does, and the proposals named in
+    /// `drop_proposed` are gone, in the same write. Approving a proposal sends the list with its
+    /// row and its name in `drop_proposed`; discarding one sends the list unchanged. The user's
+    /// own: no agent may call it.
     SetWorkerProfiles {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
         profiles: Vec<crate::profiles::WorkerProfile>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        drop_proposed: Vec<String>,
     },
+    /// From a machine only: `taste::Tastes`, once `profile` waits in `proposed` for the user, as
+    /// `Tastes::propose_worker_profile` writes it. The hub takes it only when `tab` is a Captain or
+    /// the global orchestrator on that machine; `profile_propose` sends it.
+    ProposeWorkerProfile { tab: TabId, profile: crate::profiles::WorkerProfile },
     /// From a machine: `true` when the account had no tastes and took these, a signed-out app's own.
     ImportTastes { tastes: Tastes },
     /// `taste::BoxSizeChoice`: the size a box cloning `repo` opens at when its call names `size`,
@@ -1860,10 +1869,14 @@ mod tests {
             HubCall::SetReviewer { patch: crate::reviewer::ReviewerPatch { rounds: Some(3), ..Default::default() } },
             json!({ "cmd": "set_reviewer", "patch": { "rounds": 3 } }),
         );
-        round_trip(HubCall::SetWorkerProfiles { project: None, profiles: vec![] }, json!({ "cmd": "set_worker_profiles", "profiles": [] }));
+        round_trip(HubCall::SetWorkerProfiles { project: None, profiles: vec![], drop_proposed: vec![] }, json!({ "cmd": "set_worker_profiles", "profiles": [] }));
         round_trip(
-            HubCall::SetWorkerProfiles { project: Some("github.com/acme/site".into()), profiles: serde_json::from_value(json!([{ "name": "scout" }])).unwrap() },
-            json!({ "cmd": "set_worker_profiles", "project": "github.com/acme/site", "profiles": [{ "name": "scout", "skills": [], "tools": [], "access": "edit", "delivers": "", "by": "user" }] }),
+            HubCall::SetWorkerProfiles { project: Some("github.com/acme/site".into()), profiles: serde_json::from_value(json!([{ "name": "scout" }])).unwrap(), drop_proposed: vec!["scout".into()] },
+            json!({ "cmd": "set_worker_profiles", "project": "github.com/acme/site", "profiles": [{ "name": "scout", "skills": [], "tools": [], "access": "edit", "delivers": "", "by": "user" }], "drop_proposed": ["scout"] }),
+        );
+        round_trip(
+            HubCall::ProposeWorkerProfile { tab: "tab-1".into(), profile: serde_json::from_value(json!({ "name": "scout" })).unwrap() },
+            json!({ "cmd": "propose_worker_profile", "tab": "tab-1", "profile": { "name": "scout", "skills": [], "tools": [], "access": "edit", "delivers": "", "by": "user" } }),
         );
     }
 

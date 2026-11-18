@@ -22,8 +22,10 @@ use std::time::{Duration, Instant, SystemTime};
 // The agent team's machine side, one module per area, so each unit edits its own file.
 mod board;
 mod chain;
+mod delegate_started;
 mod feature_map;
 mod profiles;
+mod propose;
 mod reviewer;
 mod send_back;
 mod team;
@@ -5637,9 +5639,11 @@ impl Machine {
             }
             _ => None,
         };
-        let body = self.start_task(caller, tool, request)?;
-        let (Some((session, step, title)), Ok(mut started)) = (link, serde_json::from_str::<Value>(&body)) else { return Ok(body) };
+        let body = self.start_task(caller, tool, request.clone())?;
+        let Ok(mut started) = serde_json::from_str::<Value>(&body) else { return Ok(body) };
         let Some(task) = started["taskId"].as_str().map(str::to_owned) else { return Ok(body) };
+        self.delegate_started(&task, &request);
+        let Some((session, step, title)) = link else { return Ok(body) };
         let facts = self.plan_facts();
         let (linked, changed) = self
             .plans
@@ -5765,8 +5769,11 @@ impl Machine {
     /// Starts a worker here for a tab on another machine, which the hub sent as `Call::Delegate`.
     /// It works in this machine's checkout of `repo`, cloned with `token` when there is none, on
     /// the project's account unless the request names one.
-    fn start_for_origin(&self, origin: crate::delegate::Origin, mut request: crate::delegate::Request, repo: Option<String>, token: Option<String>) -> Result<String, String> {
+    fn start_for_origin(&self, origin: crate::delegate::Origin, request: crate::delegate::Request, repo: Option<String>, token: Option<String>) -> Result<String, String> {
         let key = origin.parent_key();
+        let caller = crate::delegate::Caller { tab: Some(key.clone()), task: None };
+        let request = self.profile_request(&caller, request)?;
+        let mut request = self.chain_request(&caller, request)?;
         if let Some(id) = self.delegates.for_origin(&key, &origin.task) {
             return self.delegates.started_json(&id).map(|value| value.to_string());
         }
@@ -5777,7 +5784,7 @@ impl Machine {
         let own = self.tastes().resolve(&captain_scope(&history::project_of(&cwd))).limits();
         let limits = origin.limits.narrow(own);
         (request.target.machine, request.target.boxed) = (None, None);
-        let caller_key = crate::delegate::Caller { tab: Some(key.clone()), task: None }.key();
+        let caller_key = caller.key();
         let side = ChildParent {
             parent: crate::delegate::Parent::Tab(key),
             caller_key,
@@ -5796,7 +5803,11 @@ impl Machine {
             origin: Some(origin),
             placed: None,
         };
-        self.launch_child(side, None, request)
+        let body = self.launch_child(side, None, request.clone())?;
+        if let Some(task) = serde_json::from_str::<Value>(&body).ok().and_then(|started| started["taskId"].as_str().map(str::to_owned)) {
+            self.delegate_started(&task, &request);
+        }
+        Ok(body)
     }
 
     /// What a machine that is full answers a worker another machine sent it.
