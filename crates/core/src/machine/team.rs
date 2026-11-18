@@ -62,7 +62,8 @@ mod tests {
     #[test]
     fn every_team_tool_answers_that_it_is_not_available_yet() {
         let m = Machine::new(launch(), None, None, |_| {});
-        for name in crate::team_tools::NAMES {
+        // The feature map is on (U3): `machine/feature_map.rs` tests its answers.
+        for name in crate::team_tools::NAMES.into_iter().filter(|name| !name.starts_with("feature_map_")) {
             let args = match name {
                 "task_fix" | "board_read" => json!({ "taskId": "t1" }),
                 "feature_map_set" => json!({ "feature": "login", "files": [] }),

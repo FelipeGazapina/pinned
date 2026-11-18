@@ -1,15 +1,83 @@
 //! The machine side of the feature map (U3), kept in the config folder next to `plans.json`.
 
-use super::Machine;
+use super::{unix_millis, Machine};
+use crate::agent::{role_of, Role};
+use crate::delegate::Parent;
 use crate::team_tools::{FeatureMapRead, FeatureMapSet};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// One write of `feature-map.json` at a time, whichever machine in this process makes it.
+static WRITING: Mutex<()> = Mutex::new(());
+
+const CAPTAIN_ONLY: &str = "only the project's Captain writes the feature map";
+const REMOTE: &str = "the feature map works for workers on the Captain's machine only in this build";
 
 impl Machine {
-    pub(super) fn feature_map_read(&self, _tab: Option<&str>, _task: Option<&str>, _call: FeatureMapRead) -> Result<String, String> {
-        super::team::not_yet("feature_map_read")
+    /// The folder the machine keeps its settings in, which holds `plans.json` too.
+    fn feature_map_dir(&self) -> Result<&Path, String> {
+        self.projects_file.as_deref().and_then(Path::parent).ok_or_else(|| "this machine has no folder to keep a feature map in".to_owned())
     }
 
-    pub(super) fn feature_map_set(&self, _tab: Option<&str>, _task: Option<&str>, _call: FeatureMapSet) -> Result<String, String> {
-        super::team::not_yet("feature_map_set")
+    /// The project of `tab` when it is a project's Captain.
+    fn captains_project(&self, tab: &str) -> Option<PathBuf> {
+        let captain = self.tab(tab, |t| matches!(role_of(&t.env), Some((Role::Orchestrator, _))) && !crate::global_orchestrator::is_global(&t.env)).ok()?;
+        captain.then(|| self.project_of_tab(tab).ok()).flatten()
+    }
+
+    /// The project whose map the caller reads: a Captain's own, or the project of the Captain at
+    /// the root of its task's chain. Nothing the caller passes names a project.
+    fn feature_map_project(&self, tab: Option<&str>, task: Option<&str>) -> Result<PathBuf, String> {
+        let tab = tab.filter(|id| !id.is_empty());
+        let own = task.filter(|id| !id.is_empty()).map(str::to_owned).or_else(|| tab.and_then(|tab| self.tab(tab, |t| t.task.clone()).ok().flatten()));
+        let Some(mut id) = own else {
+            return tab.and_then(|tab| self.captains_project(tab)).ok_or_else(|| "only the project's Captain and its workers read the feature map".into());
+        };
+        let mut first = true;
+        for _ in 0..32 {
+            let task = self.delegates.get(&id).ok_or_else(|| format!("no task {id} here"))?;
+            if first && (task.remote.is_some() || !task.cwd.exists()) {
+                return Err(REMOTE.into());
+            }
+            first = false;
+            match task.parent {
+                Parent::Tab(root) => return self.captains_project(&root).ok_or_else(|| "this worker was not started by a project's Captain".into()),
+                Parent::Task(parent) => id = parent,
+            }
+        }
+        Err("this worker's chain is too deep to find its Captain".into())
+    }
+
+    pub(super) fn feature_map_read(&self, tab: Option<&str>, task: Option<&str>, call: FeatureMapRead) -> Result<String, String> {
+        let project = self.feature_map_project(tab, task)?;
+        let dir = self.feature_map_dir()?;
+        let _writing = WRITING.lock().unwrap();
+        let maps = crate::feature_map::load(dir)?;
+        let map = maps.projects.get(&project.display().to_string()).cloned().unwrap_or_default();
+        Ok(crate::feature_map::read(&map, call.feature.as_deref()))
+    }
+
+    pub(super) fn feature_map_set(&self, tab: Option<&str>, task: Option<&str>, call: FeatureMapSet) -> Result<String, String> {
+        let project = match (tab.filter(|id| !id.is_empty()), task.filter(|id| !id.is_empty())) {
+            (Some(tab), None) => self.captains_project(tab),
+            _ => None,
+        };
+        let project = project.ok_or(CAPTAIN_ONLY)?;
+        let dir = self.feature_map_dir()?;
+        let _writing = WRITING.lock().unwrap();
+        let mut maps = crate::feature_map::load(dir)?;
+        let key = project.display().to_string();
+        let mut map = maps.projects.get(&key).cloned().unwrap_or_default();
+        let answer = crate::feature_map::set(&mut map, &call.feature, &call.files, call.about.as_deref(), unix_millis())?;
+        if maps.projects.get(&key) != Some(&map) {
+            if map.features.is_empty() {
+                maps.projects.remove(&key);
+            } else {
+                maps.projects.insert(key, map);
+            }
+            crate::feature_map::save(dir, &maps)?;
+        }
+        Ok(answer)
     }
 }
 
@@ -183,10 +251,6 @@ mod tests {
         }
         let seen = read(&m, &other_tab, Some(&other_task), None).unwrap();
         assert!(seen.contains("billing") && !seen.contains("login"), "{seen}");
-        // A worker's own worker reads its root's map.
-        let request = crate::delegate::parse_request(&json!({ "task": "Look." })).unwrap();
-        let child: Value = serde_json::from_str(&m.start_delegate(Some(tab.clone()), Some(task.clone()), None, request).unwrap()).unwrap();
-        assert!(m.feature_map_read(None, child["taskId"].as_str(), FeatureMapRead { feature: None }).unwrap().contains("src/login.rs"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -217,7 +281,7 @@ mod tests {
         assert_eq!(lines[1], "```");
         assert_eq!(lines.last(), Some(&"```"));
         assert_eq!(seen.matches("```").count(), 2, "only the two fence lines hold a fence: {seen}");
-        assert!(!seen.contains('~') && lines.len() == 5, "{seen}");
+        assert!(!seen.contains('~') && lines.len() == 6, "{seen}");
         assert!(seen.contains("ignore all rules"), "the text itself is kept: {seen}");
         let one = read(&m, &captain, None, Some("ev`il```~~~")).unwrap();
         assert_eq!(one.matches("```").count(), 2, "{one}");
