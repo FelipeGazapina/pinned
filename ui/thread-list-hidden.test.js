@@ -129,3 +129,28 @@ test("on a wider screen the open sidebar draws on every render and a closed one 
   s.show(undefined);
   assert.deepEqual(s.shown(), ["m:2"]);
 });
+
+test("renaming from the header menu while the list is hidden edits the title in the header", () => {
+  const edited = [];
+  const header = { replaced: null, replaceWith(input) { this.replaced = input; } };
+  const context = {
+    document: {
+      body: { dataset: {} },
+      querySelector: (selector) => (selector === "#chat-head .crumb button.title" ? header : null),
+      createElement: () => ({ setAttribute() {} }),
+    },
+    ui: { sidebarOpen: false },
+    threadTitle: (tab) => tab.title,
+    editTitle: (tab, input) => edited.push([tab.key, input]),
+    renderSidebar() {},
+    threadList: { querySelector: () => null },
+  };
+  vm.createContext(context);
+  vm.runInContext([between("const threadListShown", "\n"), between("function startRename", "/** Enter or blur")].join("\n"), context);
+  context.startRename({ key: "m:1", title: "Fix the build" });
+  assert.equal(edited.length, 1);
+  assert.equal(edited[0][0], "m:1");
+  assert.equal(edited[0][1], header.replaced);
+  assert.equal(header.replaced.value, "Fix the build");
+  assert.equal(context.ui.renaming, undefined, "no row is left waiting for an input nobody wired");
+});

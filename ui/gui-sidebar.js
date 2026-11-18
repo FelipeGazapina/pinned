@@ -1565,7 +1565,7 @@ window.addEventListener("keydown", (e) => {
 }, true);
 
 function startRename(tab, where = "row") {
-  if (where === "header") {
+  if (where === "header" || !threadListShown()) {
     const title = document.querySelector("#chat-head .crumb button.title");
     if (!title) return;
     const input = Object.assign(document.createElement("input"), { className: "rename", value: threadTitle(tab), spellcheck: false });
