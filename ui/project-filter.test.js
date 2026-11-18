@@ -39,7 +39,11 @@ test("the project filter label keeps the full name as its title", () => {
   const context = {
     document: {
       activeElement: null,
+      body: { dataset: {} },
       getElementById: () => ({ hidden: false, dataset: {} }),
+    },
+    MutationObserver: class {
+      observe() {}
     },
     rowDrag: null,
     snoozeLimitStops() {},
@@ -50,7 +54,7 @@ test("the project filter label keeps the full name as its title", () => {
     tabByKey: () => null,
     noteReturns() {},
     projectGroups: () => [group],
-    ui: { project: "repo:pinned", search: "" },
+    ui: { project: "repo:pinned", search: "", sidebarOpen: true },
     isGlobalOrchestratorTab: () => false,
     askGlobalSettings() {},
     projectListsPending: () => false,

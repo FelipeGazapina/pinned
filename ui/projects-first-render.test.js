@@ -41,8 +41,12 @@ function sidebar() {
   const context = {
     document: {
       activeElement: null,
+      body: { dataset: {} },
       getElementById: () => ({ hidden: false, dataset: {} }),
       addEventListener: (type, fn) => (listeners[type] = fn),
+    },
+    MutationObserver: class {
+      observe() {}
     },
     rowDrag: null,
     snoozeLimitStops() {},
@@ -59,7 +63,7 @@ function sidebar() {
     sideSettings: { grouping: true },
     sortedProjects: (list) => [...list],
     machines: new Map([["studio", { view: { id: "studio", online: true }, projects: [{ name: "pinned", path: "/src/pinned" }] }]]),
-    ui: { project: projectKey, search: "" },
+    ui: { project: projectKey, search: "", sidebarOpen: true },
     askGlobalSettings() {},
     projectListsPending: () => false,
     machineDirectory: () => directory,
