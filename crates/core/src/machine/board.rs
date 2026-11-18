@@ -77,13 +77,15 @@ impl Machine {
     }
 
     /// `board_read`: the notes of the caller's board, or of one task's part of it, in one fence.
-    /// A worker reads its own root task's board; a Captain reads the boards its plans link.
+    /// A worker reads its own root task's board; a Captain reads the boards its plans link, even
+    /// when its tab also runs a task. A headless child names its task and no tab.
     pub(super) fn board_read(&self, tab: Option<&str>, task: Option<&str>, call: BoardRead) -> Result<String, String> {
         let not_yours = |of: &str| Err(format!("task {of} is not on your board. Nothing was read."));
-        let roots = if self.caller_task(tab, task).is_some() {
-            vec![self.worker_board(tab, task, "board_read")?.1]
-        } else if let Some(tab) = tab.filter(|tab| self.captain_session(tab).ok().flatten().is_some()) {
+        let captain = tab.filter(|tab| self.captain_session(tab).ok().flatten().is_some());
+        let roots = if let (Some(tab), None) = (captain, task.filter(|task| !task.is_empty())) {
             self.captain_roots(tab)
+        } else if self.caller_task(tab, task).is_some() {
+            vec![self.worker_board(tab, task, "board_read")?.1]
         } else {
             return Err("board_read is for a Captain or a worker of a planned task, and this session is neither. Nothing was read.".into());
         };
