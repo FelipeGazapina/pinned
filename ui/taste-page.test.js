@@ -94,6 +94,9 @@ function page({ answer = () => tastesWith(), projects = {}, machineViews = null,
     pickEffort: async (target) => (fire("change", { target }), settle()),
     type: (value) => fire("input", { target: { value, matches: (sel) => sel === "[data-note-input]" } }),
     submit: () => fire("submit", { target: { matches: (sel) => sel === "[data-note-form]" }, preventDefault() {} }),
+    changeOn: async (attr, value) => (fire("change", { target: { value, matches: (sel) => sel === `[${attr}]` } }), settle()),
+    typeOn: (attr, value) => fire("input", { target: { value, matches: (sel) => sel === `[${attr}]` } }),
+    submitOn: async (attr) => (fire("submit", { target: { matches: (sel) => sel === `[${attr}]` }, preventDefault() {} }), settle()),
     submitSkill: (name) => fire("submit", { target: { matches: (sel) => sel === "[data-skill-form]", querySelector: () => ({ value: name }) }, preventDefault() {} }),
   };
 }
@@ -640,4 +643,79 @@ test("the orchestrator tab and a hub without box sizes show no box size control"
   const old = page({ answer: () => limited() });
   await old.show();
   assert.doesNotMatch(old.html(), /Default box size/);
+});
+
+const reviewerOf = (over = {}) => ({ model: null, rounds: 2, rules: [], projects: {}, ...over });
+const section = (html, title) => html.match(new RegExp(`<section class="taste-section[^"]*"><(?:div class="taste-heading"><)?h2>${title}</h2>[\\s\\S]*?</section>`))?.[0] ?? "";
+/** A hub that stores the Reviewer: `set_reviewer` answers the tastes with `after`. */
+const reviewerHub = (before, after = before) => (cmd) => tastesWith({ reviewer: cmd === "set_reviewer" ? after : before });
+
+test("the two review toggles live in the Reviewer section, not in Pace", async () => {
+  const p = page({ answer: reviewerHub(reviewerOf()) });
+  await p.show();
+  const html = p.html();
+  assert.doesNotMatch(section(html, "Pace"), /Review each diff|Second opinion/);
+  const reviewer = section(html, "Reviewer");
+  assert.match(reviewer, /aria-label="Review each diff before accepting" data-act="toggle" data-field="review_diffs"/);
+  assert.match(reviewer, /aria-label="Second opinion on risky changes" data-act="toggle" data-field="second_opinion"/);
+  await p.click(/data-field="second_opinion"/);
+  assert.match(section(p.html(), "Reviewer"), /aria-checked="true" aria-label="Second opinion on risky changes"/, "the toggle still edits the page's draft");
+});
+
+test("Save in the Reviewer section sends set_reviewer with the changed fields, and never set_taste", async () => {
+  const after = reviewerOf({ rounds: 4, rules: [{ id: "A1", text: "Tests first." }] });
+  const p = page({ answer: reviewerHub(reviewerOf(), after) });
+  await p.show();
+  await p.click(/data-field="review_diffs"/);
+  await p.changeOn("data-reviewer-rounds", "4");
+  p.typeOn("data-reviewer-text", "Tests first.");
+  await p.submitOn("data-reviewer-form");
+  assert.deepEqual(p.calls.filter(([cmd]) => cmd !== "get_tastes"), [], "nothing is sent before Save");
+  await p.click(/data-act="rsave"/);
+  assert.deepEqual(p.calls.filter(([cmd]) => cmd !== "get_tastes"), [["set_reviewer", { patch: { rounds: 4, rules: [{ id: "A1", text: "Tests first." }] } }]]);
+  assert.doesNotMatch(section(p.html(), "Reviewer"), /data-act="rsave"/, "the saved Reviewer has nothing left to save");
+  assert.match(p.html(), /data-act="save"/, "the unsaved diff toggle still waits for the page's own Save");
+});
+
+test("a project tab saves its switch and rules, with the account rule one replaces", async () => {
+  const before = reviewerOf({ rules: [{ id: "A1", text: "Tests first." }] });
+  const after = reviewerOf({ rules: before.rules, projects: { [SITE]: { switch: "on", rules: [{ id: "P1", text: "No new deps.", replaces: "A1" }] } } });
+  const p = page({ answer: reviewerHub(before, after), projects: { mm: [{ path: "/p/site", name: "site", repo: SITE }] } });
+  await p.show();
+  await p.click(new RegExp(`data-act="rscope" data-repo="${SITE}"`));
+  await p.click(/data-act="rswitch" data-value="on"/);
+  p.typeOn("data-reviewer-text", "No new deps.");
+  await p.changeOn("data-reviewer-replaces", "A1");
+  await p.submitOn("data-reviewer-form");
+  await p.click(/data-act="rsave"/);
+  assert.deepEqual(p.calls.filter(([cmd]) => cmd !== "get_tastes"), [["set_reviewer", { patch: { project: SITE, switch: "on", rules: [{ id: "P1", text: "No new deps.", replaces: "A1" }] } }]]);
+});
+
+test("a rule's text is escaped wherever it is drawn", async () => {
+  const bad = "Never <b>bold</b> & \"quote\"";
+  const p = page({ answer: reviewerHub(reviewerOf({ rules: [{ id: "A1", text: bad }], projects: { [SITE]: { switch: "auto", rules: [{ id: "P1", text: bad, replaces: "A1" }] } } })), projects: { mm: [{ path: "/p/site", name: "site", repo: SITE }] } });
+  await p.show();
+  let html = section(p.html(), "Reviewer");
+  assert.ok(html.includes(esc(bad)), "the account's rule is drawn escaped");
+  assert.ok(!html.includes("<b>bold</b>"), "no markup from a rule reaches the page");
+  await p.click(new RegExp(`data-act="rscope" data-repo="${SITE}"`));
+  html = section(p.html(), "Reviewer");
+  assert.ok(html.includes(esc(bad)) && !html.includes("<b>bold</b>"), "so is the project's");
+});
+
+test("the rounds field refuses 0 and 6 and keeps the saved value", async () => {
+  const p = page({ answer: reviewerHub(reviewerOf({ rounds: 3 })) });
+  await p.show();
+  for (const bad of ["0", "6", "", "2.5"]) {
+    await p.changeOn("data-reviewer-rounds", bad);
+    const html = section(p.html(), "Reviewer");
+    assert.match(html, /Rounds go from 1 to 5/, `${JSON.stringify(bad)} is refused`);
+    assert.match(html, /data-reviewer-rounds[^>]*value="3"/);
+    assert.doesNotMatch(html, /data-act="rsave"/, "a refused value leaves nothing to save");
+  }
+  await p.changeOn("data-reviewer-rounds", "5");
+  const html = section(p.html(), "Reviewer");
+  assert.doesNotMatch(html, /Rounds go from 1 to 5/);
+  assert.match(html, /data-reviewer-rounds[^>]*value="5"/);
+  assert.match(html, /data-act="rsave"/);
 });
