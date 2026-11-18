@@ -51,8 +51,9 @@ pub struct WorkerProfile {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileAccess {
-    ReadOnly,
+    // What a profile that names no access gets.
     #[default]
+    ReadOnly,
     Edit,
 }
 

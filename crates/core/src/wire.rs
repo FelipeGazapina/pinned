@@ -1872,11 +1872,11 @@ mod tests {
         round_trip(HubCall::SetWorkerProfiles { project: None, profiles: vec![], drop_proposed: vec![] }, json!({ "cmd": "set_worker_profiles", "profiles": [] }));
         round_trip(
             HubCall::SetWorkerProfiles { project: Some("github.com/acme/site".into()), profiles: serde_json::from_value(json!([{ "name": "scout" }])).unwrap(), drop_proposed: vec!["scout".into()] },
-            json!({ "cmd": "set_worker_profiles", "project": "github.com/acme/site", "profiles": [{ "name": "scout", "skills": [], "tools": [], "access": "edit", "delivers": "", "by": "user" }], "drop_proposed": ["scout"] }),
+            json!({ "cmd": "set_worker_profiles", "project": "github.com/acme/site", "profiles": [{ "name": "scout", "skills": [], "tools": [], "access": "read_only", "delivers": "", "by": "user" }], "drop_proposed": ["scout"] }),
         );
         round_trip(
             HubCall::ProposeWorkerProfile { tab: "tab-1".into(), profile: serde_json::from_value(json!({ "name": "scout" })).unwrap() },
-            json!({ "cmd": "propose_worker_profile", "tab": "tab-1", "profile": { "name": "scout", "skills": [], "tools": [], "access": "edit", "delivers": "", "by": "user" } }),
+            json!({ "cmd": "propose_worker_profile", "tab": "tab-1", "profile": { "name": "scout", "skills": [], "tools": [], "access": "read_only", "delivers": "", "by": "user" } }),
         );
     }
 

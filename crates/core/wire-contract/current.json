@@ -10567,7 +10567,7 @@
               },
               "access": {
                 "$ref": "#/$defs/ProfileAccess",
-                "default": "edit"
+                "default": "read_only"
               },
               "model": {
                 "anyOf": [
@@ -23320,7 +23320,7 @@
               },
               "access": {
                 "$ref": "#/$defs/ProfileAccess",
-                "default": "edit"
+                "default": "read_only"
               },
               "model": {
                 "anyOf": [
@@ -32590,7 +32590,7 @@
               },
               "access": {
                 "$ref": "#/$defs/ProfileAccess",
-                "default": "edit"
+                "default": "read_only"
               },
               "model": {
                 "anyOf": [
@@ -42234,7 +42234,7 @@
               },
               "access": {
                 "$ref": "#/$defs/ProfileAccess",
-                "default": "edit"
+                "default": "read_only"
               },
               "model": {
                 "anyOf": [
@@ -64015,7 +64015,7 @@
               },
               "access": {
                 "$ref": "#/$defs/ProfileAccess",
-                "default": "edit"
+                "default": "read_only"
               },
               "model": {
                 "anyOf": [
@@ -64770,7 +64770,7 @@
               },
               "access": {
                 "$ref": "#/$defs/ProfileAccess",
-                "default": "edit"
+                "default": "read_only"
               },
               "model": {
                 "anyOf": [
