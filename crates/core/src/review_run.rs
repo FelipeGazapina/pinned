@@ -285,7 +285,8 @@ mod tests {
         assert_eq!(found.iter().map(|f| f.rule.as_str()).collect::<Vec<_>>(), ["A1", "P1"]);
         assert_eq!(found[0].what.chars().count(), FINDING_CHARS);
         assert_eq!((found[1].lines.clone(), found[1].what.as_str()), (vec![7], "no test for this"));
-        assert_eq!(findings("[]", &rules), Some(vec![]));
+        assert_eq!(findings("[]", &rules), None, "a bare list is not an answer");
+        assert_eq!(findings("It is fine [1].", &rules), None);
         assert_eq!(findings("I could not review it.", &rules), None);
     }
 }

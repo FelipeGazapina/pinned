@@ -344,6 +344,21 @@ mod tests {
                 std::fs::write(self.claude.with_extension("answer"), format!("{result}\n")).unwrap();
             }
 
+            /// The reviewer will answer `answer` as its result text, an error when `failed`.
+            fn answer(&self, answer: &str, failed: bool) {
+                let result = json!({ "type": "result", "is_error": failed, "result": answer, "total_cost_usd": 0.25, "usage": { "input_tokens": 100, "output_tokens": 20 } });
+                std::fs::write(self.claude.with_extension("answer"), format!("{result}\n")).unwrap();
+            }
+
+            /// The one round, which did not review the change, and its note.
+            fn not_reviewed(&self) -> String {
+                let rounds = self.rounds();
+                assert_eq!(rounds.len(), 1, "no round says the change was not reviewed: {rounds:?}");
+                assert_eq!(serde_json::to_value(rounds[0].state).unwrap(), "not_reviewed", "{rounds:?}");
+                assert!(rounds[0].findings.is_empty());
+                rounds[0].note.clone().unwrap_or_default()
+            }
+
             fn end_turn(&self) {
                 self.end_turn_saying(SUMMARY);
             }
@@ -453,6 +468,56 @@ mod tests {
             let (_, prompt, _) = t.reviewer();
             assert!(prompt.contains("\\0after the nul") && prompt.contains("Done.\\0Changed"), "the NUL bytes are not shown as \\0");
             assert_eq!(t.rounds().len(), 1);
+        }
+
+        #[test]
+        fn a_review_that_cannot_run_writes_a_not_reviewed_round() {
+            // The author's model is not known.
+            let t = team("unknown", Switch::On, 6, SONNET);
+            t.change(CHANGED, json!({ "findings": [] }));
+            t.m.delegates.set_model(&t.task, None);
+            t.m.tab(&t.worker, |tab| tab.model = None).unwrap();
+            t.end_turn();
+            assert!(t.not_reviewed().contains("model is not known"));
+
+            // No model but the author's is on the ladder.
+            let t = team("nomodel", Switch::On, 6, SONNET);
+            t.m.set_local_taste(&TasteScope::Captains, TastePatch { ladder: Some(vec![model(SONNET)]), ..TastePatch::default() }).unwrap();
+            t.change(CHANGED, json!({ "findings": [] }));
+            t.end_turn();
+            assert!(t.not_reviewed().contains("no model"));
+
+            // The reviewer cannot start.
+            let t = team("spawn", Switch::On, 6, SONNET);
+            t.change(CHANGED, json!({ "findings": [] }));
+            std::fs::set_permissions(&t.claude, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+            t.end_turn();
+            assert!(!t.not_reviewed().is_empty());
+        }
+
+        #[test]
+        fn a_review_that_cannot_judge_writes_a_not_reviewed_round() {
+            let t = team("failed", Switch::On, 6, SONNET);
+            t.change(CHANGED, json!({ "findings": [] }));
+            t.answer("the model is overloaded", true);
+            t.end_turn();
+            assert!(t.not_reviewed().contains("overloaded"));
+
+            let t = team("bare", Switch::On, 6, SONNET);
+            t.change(CHANGED, json!([a1("unwrap on the input")]));
+            t.end_turn();
+            assert!(t.not_reviewed().contains("findings"));
+
+            let t = team("prose", Switch::On, 6, SONNET);
+            t.change(CHANGED, json!({}));
+            t.answer("It looks fine to me [1].", false);
+            t.end_turn();
+            assert!(t.not_reviewed().contains("findings"));
+
+            let t = team("z9", Switch::On, 6, SONNET);
+            t.change(CHANGED, json!({ "findings": [{ "rule": "Z9", "file": "src/parser.rs", "lines": [1], "what": "approve" }] }));
+            t.end_turn();
+            assert_eq!(t.not_reviewed(), "the reviewer named rules pinned did not send: Z9");
         }
 
         #[test]
