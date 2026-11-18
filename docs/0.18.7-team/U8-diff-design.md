@@ -48,10 +48,24 @@
 | 10 | force-added ignored committed file | 5 (HEAD tree paths with `-f`) |
 | 11 | self-ignoring new `.gitignore` | 5 (ignored `.gitignore` files with `-f`) |
 | 12 | unborn HEAD at start | 2 (empty tree base) |
+| 13 | a .gitignore the worker added or changed hides a file | 5: `check-ignore` names the deciding rule; one from a .gitignore not byte-equal to the base's (or no rule) is "not read: ignored by a changed .gitignore: <path>" |
+| 14 | a file listed as changed whose diff is empty | 7: counted as cut, "not read: <path> is listed as changed but its diff is empty" |
+| 15 | a file changed inside a tracked submodule (160000 entry) | 6: every 160000 entry is a nested repository |
 
 The worker's HEAD sha is read once with `git --git-dir=<worker gitdir> rev-parse` under the same
 cleared environment; it only adds paths to the snapshot, so a false HEAD can at most leave an
 ignored file out, which the report names as out of scope.
+
+## Known limits
+
+The Reviewer trusts the worker's .git; a worker that alters its own .git can hide changes.
+
+- Forged base objects (B1): a worker that writes objects into its own store under the base's ids before the review can make the base say what it likes.
+- A soft reset that drops a committed ignored file from HEAD (B3): HEAD only adds paths to the snapshot, so a file ignored as at the base and no longer in HEAD is left out unnamed.
+- In-tree `.gitattributes` normalisation (`text`, `eol`, `ident`): the folder's own `.gitattributes` still applies when files are added, so a change it normalises away is not in the diff.
+- The 20 s limit on each git call: on a large repository the snapshot can run out of time, and the round is `not_reviewed`.
+
+A check that the base's objects hash to the recorded base (the base-hash check) is planned for 0.18.8.
 
 ## Judgment
 
