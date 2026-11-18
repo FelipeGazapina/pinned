@@ -19,6 +19,17 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+// The agent team's machine side, one module per area, so each unit edits its own file.
+mod board;
+mod chain;
+mod delegate_started;
+mod feature_map;
+mod profiles;
+mod propose;
+mod reviewer;
+mod send_back;
+mod team;
+
 const MODEL_MENU_FILE: &str = "claude-model-menu.json";
 
 /// A tab keeps this much of its session's output, replayed to a viewer that attaches late.
@@ -1632,6 +1643,7 @@ impl Machine {
                 let views: Vec<crate::plan::PlanView> = kept.iter().filter(|p| plan.as_deref().is_none_or(|id| p.id == id)).map(|p| crate::plan::derive(p, &facts)).collect();
                 Ok(json!(views))
             }
+            Call::Board { tab, task } => json(self.board(&tab, task.as_deref())?),
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text).map_err(NotTyped::for_person)?),
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
@@ -5036,6 +5048,7 @@ impl Machine {
                 Message::TaskReview { tab, task, id, verdict, note } => machine.task_review(tab, task, &id, &verdict, note),
                 Message::DelegationStats { days } => machine.delegation_stats(days),
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
+                Message::Team { tab, task, tool } => machine.team_tool(tab.as_deref(), task.as_deref(), tool),
                 Message::Guard { tab, tool, input } => machine.guard(&tab, &tool, &input),
                 message => other(message),
             };
@@ -5687,6 +5700,8 @@ impl Machine {
     /// new task is linked to the step or list it names once the task exists.
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
         let caller = Self::require_caller(tab, parent_task)?;
+        let request = self.profile_request(&caller, request)?;
+        let request = self.chain_request(&caller, request)?;
         // A replayed request answers with the task it started, which is already linked.
         let link = match request.plan_step.clone() {
             Some(step) if self.delegates.requested(&caller.key(), request.client_request_id.as_deref()).is_none() => {
@@ -5698,9 +5713,11 @@ impl Machine {
             }
             _ => None,
         };
-        let body = self.start_task(caller, tool, request)?;
-        let (Some((session, step, title)), Ok(mut started)) = (link, serde_json::from_str::<Value>(&body)) else { return Ok(body) };
+        let body = self.start_task(caller, tool, request.clone())?;
+        let Ok(mut started) = serde_json::from_str::<Value>(&body) else { return Ok(body) };
         let Some(task) = started["taskId"].as_str().map(str::to_owned) else { return Ok(body) };
+        self.delegate_started(&task, &request);
+        let Some((session, step, title)) = link else { return Ok(body) };
         let facts = self.plan_facts();
         let (linked, changed) = self
             .plans
@@ -5826,8 +5843,11 @@ impl Machine {
     /// Starts a worker here for a tab on another machine, which the hub sent as `Call::Delegate`.
     /// It works in this machine's checkout of `repo`, cloned with `token` when there is none, on
     /// the project's account unless the request names one.
-    fn start_for_origin(&self, origin: crate::delegate::Origin, mut request: crate::delegate::Request, repo: Option<String>, token: Option<String>) -> Result<String, String> {
+    fn start_for_origin(&self, origin: crate::delegate::Origin, request: crate::delegate::Request, repo: Option<String>, token: Option<String>) -> Result<String, String> {
         let key = origin.parent_key();
+        let caller = crate::delegate::Caller { tab: Some(key.clone()), task: None };
+        let request = self.profile_request(&caller, request)?;
+        let mut request = self.chain_request(&caller, request)?;
         if let Some(id) = self.delegates.for_origin(&key, &origin.task) {
             return self.delegates.started_json(&id).map(|value| value.to_string());
         }
@@ -5838,7 +5858,7 @@ impl Machine {
         let own = self.tastes().resolve(&captain_scope(&history::project_of(&cwd))).limits();
         let limits = origin.limits.narrow(own);
         (request.target.machine, request.target.boxed) = (None, None);
-        let caller_key = crate::delegate::Caller { tab: Some(key.clone()), task: None }.key();
+        let caller_key = caller.key();
         let side = ChildParent {
             parent: crate::delegate::Parent::Tab(key),
             caller_key,
@@ -5857,7 +5877,11 @@ impl Machine {
             origin: Some(origin),
             placed: None,
         };
-        self.launch_child(side, None, request)
+        let body = self.launch_child(side, None, request.clone())?;
+        if let Some(task) = serde_json::from_str::<Value>(&body).ok().and_then(|started| started["taskId"].as_str().map(str::to_owned)) {
+            self.delegate_started(&task, &request);
+        }
+        Ok(body)
     }
 
     /// What a machine that is full answers a worker another machine sent it.
@@ -6164,7 +6188,12 @@ impl Machine {
             self.arm_delegate_pass();
             return true;
         }
+        if error.is_none() && self.review_turn_end(&task, tab) {
+            return true;
+        }
         let parent = self.delegates.settle_thread(&task, reply, error, event.resume_at, self.thread_steps(tab), self.launch.path_env.as_deref());
+        self.board_write(&task, crate::board::BoardEvent::Settled { task: task.clone() });
+        self.chain_settled(&task);
         // A thread for another machine's tab sends its end back through the hub on the next pass.
         if self.tab(tab, |t| t.origin.is_some()).unwrap_or(false) {
             self.arm_delegate_pass();
@@ -13947,6 +13976,35 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!((&got["effective"]["review_diffs"], &got["effective"]["second_opinion"]), (&json!(true), &json!(false)), "taste_get still shows both");
         let set: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2}"#).unwrap()).unwrap();
         assert_eq!(set["effective"]["parallel"], json!(2), "a field the agent may change still changes");
+
+        // The Reviewer's settings and the worker profiles are the user's own: the taste tools read them and never name them.
+        let mut user = m.local_tastes();
+        user.set_reviewer(crate::reviewer::ReviewerPatch { rounds: Some(4), ..Default::default() }).unwrap();
+        m.set_local_reviewer(crate::reviewer::ReviewerPatch { rounds: Some(4), ..Default::default() }).unwrap();
+        let before = m.local_tastes();
+        assert_eq!(before.reviewer, user.reviewer);
+        for (patch, named) in [(r#"{"reviewer":{"rounds":1}}"#, "reviewer is"), (r#"{"parallel":3,"worker_profiles":{"account":[]}}"#, "worker_profiles is"), (r#"{"reviewer":{},"worker_profiles":{}}"#, "reviewer and worker_profiles are")] {
+            let refused = tool(&chat, &format!(r#""name":"taste_set","scope":"captains","patch":{patch}"#)).unwrap_err();
+            assert!(refused.contains(&format!("{named} the user's own, set only on the Way of working page; nothing changed")), "{refused}");
+        }
+        assert!(tool(&chat, r#""name":"taste_reset","scope":"captains","field":"reviewer""#).is_err());
+        assert!(tool(&chat, r#""name":"taste_reset","scope":"captains","field":"worker_profiles""#).is_err());
+        assert_eq!(m.local_tastes(), before, "a refused call changed the way of working");
+        let got: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_get","scope":"captains""#).unwrap()).unwrap();
+        assert_eq!((&got["reviewer"]["rounds"], &got["worker_profiles"]["account"]), (&json!(4), &json!([])), "taste_get reads them");
+
+        // A signed-out app's tastes reach the hub through `ImportTastes`, which takes them only when
+        // `Tastes::check` passes: it checks the Reviewer and every list of profiles as their own writes do.
+        let tastes = |value: Value| serde_json::from_value::<Tastes>(value).unwrap().check();
+        assert_eq!(tastes(json!({ "reviewer": { "rounds": 0 } })), Err("review rounds go from 1 to 5".into()));
+        assert_eq!(tastes(json!({ "reviewer": { "rules": [{ "id": "R1", "text": "Tests first." }] } })), Err(r#"the account's rule ids go A1, A2 and on, not "R1""#.into()));
+        assert_eq!(tastes(json!({ "reviewer": { "projects": { "github.com/acme/site": { "rules": [{ "id": "P1", "text": " " }] } } } })), Err("rule P1 says nothing".into()));
+        assert_eq!(tastes(json!({ "worker_profiles": { "account": [{ "name": " " }] } })), Err("every profile needs a name".into()));
+        assert_eq!(tastes(json!({ "worker_profiles": { "projects": { "github.com/acme/site": [{ "name": "scout", "delivers": "a\nb" }] } } })), Err("what scout delivers fits one line".into()));
+        assert_eq!(tastes(json!({ "worker_profiles": { "proposed": [{ "name": "scout" }, { "name": "Scout" }] } })), Err("two profiles are named Scout".into()));
+        let many: Vec<Value> = (1..=21).map(|n| json!({ "name": format!("p{n}") })).collect();
+        assert_eq!(tastes(json!({ "worker_profiles": { "proposed": many } })), Err("20 proposed profiles already wait for the user to take or drop; nothing changed".into()));
+        assert_eq!(tastes(json!({ "reviewer": { "rounds": 5, "rules": [{ "id": "A1", "text": "Tests first." }] }, "worker_profiles": { "account": [{ "name": "scout" }], "proposed": [{ "name": "scout" }] } })), Ok(()), "the same name in two lists is fine");
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -529,7 +529,8 @@ async fn run_workflow(hub: &Arc<Hub>, account: &Arc<Account>, caller: &Caller, i
 /// The user's decision on confirmation `id`, from a signed-in client of `account`. `entered` is
 /// what they typed in the app for a credential action. It never reaches the trail, the stored
 /// confirmation, the notice or an error, and a credential action whose run fails waits again.
-pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: bool, entered: BTreeMap<String, String>) -> Result<Value, String> {
+/// `_reason` is why the user said no, when they said; U2 shows it to the session that asked.
+pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: bool, entered: BTreeMap<String, String>, _reason: Option<String>) -> Result<Value, String> {
     let unknown = || format!("no confirmation {id} waits");
     let hide = |error: &str| surface::hide_entered(error, &entered);
     let key = Uuid::parse_str(id).map_err(|_| unknown())?;

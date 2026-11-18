@@ -10,6 +10,7 @@
 //! session. `Limits` is that group, resolved.
 
 use crate::connectors::BoxSize;
+use crate::profiles::{ProfileAuthor, WorkerProfile};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -268,6 +269,23 @@ pub fn refuse_review_settings(named: impl IntoIterator<Item = &'static str>) -> 
     Err(format!("{} {verb} changed only by the user, on the Way of working page; nothing changed", named.join(" and ")))
 }
 
+/// The settings of `Tastes` that are no knob of a `Taste`, so no `TastePatch` carries them: the
+/// user's own, written only by their own hub calls.
+pub const USER_ONLY: [&str; 2] = ["reviewer", "worker_profiles"];
+
+/// A `TastePatch` as `taste_set` and `set_taste` take it: one that names a `USER_ONLY` setting is
+/// refused whole instead of read without it.
+pub fn patch_without_user_only<'de, D: serde::Deserializer<'de>>(de: D) -> Result<TastePatch, D::Error> {
+    use serde::de::Error;
+    let value = Value::deserialize(de)?;
+    let named: Vec<&str> = USER_ONLY.into_iter().filter(|field| value.get(field).is_some()).collect();
+    if !named.is_empty() {
+        let verb = if named.len() == 1 { "is" } else { "are" };
+        return Err(D::Error::custom(format!("{} {verb} the user's own, set only on the Way of working page; nothing changed", named.join(" and "))));
+    }
+    serde_json::from_value(value).map_err(D::Error::custom)
+}
+
 /// An account's tastes.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(default)]
@@ -278,6 +296,12 @@ pub struct Tastes {
     pub projects: BTreeMap<String, TastePatch>,
     /// Where the account's heavy delegated work runs.
     pub placement: crate::placement::Placement,
+    /// The Reviewer's rules, model, rounds and project switches: the user's own, written only by
+    /// `HubCall::SetReviewer`. No `TastePatch` field, so the taste tools cannot name it.
+    pub reviewer: crate::reviewer::Reviewer,
+    /// The account's and each project's worker profiles: the user's own, written only by
+    /// `HubCall::SetWorkerProfiles`.
+    pub worker_profiles: crate::profiles::WorkerProfiles,
 }
 
 impl Profile {
@@ -821,13 +845,67 @@ impl Tastes {
         }
     }
 
-    /// Whether every scope, each project resolved, passes `Taste::check`.
+    /// Whether every scope, each project resolved, passes `Taste::check`, the Reviewer passes
+    /// `Reviewer::check`, and every list of worker profiles passes the checks of its own write.
     pub fn check(&self) -> Result<(), String> {
         self.orchestrator.check()?;
         self.captains.check()?;
         self.placement.check()?;
-        self.projects.keys().try_for_each(|repo| self.resolve(&TasteScope::Project { repo: repo.clone() }).check())
+        self.projects.keys().try_for_each(|repo| self.resolve(&TasteScope::Project { repo: repo.clone() }).check())?;
+        self.reviewer.check()?;
+        let profiles = &self.worker_profiles;
+        std::iter::once(&profiles.account).chain(profiles.projects.values()).chain([&profiles.proposed]).try_for_each(|list| check_profiles(list))?;
+        if profiles.proposed.len() > MAX_PROPOSED {
+            return Err(too_many_proposed());
+        }
+        Ok(())
     }
+
+    /// `HubCall::ProposeWorkerProfile`: `profile`, its name trimmed and written as an
+    /// orchestrator's, waits in `proposed` for the user, in place of a proposal of the same name.
+    /// Nothing outside `proposed` changes, and nothing at all when it fails `WorkerProfile::check`
+    /// or `MAX_PROPOSED` others already wait.
+    pub fn propose_worker_profile(&mut self, mut profile: WorkerProfile) -> Result<(), String> {
+        profile.name = profile.name.trim().to_owned();
+        profile.by = ProfileAuthor::Orchestrator;
+        profile.check()?;
+        let proposed = &mut self.worker_profiles.proposed;
+        match proposed.iter().position(|p| same_name(&p.name, &profile.name)) {
+            Some(at) => proposed[at] = profile,
+            None if proposed.len() >= MAX_PROPOSED => return Err(too_many_proposed()),
+            None => proposed.push(profile),
+        }
+        Ok(())
+    }
+
+    /// Removes the proposals named in `names`, as `HubCall::SetWorkerProfiles` drops them.
+    pub fn drop_proposed(&mut self, names: &[String]) {
+        self.worker_profiles.proposed.retain(|p| !names.iter().any(|name| same_name(&p.name, name)));
+    }
+}
+
+/// The most proposed worker profiles that wait for the user at once.
+pub const MAX_PROPOSED: usize = 20;
+
+fn too_many_proposed() -> String {
+    format!("{MAX_PROPOSED} proposed profiles already wait for the user to take or drop; nothing changed")
+}
+
+/// Profile names match trimmed and without case, as `Tastes::set_worker_profiles` compares them.
+fn same_name(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
+}
+
+/// Each profile passes `WorkerProfile::check` and no two share a name.
+fn check_profiles(list: &[WorkerProfile]) -> Result<(), String> {
+    let mut names = std::collections::BTreeSet::new();
+    for profile in list {
+        profile.check()?;
+        if !names.insert(profile.name.trim().to_lowercase()) {
+            return Err(format!("two profiles are named {}", profile.name.trim()));
+        }
+    }
+    Ok(())
 }
 
 /// Which setting chose a box's size, as the app names it.
@@ -922,6 +1000,9 @@ pub struct ScopeView {
     pub inherits_from: Option<String>,
     /// The text the scope's sessions start with.
     pub brief: String,
+    /// The account's `USER_ONLY` settings, which the taste tools read and never change.
+    pub reviewer: crate::reviewer::Reviewer,
+    pub worker_profiles: crate::profiles::WorkerProfiles,
 }
 
 impl Tastes {
@@ -940,6 +1021,8 @@ impl Tastes {
             own,
             inherits_from: matches!(scope, TasteScope::Project { .. }).then(|| TasteScope::Captains.name()),
             effective,
+            reviewer: self.reviewer.clone(),
+            worker_profiles: self.worker_profiles.clone(),
         }
     }
 }
@@ -1241,8 +1324,13 @@ Deploys go through the VPS."
             },
             "projects": { "github.com/acme/site": { "hard_model": { "provider": "cursor", "model": "grok-4.7" }, "parallel": 4 } },
             "placement": { "prefer": [], "avoid": [], "heavy": "worktree" },
+            "reviewer": { "model": null, "rounds": 2, "rules": [], "projects": {} },
+            "worker_profiles": { "account": [], "projects": {}, "proposed": [] },
         });
         assert_eq!(serde_json::to_value(&tastes).unwrap(), json);
+        let mut before_the_team = json.clone();
+        before_the_team.as_object_mut().unwrap().retain(|field, _| !USER_ONLY.contains(&field.as_str()));
+        assert_eq!(serde_json::from_value::<Tastes>(before_the_team).unwrap(), tastes, "a taste.json from before the team reads with the defaults");
         assert_eq!(serde_json::from_value::<Tastes>(json).unwrap(), tastes);
         assert_eq!(serde_json::from_value::<Tastes>(json!({})).unwrap(), Tastes::default());
         let no_hard_model = Taste { hard_model: None, ..Taste::default() };

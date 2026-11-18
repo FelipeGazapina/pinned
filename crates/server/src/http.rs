@@ -1327,6 +1327,14 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         }
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
+    // A Captain or the global orchestrator proposes a worker profile for the user to take or drop.
+    if let HubCall::ProposeWorkerProfile { tab, profile } = call {
+        let result = hub.propose_worker_profile(&account, &machine, &tab, profile).await;
+        if let Err(e) = &result {
+            eprintln!("pinned-server: machine {machine}'s worker profile proposal was refused: {e}");
+        }
+        return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+    }
     if let HubCall::RecordTasks { records } = call {
         let result = hub.record_tasks(&account, &machine, records).await.map(|()| Value::Null);
         if let Err(e) = &result {

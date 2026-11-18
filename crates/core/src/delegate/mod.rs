@@ -383,6 +383,14 @@ pub struct Request {
     /// The step or list of the calling Captain's plan this task drives: a step id or a list id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_step: Option<String>,
+    /// The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses
+    /// it until U6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// The profiles that take the work on after this task, in order: a handoff chain.
+    /// `chain::admit` refuses it until U12.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub then: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -521,6 +529,12 @@ pub struct Task {
     pub recorded: bool,
     /// Where it runs and who chose that, for a task this machine's caller delegated.
     pub placement: Option<crate::placement::Placed>,
+    /// Its review rounds, oldest first, which `task_status` answers.
+    pub reviews: Vec<crate::reviewer::ReviewRound>,
+    /// The worker profile it runs as.
+    pub profile: Option<String>,
+    /// Where it stands in a handoff chain.
+    pub chain: Option<crate::chain::ChainLink>,
 }
 
 /// A task that a usage limit moved: what the request asked for, and why it ran elsewhere.
@@ -1004,6 +1018,8 @@ mod tests {
                 client_request_id: None,
                 heavy: None,
                 plan_step: None,
+                profile: None,
+                then: vec![],
             }
         );
         let on = |target: Value| parse_request(&json!({"task": "x", "target": target})).map(|r| (r.target.machine, r.target.boxed));
@@ -1065,6 +1081,8 @@ mod tests {
                 client_request_id: None,
                 heavy: None,
                 plan_step: None,
+                profile: None,
+                then: vec![],
             }
         );
         assert_eq!(
@@ -1902,6 +1920,42 @@ grok-4.7-high - Grok 4.7  High
             json!(["result_available", "done", null, 7200, 28800]),
             "{status}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_task_record_from_before_the_team_loads_without_reviews_and_one_with_them_answers_them() {
+        let dir = scratch("old-team");
+        let file = dir.join("delegates.json");
+        let task = json!({"id":"task-0ld0","parent_kind":"tab","parent_id":"tab-1","title":"Old","account":"claude","provider":"claude","cwd":"/tmp","access":"auto","started":1000,"ended":2000,"state":"result_available","summary":"done","mode":"async","caller_key":"tab:tab-1"});
+        std::fs::write(&file, json!({ "tasks": [task] }).to_string()).unwrap();
+        let delegates = Delegates::load(Some(file.clone()));
+        let old = delegates.get("task-0ld0").unwrap();
+        assert_eq!((old.reviews.len(), old.profile.is_none(), old.chain.is_none()), (0, true, true));
+        let status = delegates.status(&parent(), "task-0ld0").unwrap();
+        assert!(status.get("reviews").is_none(), "{status}");
+
+        let mut task = task;
+        task["reviews"] = json!([{ "round": 1, "findings": [{ "rule": "A1", "file": "src/a.rs", "lines": [3], "what": "unwrap" }], "state": "sent", "model": "claude-sonnet-5-5" }]);
+        task["profile"] = json!("fixer");
+        task["chain"] = json!({ "root": "task-0ld0", "index": 0, "then": ["tester"] });
+        std::fs::write(&file, json!({ "tasks": [task] }).to_string()).unwrap();
+        let delegates = Delegates::load(Some(file.clone()));
+        let loaded = delegates.get("task-0ld0").unwrap();
+        assert_eq!((loaded.profile.as_deref(), loaded.chain.as_ref().map(|c| c.then.clone())), (Some("fixer"), Some(vec!["tester".to_owned()])));
+        let status = delegates.status(&parent(), "task-0ld0").unwrap();
+        assert_eq!(status["reviews"][0]["state"], "sent");
+        assert_eq!(status["reviews"][0]["findings"][0]["rule"], "A1");
+        let passed = crate::reviewer::ReviewRound { round: 2, findings: vec![], state: crate::reviewer::ReviewState::Passed, model: None, note: None };
+        delegates.put_review("task-0ld0", passed.clone());
+        delegates.put_review("task-0ld0", passed);
+        let saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!((&saved["tasks"][0]["reviews"][1]["state"], &saved["tasks"][0]["profile"], &saved["tasks"][0]["chain"]["root"]), (&json!("passed"), &json!("fixer"), &json!("task-0ld0")), "{saved}");
+        assert_eq!(saved["tasks"][0]["reviews"].as_array().unwrap().len(), 2, "a round put again replaces itself");
+        delegates.set_profile("task-0ld0", None);
+        delegates.set_chain("task-0ld0", None);
+        let saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert!(saved["tasks"][0].get("profile").is_none() && saved["tasks"][0].get("chain").is_none(), "{saved}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
