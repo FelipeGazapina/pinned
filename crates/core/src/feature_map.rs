@@ -250,6 +250,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    const INVISIBLE: [(u32, u32); 11] = [(0x34F, 0x34F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F), (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0), (0xE0100, 0xE01EF), (0x61C, 0x61C), (0x200B, 0x200F)];
+
+    #[test]
+    fn more_invisible_characters_are_refused_and_dropped() {
+        for (from, to) in INVISIBLE {
+            for code in from..=to {
+                let c = char::from_u32(code).unwrap();
+                let mut map = FeatureMap::default();
+                let with = |text: &str| text.replace('_', &c.to_string());
+                assert!(set(&mut map, &with("log_in"), &[], Some("x"), 1).is_err(), "feature U+{code:04X}");
+                assert!(set(&mut map, "login", &[], Some(&with("sign_in")), 1).is_err(), "about U+{code:04X}");
+                assert!(set(&mut map, "login", &[with("src/l_.rs")], None, 1).is_err(), "file U+{code:04X}");
+                assert!(map.features.is_empty());
+                assert_eq!(fenced(&with("a_b")), "ab", "fenced U+{code:04X}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_feature_named_like_the_header_is_refused_and_a_miss_does_not_echo() {
+        let mut map = FeatureMap::default();
+        for name in [HEADER, "Feature map (", "Feature map (x)", "  Feature map (x)"] {
+            assert!(set(&mut map, name, &["a.rs".into()], None, 1).is_err(), "{name}");
+        }
+        assert!(map.features.is_empty());
+        assert!(set(&mut map, "Feature map", &["a.rs".into()], None, 1).is_ok());
+        assert_eq!(read(&map, Some("billing")), "no such feature in the map");
+        assert_eq!(read(&map, Some("a```b")), "no such feature in the map");
+    }
+
+    #[test]
+    fn two_saves_in_a_row_leave_no_temp_file_and_the_second_wins() {
+        let dir = temp("twice");
+        save(&dir, &FeatureMaps::default()).unwrap();
+        save(&dir, &login()).unwrap();
+        assert_eq!(load(&dir), Ok(login()));
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, [FILE], "{names:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_file_that_cannot_be_read_stays_where_it_is() {
