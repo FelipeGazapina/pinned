@@ -410,6 +410,7 @@ mod tests {
             let app = dir.join("app");
             std::fs::create_dir_all(app.join("src")).unwrap();
             std::fs::write(app.join("src/parser.rs"), "fn parse() {}\n").unwrap();
+            std::fs::write(app.join(".gitignore"), "target/\n").unwrap();
             git(&app, &["init", "-q"]);
             if !unborn {
                 git(&app, &["add", "."]);
@@ -975,6 +976,33 @@ mod tests {
             std::fs::write(t.app.join("src/hide/x.rs"), "fn hidden_here() {}\n").unwrap();
             t.end_turn();
             t.reads("src/hide/.gitignore");
+            let note = t.not_reviewed();
+            assert!(note.contains("not read: ignored by a changed .gitignore: src/hide/"), "{note}");
+        }
+
+        #[test]
+        fn a_file_ignored_by_a_line_the_worker_added_is_named_as_not_read() {
+            let t = team("ignoreline", Switch::On, 6, SONNET);
+            t.change(CHANGED, json!({ "findings": [] }));
+            let ignore = std::fs::read_to_string(t.app.join(".gitignore")).unwrap();
+            std::fs::write(t.app.join(".gitignore"), format!("{ignore}secret.rs\n")).unwrap();
+            std::fs::write(t.app.join("secret.rs"), "fn secret_here() {}\n").unwrap();
+            t.end_turn();
+            let note = t.not_reviewed();
+            assert!(note.contains("not read: ignored by a changed .gitignore: secret.rs"), "{note}");
+        }
+
+        #[test]
+        fn build_output_ignored_as_at_the_base_is_not_a_note() {
+            let t = team("buildout", Switch::On, 6, SONNET);
+            t.change(CHANGED, json!({ "findings": [] }));
+            std::fs::create_dir_all(t.app.join("target")).unwrap();
+            std::fs::write(t.app.join("target/out.bin"), "built\n").unwrap();
+            t.end_turn();
+            let rounds = t.rounds();
+            assert_eq!(rounds.len(), 1, "{rounds:?}");
+            assert_eq!(serde_json::to_value(rounds[0].state).unwrap(), "passed", "{rounds:?}");
+            assert!(!rounds[0].note.as_deref().unwrap_or_default().contains("not read"), "{rounds:?}");
         }
 
         #[test]
