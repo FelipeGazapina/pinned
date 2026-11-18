@@ -10069,6 +10069,7 @@ pub(crate) mod tests {
     const THEME_SCREEN: &str = " Choose the text style that looks best with your terminal";
     const TRUST_SCREEN: &str = " Quick safety check: Is this a project you created or one you trust?  No, exit  Yes, I trust this folder";
     const BYPASS_SCREEN: &str = " WARNING: Claude Code running in Bypass Permissions mode  No, exit  Yes, I accept";
+    const MCP_SCREEN: &str = " New MCP server found in this project: fs  MCP servers may execute code or access system resources. All tool calls require approval.  ❯ 1. Use this MCP server  2. Use this and all future MCP servers in this project  3. Continue without using this MCP server  Enter confirm / Esc cancel";
 
     /// Starts a worker thread from a tab in `parent_dir` and returns its task id.
     #[cfg(unix)]
@@ -10095,6 +10096,26 @@ pub(crate) mod tests {
         let thread = m.view(&info.thread.unwrap().tab).unwrap();
         assert_eq!((thread.running, thread.status, thread.message.as_deref()), (true, Some(AgentStatus::Failed), Some(reason.as_str())), "the session stays open for the user to answer");
         assert!(!keys.exists(), "the trust prompt of a folder pinned did not make is never answered");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_on_the_project_mcp_approval_dialog_fails_its_task_with_the_reason() {
+        let root = temp("first-run-mcp-approval");
+        let (claude, keys) = claude_on_screens(&root, &[MCP_SCREEN]);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.join("config")), None, |_| {});
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let task = delegate_from(&m, &app, "shared");
+        wait_for("the task to fail", || m.delegates.get(&task).is_some_and(|t| t.state.terminal()));
+        let info = m.delegates.get(&task).unwrap();
+        let reason = format!("Claude Code is waiting for approval of this project's MCP servers in {}; open the session to answer it", app.display());
+        assert_eq!((info.state.as_str(), info.error.as_deref()), ("failed", Some(reason.as_str())));
+        let thread = m.view(&info.thread.unwrap().tab).unwrap();
+        assert_eq!((thread.running, thread.status, thread.message.as_deref()), (true, Some(AgentStatus::Failed), Some(reason.as_str())), "the session stays open for the user to answer");
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!keys.exists(), "nothing was typed into the project's MCP approval dialog");
         let _ = std::fs::remove_dir_all(root);
     }
 
