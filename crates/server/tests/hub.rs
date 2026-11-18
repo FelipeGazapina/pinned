@@ -7544,7 +7544,7 @@ fn a_session_reads_convex_through_the_hub_and_the_key_never_leaves_it() {
     ana.client.wait("the workflow's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == run.as_str()));
     assert_eq!(convex(&run, json!({ "op": "offer" })), Ok(json!({ "deployment": "quick-lemur-789", "kind": "dev", "tables": ["invoices"] })));
     assert_eq!(convex(&run, json!({ "op": "tables" })), Ok(json!({ "deployment": "quick-lemur-789", "kind": "dev", "tables": ["invoices"] })));
-    assert_eq!(convex(&run, json!({ "op": "query", "code": "return 1;" })), Err("This run's Read Convex data step limits it to the tables invoices, so convex_query is off.".into()));
+    assert_eq!(convex(&run, json!({ "op": "query", "code": "return 1;" })), Err("pinned no longer runs arbitrary Convex code for a session; read tables with convex_data".into()));
     assert_eq!(convex(&run, json!({ "op": "data", "table": "customers" })), Err("This run's Read Convex data step limits it to the tables invoices, so convex_data cannot read customers.".into()));
 
     assert_eq!(ana.client.hub(json!({ "cmd": "disconnect_convex", "id": "quick-lemur-789" })), Ok(Value::Null));

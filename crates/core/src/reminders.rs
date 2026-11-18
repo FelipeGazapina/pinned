@@ -1457,7 +1457,6 @@ fn restore_var(name: &str, value: Option<String>) {
                 "mcp__pinned__plan_close",
                 "mcp__pinned__convex_tables",
                 "mcp__pinned__convex_data",
-                "mcp__pinned__convex_query",
                 "mcp__pinned__convex_run",
                 "mcp__pinned__convex_logs",
             ]
