@@ -846,3 +846,77 @@ test("a rule id is escaped in the Reviewer section", async () => {
   html = section(p.html(), "Reviewer");
   assert.ok(!html.includes("<b>1"), "so is the id in the replaces choice");
 });
+
+const shownRows = (html) => [...(html.match(/<ul class="taste-rules taste-profiles-list" aria-label="(?:Account|Project) profiles">([\s\S]*?)<\/ul>/)?.[1] ?? "").matchAll(/<li\b[\s\S]*?<\/li>/g)].map((m) => m[0]);
+const rowNamed = (html, name) => shownRows(html).filter((row) => row.includes(`<b>${name}</b>`));
+const seedNames = ["Explorer", "Implementer", "Tester", "Reviewer"];
+
+test("a fresh account lists the built-in Explorer, Implementer, Tester and Reviewer in full", async () => {
+  const p = page({ answer: profilesHub(profilesOf()) });
+  await p.show();
+  const html = section(p.html(), "Profiles");
+  assert.deepEqual(shownRows(html).map((row) => row.match(/<b>([^<]*)<\/b>/)[1]), seedNames);
+  for (const name of seedNames) assert.match(rowNamed(html, name)[0], /Built-in/, `${name} is tagged built-in`);
+  const explorer = rowNamed(html, "Explorer")[0];
+  assert.match(explorer, /Read only/);
+  assert.match(explorer, /ladder/);
+  assert.match(explorer, /What it found, with file:line, and no change\./);
+  assert.match(explorer, /<code>Read<\/code> <code>Grep<\/code> <code>Glob<\/code>/);
+  assert.match(rowNamed(html, "Implementer")[0], /Can edit[\s\S]*<code>Bash<\/code>/);
+  assert.match(rowNamed(html, "Tester")[0], /screenshot proof only when the work changes a screen\./);
+  const reviewer = rowNamed(html, "Reviewer")[0];
+  assert.match(reviewer, /set in Reviewer/);
+  assert.match(reviewer, /Findings on the change, sent back to the worker for at most 2 rounds\./);
+});
+
+test("the Reviewer row reads its model, rules and rounds from the Reviewer, and offers no edit or delete", async () => {
+  const reviewer = reviewerOf({ model: { model: "claude-opus-5-5" }, rounds: 1, rules: [{ id: "A1", text: "x" }, { id: "A2", text: "y" }], projects: { [SITE]: { switch: "auto", rules: [{ id: "S1", text: "z", replaces: "A1" }] } } });
+  const p = page({ answer: () => tastesWith({ reviewer, worker_profiles: profilesOf() }), projects: siteProjects });
+  await p.show();
+  let row = rowNamed(section(p.html(), "Profiles"), "Reviewer")[0];
+  assert.match(row, /Claude Opus 5\.5/);
+  assert.match(row, /Findings against rules A1, A2, sent back to the worker for at most 1 round\./);
+  assert.doesNotMatch(row, /data-act="wpedit"|data-act="wpdrop"/);
+  for (const name of ["Explorer", "Implementer", "Tester"]) {
+    const seed = rowNamed(section(p.html(), "Profiles"), name)[0];
+    assert.match(seed, /data-act="wpedit"/, `${name} can be edited`);
+    assert.doesNotMatch(seed, /data-act="wpdrop"/, `${name} has no delete`);
+  }
+  await p.click(new RegExp(`data-act="wpscope" data-repo="${SITE}"`));
+  row = rowNamed(section(p.html(), "Profiles"), "Reviewer")[0];
+  assert.match(row, /Findings against rules A2, S1, sent back to the worker for at most 1 round\./);
+});
+
+test("a user Explorer replaces the built-in row, and the project tab shows the account's over the seeds", async () => {
+  const mine = wp({ name: "Explorer", tools: ["Read"], delivers: "Paths only." });
+  const p = page({ answer: profilesHub(profilesOf({ account: [mine, wp()] })), projects: siteProjects });
+  await p.show();
+  let html = section(p.html(), "Profiles");
+  assert.deepEqual(shownRows(html).map((row) => row.match(/<b>([^<]*)<\/b>/)[1]), [...seedNames, "scout"]);
+  const [explorer] = rowNamed(html, "Explorer");
+  assert.equal(rowNamed(html, "Explorer").length, 1);
+  assert.match(explorer, /Paths only\./);
+  assert.doesNotMatch(explorer, /Built-in|What it found/);
+  assert.match(explorer, /Yours/);
+  assert.match(explorer, /data-act="wpdrop" data-index="0"/);
+  await p.click(new RegExp(`data-act="wpscope" data-repo="${SITE}"`));
+  html = section(p.html(), "Profiles");
+  assert.deepEqual(shownRows(html).map((row) => row.match(/<b>([^<]*)<\/b>/)[1]), [...seedNames, "scout"]);
+  assert.match(rowNamed(html, "Explorer")[0], /Paths only\./);
+});
+
+test("editing the built-in Explorer saves a user copy named Explorer, and deleting it brings the seed back", async () => {
+  const copy = { name: "Explorer", skills: [], tools: ["Read", "Grep", "Glob"], access: "read_only", delivers: "Paths only.", by: "user" };
+  const p = page({ answer: profilesHub(profilesOf(), profilesOf({ account: [copy] })) });
+  await p.show();
+  await p.click(/data-act="wpedit" data-seed="Explorer"/);
+  p.typeOn("data-profile-delivers", "Paths only.");
+  await p.submitOn("data-profile-form");
+  await p.click(/data-act="wpsave"/);
+  assert.deepEqual(sent(p), [["set_worker_profiles", { project: null, profiles: [copy] }]]);
+  let html = section(p.html(), "Profiles");
+  assert.match(rowNamed(html, "Explorer")[0], /Paths only\./);
+  await p.click(/data-act="wpdrop" data-index="0"/);
+  html = section(p.html(), "Profiles");
+  assert.match(rowNamed(html, "Explorer")[0], /Built-in[\s\S]*What it found, with file:line, and no change\./);
+});

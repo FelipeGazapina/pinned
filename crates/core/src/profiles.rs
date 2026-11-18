@@ -453,4 +453,16 @@ mod tests {
         assert_eq!(skilled.check_skills(&["pstack:unslop", "bro"]), Ok(()));
         assert_eq!(skilled.check_skills(&["unslop"]), Err("writer names pstack:unslop, which is no installed skill: name one the skills action lists".into()));
     }
+
+    /// The Way of working page draws the seeds from `PROFILE_SEEDS` in `ui/gui-profiles.js`; the
+    /// Reviewer's row it builds from `Tastes.reviewer`. A seed changed here and not there fails.
+    #[test]
+    fn the_pages_seeds_match_the_built_in_ones() {
+        let js = include_str!("../../../ui/gui-profiles.js");
+        let start = js.find("const PROFILE_SEEDS = ").expect("ui/gui-profiles.js holds const PROFILE_SEEDS") + "const PROFILE_SEEDS = ".len();
+        let end = start + js[start..].find("];").expect("PROFILE_SEEDS ends with ];") + 1;
+        let mirror: Vec<WorkerProfile> = serde_json::from_str(&js[start..end]).expect("PROFILE_SEEDS is a JSON array of profiles");
+        let built_in: Vec<WorkerProfile> = seeds(&Reviewer::default(), None).into_iter().filter(|p| p.name != REVIEWER).collect();
+        assert_eq!(mirror, built_in);
+    }
 }
