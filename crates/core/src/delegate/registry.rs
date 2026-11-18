@@ -312,7 +312,10 @@ impl Delegates {
         }
         if let Some(most) = at_once {
             let project = crate::history::project_of(&new.cwd);
-            let working = tasks.iter().filter(|task| !task.state.terminal() && Some(task.id.as_str()) != waiting && crate::history::project_of(&task.cwd) == project).count();
+            // An author held by its running review counts once, together with that review.
+            let reviewer = Some(crate::agent::Role::Reviewer.name());
+            let held: Vec<&str> = tasks.iter().filter(|task| !task.state.terminal() && task.role.as_deref() == reviewer).filter_map(|task| if let Parent::Task(author) = &task.parent { Some(author.as_str()) } else { None }).collect();
+            let working = tasks.iter().filter(|task| !task.state.terminal() && Some(task.id.as_str()) != waiting && !held.contains(&task.id.as_str()) && crate::history::project_of(&task.cwd) == project).count();
             if working >= most as usize {
                 return Claim::Full(working);
             }

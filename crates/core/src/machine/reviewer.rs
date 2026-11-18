@@ -51,7 +51,10 @@ impl Machine {
     /// wanted, a review that cannot start writes a not reviewed round.
     fn start_review(&self, task: &str, tab: &str) -> Result<bool, String> {
         let Some(author) = self.delegates.get(task) else { return Ok(false) };
-        let (cwd, remote, tab_model, role) = self.tab(tab, |t| (t.cwd.clone(), t.origin.is_some(), t.model.clone(), role_of(&t.env).map(|(role, _)| role)))?;
+        let (remote, tab_model, role) = self.tab(tab, |t| (t.origin.is_some(), t.model.clone(), role_of(&t.env).map(|(role, _)| role)))?;
+        // The folder the task started in. The tab's cwd follows the session into a worktree of its
+        // own, which would point the review at other files.
+        let cwd = author.cwd.clone();
         // Only a worker's change is reviewed, and on the Captain's machine: a thread for another
         // machine's Captain is not reviewed here.
         if role != Some(Role::Worker) || remote || author.remote.is_some() || author.role.as_deref() == Some(Role::Reviewer.name()) {
@@ -67,15 +70,24 @@ impl Machine {
         let project = crate::history::project_of(&cwd);
         let repo = git_remote(&project).and_then(|url| repo_key(&url));
         let (switch, rules) = review_run::rules_in_force(&tastes.reviewer, repo.as_deref());
-        if rules.is_empty() || round > tastes.reviewer.rounds {
+        if switch == Switch::Off || rules.is_empty() || round > tastes.reviewer.rounds {
             return Ok(false);
         }
         let path = self.launch.path_env.clone();
-        let diff = match review_run::diff(&cwd, author.base.as_deref(), path.as_deref()) {
-            Ok(diff) => diff,
-            Err(error) if switch != Switch::Off => return Ok(self.not_reviewed(task, round, None, &error, None)),
-            Err(_) => return Ok(false),
+        let Some(base) = author.base.clone() else {
+            return Ok(self.not_reviewed(task, round, None, "the commit the task started from was not kept", None));
         };
+        let diff = match review_run::diff(&cwd, &base, &self.diff_dir(task), path.as_deref()) {
+            Ok(diff) => diff,
+            Err(error) => return Ok(self.not_reviewed(task, round, None, &error, None)),
+        };
+        if diff.is_empty() {
+            // On asks for a review of every change; with none, the round says so and passes nothing.
+            if switch == Switch::On {
+                self.delegates.put_review(task, ReviewRound { round, findings: vec![], state: ReviewState::NothingToReview, model: None, note: Some("the worker changed no file".to_owned()) });
+            }
+            return Ok(false);
+        }
         if !review_run::wanted(switch, &rules, &diff) {
             return Ok(false);
         }
@@ -168,7 +180,9 @@ impl Machine {
         argv.push("--allowedTools".to_owned());
         argv.extend(REVIEWER_TOOLS.iter().map(|tool| tool.to_string()));
         argv.push("--disallowedTools".to_owned());
-        argv.extend(Role::Reviewer.disallowed_tools().iter().map(|tool| tool.to_string()));
+        argv.extend(Role::Reviewer.disallowed_tools().iter().chain(&REVIEWER_DENIED).map(|tool| tool.to_string()));
+        // No skill of the added folder's `.claude/skills` loads.
+        argv.push("--disable-slash-commands".to_owned());
         let system = format!("{}\n\nThe worker's files are in {}.", review_run::system_prompt(&rules), cwd.display());
         argv.extend(["--append-system-prompt".to_owned(), system]);
         let mut env = self.delegate_env(&account, &review);
@@ -181,12 +195,13 @@ impl Machine {
         let ended = AtomicBool::new(false);
         let (id, author_id, worker) = (review.clone(), task.to_owned(), tab.to_owned());
         let (child_path, sent_model, sent_note, cut) = (path.clone(), model.clone(), note.clone(), diff.cut_note());
+        let (folder, sent) = (cwd.clone(), diff.snapshot.clone());
         let pid = spawn(ChildSpec { bin: &self.launch.bin(Provider::Claude), argv: &argv, cwd: &neutral, env: &env.set, path: path.as_deref(), strip: &strip }, move |event| {
             let Some(machine) = me.upgrade() else { return };
             let ready = machine.delegates.apply(&id, event, child_path.as_deref());
             if machine.delegates.is_terminal(&id) && !ended.swap(true, Ordering::SeqCst) {
                 let _ = std::fs::remove_dir_all(machine.review_dir(&id));
-                machine.review_answered(&author_id, &id, &worker, Answered { round, rules: &rules, model: &sent_model, note: sent_note.clone(), cut: cut.clone() });
+                machine.review_answered(&author_id, &id, &worker, Answered { round, rules: &rules, model: &sent_model, note: sent_note.clone(), cut: cut.clone(), folder: &folder, base: &base, sent: &sent });
             }
             if let Some(tab) = ready {
                 machine.maybe_deliver(&tab);
@@ -210,7 +225,11 @@ impl Machine {
     /// not reviewed round.
     fn review_answered(&self, task: &str, review: &str, tab: &str, answered: Answered) {
         let model = Some(answered.model.to_owned());
+        // The files the review read must still be the folder's: a change made while it ran was not read.
+        let again = review_run::snapshot(answered.folder, answered.base, &self.diff_dir(task), self.launch.path_env.as_deref());
         let why = match self.delegates.get(review) {
+            _ if again.as_ref().is_ok_and(|again| again != answered.sent) => Some("the worker changed its files while the review ran".to_owned()),
+            _ if again.is_err() => Some(format!("the worker's files could not be read again: {}", again.err().unwrap_or_default())),
             None => Some("the review's record is gone".to_owned()),
             Some(ended) if ended.error.is_some() || ended.state != crate::delegate::WorkState::ResultAvailable => {
                 let error = ended.error.as_deref().map_or_else(|| ended.state.as_str().replace('_', " "), |error| review_run::clip_chars(&error.split_whitespace().collect::<Vec<_>>().join(" "), 200));
@@ -234,6 +253,12 @@ impl Machine {
             self.not_reviewed(task, answered.round, model, &why, answered.note);
         }
         self.end_reviewed(task, tab);
+    }
+
+    /// A fresh folder for one diff of task `task`'s files, which the diff removes once read.
+    fn diff_dir(&self, task: &str) -> std::path::PathBuf {
+        static DIFFS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        self.review_dir(&format!("diff-{task}-{}", DIFFS.fetch_add(1, Ordering::SeqCst)))
     }
 
     /// The folder review `review` owns while it runs: under this machine's config, else the temp folder.
@@ -261,6 +286,9 @@ impl Machine {
 /// The variable that makes Claude Code load the CLAUDE.md of an --add-dir folder.
 const ADDED_DIRS_CLAUDE_MD: &str = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD";
 
+/// Tools the reviewer is denied beside its role's.
+const REVIEWER_DENIED: [&str; 1] = ["Skill"];
+
 /// All the reviewer may use: it reads the change and the files around it.
 const REVIEWER_TOOLS: [&str; 3] = ["Read", "Grep", "Glob"];
 
@@ -272,6 +300,10 @@ struct Answered<'a> {
     note: Option<String>,
     /// What the round says when the diff was cut.
     cut: Option<String>,
+    /// The task's folder, its base, and the snapshot of its files the review was sent.
+    folder: &'a std::path::Path,
+    base: &'a str,
+    sent: &'a review_run::Snapshot,
 }
 
 #[cfg(test)]
@@ -814,7 +846,8 @@ mod tests {
             wait_for("the review to start", || t.m.delegates.requested(&format!("review:{}", t.task), Some("round-1")).is_some());
             std::fs::write(t.work.join("src/parser.rs"), "fn parse() { unreachable!() }\n").unwrap();
             std::fs::remove_file(t.claude.with_extension("hold")).unwrap();
-            assert_eq!(t.not_reviewed(), "the worker changed its files while the review ran");
+            let note = t.not_reviewed();
+            assert!(note.starts_with("the worker changed its files while the review ran"), "{note}");
         }
 
         #[test]

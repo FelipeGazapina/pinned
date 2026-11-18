@@ -41,7 +41,7 @@ pub fn rules_in_force(reviewer: &Reviewer, repo: Option<&str>) -> (Switch, Vec<R
 /// Whether a change gets a review. Off never does. On and Auto do when there is a rule to read the
 /// change against and the worker changed something; Auto decides by the change in just that way.
 pub fn wanted(switch: Switch, rules: &[Rule], diff: &Diff) -> bool {
-    switch != Switch::Off && !rules.is_empty() && (!diff.text.trim().is_empty() || diff.cut > 0)
+    switch != Switch::Off && !rules.is_empty() && !diff.is_empty()
 }
 
 /// The reviewer's `--append-system-prompt`: its role's prompt, then the rules, one a line.
@@ -127,7 +127,15 @@ pub fn same_model(a: &str, b: &str) -> bool {
         let dated = id.len() > 9 && id.as_bytes()[id.len() - 9] == b'-' && id[id.len() - 8..].bytes().all(|b| b.is_ascii_digit());
         (if dated { &id[..id.len() - 9] } else { id }).to_owned()
     }
-    bare(a) == bare(b)
+    // A family alias, as `opus`, names whichever model of the family is current, so it is the
+    // same model as every id of its family.
+    fn family(id: &str) -> Option<&str> {
+        let name = id.strip_prefix("claude-").map_or(id, |rest| rest.split('-').next().unwrap_or_default());
+        ["opus", "sonnet", "haiku", "fable"].into_iter().find(|family| *family == name)
+    }
+    let (a, b) = (bare(a), bare(b));
+    let alias = |id: &str| family(id).is_some_and(|family| family == id);
+    a == b || ((alias(&a) || alias(&b)) && family(&a).is_some() && family(&a) == family(&b))
 }
 
 /// The model a Claude Code transcript's last answer came from.
@@ -145,127 +153,239 @@ pub struct Diff {
     pub text: String,
     /// The bytes of the change left out of `text`, which holds at most `DIFF_BYTES`.
     pub cut: usize,
+    /// The folder's files as pinned took them.
+    pub snapshot: Snapshot,
 }
 
 impl Diff {
-    /// What a round says when the diff was cut, so a cut diff never reads as a full review.
+    /// What a round says when part of the change was not read, so such a diff never reads as a
+    /// full review: each nested repository, and the bytes cut.
     pub fn cut_note(&self) -> Option<String> {
-        (self.cut > 0).then(|| format!("the diff was cut at {} KiB: {} bytes were not read", DIFF_BYTES / 1024, self.cut))
+        let nested = self.snapshot.nested.iter().map(|repo| format!("not read: nested repository {repo}"));
+        let cut = (self.cut > 0).then(|| format!("the diff was cut at {} KiB: {} bytes were not read", DIFF_BYTES / 1024, self.cut));
+        let note: Vec<String> = cut.into_iter().chain(nested).collect();
+        (!note.is_empty()).then(|| note.join("; "))
+    }
+
+    /// Whether the change holds nothing at all to read.
+    pub fn is_empty(&self) -> bool {
+        self.text.trim().is_empty() && self.cut == 0 && self.snapshot.nested.is_empty()
     }
 }
+
+/// The folder's files as pinned took them: the tree they make, and the nested repositories
+/// it did not read. Two snapshots of the same files are equal.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    pub tree: String,
+    pub nested: Vec<String>,
+}
+
+/// The base of a task whose folder had no commit when it started: the empty tree, so the first
+/// commit is reviewed.
+pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+const EMPTY_TREE_SHA256: &str = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
 
 /// The most files of a change read one by one; the rest count as cut.
 const MOST_FILES: usize = 500;
 
-/// What the worker changed: its folder against `base`, the commit its task started from, with
-/// the files it added. A task from before bases were kept uses the commit of the project's
-/// checkout that the folder's branch came from. Each file's diff is read on its own and the
-/// smallest go first, so a large file is the one cut, not the change beside it.
-pub fn diff(cwd: &Path, base: Option<&str>, path: Option<&str>) -> Result<Diff, String> {
-    let base = match base {
-        Some(base) => base.to_owned(),
-        None => {
-            let root = crate::history::project_of(cwd);
-            let head = git(&root, path, &["rev-parse", "HEAD"])?;
-            git(cwd, path, &["merge-base", "HEAD", head.trim()]).unwrap_or(head)
-        }
-    };
-    let base = base.trim();
-    let names = |out: String| out.split('\0').filter(|file| !file.is_empty()).map(str::to_owned).collect::<Vec<_>>();
-    let tracked = names(git(cwd, path, &["diff", "--name-only", "-z", "--no-renames", base, "--"])?);
-    let added = names(git(cwd, path, &["ls-files", "--others", "--exclude-standard", "-z"])?);
-    let on_disk = |file: &str| std::fs::metadata(cwd.join(file)).map_or(0, |meta| usize::try_from(meta.len()).unwrap_or(usize::MAX));
-    let mut diff = Diff::default();
-    let mut parts: Vec<(String, usize)> = vec![];
-    for (at, (file, is_added)) in tracked.iter().map(|file| (file, false)).chain(added.iter().map(|file| (file, true))).enumerate() {
-        if at >= MOST_FILES {
-            diff.cut = diff.cut.saturating_add(on_disk(file).max(1));
-            continue;
-        }
-        let literal = format!(":(literal){file}");
-        // --no-index exits 1 when the files differ, which is the point here.
-        let (text, whole) = if is_added {
-            git_read(cwd, path, &["diff", "--no-color", "--no-ext-diff", "--no-index", "--", "/dev/null", file], DIFF_BYTES + 1)?
-        } else {
-            let (ok, text, whole) = git_capped(cwd, path, &["diff", "--no-color", "--no-ext-diff", base, "--", &literal], DIFF_BYTES + 1)?;
-            if whole && !ok {
-                return Err(format!("git diff failed in {}", cwd.display()));
+/// What the worker changed: the files of `folder`, as pinned takes them, against `base`, the
+/// commit its task started from. Each file's diff is read on its own and the smallest go first, so
+/// a large file is the one cut, not the change beside it.
+///
+/// Git runs in a repository pinned makes in `scratch` and removes after, never in the worker's:
+/// the worker's config, exclude and attributes files, index, replace refs and filter programs
+/// shape nothing. The worker's object store is only borrowed for the base, whose id its bytes
+/// must match.
+pub fn diff(folder: &Path, base: &str, scratch: &Path, path: Option<&str>) -> Result<Diff, String> {
+    in_neutral(folder, base, scratch, path, |git, top, snapshot| {
+        let base = base.trim();
+        let changed: Vec<String> = git.run(&["diff", "--cached", "--name-only", "-z", "--no-renames", base, "--"])?.split('\0').filter(|file| !file.is_empty()).map(str::to_owned).collect();
+        let on_disk = |file: &str| std::fs::symlink_metadata(top.join(file)).map_or(0, |meta| usize::try_from(meta.len()).unwrap_or(usize::MAX));
+        let mut diff = Diff { snapshot, ..Diff::default() };
+        let mut parts: Vec<(String, usize)> = vec![];
+        for (at, file) in changed.iter().enumerate() {
+            if at >= MOST_FILES {
+                diff.cut = diff.cut.saturating_add(on_disk(file).max(1));
+                continue;
             }
-            (text, whole)
-        };
-        let size = if whole { text.len() } else { text.len().max(on_disk(file)) };
-        parts.push((if whole { text } else { String::new() }, size));
-    }
-    parts.sort_by_key(|(_, size)| *size);
-    for (text, size) in parts {
-        if !text.is_empty() && diff.text.len() + text.len() <= DIFF_BYTES {
-            diff.text.push_str(&text);
-        } else {
-            diff.cut = diff.cut.saturating_add(size);
+            let (ok, text, whole) = git.capped(&["diff", "--cached", "--text", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", base, "--", file], DIFF_BYTES + 1)?;
+            if whole && !ok {
+                return Err(format!("git diff failed in {}", top.display()));
+            }
+            let size = if whole { text.len() } else { text.len().max(on_disk(file)) };
+            parts.push((if whole { text } else { String::new() }, size));
         }
+        parts.sort_by_key(|(_, size)| *size);
+        for (text, size) in parts {
+            if !text.is_empty() && diff.text.len() + text.len() <= DIFF_BYTES {
+                diff.text.push_str(&text);
+            } else {
+                diff.cut = diff.cut.saturating_add(size);
+            }
+        }
+        Ok(diff)
+    })
+}
+
+/// The folder's files as pinned takes them, as `diff` does, to tell whether they changed.
+pub fn snapshot(folder: &Path, base: &str, scratch: &Path, path: Option<&str>) -> Result<Snapshot, String> {
+    in_neutral(folder, base, scratch, path, |_, _, snapshot| Ok(snapshot))
+}
+
+/// Makes the neutral repository in `scratch`, takes the folder's files into its index on top of
+/// `base`, runs `read` and removes the repository.
+fn in_neutral<T>(folder: &Path, base: &str, scratch: &Path, path: Option<&str>, read: impl FnOnce(&Git, &Path, Snapshot) -> Result<T, String>) -> Result<T, String> {
+    let _ = std::fs::remove_dir_all(scratch);
+    let taken = (|| {
+        let (top, gitdir, objects) = worker_repo(folder)?;
+        let home = scratch.join("home");
+        let neutral = scratch.join("git");
+        std::fs::create_dir_all(&home).map_err(|error| format!("the review's folder could not be made: {error}"))?;
+        let git = Git { dir: &neutral, work: Some(&top), home: &home, path };
+        let base = base.trim();
+        let format = if base.len() == 64 { "--object-format=sha256" } else { "--object-format=sha1" };
+        Git { work: None, ..git }.run(&["init", "-q", "--bare", "--template=", format])?;
+        std::fs::create_dir_all(neutral.join("objects/info")).and_then(|()| std::fs::write(neutral.join("objects/info/alternates"), format!("{}\n", objects.display()))).map_err(|error| format!("the review's repository could not be made: {error}"))?;
+        git.run(&["read-tree", base])?;
+        let listed = |out: String| out.split('\0').filter(|file| !file.is_empty()).map(str::to_owned).collect::<Vec<_>>();
+        // The files in the base, every file the folder's own .gitignore files leave in, and the
+        // nested repositories, which git lists as a folder.
+        let mut add = listed(git.run(&["ls-files", "--cached", "-z"])?);
+        let (nested, untracked): (Vec<String>, Vec<String>) = listed(git.run(&["ls-files", "--others", "--exclude-standard", "-z"])?).into_iter().partition(|file| file.ends_with('/'));
+        add.extend(untracked);
+        // A file the worker force-added and committed while it is ignored.
+        let head = Git { dir: &gitdir, work: None, ..git }.run(&["rev-parse", "--verify", "-q", "HEAD^{commit}"]).ok().map(|head| head.trim().to_owned()).filter(|head| !head.is_empty());
+        if let Some(head) = head {
+            for entry in git.run(&["ls-tree", "-r", "-z", "--full-tree", &head])?.split('\0') {
+                if let Some((kind, file)) = entry.split_once('\t') {
+                    if kind.split(' ').nth(1) == Some("blob") && std::fs::symlink_metadata(top.join(file)).is_ok() {
+                        add.push(file.to_owned());
+                    }
+                }
+            }
+        }
+        // A new .gitignore that ignores itself.
+        add.extend(listed(git.run(&["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"])?).into_iter().filter(|file| Path::new(file).file_name().is_some_and(|name| name == ".gitignore")));
+        add.retain(|file| !nested.iter().any(|repo| file.starts_with(repo.as_str())));
+        if !add.is_empty() {
+            let list = scratch.join("add");
+            std::fs::write(&list, add.join("\0")).map_err(|error| format!("the review's file list could not be written: {error}"))?;
+            git.run(&["add", "-A", "-f", &format!("--pathspec-from-file={}", list.display()), "--pathspec-file-nul"])?;
+        }
+        let tree = git.run(&["write-tree"])?.trim().to_owned();
+        let nested = nested.into_iter().map(|repo| repo.trim_end_matches('/').to_owned()).collect();
+        read(&git, &top, Snapshot { tree, nested })
+    })();
+    let _ = std::fs::remove_dir_all(scratch);
+    taken
+}
+
+/// The repository `folder` is in, read from its files, not by git: the folder that holds `.git`,
+/// its git folder, and the object store it shares with its other worktrees.
+fn worker_repo(folder: &Path) -> Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf), String> {
+    let folder = dunce::canonicalize(folder).map_err(|error| format!("the task's folder {} could not be read: {error}", folder.display()))?;
+    for top in folder.ancestors() {
+        let dot = top.join(".git");
+        let gitdir = if dot.is_dir() {
+            dot
+        } else if dot.is_file() {
+            let text = std::fs::read_to_string(&dot).unwrap_or_default();
+            let named = text.lines().find_map(|line| line.strip_prefix("gitdir:")).map(str::trim).ok_or_else(|| format!("{} names no git folder", dot.display()))?;
+            top.join(named)
+        } else {
+            continue;
+        };
+        let common = std::fs::read_to_string(gitdir.join("commondir")).map_or_else(|_| gitdir.clone(), |common| gitdir.join(common.trim()));
+        let objects = dunce::canonicalize(common.join("objects")).map_err(|error| format!("the task's object store could not be read: {error}"))?;
+        return Ok((top.to_path_buf(), gitdir, objects));
     }
-    Ok(diff)
+    Err(format!("{} is not in a git repository", folder.display()))
 }
 
-/// The commit `dir` stands at, which a task's review later diffs against.
+/// The commit `dir` stands at, which a task's review later diffs against: the empty tree when
+/// its repository has no commit yet.
 pub fn head(dir: &Path, path: Option<&str>) -> Option<String> {
-    git(dir, path, &["rev-parse", "--verify", "-q", "HEAD"]).ok().map(|head| head.trim().to_owned()).filter(|head| !head.is_empty())
-}
-
-fn git(dir: &Path, path: Option<&str>, args: &[&str]) -> Result<String, String> {
-    let (ok, out, _) = git_capped(dir, path, args, usize::MAX)?;
-    ok.then_some(out).ok_or_else(|| format!("git {} failed in {}", args.first().copied().unwrap_or_default(), dir.display()))
-}
-
-/// Git's output up to `most` bytes, and whether that was all of it, whatever git exits with.
-fn git_read(dir: &Path, path: Option<&str>, args: &[&str], most: usize) -> Result<(String, bool), String> {
-    git_capped(dir, path, args, most).map(|(_, out, whole)| (out, whole))
+    let (_, gitdir, _) = worker_repo(dir).ok()?;
+    let home = std::env::temp_dir();
+    let git = Git { dir: &gitdir, work: None, home: &home, path };
+    if let Some(head) = git.run(&["rev-parse", "--verify", "-q", "HEAD^{commit}"]).ok().map(|head| head.trim().to_owned()).filter(|head| !head.is_empty()) {
+        return Some(head);
+    }
+    let format = git.run(&["rev-parse", "--show-object-format"]).ok()?;
+    Some((if format.trim() == "sha256" { EMPTY_TREE_SHA256 } else { EMPTY_TREE }).to_owned())
 }
 
 /// How long one git call of a review may take.
 const GIT_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// Runs git, reading at most `most` bytes of what it prints: whether it succeeded, what it
-/// printed, and whether that was all of it. Git stops on a closed pipe past `most`. The worker
-/// can write its repo's config, so nothing there runs: no fsmonitor, external diff or textconv.
-/// Git killed after `GIT_WAIT` is "git did not answer".
-fn git_capped(dir: &Path, path: Option<&str>, args: &[&str], most: usize) -> Result<(bool, String, bool), String> {
-    use std::io::Read;
-    let mut cmd = crate::process::command("git");
-    cmd.arg("-C").arg(dir).args(["-c", "core.quotepath=off", "-c", "core.fsmonitor=false", "-c", "diff.external="]);
-    match args.split_first() {
-        Some((&"diff", rest)) => cmd.args(["diff", "--no-textconv"]).args(rest),
-        _ => cmd.args(args),
-    };
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-    if let Some(path) = path {
-        cmd.env("PATH", path);
+/// Git with nothing of the user's or the worker's: no inherited `GIT_*` variable, no system,
+/// global or user config, no replace refs, and no program a config could name.
+struct Git<'a> {
+    dir: &'a Path,
+    work: Option<&'a Path>,
+    home: &'a Path,
+    path: Option<&'a str>,
+}
+
+impl Git<'_> {
+    fn run(&self, args: &[&str]) -> Result<String, String> {
+        let (ok, out, _) = self.capped(args, usize::MAX)?;
+        ok.then_some(out).ok_or_else(|| format!("git {} failed in {}", args.first().copied().unwrap_or_default(), self.work.unwrap_or(self.dir).display()))
     }
-    let mut child = cmd.spawn().map_err(|error| format!("git: {error}"))?;
-    let stdout = child.stdout.take();
-    let (sent, read) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut out = vec![];
-        if let Some(stdout) = stdout {
-            let _ = stdout.take(u64::try_from(most).unwrap_or(u64::MAX)).read_to_end(&mut out);
-        }
-        let _ = sent.send(out);
-    });
-    let deadline = std::time::Instant::now() + GIT_WAIT;
-    let status = loop {
-        match child.try_wait().map_err(|error| format!("git: {error}"))? {
-            Some(status) => break status,
-            None if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(5)),
-            None => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("git did not answer".to_owned());
+
+    /// Runs git, reading at most `most` bytes of what it prints: whether it succeeded, what it
+    /// printed, and whether that was all of it. Git stops on a closed pipe past `most`. Git
+    /// killed after `GIT_WAIT` is "git did not answer".
+    fn capped(&self, args: &[&str], most: usize) -> Result<(bool, String, bool), String> {
+        use std::io::Read;
+        let mut cmd = crate::process::command("git");
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with("GIT_") {
+                cmd.env_remove(name);
             }
         }
-    };
-    let out = read.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()).max(std::time::Duration::from_secs(1))).map_err(|_| "git did not answer".to_owned())?;
-    let whole = out.len() < most;
-    Ok((status.success(), String::from_utf8_lossy(&out).into_owned(), whole))
+        cmd.env("GIT_DIR", self.dir);
+        if let Some(work) = self.work {
+            cmd.env("GIT_WORK_TREE", work).current_dir(work);
+        }
+        for (name, value) in [("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_ATTR_NOSYSTEM", "1"), ("GIT_NO_REPLACE_OBJECTS", "1"), ("GIT_OPTIONAL_LOCKS", "0"), ("GIT_LITERAL_PATHSPECS", "1"), ("GIT_TERMINAL_PROMPT", "0")] {
+            cmd.env(name, value);
+        }
+        cmd.env("HOME", self.home).env("XDG_CONFIG_HOME", self.home);
+        for setting in ["core.quotepath=off", "core.fsmonitor=false", "diff.external=", "core.autocrlf=false", "core.safecrlf=false", "core.untrackedCache=false", "core.splitIndex=false", "gc.auto=0", "maintenance.auto=false"] {
+            cmd.args(["-c", setting]);
+        }
+        cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+        if let Some(path) = self.path {
+            cmd.env("PATH", path);
+        }
+        let mut child = cmd.spawn().map_err(|error| format!("git: {error}"))?;
+        let stdout = child.stdout.take();
+        let (sent, read) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut out = vec![];
+            if let Some(stdout) = stdout {
+                let _ = stdout.take(u64::try_from(most).unwrap_or(u64::MAX)).read_to_end(&mut out);
+            }
+            let _ = sent.send(out);
+        });
+        let deadline = std::time::Instant::now() + GIT_WAIT;
+        let status = loop {
+            match child.try_wait().map_err(|error| format!("git: {error}"))? {
+                Some(status) => break status,
+                None if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(5)),
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("git did not answer".to_owned());
+                }
+            }
+        };
+        let out = read.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()).max(std::time::Duration::from_secs(1))).map_err(|_| "git did not answer".to_owned())?;
+        let whole = out.len() < most;
+        Ok((status.success(), String::from_utf8_lossy(&out).into_owned(), whole))
+    }
 }
 
 /// The findings in the reviewer's answer that name a rule in `rules`, and the ids it named that
@@ -357,7 +477,7 @@ mod tests {
         assert_eq!(rules.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["A2", "P1"]);
         let (switch, rules) = rules_in_force(&reviewer, Some("github.com/acme/other"));
         assert_eq!((switch, rules.len()), (Switch::Auto, 2));
-        let change = |text: &str, cut| Diff { text: text.into(), cut };
+        let change = |text: &str, cut| Diff { text: text.into(), cut, ..Diff::default() };
         assert!(!wanted(Switch::Off, &rules, &change("diff", 0)));
         assert!(!wanted(Switch::On, &[], &change("diff", 0)));
         assert!(!wanted(Switch::Auto, &rules, &change(" \n", 0)));
@@ -399,7 +519,8 @@ mod tests {
         std::fs::write(dir.join(".gitattributes"), "*.rs diff=evil\n").unwrap();
         std::fs::write(dir.join("a.rs"), "fn a() { b() }\n").unwrap();
         std::fs::write(dir.join("new.rs"), "fn new() {}\n").unwrap();
-        let diff = diff(&dir, None, None).unwrap();
+        let base = head(&dir, None).unwrap();
+        let diff = diff(&dir, &base, &dir.with_extension("scratch"), None).unwrap();
         assert!(diff.text.contains("fn a() { b() }") && diff.text.contains("fn new() {}"), "{}", diff.text);
         let ran: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).filter(|entry| entry.file_name().to_string_lossy().starts_with("ran.")).collect();
         assert!(ran.is_empty(), "the repo's config ran a program {} times", ran.len());
