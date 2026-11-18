@@ -148,15 +148,19 @@ pub fn read(map: &FeatureMap, feature: Option<&str>) -> String {
     out
 }
 
-/// The maps saved in the config folder `dir`: none when the file is missing. A file that cannot be
-/// read or parsed is renamed to `feature-map.json.corrupt-<unix millis>` first, so nothing is ever
-/// saved over it, and the map starts empty. When even the rename fails, the answer is an error.
+/// The maps saved in the config folder `dir`: none when the file is missing. A file that does not
+/// parse is renamed to `feature-map.json.corrupt-<unix millis>` first, so nothing is ever saved
+/// over it, and the map starts empty. When even the rename fails, the answer is an error. A file
+/// that cannot be read (permissions, I/O) stays where it is and the answer is an error.
 pub fn load(dir: &Path) -> Result<FeatureMaps, String> {
     let path = dir.join(FILE);
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(FeatureMaps::default()),
-        Err(e) => return keep_aside(&path, &e.to_string()),
+        Err(e) => {
+            eprintln!("pinned: {FILE} could not be read ({}); the feature map will not change", e.kind());
+            return Err(format!("the feature map could not be read: {}", e.kind()));
+        }
     };
     // serde's message may quote the file, and a feature's text stays out of the log.
     match serde_json::from_slice(&bytes) {
