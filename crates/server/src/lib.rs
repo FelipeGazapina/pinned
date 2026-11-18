@@ -13,6 +13,7 @@ pub mod reports;
 pub mod remote;
 pub mod self_update;
 mod store_writes;
+pub mod sync_limits;
 pub mod traffic;
 pub mod surface;
 pub mod teams;
@@ -48,6 +49,8 @@ pub struct Config {
     pub access: http::Access,
     /// Where the hub files the issues users report from the app; without it reporting is not available.
     pub reports: Option<reports::Config>,
+    /// What synced projects may take on the hub (`sync_limits::from_env`).
+    pub sync_limits: sync_limits::SyncLimits,
 }
 
 /// How long the hub gives sockets to close once it is told to stop, before it drops them.
@@ -66,7 +69,7 @@ pub struct Running {
 pub async fn start(config: Config) -> Result<Running, String> {
     // Before the hub listens, so no sign in pays for it.
     http::warm_up().await;
-    let db = db::Db::connect(&config.db, db::Sealer::load(&config.key_file)?).await?;
+    let db = db::Db::connect(&config.db, db::Sealer::load(&config.key_file)?).await?.limit_sync(config.sync_limits);
     let learning = match &config.learning_db {
         Some(url) => Some(db::Learning::connect(url).await?),
         None => None,
@@ -103,6 +106,9 @@ pub async fn start(config: Config) -> Result<Running, String> {
             let Some(hub) = census.upgrade() else { break };
             eprintln!("{}", hub.census());
             for line in hub.census_accounts() {
+                eprintln!("{line}");
+            }
+            for line in hub.db.sync_census().await {
                 eprintln!("{line}");
             }
         }
