@@ -15,6 +15,7 @@ use pinned_core::upstash::{BoxId, Exec, Listed, NewBox};
 use pinned_core::sessions::Saved;
 use pinned_core::wire::{Call, HubCall, MachineEvent, MachineView, NEVER_EXPIRES};
 use pinned_server::boxes::{BoxApi, Policy};
+use pinned_server::sync_limits::SyncLimits;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -53,6 +54,8 @@ struct TestHub {
     team_policy: pinned_core::teams::TeamPolicy,
     /// Where the hub files reports; a test points it at a fake GitHub.
     reports: Option<pinned_server::reports::Config>,
+    /// What synced projects may take: the hub's default unless `start_with_sync_limits` names others.
+    sync_limits: SyncLimits,
 }
 
 impl TestHub {
@@ -87,19 +90,24 @@ impl TestHub {
 
     /// A hub whose boxes follow `policy` and whose teams' calls escalate and give up as `teams` says.
     fn start_with_team_policy(name: &str, policy: Policy, teams: pinned_core::teams::TeamPolicy) -> TestHub {
-        TestHub::start_every(name, Signup::Open, policy, false, Default::default(), "127.0.0.1:0", teams, None)
+        TestHub::start_every(name, Signup::Open, policy, false, Default::default(), "127.0.0.1:0", teams, None, SyncLimits::default())
+    }
+
+    /// A hub that keeps synced projects within `limits`.
+    fn start_with_sync_limits(name: &str, limits: SyncLimits) -> TestHub {
+        TestHub::start_every(name, Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Default::default(), None, limits)
     }
 
     fn start_all(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str) -> TestHub {
-        TestHub::start_every(name, signup, policy, with_learning, access, listen, Default::default(), None)
+        TestHub::start_every(name, signup, policy, with_learning, access, listen, Default::default(), None, SyncLimits::default())
     }
 
     fn start_reports(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str, reports: Option<pinned_server::reports::Config>) -> TestHub {
-        TestHub::start_every(name, signup, policy, with_learning, access, listen, Default::default(), reports)
+        TestHub::start_every(name, signup, policy, with_learning, access, listen, Default::default(), reports, SyncLimits::default())
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn start_every(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str, team_policy: pinned_core::teams::TeamPolicy, reports: Option<pinned_server::reports::Config>) -> TestHub {
+    fn start_every(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str, team_policy: pinned_core::teams::TeamPolicy, reports: Option<pinned_server::reports::Config>, sync_limits: SyncLimits) -> TestHub {
         pinned_core::machine::refuse_real_home();
         let _ = rustls::crypto::ring::default_provider().install_default();
         let database = format!("pinned_test_{name}_{}", std::process::id());
@@ -116,7 +124,7 @@ impl TestHub {
         std::fs::create_dir_all(dir.join("downloads")).unwrap();
         std::fs::write(dir.join("downloads/pinned-server-x86_64-unknown-linux-musl"), "ELF").unwrap();
         let boxes = FakeBoxes::new(dir.join("boxes"));
-        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup, access, team_policy, reports };
+        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup, access, team_policy, reports, sync_limits };
         hub.serve(listen);
         hub
     }
@@ -160,6 +168,7 @@ impl TestHub {
             learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
             access: self.access.clone(),
             reports: self.reports.clone(),
+            sync_limits: self.sync_limits,
         }
     }
 
@@ -13313,7 +13322,7 @@ mod plans;
 
 #[test]
 fn an_account_over_the_sync_limit_takes_a_push_that_does_not_grow_it_and_refuses_one_that_does() {
-    let hub = TestHub::start("sync_quota");
+    let hub = account_limited("sync_quota", 1024);
     let url = hub.url.clone();
     let (_, _, mut ana) = signed_in(&url, "ana@example.test");
     let project = "github.com/acme/site";
@@ -13355,7 +13364,7 @@ fn an_account_over_the_sync_limit_takes_a_push_that_does_not_grow_it_and_refuses
 
 #[test]
 fn a_sync_refusal_says_nothing_is_deleted_and_keeps_the_prefix_released_nodes_match_on() {
-    let hub = TestHub::start("sync_refusal_text");
+    let hub = account_limited("sync_refusal_text", 1024);
     let url = hub.url.clone();
     let (_, _, mut ana) = signed_in(&url, "ana@example.test");
     let project = "github.com/acme/site";
@@ -13478,7 +13487,7 @@ fn a_deletion_naming_a_sha_the_hub_no_longer_holds_is_skipped_and_one_naming_non
 
 #[test]
 fn over_the_sync_limit_a_stale_deletion_frees_nothing_and_agreed_on_a_file_is_ignored() {
-    let hub = TestHub::start("sync_quota_stale");
+    let hub = account_limited("sync_quota_stale", 1024);
     let url = hub.url.clone();
     let (_, _, mut ana) = signed_in(&url, "ana@example.test");
     let project = "github.com/acme/site";
@@ -13513,6 +13522,196 @@ fn over_the_sync_limit_a_stale_deletion_frees_nothing_and_agreed_on_a_file_is_ig
     assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), None);
     let current = json!({ "path": "claude/big-1.jsonl", "sha": "", "modified": 2, "agreed": "big1" });
     assert_eq!(push(&mut ana, vec![current, file("claude/memory/more.md", "one more note")]), Ok(Value::Null));
+}
+
+/// A hub whose accounts may each keep `mb` of synced projects, as every hub before 0.18.7.
+fn account_limited(name: &str, mb: i64) -> TestHub {
+    TestHub::start_with_sync_limits(name, SyncLimits { account: Some(mb << 20), ..SyncLimits::default() })
+}
+
+const SYNCED: &str = "github.com/acme/site";
+/// The refusal of a push that would grow the synced projects past what the whole hub may keep.
+const HUB_FULL: &str = "the account's synced projects would pass the space the hub has left; nothing is deleted, the push is refused";
+
+fn synced_note(path: &str, text: &str) -> Value {
+    json!({ "path": path, "sha": sha256_hex(text.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())) })
+}
+
+fn synced_deletion(path: &str) -> Value {
+    json!({ "path": path, "sha": "", "modified": 2 })
+}
+
+fn sync_push(client: &mut Client, files: Vec<Value>) -> Result<Value, String> {
+    client.hub(json!({ "cmd": "sync_push", "project": SYNCED, "files": files }))
+}
+
+/// Stores `count` sessions of 100 MiB for `email` straight in the table, `claude/big-1.jsonl` on.
+fn store_big_sessions(hub: &TestHub, email: &str, count: u32) {
+    admin_on(
+        &hub.database,
+        &format!(
+            "insert into project_files (account, project, path, sha, modified, data) \
+             select a.id, '{SYNCED}', 'claude/big-' || n || '.jsonl', 'big' || n, 1, convert_to(repeat('x', 104857600), 'UTF8') \
+             from accounts a, generate_series(1, {count}) n where a.email = '{email}'"
+        ),
+    );
+}
+
+/// Stores a file of `size` bytes for `email` straight in the table.
+fn store_synced(hub: &TestHub, email: &str, path: &str, size: u32) {
+    admin_on(
+        &hub.database,
+        &format!(
+            "insert into project_files (account, project, path, sha, modified, data) \
+             select a.id, '{SYNCED}', '{path}', 'stored', 1, convert_to(repeat('n', {size}), 'UTF8') from accounts a where a.email = '{email}'"
+        ),
+    );
+}
+
+#[test]
+fn without_an_account_limit_an_account_past_1024_mb_still_pushes() {
+    let hub = TestHub::start_with_sync_limits("sync_no_account_limit", SyncLimits { account: None, total: 8192 << 20, db: 16384 << 20 });
+    let (_, _, mut ana) = signed_in(&hub.url, "ana@example.test");
+    // Thirteen sessions of 100 MiB: 1363148800 bytes, past the 1024 MB an account kept before.
+    store_big_sessions(&hub, "ana@example.test", 13);
+    assert_eq!(sync_push(&mut ana, vec![synced_note("claude/memory/more.md", "one more note")]), Ok(Value::Null));
+}
+
+#[test]
+fn an_account_limit_that_is_set_refuses_with_the_text_released_nodes_match() {
+    let hub = account_limited("sync_account_limit", 1024);
+    let (_, _, mut ana) = signed_in(&hub.url, "ana@example.test");
+    store_big_sessions(&hub, "ana@example.test", 13);
+    assert_eq!(
+        sync_push(&mut ana, vec![synced_note("claude/memory/more.md", "one more note")]),
+        Err("the account's synced projects would pass 1024 MB; nothing is deleted, the push is refused".to_owned())
+    );
+}
+
+/// A hub whose synced projects may take 1024 MB together, with no account limit: ana holds
+/// 1300 MiB, bea a note of their own.
+fn full_hub(name: &str) -> (TestHub, Client, Client) {
+    let hub = TestHub::start_with_sync_limits(name, SyncLimits { account: None, total: 1024 << 20, db: 2048 << 20 });
+    let (_, _, ana) = signed_in(&hub.url, "ana@example.test");
+    let (_, _, bea) = signed_in(&hub.url, "bea@example.test");
+    store_big_sessions(&hub, "ana@example.test", 13);
+    store_synced(&hub, "bea@example.test", "claude/memory/notes.md", 9);
+    (hub, ana, bea)
+}
+
+#[test]
+fn a_hub_past_its_total_refuses_a_growing_push_of_another_account() {
+    let (_hub, _ana, mut bea) = full_hub("sync_total_full");
+    assert_eq!(sync_push(&mut bea, vec![synced_note("claude/memory/more.md", "one more note")]), Err(HUB_FULL.to_owned()));
+}
+
+#[test]
+fn a_hub_past_its_total_takes_a_deletion() {
+    let (_hub, _ana, mut bea) = full_hub("sync_total_delete");
+    assert_eq!(sync_push(&mut bea, vec![synced_note("claude/memory/more.md", "one more note")]), Err(HUB_FULL.to_owned()), "the hub is full");
+    assert_eq!(sync_push(&mut bea, vec![synced_deletion("claude/memory/notes.md")]), Ok(Value::Null), "a deletion is always taken");
+}
+
+#[test]
+fn deletions_that_land_open_a_full_hub_to_every_account() {
+    let (hub, mut ana, mut bea) = full_hub("sync_total_reopen");
+    let more = || vec![synced_note("claude/memory/more.md", "one more note")];
+    assert_eq!(sync_push(&mut bea, more()), Err(HUB_FULL.to_owned()), "the hub is full");
+    let deletions = (1..=4).map(|n| synced_deletion(&format!("claude/big-{n}.jsonl"))).collect();
+    assert_eq!(sync_push(&mut ana, deletions), Ok(Value::Null), "900 MiB left");
+    // Past the 5 s the hub waits between two reads of the real sum.
+    hub.runtime.block_on(hub.hub().db.age_sync_reads(Duration::from_secs(6)));
+    assert_eq!(sync_push(&mut bea, more()), Ok(Value::Null), "the hub reads the real sum before it refuses");
+}
+
+#[test]
+fn of_two_pushes_at_once_that_together_pass_the_total_one_is_refused() {
+    let hub = TestHub::start_with_sync_limits("sync_total_race", SyncLimits { account: None, total: 1 << 20, db: 2048 << 20 });
+    let (_, _, mut ana) = signed_in(&hub.url, "ana@example.test");
+    let (_, _, mut bea) = signed_in(&hub.url, "bea@example.test");
+    // 3000 bytes left under the 1 MB total; each push grows the hub by 2000.
+    store_synced(&hub, "ana@example.test", "claude/memory/notes.md", (1 << 20) - 3000);
+    let blob = |path: &str| json!({ "path": path, "sha": sha256_hex(path.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode([7u8; 2000]) });
+    // Each push waits after its check while this is held, so both are past their check before the files of either land.
+    let paused = hub.runtime.block_on(hub.hub().db.pause_sync_writes());
+    let mut answers = std::thread::scope(|scope| {
+        let a = scope.spawn(|| sync_push(&mut ana, vec![blob("claude/memory/a.md")]));
+        let b = scope.spawn(|| sync_push(&mut bea, vec![blob("claude/memory/b.md")]));
+        std::thread::sleep(Duration::from_millis(1000));
+        drop(paused);
+        vec![a.join().unwrap(), b.join().unwrap()]
+    });
+    answers.sort_by_key(|answer| answer.is_err());
+    assert_eq!(answers, vec![Ok(Value::Null), Err(HUB_FULL.to_owned())]);
+}
+
+#[test]
+fn past_its_database_limit_the_hub_refuses_a_growing_push_and_takes_a_deletion() {
+    // The test database alone is several MB, past this 1 MB.
+    let hub = TestHub::start_with_sync_limits("sync_db_full", SyncLimits { account: None, total: 8192 << 20, db: 1 << 20 });
+    let (_, _, mut ana) = signed_in(&hub.url, "ana@example.test");
+    store_synced(&hub, "ana@example.test", "claude/memory/notes.md", 9);
+    assert_eq!(sync_push(&mut ana, vec![synced_note("claude/memory/more.md", "one more note")]), Err(HUB_FULL.to_owned()));
+    assert_eq!(sync_push(&mut ana, vec![synced_deletion("claude/memory/notes.md")]), Ok(Value::Null), "a deletion is always taken");
+}
+
+/// Makes the hub's own reads of `function` (a `pg_catalog` function or aggregate, as
+/// `pg_database_size(name)`) fail: a `public` one of the same name that raises goes first in the
+/// database's search path, and the hub's connections are closed so the ones it opens again read it.
+fn break_hub_read(hub: &TestHub, function: &str) {
+    let database = &hub.database;
+    admin_on(database, &format!("create function public.broken_read() returns bigint language plpgsql as $$ begin raise exception 'read broken by the test'; end $$; {function}"));
+    admin_on(
+        database,
+        &format!("alter database {database} set search_path = public, pg_catalog; select pg_terminate_backend(pid) from pg_stat_activity where datname = '{database}' and pid <> pg_backend_pid()"),
+    );
+    // Long enough for the hub to see its connections closed, so its next statement opens another.
+    std::thread::sleep(Duration::from_millis(500));
+}
+
+#[test]
+fn a_failed_read_of_the_database_size_still_refuses_a_push_past_the_total() {
+    let hub = TestHub::start_with_sync_limits("sync_db_read_fails", SyncLimits { account: None, total: 1 << 20, db: 2048 << 20 });
+    let (_, _, mut ana) = signed_in(&hub.url, "ana@example.test");
+    // 3000 bytes left under the 1 MB total.
+    store_synced(&hub, "ana@example.test", "claude/memory/notes.md", (1 << 20) - 3000);
+    break_hub_read(&hub, "create function public.pg_database_size(name) returns bigint language sql as $$ select public.broken_read() $$;");
+    let blob = json!({ "path": "claude/memory/more.md", "sha": sha256_hex(b"more"), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode([7u8; 4000]) });
+    assert_eq!(sync_push(&mut ana, vec![blob]), Err(HUB_FULL.to_owned()), "the sum was read, so the total holds");
+}
+
+#[test]
+fn a_failed_read_of_the_sum_still_refuses_a_push_past_the_database_limit() {
+    // The test database alone is several MB, past this 1 MB.
+    let hub = TestHub::start_with_sync_limits("sync_sum_read_fails", SyncLimits { account: None, total: 8192 << 20, db: 1 << 20 });
+    let (_, _, mut ana) = signed_in(&hub.url, "ana@example.test");
+    store_synced(&hub, "ana@example.test", "claude/memory/notes.md", 9);
+    break_hub_read(&hub, "create function public.broken_sum(bigint, integer) returns bigint language sql as $$ select public.broken_read() $$; create aggregate public.sum(integer) (sfunc = public.broken_sum, stype = bigint);");
+    assert_eq!(sync_push(&mut ana, vec![synced_note("claude/memory/more.md", "one more note")]), Err(HUB_FULL.to_owned()), "the database's size was read, so its limit holds");
+}
+
+#[test]
+fn a_reserved_push_refused_for_a_stale_base_gives_its_reservation_back() {
+    let hub = TestHub::start_with_sync_limits("sync_total_stale", SyncLimits { account: None, total: 1 << 20, db: 2048 << 20 });
+    let (_, _, mut ana) = signed_in(&hub.url, "ana@example.test");
+    // 3000 bytes left under the 1 MB total: a 10-byte history the push merges with, and the rest.
+    store_synced(&hub, "ana@example.test", "history.jsonl", 10);
+    store_synced(&hub, "ana@example.test", "claude/memory/notes.md", (1 << 20) - 3010);
+    let bytes = |path: &str, size: usize| json!({ "path": path, "sha": sha256_hex(path.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(vec![7u8; size]) });
+    let mut merged = bytes("history.jsonl", 2010);
+    merged["base"] = json!("stored");
+    // The push passes its check and reserves its 2000 bytes, then another machine's copy lands
+    // before its files are written.
+    let paused = hub.runtime.block_on(hub.hub().db.pause_sync_writes());
+    let stale = std::thread::scope(|scope| {
+        let push = scope.spawn(|| sync_push(&mut ana, vec![merged]));
+        std::thread::sleep(Duration::from_millis(1000));
+        admin_on(&hub.database, "update project_files set sha = 'another machine' where path = 'history.jsonl'");
+        drop(paused);
+        push.join().unwrap()
+    });
+    assert_eq!(stale, Err(sync::STALE_REFUSAL.to_owned()));
+    assert_eq!(sync_push(&mut ana, vec![bytes("claude/memory/more.md", 2000)]), Ok(Value::Null), "the refused push holds none of the 3000 bytes left");
 }
 
 /// An account with one machine, a plain session `ana.tab` that runs no workflow, and two workflows

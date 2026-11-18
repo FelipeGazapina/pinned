@@ -68,6 +68,7 @@ impl Hub {
             learning_db: None,
             access: Default::default(),
             reports: None,
+            sync_limits: Default::default(),
         };
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let running = runtime.block_on(pinned_server::start(config)).unwrap();
