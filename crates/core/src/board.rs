@@ -122,7 +122,7 @@ pub const MAX_STORED: usize = 200;
 pub const MAX_NOTES: usize = 200;
 
 /// `board` cut to its caps after a write: each task's newest `NOTES_BY` notes, then the board's
-/// newest `MAX_NOTES`.
+/// newest `MAX_NOTES`, and its newest `MAX_STORED` handoffs and blocks.
 pub fn trim(board: &mut BoardView) {
     let mut by = std::collections::HashMap::new();
     let mut keep = vec![true; board.notes.len()];
@@ -136,6 +136,18 @@ pub fn trim(board: &mut BoardView) {
     if board.notes.len() > MAX_NOTES {
         board.notes.drain(..board.notes.len() - MAX_NOTES);
     }
+    if board.handoffs.len() > MAX_STORED {
+        board.handoffs.drain(..board.handoffs.len() - MAX_STORED);
+    }
+    if board.blocks.len() > MAX_STORED {
+        board.blocks.drain(..board.blocks.len() - MAX_STORED);
+    }
+}
+
+/// A line that says what tools a task NEEDS: `NEEDS`, then a character that is not a letter or
+/// nothing.
+pub fn needs_line(line: &str) -> bool {
+    line.strip_prefix("NEEDS").is_some_and(|rest| !rest.chars().next().is_some_and(char::is_alphabetic))
 }
 
 /// A note's text as it is kept: one line, not empty, at most `NOTE_CHARS` characters.

@@ -286,8 +286,13 @@ fn blocks_of(task: &Task) -> Vec<BoardBlock> {
     }
     if task.state != WorkState::Cancelled {
         let said = [task.newest_text.as_deref(), task.summary.as_deref()];
-        let mut needs: Vec<String> = said.into_iter().flatten().flat_map(str::lines).map(str::trim).filter(|line| line.starts_with("NEEDS")).map(|line| line.chars().take(crate::board::NOTE_CHARS).collect()).collect();
-        needs.dedup();
+        let mut needs: Vec<String> = vec![];
+        for line in said.into_iter().flatten().flat_map(str::lines).map(str::trim).filter(|line| crate::board::needs_line(line)) {
+            let line: String = line.chars().take(crate::board::NOTE_CHARS).collect();
+            if !needs.contains(&line) {
+                needs.push(line);
+            }
+        }
         blocks.extend(needs.into_iter().map(block));
     }
     blocks
