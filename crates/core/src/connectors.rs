@@ -6792,7 +6792,7 @@ fn check_convex_step(graph: &Graph, connected: &[convex::Connection], had: Optio
 fn convex_note(connection: &convex::Connection, tables: Option<&[String]>) -> String {
     let on = format!("Convex deployment {} ({})", connection.id, connection.kind.name());
     let mut note = match tables {
-        None => format!("You may read {on}, which holds this project's data, with the tools convex_tables, convex_data, convex_query, convex_run and convex_logs."),
+        None => format!("You may read {on}, which holds this project's data, with the tools convex_tables, convex_data, convex_run and convex_logs."),
         Some(tables) => format!("You may read the tables {} of {on} with the tools convex_tables and convex_data. Queries and logs are off for this run.", tables.join(", ")),
     };
     if connection.kind == convex::Kind::Prod {
@@ -12394,7 +12394,7 @@ mod tests {
         fn the_opening_prompt_names_what_the_step_lets_the_session_read() {
             let everything = run_now_prompt("convex-note-all", vec![reads("quick-lemur-789", None)], vec![]);
             assert!(
-                everything.ends_with("Summarize the week.\n\nYou may read Convex deployment quick-lemur-789 (dev), which holds this project's data, with the tools convex_tables, convex_data, convex_query, convex_run and convex_logs. Anyone in the thread sees your reply. Quote only what the answer needs."),
+                everything.ends_with("Summarize the week.\n\nYou may read Convex deployment quick-lemur-789 (dev), which holds this project's data, with the tools convex_tables, convex_data, convex_run and convex_logs. Anyone in the thread sees your reply. Quote only what the answer needs."),
                 "a step no edge reaches still counts: {everything}"
             );
             let limited = run_now_prompt("convex-note-tables", vec![reads("happy-otter-123", Some(&["invoices", "customers"]))], vec![]);
