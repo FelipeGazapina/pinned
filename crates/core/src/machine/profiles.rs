@@ -39,14 +39,11 @@ impl Machine {
         if !orchestrator {
             return Err("profile_propose is the Orchestrator's own: a Captain or a worker cannot propose a profile".into());
         }
-        // A linked machine's tastes are the hub's, which take no proposal yet: one kept here would
-        // be overwritten by the hub's next answer.
-        if self.hub.lock().unwrap().is_some() {
-            return Err("profile_propose keeps a proposal only on a signed-out app in this build; nothing changed".into());
-        }
         self.check_skills(std::slice::from_ref(&call.profile))?;
         let name = call.profile.name.trim().to_owned();
-        taste::change(self.orchestration_dir.as_deref(), |tastes| tastes.propose_worker_profile(call.profile))?;
+        // The role is checked here, before the hub or this machine's tastes see anything: the hub
+        // also takes a Captain's, and the signed-out path checks no role at all.
+        self.propose_worker_profile(tab.unwrap_or_default(), call.profile)?;
         Ok(format!("{name} waits for the user on the Way of working page. delegate_task cannot name it until they take it into a list."))
     }
 }
