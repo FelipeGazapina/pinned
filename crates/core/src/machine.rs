@@ -11304,11 +11304,13 @@ echo '{"type":"result","result":"ok"}'
     }
 
     /// `--resume session` followed by the flags a read-only Claude session starts with.
+    #[cfg(unix)]
     fn resumed_read_only(session: &str) -> Vec<String> {
         ["--resume", session].map(str::to_owned).into_iter().chain(crate::delegate::claude_read_only_args()).collect()
     }
 
     /// A fake claude that writes its arguments to `root/argv` and stays up.
+    #[cfg(unix)]
     fn claude_holding_argv(root: &Path) -> (PathBuf, PathBuf) {
         let argv = root.join("argv");
         let claude = root.join("claude");
