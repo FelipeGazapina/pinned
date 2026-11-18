@@ -147,9 +147,21 @@ impl Machine {
         Some(self.orchestration_dir.as_ref()?.join("boards").join(format!("{root}.json"))).filter(|_| safe)
     }
 
-    /// What the board of `root` holds on disk; nothing when it has no file or the file is unreadable.
+    /// What the board of `root` holds on disk, for a view: nothing when it has no file, and nothing
+    /// when the file is unreadable, which the next write sets aside.
     fn load_board(&self, root: &str) -> BoardView {
-        self.board_file(root).and_then(|file| std::fs::read(file).ok()).and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+        self.read_board(root).unwrap_or_default()
+    }
+
+    /// The stored board of `root`, empty when it has no file yet; an error for a file that is there
+    /// but cannot be read or parsed.
+    fn read_board(&self, root: &str) -> Result<BoardView, String> {
+        let Some(file) = self.board_file(root) else { return Ok(BoardView::default()) };
+        match std::fs::read(&file) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BoardView::default()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     /// Runs `write` on the stored board of `root` and saves it: a private temp file, flushed, then
@@ -157,7 +169,16 @@ impl Machine {
     fn write_board(&self, root: &str, write: impl FnOnce(&mut BoardView)) -> Result<(), String> {
         let file = self.board_file(root).ok_or("this machine keeps no boards. Nothing changed.")?;
         let _held = WRITING.lock().unwrap_or_else(|e| e.into_inner());
-        let mut board = self.load_board(root);
+        let mut board = match self.read_board(root) {
+            Ok(board) => board,
+            Err(_) => {
+                // Kept for whoever wants it back; its content is workers' text, so it is not logged.
+                let aside = file.with_extension(format!("json.corrupt-{}", super::unix_millis()));
+                std::fs::rename(&file, &aside).map_err(|e| format!("the board of {root} is unreadable and was not set aside: {e}. Nothing changed."))?;
+                eprintln!("pinned: the board file {} was unreadable; it was kept as {} and a new board was started", file.display(), aside.display());
+                BoardView::default()
+            }
+        };
         write(&mut board);
         if board.notes.len() > crate::board::MAX_NOTES {
             board.notes.drain(..board.notes.len() - crate::board::MAX_NOTES);
