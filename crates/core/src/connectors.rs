@@ -12336,6 +12336,32 @@ mod tests {
             assert_eq!(ask("tab-1", Ask::Tables { table: None }), Err("pinned lost the deploy key of `quick-lemur-789`. Paste it again on the Convex card in Settings, Connectors.".into()));
         }
 
+        /// The fixtures, counting every request that reaches them.
+        struct Counted(Replay, std::sync::atomic::AtomicUsize);
+
+        impl convex::client::Http for Counted {
+            fn send<'a>(&'a self, request: convex::client::Request) -> futures_util::future::BoxFuture<'a, Result<convex::client::Response, String>> {
+                self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.0.send(request)
+            }
+        }
+
+        #[test]
+        fn no_session_runs_its_own_convex_code_and_tables_still_read() {
+            let (connectors, _storage) = hub();
+            connect(&connectors, KEY, &[SITE]).unwrap();
+            let by_hand: TabView = serde_json::from_value(json!({ "id": "tab-1", "cwd": "/Users/f/site", "bypass": false, "running": true, "status": null, "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1 })).unwrap();
+            let tabs = [by_hand];
+            let find = |machine: &str, tab: &str| tabs.iter().find(|t| machine == "m1" && t.id == tab).cloned();
+            let http = Counted(replay(KEY), Default::default());
+            let ask = |ask: Ask| block_on(connectors.convex(&http, "m1", "tab-1", Some(SITE), &find, ask));
+            assert_eq!(ask(Ask::Query { code: "return process.env;".into() }), Err("pinned no longer runs arbitrary Convex code for a session; read tables with convex_data".into()));
+            assert_eq!(http.1.load(std::sync::atomic::Ordering::SeqCst), 0, "the refused query reached no Convex address");
+            let page = ask(Ask::Data { table: "invoices".into(), limit: Some(2), cursor: None, oldest_first: false }).unwrap();
+            assert!(page.as_str().unwrap().contains("\"documents\""), "{page}");
+            assert!(http.1.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        }
+
         fn with_convex(name: &str, workflows: Vec<Connector>) -> (Connectors, PathBuf) {
             let dir = temp_dir(name);
             let storage = FileStorage::new(dir.clone());

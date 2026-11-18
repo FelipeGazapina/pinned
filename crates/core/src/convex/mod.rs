@@ -404,6 +404,15 @@ mod tests {
     }
 
     #[test]
+    fn no_offer_lists_convex_query() {
+        for tables in [None, Some(vec!["invoices".into()])] {
+            let tools = tool_definitions(&Offer { deployment: "quick-lemur-789".into(), kind: Kind::Dev, tables });
+            assert!(!named(&tools).iter().any(|(name, _)| *name == "convex_query"), "{tools:?}");
+        }
+        assert!(!TOOLS.contains(&"convex_query"));
+    }
+
+    #[test]
     fn a_limited_prod_offer_lists_tables_and_data_only_and_warns() {
         let tools = tool_definitions(&Offer { deployment: "happy-otter-123".into(), kind: Kind::Prod, tables: Some(vec!["invoices".into(), "customers".into()]) });
         assert_eq!(
