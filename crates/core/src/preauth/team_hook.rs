@@ -86,8 +86,12 @@ pub fn decide(payload: &str, env: &HookEnv, ask: impl FnOnce(Message) -> Result<
     let Some(tool_ask) = Ask::from_tool(tool, input) else {
         return crate::hooks::OWNERS_GUARDED.split('|').any(|guarded| guarded == tool).then(|| deny(UNREADABLE));
     };
-    // With no cwd the path still names the file: an absolute one whole, a relative one by its last components.
+    // With no cwd an absolute path still names the file whole, and a command's relative one by its
+    // last components; a relative path given to a tool that writes it names no file the hook can tell.
     let cwd = hook["cwd"].as_str().map(PathBuf::from);
+    if cwd.is_none() && matches!(tool_ask, Ask::Edit { path } if path.is_relative()) {
+        return Some(deny(UNREADABLE));
+    }
     let at = cwd.clone().unwrap_or_else(|| PathBuf::from("/"));
     if let Some(name) = owners_file(&AskCtx { worktree: &at, scratch: None, home: &env.home, cwd: &at, default_branch: "main", current_branch: None }, &tool_ask) {
         return Some(deny(&owners(name)));

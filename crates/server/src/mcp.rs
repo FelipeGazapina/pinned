@@ -6,7 +6,8 @@
 //! for: a session starts as a connector's run does (`Call::Run`), the orchestrator opens as the
 //! app opens it (`Call::OpenOrchestrator`, but asking for its permission prompts), text goes in as
 //! a typed prompt (`Call::Prompt`), and replies come out of the transcript (`Call::Thread`).
-//! Nothing here answers a permission prompt or starts a session that skips them.
+//! Nothing here answers a permission prompt, starts a session that skips them, or types into one
+//! that skips them.
 
 use crate::db::{AgentGrant, AgentSession, Reserved};
 use crate::http::Server;
@@ -678,10 +679,13 @@ async fn message_orchestrator(ctx: &Ctx<'_>, args: &Value) -> Result<Value, Stri
         forget(ctx, key).await;
         return Err("the orchestrator's tab closed before the message reached it; try again".into());
     };
-    if !view.running && view.bypass {
-        // The user opened it in Full access and left it stopped: only the user starts it.
+    if view.bypass {
+        // The user opened it in Full access: running or stopped, no external agent's text reaches it.
         forget(ctx, key).await;
-        return Err("the orchestrator is stopped and skips its permission prompts, so only the user can start it in pinned; ask them to, then send this message again with the same request_id".into());
+        return Err(format!(
+            "the Captain of {} skips its permission prompts, so an external agent's message can't reach it; the user can switch that Captain to ask for permissions",
+            if project.name.is_empty() { &project.path } else { &project.name }
+        ));
     }
     if !view.running {
         // Nothing is typed into it yet: it may open on a prompt only the user may answer.

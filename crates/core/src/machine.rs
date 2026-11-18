@@ -3344,11 +3344,14 @@ impl Machine {
     /// answers the first outcome without typing. The ledger keeps which turn the message started,
     /// so the Capitão's reply can go back up when that turn ends.
     pub fn enqueue_to_captain(&self, path: &str, text: &str, request_id: &str, sender: &str, busy: Option<BusyPolicy>) -> Result<Handoff, String> {
-        self.hand_to_captain(path, text, request_id, sender, busy, full_access_by_default())
+        self.hand_to_captain(path, text, request_id, sender, busy, full_access_by_default(), None)
     }
 
     /// `enqueue_to_captain`, where a Capitão it opens skips its permission prompts only with `full`.
-    fn hand_to_captain(&self, path: &str, text: &str, request_id: &str, sender: &str, busy: Option<BusyPolicy>, full: bool) -> Result<Handoff, String> {
+    /// With `asking`, the sender asks for its permission prompts: a Capitão that skips them, running
+    /// or stopped, takes nothing and the call fails with `asking`.
+    #[allow(clippy::too_many_arguments)]
+    fn hand_to_captain(&self, path: &str, text: &str, request_id: &str, sender: &str, busy: Option<BusyPolicy>, full: bool, asking: Option<String>) -> Result<Handoff, String> {
         let (request_id, text) = (request_id.trim(), text.trim());
         if request_id.is_empty() {
             return Err("request_id is required".into());
@@ -3367,7 +3370,7 @@ impl Machine {
         let tab = self.open_captain(path, full)?;
         let project = canonical(path);
         let sender = if sender.trim().is_empty() { settings.name } else { global::Settings { name: sender.to_owned(), ..global::Settings::default() }.cleaned().name };
-        let handoff = self.hand_to(&tab, &format!("[{sender}] {}", pinned_lines::guard(text)), request_id, busy.unwrap_or(settings.busy), &sent)?;
+        let handoff = self.hand_to(&tab, &format!("[{sender}] {}", pinned_lines::guard(text)), request_id, busy.unwrap_or(settings.busy), &sent, asking.as_deref())?;
         let progress = match handoff {
             Handoff::Busy { .. } => return Ok(handoff),
             Handoff::Queued { .. } => Progress::Queued,
@@ -3394,7 +3397,7 @@ impl Machine {
             return if earlier.project == self.global_folder() { Ok(earlier.handoff.clone()) } else { Err(format!("request_id {request_id} was already used for another message")) };
         }
         let tab = self.open_global_orchestrator()?;
-        let handoff = self.hand_to(&tab, &report.line(), request_id, BusyPolicy::Queue, &sent)?;
+        let handoff = self.hand_to(&tab, &report.line(), request_id, BusyPolicy::Queue, &sent, None)?;
         let progress = if matches!(handoff, Handoff::Queued { .. }) { Progress::Queued } else { Progress::InFlight };
         sent.record(global::Sent { request_id: request_id.to_owned(), sender: report.project.clone(), project: self.global_folder(), handoff: handoff.clone(), progress, at: unix_now() });
         Ok(handoff)
@@ -3403,10 +3406,14 @@ impl Machine {
     /// Types `line` into `tab` now when its session is idle, or starts the session on it as its
     /// first prompt when it is stopped or has no conversation yet. Otherwise it queues `line` with
     /// the tab's other news, or answers busy under `BusyPolicy::Refuse`. Starting with the prompt
-    /// instead of typing it keeps a startup dialog from taking its Enter.
-    fn hand_to(&self, tab: &str, line: &str, request_id: &str, busy: BusyPolicy, sent: &global::Ledger) -> Result<Handoff, String> {
+    /// instead of typing it keeps a startup dialog from taking its Enter. With `asking`, a tab that
+    /// skips its permission prompts takes nothing and the call fails with `asking`; that is decided
+    /// on the same read of the tab as its state, and again when a start is set up.
+    fn hand_to(&self, tab: &str, line: &str, request_id: &str, busy: BusyPolicy, sent: &global::Ledger, asking: Option<&str>) -> Result<Handoff, String> {
         #[derive(PartialEq)]
         enum Ready {
+            /// It skips its permission prompts and the sender asks for them.
+            Skips,
             Stopped,
             /// Running without a conversation, with nothing typed or started there yet.
             Fresh,
@@ -3415,6 +3422,7 @@ impl Machine {
         }
         let ours = sent.started(tab);
         let ready = self.tab(tab, |t| match &t.session {
+            _ if asking.is_some() && t.bypass => Ready::Skips,
             None if t.starting => Ready::Busy,
             None => Ready::Stopped,
             Some(session) if session.raw() && t.notice_idle() => Ready::Idle,
@@ -3423,12 +3431,17 @@ impl Machine {
         })?;
         let id = tab.to_owned();
         match ready {
+            Ready::Skips => Err(asking.unwrap_or_default().to_owned()),
             Ready::Stopped | Ready::Fresh => {
                 self.tab(tab, |t| {
+                    if let (Some(refusal), true) = (asking, t.bypass) {
+                        return Err(refusal.to_owned());
+                    }
                     let mut args = t.claude_session.as_deref().map(|session| crate::delegate::resume_args(t.account.provider, session)).unwrap_or_default();
                     args.push(if line.starts_with('-') { format!("\n{line}") } else { line.to_owned() });
                     t.launch = args;
-                })?;
+                    Ok(())
+                })??;
                 if ready == Ready::Fresh {
                     self.relaunch(tab, UNWATCHED.0, UNWATCHED.1)?;
                 } else {
@@ -4034,8 +4047,8 @@ impl Machine {
     /// a session start: it must pass the project's tier and effort limits, and the project must run
     /// fewer than its workers-at-once. A Captain that runs takes the message with no new session.
     /// It is no wider than the caller, as a worker is: only a caller in Full access opens a Captain
-    /// that skips its permission prompts, or starts one, and a caller this machine does not know
-    /// (an act from another machine names none) is not in Full access.
+    /// that skips its permission prompts, starts one or types into one, and a caller this machine
+    /// does not know (an act from another machine names none) is not in Full access.
     fn enqueue_for(&self, caller: &str, path: &str, text: &str, request_id: &str, busy: Option<BusyPolicy>) -> Result<Handoff, String> {
         let project = canonical(path);
         let full = self.tab(caller, |t| t.child_access() == crate::delegate::Access::Full).unwrap_or(false);
@@ -4044,10 +4057,12 @@ impl Machine {
             return Err("enqueue hands a message to a Captain; your own session is the one reading this".into());
         }
         let (running, model, account, skips) = self.tab(&tab, |t| (t.live() || t.starting, t.model.clone(), t.account.clone(), t.bypass))?;
-        if !running {
-            if skips && !full {
-                return Err(format!("the Capitão of {} skips its permission prompts and your session asks for them, so your message can't start it: ask the user to start it", project.display()));
-            }
+        // A caller that asks for its prompts reaches no Captain that skips them, running or stopped;
+        // `hand_to` decides it on the tab's state as it hands the message over.
+        let asking = (!full).then(|| {
+            format!("the Captain of {} skips its permission prompts and your session asks for them, so your message can't reach it; the user can switch that Captain to ask for permissions", project.display())
+        });
+        if !running && !(skips && asking.is_some()) {
             let limits = self.limits_in(caller, &project);
             limits.admit(&account, model.as_deref(), None, &self.claude_models())?;
             let working = self.delegates.working_in(&project);
@@ -4055,7 +4070,7 @@ impl Machine {
                 return Err(workers_full(working));
             }
         }
-        self.hand_to_captain(path, text, request_id, &self.sender_of(caller), busy, full && full_access_by_default())
+        self.hand_to_captain(path, text, request_id, &self.sender_of(caller), busy, full && full_access_by_default(), asking)
     }
 
     /// Who the agent in `caller` is, as the stamp on what it types into another session reads:
@@ -5220,7 +5235,7 @@ impl Machine {
             None => (account, false),
         };
         let provider = account.provider;
-        let access = crate::delegate::default_for(provider, access, &request);
+        let access = crate::delegate::default_for(provider, access, &request, full_access_by_default());
         let place = Some(placed.machine_name.clone()).filter(|name| !name.is_empty()).or_else(|| request.target.machine.clone()).unwrap_or_else(|| "an Upstash Box".into());
         // Held here to the caller's limits, and sent with them, so the worker there is held too.
         // An account this machine lacks is held by the machine that runs it, which checks the model
@@ -5856,7 +5871,7 @@ impl Machine {
         let inherited_model = if parent_auth == account.auth { inherited_model } else { None };
         let model = crate::delegate::child_model(parent_provider, account.provider, inherited_model, request.target.model.clone());
         let (account, mut model, moved) = self.route_around_limits(account, model, &limits, &cwd, request.target.effort.as_deref())?;
-        let access = crate::delegate::default_for(account.provider, access, &request);
+        let access = crate::delegate::default_for(account.provider, access, &request, full_access_by_default());
         let mut effort = limits.admit(&account, model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
         let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
         self.ensure_parent(parent_tab.as_deref(), None)?;
@@ -15754,7 +15769,7 @@ Have another model review a risky change before it goes ahead.";
         show(&m, &tab, PICKER);
         let session = m.tab(&tab, |t| t.claude_session.clone()).unwrap();
         m.delegates.queue_report(&tab, session, "[pinned] Worker tab-9 finished".into());
-        let handoff = m.hand_to(&tab, "[Ana] Ship it.", "r-1", BusyPolicy::Queue, &m.sent.lock().unwrap()).unwrap();
+        let handoff = m.hand_to(&tab, "[Ana] Ship it.", "r-1", BusyPolicy::Queue, &m.sent.lock().unwrap(), None).unwrap();
         assert!(matches!(handoff, Handoff::Queued { .. }), "an idle Captain behind a menu queues the message: {handoff:?}");
         m.maybe_deliver(&tab);
         std::thread::sleep(Duration::from_millis(1200));

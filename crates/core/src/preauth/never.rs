@@ -1298,12 +1298,15 @@ impl<'c, 'a> Scan<'c, 'a> {
         }
     }
 
-    /// A copy into a folder writes each source's name there: `cp x/.mcp.json .claude/`,
-    /// `cp -t .claude x/.mcp.json`, `rsync x/.mcp.json conf` with `conf` a folder.
+    /// A copy or move into a folder writes each source's name there: `cp x/.mcp.json .claude/`,
+    /// `cp -t .claude x/.mcp.json`, `mv /tmp/settings.json .claude/`, `rsync x/.mcp.json conf` with
+    /// `conf` a folder, and with `cp --parents` each source's whole path under the folder.
     fn owners_into(&mut self, cwd: &Option<PathBuf>, c: &Cmd) {
-        if c.has("T", &["no-target-directory"]) {
+        // rsync's -T is --temp-dir, and leaves the last word the target folder.
+        if c.prog != "rsync" && c.has("T", &["no-target-directory"]) {
             return;
         }
+        let parents = c.prog == "cp" && c.has("", &["parents"]);
         let pos = c.positionals();
         // rsync's -t keeps times, and takes no folder.
         let target = if c.prog == "rsync" { None } else { c.value('t', "target-directory") };
@@ -1321,7 +1324,13 @@ impl<'c, 'a> Scan<'c, 'a> {
             return;
         }
         for source in sources {
-            let Some(name) = source.text.split(['/', '\\']).rfind(|part| !part.is_empty() && *part != ".") else { continue };
+            let name = if parents {
+                let whole = source.text.trim_start_matches(['/', '\\']);
+                (!whole.is_empty()).then_some(whole)
+            } else {
+                source.text.split(['/', '\\']).rfind(|part| !part.is_empty() && *part != ".")
+            };
+            let Some(name) = name else { continue };
             let raw = format!("{}/{name}", folder.text.trim_end_matches(['/', '\\']));
             self.owners_check(&raw, t.path.as_ref().map(|p| p.join(name)).as_deref());
         }
@@ -1404,13 +1413,14 @@ impl<'c, 'a> Scan<'c, 'a> {
             "cp" | "install" | "mv" | "ln" | "tee" | "touch" | "mkdir" | "truncate" | "mkfifo" | "sed" | "dd" | "curl" | "wget" => {
                 let words = self.write_args(c);
                 self.write_words(cwd, words);
-                if matches!(prog, "cp" | "install" | "ln") {
+                if matches!(prog, "cp" | "install" | "ln" | "mv") {
                     self.owners_into(cwd, c);
                 }
             }
-            // It writes .mcp.json in project scope, and ~/.claude.json in the others.
+            // It writes .mcp.json in project scope, and ~/.claude.json in user or local scope.
             "claude" if sub == "mcp" && pos.get(1).is_some_and(|w| w.text.starts_with("add") || w.text == "remove") => {
-                self.owners.get_or_insert(OWNERS_FILES[0]);
+                let home = c.value('s', "scope").is_some_and(|w| matches!(w.text.as_str(), "user" | "local"));
+                self.owners.get_or_insert(if home { "~/.claude.json" } else { OWNERS_FILES[0] });
             }
             "npm" | "pnpm" | "yarn" | "bun" | "npx" | "bunx" | "cargo" | "pip" | "pip3" | "pip2" | "pipx" | "python" | "python3" | "python2" | "uv" | "uvx" | "poetry" | "brew" | "apt" | "apt-get" | "aptitude"
             | "dnf" | "yum" | "apk" | "zypper" | "pacman" | "gem" | "go" | "conda" | "mamba" | "micromamba" | "rustup" | "volta" | "asdf" | "mise" | "composer" | "bundle" | "dotnet" => {

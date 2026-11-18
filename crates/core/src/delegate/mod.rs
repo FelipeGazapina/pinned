@@ -155,12 +155,14 @@ pub fn resolve_access(ceiling: Access, request: &Request) -> Result<Access, Stri
 }
 
 /// The access of a worker on `provider` whose `runtimeMode` was left out: a Claude Code worker
-/// takes its parent's, a Codex or Cursor one at most auto, the level it had before Captains opened
-/// in Full access. One that names its mode keeps what `resolve_access` gave it.
-pub fn default_for(provider: Provider, access: Access, request: &Request) -> Access {
+/// takes its parent's. With `capped`, which is Full access by default being on, a Codex or Cursor
+/// one gets at most auto, as Captains open in Full access; without it, it takes its parent's too,
+/// as before 0.18.7. One that names its mode keeps what `resolve_access` gave it.
+pub fn default_for(provider: Provider, access: Access, request: &Request, capped: bool) -> Access {
     match (provider, request.runtime) {
         (Provider::Claude, _) | (_, Some(_)) => access,
-        (Provider::Codex | Provider::Cursor, None) => tighten(access, Access::Auto),
+        (Provider::Codex | Provider::Cursor, None) if capped => tighten(access, Access::Auto),
+        (Provider::Codex | Provider::Cursor, None) => access,
     }
 }
 
