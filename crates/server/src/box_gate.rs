@@ -37,6 +37,7 @@ pub fn is_box(boxed: bool, account: &Account, machine: &str) -> bool {
 /// Whether a box machine may send `call`: a read, or a callback of the box's own run. Every call
 /// is classed here by name, so a call added later is classed by whoever adds it.
 pub fn box_may_send(call: &HubCall) -> Result<(), String> {
+    // No wildcard arm, on purpose: a new `HubCall` fails to compile until someone decides whether a box may send it.
     let refused = match call {
         // Reads: what the account has, and what its machines report.
         HubCall::GetSettings
