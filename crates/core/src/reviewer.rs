@@ -17,6 +17,12 @@ pub const DEFAULT_ROUNDS: u8 = 2;
 pub const MAX_ROUNDS: u8 = 5;
 /// The longest `Finding::what`, in characters.
 pub const FINDING_CHARS: usize = 300;
+/// The most rules the account, or one project, may have.
+pub const MAX_RULES: usize = 30;
+/// The longest rule text, in characters once trimmed.
+pub const RULE_CHARS: usize = 500;
+/// The most projects with their own review settings.
+pub const MAX_PROJECTS: usize = 200;
 
 /// The account's review settings, kept in `Tastes::reviewer`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
@@ -150,6 +156,7 @@ impl Tastes {
     /// when the result fails `Reviewer::check`.
     pub fn set_reviewer(&mut self, patch: ReviewerPatch) -> Result<(), String> {
         let mut changed = self.reviewer.clone();
+        let rules = patch.rules.map(|rules| rules.into_iter().map(|rule| Rule { text: rule.text.trim().to_owned(), ..rule }).collect());
         if let Some(model) = patch.model {
             changed.model = model;
         }
@@ -163,7 +170,7 @@ impl Tastes {
                 if let Some(switch) = patch.switch {
                     project.switch = switch;
                 }
-                if let Some(rules) = patch.rules {
+                if let Some(rules) = rules {
                     project.rules = rules;
                 }
                 if *project == ProjectReview::default() {
@@ -172,7 +179,7 @@ impl Tastes {
             }
             None if patch.switch.is_some() => return Err("the review switch belongs to a project: name it in project".into()),
             None => {
-                if let Some(rules) = patch.rules {
+                if let Some(rules) = rules {
                     changed.rules = rules;
                 }
             }
@@ -184,6 +191,19 @@ impl Tastes {
 }
 
 impl Reviewer {
+    /// The rules a review in `repo`'s project reads: the account's, less those a project rule
+    /// replaces, then the project's.
+    pub fn resolved(&self, repo: &str) -> Vec<&Rule> {
+        let project = self.projects.get(repo).map_or(&[][..], |p| &p.rules[..]);
+        let replaced = |id: &str| project.iter().any(|rule| rule.replaces.as_deref() == Some(id));
+        self.rules.iter().filter(|rule| !replaced(&rule.id)).chain(project).collect()
+    }
+
+    /// Whether `repo`'s workers get a review: the project's switch, or Auto when it has none.
+    pub fn switch(&self, repo: &str) -> Switch {
+        self.projects.get(repo).map_or(Switch::Auto, |p| p.switch)
+    }
+
     pub fn check(&self) -> Result<(), String> {
         if !(1..=MAX_ROUNDS).contains(&self.rounds) {
             return Err(format!("review rounds go from 1 to {MAX_ROUNDS}"));
@@ -191,12 +211,30 @@ impl Reviewer {
         if self.model.as_ref().is_some_and(|m| m.model.trim().is_empty()) {
             return Err("the reviewer's model needs a name".into());
         }
+        if self.projects.len() > MAX_PROJECTS {
+            return Err(format!("review settings cover up to {MAX_PROJECTS} projects, not {}", self.projects.len()));
+        }
         check_rules(&self.rules, 'A', "the account's")?;
-        self.projects.iter().try_for_each(|(repo, project)| check_rules(&project.rules, 'P', &format!("{repo}'s")))
+        if let Some(rule) = self.rules.iter().find(|rule| rule.replaces.is_some()) {
+            return Err(format!("rule {} is an account rule: only a project rule replaces one", rule.id));
+        }
+        for (repo, project) in &self.projects {
+            let whose = format!("{repo}'s");
+            check_rules(&project.rules, 'P', &whose)?;
+            for rule in &project.rules {
+                if let Some(replaces) = rule.replaces.as_deref().filter(|id| !self.rules.iter().any(|a| a.id == *id)) {
+                    return Err(format!("{whose} rule {} replaces {replaces}, which is no account rule", rule.id));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
 fn check_rules(rules: &[Rule], prefix: char, whose: &str) -> Result<(), String> {
+    if rules.len() > MAX_RULES {
+        return Err(format!("{whose} rules go up to {MAX_RULES}, not {}", rules.len()));
+    }
     let mut seen = std::collections::BTreeSet::new();
     for rule in rules {
         let numbered = rule.id.strip_prefix(prefix).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
@@ -206,8 +244,12 @@ fn check_rules(rules: &[Rule], prefix: char, whose: &str) -> Result<(), String> 
         if !seen.insert(rule.id.as_str()) {
             return Err(format!("{whose} rules name {} twice", rule.id));
         }
-        if rule.text.trim().is_empty() {
+        let text = rule.text.trim();
+        if text.is_empty() {
             return Err(format!("rule {} says nothing", rule.id));
+        }
+        if text.chars().count() > RULE_CHARS {
+            return Err(format!("rule {} runs past {RULE_CHARS} characters", rule.id));
         }
     }
     Ok(())
@@ -285,5 +327,68 @@ mod tests {
 
         tastes.set_reviewer(ReviewerPatch { project: Some("github.com/acme/site".into()), switch: Some(Switch::Auto), rules: Some(vec![]), ..ReviewerPatch::default() }).unwrap();
         assert!(tastes.reviewer.projects.is_empty(), "a project back to the defaults is dropped");
+    }
+
+    fn rules(prefix: char, n: usize) -> Vec<Rule> {
+        (1..=n).map(|i| rule(&format!("{prefix}{i}"), "Tests first.")).collect()
+    }
+
+    fn ids<'a>(rules: Vec<&'a Rule>) -> Vec<&'a str> {
+        rules.into_iter().map(|r| r.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_project_rule_that_replaces_an_account_rule_drops_it_from_that_projects_list() {
+        let mut tastes = Tastes::default();
+        tastes.set_reviewer(ReviewerPatch { rules: Some(vec![rule("A1", "No unwrap."), rule("A2", "Tests first.")]), ..ReviewerPatch::default() }).unwrap();
+        let p1 = Rule { replaces: Some("A1".into()), ..rule("P1", "No unwrap outside tests.") };
+        tastes.set_reviewer(ReviewerPatch { project: Some("github.com/acme/site".into()), switch: Some(Switch::On), rules: Some(vec![p1, rule("P2", "No new deps.")]), ..ReviewerPatch::default() }).unwrap();
+        tastes.set_reviewer(ReviewerPatch { project: Some("github.com/acme/docs".into()), switch: Some(Switch::Off), ..ReviewerPatch::default() }).unwrap();
+
+        let reviewer = &tastes.reviewer;
+        assert_eq!(ids(reviewer.resolved("github.com/acme/site")), ["A2", "P1", "P2"]);
+        assert_eq!(ids(reviewer.resolved("github.com/acme/docs")), ["A1", "A2"]);
+        assert_eq!(ids(reviewer.resolved("github.com/acme/other")), ["A1", "A2"], "a project with no settings reads the account's");
+        assert_eq!(reviewer.switch("github.com/acme/site"), Switch::On);
+        assert_eq!(reviewer.switch("github.com/acme/docs"), Switch::Off);
+        assert_eq!(reviewer.switch("github.com/acme/other"), Switch::Auto);
+        assert_eq!(reviewer.rounds, 2, "rounds stay at the default");
+
+        let before = tastes.clone();
+        let without_a1 = ReviewerPatch { rules: Some(vec![rule("A2", "Tests first.")]), ..ReviewerPatch::default() };
+        assert_eq!(tastes.set_reviewer(without_a1), Err("github.com/acme/site's rule P1 replaces A1, which is no account rule".into()));
+        assert_eq!(tastes, before);
+    }
+
+    #[test]
+    fn each_cap_refuses_one_past_its_limit_and_stores_nothing() {
+        let site = || Some("github.com/acme/site".to_owned());
+        let mut tastes = Tastes::default();
+        tastes.set_reviewer(ReviewerPatch { rules: Some(rules('A', 30)), ..ReviewerPatch::default() }).unwrap();
+        tastes.set_reviewer(ReviewerPatch { project: site(), rules: Some(rules('P', 30)), ..ReviewerPatch::default() }).unwrap();
+        let long = format!("  {}  ", "x".repeat(500));
+        tastes.set_reviewer(ReviewerPatch { project: Some("github.com/acme/long".into()), rules: Some(vec![rule("P1", &long)]), ..ReviewerPatch::default() }).unwrap();
+        assert_eq!(tastes.reviewer.projects["github.com/acme/long"].rules[0].text, "x".repeat(500), "the text is kept trimmed");
+        for i in 3..=200 {
+            tastes.set_reviewer(ReviewerPatch { project: Some(format!("github.com/acme/r{i}")), switch: Some(Switch::On), ..ReviewerPatch::default() }).unwrap();
+        }
+        assert_eq!(tastes.reviewer.projects.len(), 200);
+
+        let before = tastes.clone();
+        let refusals = [
+            (ReviewerPatch { rules: Some(rules('A', 31)), ..ReviewerPatch::default() }, "the account's rules go up to 30, not 31"),
+            (ReviewerPatch { project: site(), rules: Some(rules('P', 31)), ..ReviewerPatch::default() }, "github.com/acme/site's rules go up to 30, not 31"),
+            (ReviewerPatch { rules: Some(vec![rule("A1", &"x".repeat(501))]), ..ReviewerPatch::default() }, "rule A1 runs past 500 characters"),
+            (ReviewerPatch { project: site(), rules: Some(vec![rule("P1", &format!(" {} ", "y".repeat(501)))]), ..ReviewerPatch::default() }, "rule P1 runs past 500 characters"),
+            (ReviewerPatch { rules: Some(vec![rule("A1", "  \n ")]), ..ReviewerPatch::default() }, "rule A1 says nothing"),
+            (ReviewerPatch { project: site(), rules: Some(vec![rule("P1", "x"), rule("P1", "y")]), ..ReviewerPatch::default() }, "github.com/acme/site's rules name P1 twice"),
+            (ReviewerPatch { project: site(), rules: Some(vec![Rule { replaces: Some("A31".into()), ..rule("P1", "x") }]), ..ReviewerPatch::default() }, "github.com/acme/site's rule P1 replaces A31, which is no account rule"),
+            (ReviewerPatch { rules: Some(vec![Rule { replaces: Some("A2".into()), ..rule("A1", "x") }]), ..ReviewerPatch::default() }, "rule A1 is an account rule: only a project rule replaces one"),
+            (ReviewerPatch { project: Some("github.com/acme/r201".into()), switch: Some(Switch::On), ..ReviewerPatch::default() }, "review settings cover up to 200 projects, not 201"),
+        ];
+        for (patch, refusal) in refusals {
+            assert_eq!(tastes.set_reviewer(patch.clone()), Err(refusal.to_owned()), "{patch:?}");
+            assert_eq!(tastes, before, "a refused change stored something: {patch:?}");
+        }
     }
 }

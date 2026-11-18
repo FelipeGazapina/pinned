@@ -13,6 +13,7 @@ mod navigation;
 use background::{Background, Moment};
 use pinned_core::machine::{AppWindow, Launch, Machine, SelfUpdate};
 use pinned_core::wire::{Call, MachineEvent, TabId, UpdateStatus};
+use pinned_core::reviewer::ReviewerPatch;
 use pinned_core::taste::{TasteField, TastePatch, TasteScope, Tastes};
 use pinned_core::{agent, connectors, reminders, uploads};
 use std::path::PathBuf;
@@ -295,6 +296,12 @@ fn set_taste(machine: State<Arc<Machine>>, scope: TasteScope, patch: TastePatch)
     machine.set_local_taste(&scope, patch)
 }
 
+/// A signed-out app's `HubCall::SetReviewer`, from the Way of working page.
+#[tauri::command]
+fn set_reviewer(machine: State<Arc<Machine>>, patch: ReviewerPatch) -> Result<Tastes, String> {
+    machine.set_local_reviewer(patch)
+}
+
 #[tauri::command]
 fn reset_taste_field(machine: State<Arc<Machine>>, scope: TasteScope, field: TasteField) -> Result<Tastes, String> {
     machine.reset_local_taste_field(&scope, field)
@@ -541,6 +548,7 @@ fn main() {
             get_tastes,
             delegation_stats,
             set_taste,
+            set_reviewer,
             reset_taste_field,
             commands::get_settings,
             commands::open_linear_keys,
