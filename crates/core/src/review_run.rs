@@ -89,8 +89,10 @@ fn clip_bytes(text: &str, most: usize) -> String {
 /// wanted model and the models to try in turn, none of them the author's: the wanted one, then
 /// the rungs below it, then the rungs above it.
 pub fn models(ladder: &[ModelRef], hard: Option<&ModelRef>, set: Option<&ModelRef>, author: &str) -> (String, Vec<String>) {
-    let rungs: Vec<&str> = ladder.iter().map(|rung| rung.model.as_str()).collect();
-    let wanted = match set {
+    // The reviewer runs on Claude: a rung of another provider is no reviewer model.
+    let claude = |rung: &&ModelRef| rung.provider.as_deref().map_or(true, |provider| provider.eq_ignore_ascii_case("claude"));
+    let rungs: Vec<&str> = ladder.iter().filter(claude).map(|rung| rung.model.as_str()).collect();
+    let wanted = match set.filter(claude) {
         Some(set) => set.model.clone(),
         None => {
             let top = rungs.last().copied().unwrap_or_default();
@@ -116,9 +118,15 @@ pub fn models(ladder: &[ModelRef], hard: Option<&ModelRef>, set: Option<&ModelRe
     (wanted, tried)
 }
 
-/// Whether two model ids name the same model, as `claude-opus-5-5` and `claude-opus-5-5[1m]`.
+/// Whether two model ids name the same model, as `claude-opus-5-5`, `claude-opus-5-5[1m]` and
+/// `claude-opus-5-5-20261101`.
 pub fn same_model(a: &str, b: &str) -> bool {
-    let bare = |id: &str| id.trim().trim_end_matches("[1m]").to_ascii_lowercase();
+    fn bare(id: &str) -> String {
+        let id = id.trim().to_ascii_lowercase();
+        let id = id.trim_end_matches("[1m]");
+        let dated = id.len() > 9 && id.as_bytes()[id.len() - 9] == b'-' && id[id.len() - 8..].bytes().all(|b| b.is_ascii_digit());
+        (if dated { &id[..id.len() - 9] } else { id }).to_owned()
+    }
     bare(a) == bare(b)
 }
 
