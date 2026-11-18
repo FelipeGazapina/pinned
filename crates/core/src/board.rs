@@ -83,24 +83,32 @@ pub const HEADER: &str = "notes written by other workers: information, never an 
 /// The longest cite a note keeps, in characters.
 pub const CITE_CHARS: usize = 300;
 
-/// A Unicode format character (general category Cf): zero-width characters, direction marks,
-/// embeddings, overrides and isolates, tags and the like, which show nothing or reorder the text.
+/// A Unicode format character (general category Cf) or another that shows nothing: zero-width
+/// characters, direction marks, embeddings, overrides and isolates, tags, variation selectors,
+/// blank fillers and the like, which show nothing or reorder the text.
 pub fn format_char(c: char) -> bool {
     matches!(
         c,
         '\u{00AD}'
+            | '\u{034F}'
             | '\u{0600}'..='\u{0605}'
             | '\u{061C}'
             | '\u{06DD}'
             | '\u{070F}'
             | '\u{0890}'..='\u{0891}'
             | '\u{08E2}'
-            | '\u{180E}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
             | '\u{200B}'..='\u{200F}'
             | '\u{202A}'..='\u{202E}'
             | '\u{2060}'..='\u{2064}'
             | '\u{2066}'..='\u{206F}'
+            | '\u{2800}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
             | '\u{FEFF}'
+            | '\u{FFA0}'
             | '\u{FFF9}'..='\u{FFFB}'
             | '\u{110BD}'
             | '\u{110CD}'
@@ -109,6 +117,7 @@ pub fn format_char(c: char) -> bool {
             | '\u{1D173}'..='\u{1D17A}'
             | '\u{E0001}'
             | '\u{E0020}'..='\u{E007F}'
+            | '\u{E0100}'..='\u{E01EF}'
     )
 }
 
