@@ -520,7 +520,8 @@ fn teams_a_reserved_subject_is_not_admitted_twice() {
     });
     let answers = std::thread::scope(|scope| {
         let reads = [scope.spawn(|| crew.admit(crew.labeled(&docs, 2))), scope.spawn(|| crew.admit(crew.labeled(&docs, 2)))];
-        std::thread::sleep(Duration::from_millis(500));
+        // Well under the turn's 2 s wait, so a slow box does not refuse them as busy.
+        std::thread::sleep(Duration::from_millis(250));
         assert!(reads.iter().all(|r| !r.is_finished()), "both reads wait for the team's turn");
         crew.hub.runtime.block_on(other.execute(&format!("select pg_advisory_unlock({})", teams::queue::TURN_KEY), &[&crew.team])).unwrap();
         reads.map(|r| r.join().unwrap())
@@ -529,6 +530,45 @@ fn teams_a_reserved_subject_is_not_admitted_twice() {
     assert!(answers.contains(&Ok(Admitted::Held)), "the second read is held: {answers:?}");
     assert_eq!(crew.live_of(&docs).len(), 1, "one run of ENG-2 lives");
     assert_eq!(crew.waiting(&docs), 0, "nothing waits behind ENG-2's own run");
+    assert_eq!(crew.skipped(&docs), Value::Null);
+}
+
+/// A read that found no run before the team's turn, while its subject's first read opened its
+/// session meanwhile (the run is live, no longer reserved): inside the turn it is passed on to
+/// that run as before the turn (`Go`), and its event does not wait behind the run to run twice.
+#[test]
+fn teams_a_subject_run_opened_while_waiting_for_the_turn_takes_the_event() {
+    let crew = Crew::new("ta_opened_meanwhile");
+    let docs = crew.on_bot("Docs");
+    let url = format!("{}/{}", postgres(), crew.hub.database);
+    let other = crew.hub.runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.execute(&format!("select pg_advisory_lock({})", teams::queue::TURN_KEY), &[&crew.team]).await.unwrap();
+        db
+    });
+    let answer = std::thread::scope(|scope| {
+        let read = scope.spawn(|| crew.admit(crew.labeled(&docs, 3)));
+        // The read is in the team's turn once Postgres has a lock request waiting.
+        wait_for("the read to wait for the team's turn", || {
+            crew.hub.runtime.block_on(other.query_one("select count(*) from pg_locks where locktype = 'advisory' and not granted", &[])).unwrap().get::<_, i64>(0) == 1
+        });
+        // The first read's run, its session open: live, not reserved.
+        let subject = serde_json::to_value(super::issue("eng-3")).unwrap();
+        crew.hub
+            .runtime
+            .block_on(other.execute(
+                "insert into team_runs (id, team, workflow, started_by, state, subject, reserved) values ($1, $2, $3, $4, 'working', $5, false)",
+                &[&uuid::Uuid::new_v4(), &crew.team, &docs, &serde_json::json!("trigger:linear_label"), &subject],
+            ))
+            .unwrap();
+        crew.hub.runtime.block_on(other.execute(&format!("select pg_advisory_unlock({})", teams::queue::TURN_KEY), &[&crew.team])).unwrap();
+        read.join().unwrap()
+    });
+    assert_eq!(answer, Ok(Admitted::Go), "the live run of ENG-3 takes the event");
+    assert_eq!(crew.waiting_on(&docs, 3), 0, "ENG-3 does not wait behind its own run");
+    assert_eq!(crew.waiting(&docs), 0);
+    assert_eq!(crew.live_of(&docs).len(), 1);
     assert_eq!(crew.skipped(&docs), Value::Null);
 }
 
