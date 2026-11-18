@@ -97,8 +97,8 @@ const HOLD_CLEAR: Duration = Duration::from_secs(5);
 const IDLE_NOTICE_GRACE: Duration = Duration::from_secs(10);
 /// Claude Code's built-in commands that run at its prompt and start no turn, so no hook answers
 /// them. An unknown command, a skill or a custom command included, waits for Done like a prompt.
-const LOCAL_COMMANDS: [&str; 26] = [
-    "effort", "model", "config", "status", "cost", "usage", "help", "context", "permissions", "hooks", "mcp", "doctor", "theme", "vim", "output-style", "privacy-settings", "terminal-setup", "agents", "plugin", "release-notes", "export", "statusline", "add-dir", "ide", "todos", "fast",
+const LOCAL_COMMANDS: [&str; 25] = [
+    "effort", "model", "config", "status", "cost", "usage", "help", "context", "permissions", "hooks", "mcp", "doctor", "theme", "vim", "output-style", "privacy-settings", "terminal-setup", "agents", "plugin", "release-notes", "export", "add-dir", "ide", "todos", "fast",
 ];
 /// How long a compaction's mark holds when no end comes for it: the tab then reads as it did before.
 const COMPACT_WAIT: Duration = Duration::from_secs(600);
@@ -7360,6 +7360,9 @@ struct Draft {
     head: Head,
     /// The line the last Enter submitted was one of `LOCAL_COMMANDS`.
     sent_local: bool,
+    /// A local command's panel, such as `/model`'s picker, may be open: its Enters, with only arrow
+    /// keys between, start no turn either. A printable key, Backspace, Ctrl-C and Ctrl-U end it.
+    panel: bool,
 }
 
 impl Draft {
@@ -7369,16 +7372,18 @@ impl Draft {
 
     fn push(&mut self, byte: u8) {
         self.chars += 1;
+        self.panel = false;
         self.head = self.head.push(byte, self.chars);
     }
 
     fn back(&mut self) {
         self.chars = self.chars.saturating_sub(1);
+        self.panel = false;
         self.head = self.head.back(self.chars);
     }
 
     fn clear(&mut self) {
-        *self = Draft { sent_local: self.sent_local, ..Draft::default() };
+        *self = Draft { sent_local: self.sent_local, panel: self.panel, ..Draft::default() };
     }
 
     /// A key that edits the line in a way the head cannot follow, which an empty line has nothing to lose to.
@@ -7392,7 +7397,7 @@ impl Draft {
 /// The line's first word, followed key by key against `LOCAL_COMMANDS` without keeping the text.
 #[derive(Clone, Copy, Debug, Default)]
 enum Head {
-    /// Nothing but spaces yet.
+    /// Nothing yet.
     #[default]
     Blank,
     /// A slash and `len` characters, with which the commands set in `could_be` begin.
@@ -7407,7 +7412,6 @@ impl Head {
     /// The head once `byte` is added and the line has `chars` characters.
     fn push(self, byte: u8, chars: usize) -> Head {
         match (self, byte) {
-            (Head::Blank, b' ') => Head::Blank,
             (Head::Blank, b'/') => Head::Command { could_be: (1 << LOCAL_COMMANDS.len()) - 1, len: 0 },
             (Head::Command { could_be, len }, b' ') if whole_command(could_be, len) => Head::Local { chars },
             (Head::Command { could_be, len }, _) if byte != b' ' => {
@@ -7443,7 +7447,7 @@ fn whole_command(could_be: u32, len: usize) -> bool {
     LOCAL_COMMANDS.iter().enumerate().any(|(i, command)| could_be & 1 << i != 0 && command.len() == len)
 }
 
-/// `text`'s first word, after leading spaces, is a slash and one of `LOCAL_COMMANDS`.
+/// `text`'s first word is a slash and one of `LOCAL_COMMANDS`.
 fn local_command(text: &str) -> bool {
     text.bytes().enumerate().fold(Head::Blank, |head, (i, byte)| head.push(byte, i + 1)).local()
 }
@@ -7475,11 +7479,15 @@ fn note_draft(draft: &mut Draft, data: &[u8]) -> bool {
             b'\r' => {
                 if !draft.empty() {
                     submitted = true;
-                    draft.sent_local = !draft.recalled && draft.head.local();
+                    draft.sent_local = (!draft.recalled && draft.head.local()) || draft.panel;
+                    draft.panel = draft.sent_local;
                 }
                 draft.clear();
             }
-            0x03 | 0x15 => draft.clear(),
+            0x03 | 0x15 => {
+                draft.clear();
+                draft.panel = false;
+            }
             0x08 | 0x7f => draft.back(),
             0x80..=0xbf => {}
             byte if byte >= 0x20 => draft.push(byte),
