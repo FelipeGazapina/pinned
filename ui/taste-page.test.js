@@ -68,7 +68,7 @@ function page({ answer = () => tastesWith(), projects = {}, machineViews = null,
   vm.createContext(context);
   const skillsSrc = read("gui-skills.js").split("\n");
   const line = (start) => skillsSrc.find((l) => l.startsWith(start));
-  vm.runInContext(`${line("const baseName = ")}\n${line("const scopeLabel = ")}\n${read("global-orchestrator.js")}\n${read("taste.js")}\n${read("delegation.js")}\n${read("gui-taste.js")}\n${read("gui-delegation.js")}`, context);
+  vm.runInContext(`${line("const baseName = ")}\n${line("const scopeLabel = ")}\n${read("global-orchestrator.js")}\n${read("taste.js")}\n${read("delegation.js")}\n${read("gui-reviewer.js")}\n${read("gui-profiles.js")}\n${read("gui-taste.js")}\n${read("gui-delegation.js")}`, context);
   const html = () => drawn.at(-1);
   const control = (pattern) => {
     const tag = [...html().matchAll(/<(?:button|select|input|form)\b[^>]*>/g)].map((m) => m[0]).find((t) => pattern.test(t));

@@ -209,6 +209,33 @@ impl Delegates {
         }
     }
 
+    /// Notes the worker profile task `id` runs as (U6).
+    pub fn set_profile(&self, id: &str, profile: Option<String>) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.profile = profile;
+        }
+        self.persist();
+    }
+
+    /// Notes where task `id` stands in its handoff chain (U12).
+    pub fn set_chain(&self, id: &str, chain: Option<crate::chain::ChainLink>) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.chain = chain;
+        }
+        self.persist();
+    }
+
+    /// Adds a review round to task `id`, or replaces the one with its number (U8, U9).
+    pub fn put_review(&self, id: &str, round: crate::reviewer::ReviewRound) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            match task.reviews.iter_mut().find(|known| known.round == round.round) {
+                Some(known) => *known = round,
+                None => task.reviews.push(round),
+            }
+        }
+        self.persist();
+    }
+
     /// Notes where task `id` runs and who chose that.
     pub fn set_placement(&self, id: &str, placed: crate::placement::Placed) {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {

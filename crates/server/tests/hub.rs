@@ -13698,3 +13698,52 @@ fn a_history_push_naming_a_base_the_hub_no_longer_holds_is_refused_and_one_namin
     assert_eq!(push(&mut ana, vec![file(three)]), Ok(Value::Null), "an older app sends no base and replaces the copy as before");
     assert_eq!(sha_of(&mut ana), Some(sha256_hex(three.as_bytes())));
 }
+
+#[test]
+fn act_cannot_set_the_reviewer_or_worker_profiles_for_any_role_and_the_user_can() {
+    let hub = TestHub::start("team_user_only");
+    let (ana_token, _, mut ana) = signed_in(&hub.url, "ana@example.test");
+    let tab = |id: &str, extra: Value| {
+        let mut tab = json!({ "id": id, "cwd": "/a/app", "bypass": false, "running": true, "status": "working", "title": id, "message": null, "resume_at": null, "opened": 1, "session": format!("{id}-conv") });
+        tab.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        tab
+    };
+    let tabs = vec![
+        tab("tab-global", json!({ "orchestrator_global": true })),
+        tab("tab-captain", json!({ "role": "orchestrator" })),
+        tab("tab-worker", json!({ "role": "worker" })),
+        tab("tab-reviewer", json!({ "role": "reviewer" })),
+        tab("tab-chat", json!({ "taste_chat": true })),
+        tab("tab-workflow", json!({ "connector": "c1" })),
+        tab("tab-plain", json!({})),
+    ];
+    let roles: std::collections::BTreeSet<&str> = tabs.iter().map(|t| ActorRole::of(&serde_json::from_value(t.clone()).unwrap()).name()).collect();
+    assert_eq!(roles.len(), 6, "every ActorRole acts: {roles:?}");
+    let (machine, machine_token) = account::register_machine(&hub.url, &ana_token, "ana-mac", "linux").unwrap();
+    let raw = RawMachine::start_with(&hub.url, &machine_token, vec![json!({ "kind": "tabs", "tabs": tabs.clone() })], |_| RawReply::Ok(Value::Null));
+    ana.wait("ana-mac's tabs", |f| f["type"] == "event" && f["event"]["kind"] == "tabs");
+    let _ = machine;
+
+    let acts = [
+        ("set_reviewer", json!({ "patch": { "rounds": 5 } }), "set_reviewer is not open to agents: review rules and the reviewer's settings are the user's own"),
+        ("set_worker_profiles", json!({ "profiles": [{ "name": "scout" }] }), "set_worker_profiles is not open to agents: worker profiles are the user's own: propose one with profile_propose"),
+    ];
+    for t in &tabs {
+        for (action, args, refusal) in &acts {
+            let acted = raw.ask(json!({ "cmd": "act", "act": { "tab": t["id"], "action": action, "args": args } }));
+            assert_eq!(acted, Err(refusal.to_string()), "{} as {}", action, t["id"]);
+        }
+        let taste = raw.ask(json!({ "cmd": "act", "act": { "tab": t["id"], "action": "set_taste", "args": { "scope": { "kind": "captains" }, "patch": { "reviewer": { "rounds": 5 } } } } })).unwrap_err();
+        assert!(taste.contains("reviewer is the user's own"), "set_taste as {}: {taste}", t["id"]);
+    }
+    let tastes: Tastes = serde_json::from_value(ana.hub(json!({ "cmd": "get_tastes" })).unwrap()).unwrap();
+    assert_eq!((tastes.reviewer.rounds, tastes.worker_profiles.account.len()), (2, 0), "no agent changed them");
+
+    // The user's own app writes them, and reads them back.
+    let set = ana.hub(json!({ "cmd": "set_reviewer", "patch": { "rounds": 3, "rules": [{ "id": "A1", "text": "Tests first." }] } })).unwrap();
+    assert_eq!((&set["reviewer"]["rounds"], &set["reviewer"]["rules"][0]["id"]), (&json!(3), &json!("A1")));
+    ana.hub(json!({ "cmd": "set_worker_profiles", "project": "github.com/acme/app", "profiles": [{ "name": "scout", "access": "read_only" }] })).unwrap();
+    let tastes: Tastes = serde_json::from_value(ana.hub(json!({ "cmd": "get_tastes" })).unwrap()).unwrap();
+    assert_eq!((tastes.reviewer.rounds, tastes.worker_profiles.projects["github.com/acme/app"][0].name.as_str()), (3, "scout"));
+    assert_eq!(ana.hub(json!({ "cmd": "set_reviewer", "patch": { "rounds": 9 } })), Err("review rounds go from 1 to 5".into()));
+}

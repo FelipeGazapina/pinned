@@ -25,6 +25,7 @@ mod chain;
 mod feature_map;
 mod profiles;
 mod reviewer;
+mod send_back;
 mod team;
 
 const MODEL_MENU_FILE: &str = "claude-model-menu.json";
@@ -5623,8 +5624,8 @@ impl Machine {
     /// new task is linked to the step or list it names once the task exists.
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
         let caller = Self::require_caller(tab, parent_task)?;
-        crate::profiles::admit(&request)?;
-        crate::chain::admit(&request)?;
+        let request = self.profile_request(&caller, request)?;
+        let request = self.chain_request(&caller, request)?;
         // A replayed request answers with the task it started, which is already linked.
         let link = match request.plan_step.clone() {
             Some(step) if self.delegates.requested(&caller.key(), request.client_request_id.as_deref()).is_none() => {
@@ -6107,6 +6108,7 @@ impl Machine {
         }
         let parent = self.delegates.settle_thread(&task, reply, error, event.resume_at, self.thread_steps(tab), self.launch.path_env.as_deref());
         self.board_write(&task, crate::board::BoardEvent::Settled { task: task.clone() });
+        self.chain_settled(&task);
         // A thread for another machine's tab sends its end back through the hub on the next pass.
         if self.tab(tab, |t| t.origin.is_some()).unwrap_or(false) {
             self.arm_delegate_pass();

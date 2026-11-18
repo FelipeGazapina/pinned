@@ -5,7 +5,7 @@
 //!
 //! None is offered yet. Each unit turns its own tools on in its own `*_offered` function below,
 //! and fills in its machine side:
-//! - `task_fix`: U9 (`machine/reviewer.rs`)
+//! - `task_fix`: U9 (`machine/send_back.rs`)
 //! - `feature_map_read`, `feature_map_set`: U3 (`machine/feature_map.rs`)
 //! - `profile_propose`: U5 (`machine/profiles.rs`)
 //! - `board_note`, `board_read`: U11 (`machine/board.rs`)
