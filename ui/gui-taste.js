@@ -283,16 +283,16 @@ function tastePlacementHtml() {
       <p class="taste-quiet">A machine with under 10 GB of disk free takes no heavy worker.</p></div>`);
 }
 
-function tastePaceHtml(t) {
-  const autonomies = TASTE_AUTONOMIES.map((a) => `<button type="button" data-act="set" data-field="autonomy" data-value="${a.id}" aria-pressed="${a.id === t.autonomy}">${a.label}</button>`).join("");
-  const toggle = (field, title, about) => `<div class="taste-switch-row">
+/** A switch row for a boolean knob of the shown scope; the Reviewer section draws the review ones. */
+const tasteToggleHtml = (t, field, title, about) => `<div class="taste-switch-row">
     <button type="button" class="taste-switch" role="switch" aria-checked="${t[field]}" aria-label="${title}" data-act="toggle" data-field="${field}"><span></span></button>
     <span class="taste-switch-text"><b>${title}</b><span>${about}</span></span><span class="taste-tags">${tasteTagHtml(field)}</span></div>`;
+
+function tastePaceHtml(t) {
+  const autonomies = TASTE_AUTONOMIES.map((a) => `<button type="button" data-act="set" data-field="autonomy" data-value="${a.id}" aria-pressed="${a.id === t.autonomy}">${a.label}</button>`).join("");
   return `<section class="taste-section"><h2>Pace</h2>
     ${tasteUi.scope.kind === "orchestrator" ? tasteParallelHtml(t) : ""}
     <div class="taste-field">${tasteLabelHtml("autonomy")}<div class="taste-seg" role="group" aria-label="Autonomy">${autonomies}</div></div>
-    ${toggle("review_diffs", "Review each diff before accepting", "The Captain reads the worker's diff before merging it in.")}
-    ${toggle("second_opinion", "Second opinion on risky changes", "Another model reviews the change before it goes ahead.")}
   </section>`;
 }
 

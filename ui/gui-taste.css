@@ -135,7 +135,7 @@ button.taste-card:hover { background: var(--g-hover); }
 
 @media (pointer: coarse) {
   .taste-seg button, .taste-icon, .taste-stepper button { min-width: 36px; min-height: 36px; }
-  .taste select, .taste-note-form input { font-size: 16px; }
+  .taste select, .taste-note-form input, .taste-rounds { font-size: 16px; }
 }
 .taste-limit-pair { display: flex; flex-wrap: wrap; gap: 12px 24px; }
 .taste-limits select { text-transform: capitalize; }
@@ -150,3 +150,10 @@ button.taste-card:hover { background: var(--g-hover); }
 .taste-chip[data-state="online"] { background: color-mix(in srgb, var(--g-success) 14%, transparent); color: var(--g-success); }
 .taste-policy { display: flex; flex-direction: column; gap: 4px; }
 .taste-policy p { margin: 0; }
+
+.taste-rules { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.taste-rules:empty { display: none; }
+.taste-rules li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 6px 6px 12px; border: 1px solid var(--g-border); border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.03); }
+.taste-rule-text { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; color: var(--g-text); font-size: 13px; }
+.taste-rounds { width: 72px; height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--g-input); background: var(--g-canvas); color: var(--g-fg); font: inherit; font-size: 13px; }
+.taste-reviewer .taste-note-form select { height: 36px; }
