@@ -339,6 +339,8 @@ mod tests {
             dir: PathBuf,
             claude: PathBuf,
             app: PathBuf,
+            /// The worker's folder: the app, or its own worktree.
+            work: PathBuf,
             captain: String,
             task: String,
             worker: String,
@@ -349,6 +351,11 @@ mod tests {
         /// haiku, sonnet, opus, and a worker thread on `author` that changed the parser, its turn
         /// not ended yet.
         fn team(name: &str, switch: Switch, parallel: u32, author: &str) -> Team {
+            team_in(name, switch, parallel, author, false)
+        }
+
+        /// `team`, its worker in a worktree of its own when `isolated`.
+        fn team_in(name: &str, switch: Switch, parallel: u32, author: &str, isolated: bool) -> Team {
             let dir = std::env::temp_dir().join(format!("pinned-review-run-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
@@ -370,11 +377,17 @@ mod tests {
             let path = m.open_project(app.clone()).display().to_string();
             let captain = m.open_orchestrator(&path).unwrap();
 
-            let request = crate::delegate::parse_request(&json!({ "task": "Fix the parser.", "title": "Parser", "target": { "providerInstanceId": "work", "model": author } })).unwrap();
+            let mut request = json!({ "task": "Fix the parser.", "title": "Parser", "target": { "providerInstanceId": "work", "model": author } });
+            if isolated {
+                request["isolation"] = json!("worktree");
+            }
+            let request = crate::delegate::parse_request(&request).unwrap();
             let started: Value = serde_json::from_str(&m.start_delegate(Some(captain.clone()), None, None, request).unwrap()).unwrap();
             let (task, worker) = (started["taskId"].as_str().unwrap().to_owned(), started["tabId"].as_str().unwrap().to_owned());
             m.record_event(event(&worker, AgentStatus::Working, None));
-            Team { m, dir, claude, app, captain, task, worker }
+            let work = m.delegates.get(&task).unwrap().cwd;
+            assert_eq!(work != app, isolated, "{}", work.display());
+            Team { m, dir, claude, app, work, captain, task, worker }
         }
 
         fn event(tab: &str, status: AgentStatus, reply: Option<&str>) -> AgentEvent {
@@ -384,7 +397,7 @@ mod tests {
         impl Team {
             /// The worker writes `code` into the parser, and the reviewer will answer `findings`.
             fn change(&self, code: &str, findings: Value) {
-                std::fs::write(self.app.join("src/parser.rs"), format!("{code}\n")).unwrap();
+                std::fs::write(self.work.join("src/parser.rs"), format!("{code}\n")).unwrap();
                 let result = json!({ "type": "result", "result": findings.to_string(), "total_cost_usd": 0.25, "usage": { "input_tokens": 100, "output_tokens": 20 } });
                 std::fs::write(self.claude.with_extension("answer"), format!("{result}\n")).unwrap();
             }
@@ -586,6 +599,29 @@ mod tests {
             let rounds = t.rounds();
             assert_eq!(serde_json::to_value(rounds[0].state).unwrap(), "limit");
             assert!(rounds[0].note.as_deref().unwrap_or_default().contains("the diff was cut at 96 KiB"), "{rounds:?}");
+        }
+
+        #[test]
+        fn a_worker_cannot_empty_its_own_diff() {
+            // A shared worker commits its change in the project's checkout.
+            let t = team("committed", Switch::On, 6, SONNET);
+            t.change(CHANGED, json!({ "findings": [a1("unwrap on the input")] }));
+            git(&t.work, &["commit", "-qam", "parser"]);
+            t.end_turn();
+            let (_, prompt, _) = t.reviewer();
+            assert!(prompt.contains(CHANGED), "the committed change is not in the diff");
+            assert_eq!(t.rounds().len(), 1);
+
+            // An isolated worker commits on its branch, and the project's checkout moves to it.
+            let t = team_in("forwarded", Switch::On, 6, SONNET, true);
+            t.change(CHANGED, json!({ "findings": [a1("unwrap on the input")] }));
+            git(&t.work, &["commit", "-qam", "parser"]);
+            let out = crate::process::command("git").arg("-C").arg(&t.work).args(["rev-parse", "HEAD"]).output().unwrap();
+            git(&t.app, &["merge", "-q", "--ff-only", String::from_utf8_lossy(&out.stdout).trim()]);
+            t.end_turn();
+            let (_, prompt, _) = t.reviewer();
+            assert!(prompt.contains(CHANGED), "the fast-forwarded change is not in the diff");
+            assert_eq!(t.rounds().len(), 1);
         }
 
         #[test]
