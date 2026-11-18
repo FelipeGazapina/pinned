@@ -13727,6 +13727,8 @@ fn act_cannot_set_the_reviewer_or_worker_profiles_for_any_role_and_the_user_can(
     let acts = [
         ("set_reviewer", json!({ "patch": { "rounds": 5 } }), "set_reviewer is not open to agents: review rules and the reviewer's settings are the user's own"),
         ("set_worker_profiles", json!({ "profiles": [{ "name": "scout" }] }), "set_worker_profiles is not open to agents: worker profiles are the user's own: propose one with profile_propose"),
+        ("propose_worker_profile", json!({ "tab": "tab-captain", "profile": { "name": "scout" } }), "propose_worker_profile is not open to agents: a Captain proposes a worker profile with profile_propose, which its machine sends"),
+        ("import_tastes", json!({ "tastes": { "reviewer": { "rounds": 5 } } }), "import_tastes is not open to agents: a signed-out app's one-time move of its way of working"),
     ];
     for t in &tabs {
         for (action, args, refusal) in &acts {
