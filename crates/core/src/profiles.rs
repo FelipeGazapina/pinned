@@ -78,27 +78,57 @@ impl Tastes {
                 return Err(format!("two profiles are named {}", profile.name.trim()));
             }
         }
+        let mut changed = self.worker_profiles.clone();
         match project.map(str::trim) {
             Some("") => return Err("a project's profiles need the project's repo".into()),
             Some(repo) if profiles.is_empty() => {
-                self.worker_profiles.projects.remove(repo);
+                changed.projects.remove(repo);
             }
             Some(repo) => {
-                self.worker_profiles.projects.insert(repo.to_owned(), profiles);
+                changed.projects.insert(repo.to_owned(), profiles);
             }
-            None => self.worker_profiles.account = profiles,
+            None => changed.account = profiles,
         }
+        changed.check_caps()?;
+        self.worker_profiles = changed;
         Ok(())
+    }
+}
+
+impl WorkerProfiles {
+    /// At most `MAX_PROFILES` in any list and `MAX_PROJECT_LISTS` projects with a list of their
+    /// own, which `Tastes::check` also asks of what `ImportTastes` brings.
+    pub fn check_caps(&self) -> Result<(), String> {
+        if self.projects.len() > MAX_PROJECT_LISTS {
+            return Err(format!("at most {MAX_PROJECT_LISTS} projects have their own profiles"));
+        }
+        match std::iter::once(&self.account).chain(self.projects.values()).chain([&self.proposed]).any(|list| list.len() > MAX_PROFILES) {
+            true => Err(format!("a list holds at most {MAX_PROFILES} profiles")),
+            false => Ok(()),
+        }
     }
 }
 
 impl WorkerProfile {
     pub fn check(&self) -> Result<(), String> {
-        if self.name.trim().is_empty() {
+        let name = self.name.trim();
+        if name.is_empty() {
             return Err("every profile needs a name".into());
         }
+        if name.chars().count() > MAX_NAME {
+            return Err(format!("a profile's name is at most {MAX_NAME} characters"));
+        }
         if self.delivers.contains('\n') {
-            return Err(format!("what {} delivers fits one line", self.name.trim()));
+            return Err(format!("what {name} delivers fits one line"));
+        }
+        if self.delivers.chars().count() > MAX_DELIVERS {
+            return Err(format!("what {name} delivers is at most {MAX_DELIVERS} characters"));
+        }
+        if self.tools.len() > MAX_TOOLS {
+            return Err(format!("{name} names at most {MAX_TOOLS} tools"));
+        }
+        if self.skills.len() > MAX_SKILLS {
+            return Err(format!("{name} names at most {MAX_SKILLS} skills"));
         }
         if self.model.as_ref().is_some_and(|m| m.model.trim().is_empty()) {
             return Err(format!("{}'s model needs a name", self.name.trim()));
@@ -115,6 +145,17 @@ impl WorkerProfile {
     }
 }
 
+/// The most profiles in one list.
+pub const MAX_PROFILES: usize = 30;
+/// The most projects with a list of their own.
+pub const MAX_PROJECT_LISTS: usize = 200;
+/// The most characters in a profile's name, trimmed.
+pub const MAX_NAME: usize = 60;
+/// The most characters in what a profile delivers.
+pub const MAX_DELIVERS: usize = 300;
+/// The most tools, and the most skills, one profile names.
+pub const MAX_TOOLS: usize = 40;
+pub const MAX_SKILLS: usize = 40;
 /// The seed whose model, rules and rounds are `Tastes::reviewer`'s, and no list's.
 pub const REVIEWER: &str = "Reviewer";
 

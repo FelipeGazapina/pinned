@@ -855,6 +855,7 @@ impl Tastes {
         self.reviewer.check()?;
         let profiles = &self.worker_profiles;
         std::iter::once(&profiles.account).chain(profiles.projects.values()).chain([&profiles.proposed]).try_for_each(|list| check_profiles(list))?;
+        profiles.check_caps()?;
         if profiles.proposed.len() > MAX_PROPOSED {
             return Err(too_many_proposed());
         }
