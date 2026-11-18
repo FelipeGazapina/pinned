@@ -746,4 +746,26 @@ mod tests {
         let theirs: Vec<&str> = notes.iter().filter(|n| n.by == second).map(|n| n.text.as_str()).collect();
         assert_eq!(theirs, ["the second worker's note"]);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_board_file_that_cannot_be_read_is_left_where_it_is() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = team("unreadable");
+        noted(&t.m, &t.worker, "src/login.rs", "the token check moved");
+        let file = t.m.board_file(&t.root).unwrap();
+        let bytes = std::fs::read(&file).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read(&file).is_ok();
+        let answer = if readable { Ok(String::new()) } else { note(&t.m, &t.worker, "src/login.rs", "signup reads it too") };
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        if readable {
+            return; // e.g. root, which reads any file
+        }
+        let refused = answer.expect_err("the write is an error");
+        assert!(refused.starts_with(&format!("the board of {} could not be read: ", t.root)) && refused.ends_with(". Nothing changed."), "{refused}");
+        assert_eq!(std::fs::read(&file).unwrap(), bytes, "the file stays, untouched");
+        let names: Vec<String> = std::fs::read_dir(file.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, [format!("{}.json", t.root)], "nothing was set aside or written");
+    }
 }
