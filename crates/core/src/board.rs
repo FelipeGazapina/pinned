@@ -297,4 +297,12 @@ mod tests {
             assert_eq!(neutral(&format!("a{c}b")), "ab", "U+{:04X}", c as u32);
         }
     }
+
+    #[test]
+    fn a_note_with_any_control_character_is_refused() {
+        for c in ['\u{1B}', '\u{0B}', '\u{0C}', '\u{85}'] {
+            assert_eq!(note_text(&format!("the token{c}check moved")), Err("a board note may not hold a control character. Nothing was noted.".into()), "U+{:04X}", c as u32);
+        }
+        assert_eq!(note_text("one\ntwo"), Err("a board note is one line. Nothing was noted.".into()));
+    }
 }
