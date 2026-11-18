@@ -43,13 +43,20 @@ pub fn wanted(switch: Switch, rules: &[Rule], diff: &str) -> bool {
 /// The reviewer's `--append-system-prompt`: its role's prompt, then the rules, one a line.
 pub fn system_prompt(rules: &[Rule]) -> String {
     let listed: Vec<String> = rules.iter().map(|rule| format!("- {}: {}", rule.id, one_line(&rule.text))).collect();
-    format!("{}\n\nThe review rules. A finding names one of these ids, and there are no others:\n{}", crate::agent::Role::Reviewer.prompt(), listed.join("\n"))
+    let prompt = format!("{}\n\nThe review rules. A finding names one of these ids, and there are no others:\n{}", crate::agent::Role::Reviewer.prompt(), listed.join("\n"));
+    argv_safe(&prompt)
+}
+
+/// `text` as one argument can carry it: a NUL byte, which would end the argument and fail the
+/// start, shows as the two characters `\0`.
+fn argv_safe(text: &str) -> String {
+    text.replace('\0', "\\0")
 }
 
 /// The reviewer's first prompt: `DATA_HEADER`, then the summary and the diff in one fence longer
 /// than any run of backticks inside it, so nothing in the data can close it.
 pub fn first_prompt(summary: &str, diff: &str) -> String {
-    let data = format!("Summary:\n{}\n\nDiff:\n{}", clip_bytes(summary.trim(), SUMMARY_BYTES), clip_bytes(diff, DIFF_BYTES));
+    let data = argv_safe(&format!("Summary:\n{}\n\nDiff:\n{}", clip_bytes(summary.trim(), SUMMARY_BYTES), clip_bytes(diff, DIFF_BYTES)));
     let fence = "`".repeat(longest_backticks(&data).max(2) + 1);
     format!("Review the change below against the review rules in your system prompt.\n\n{DATA_HEADER}\n{fence}\n{}\n{fence}", data.trim_end())
 }
