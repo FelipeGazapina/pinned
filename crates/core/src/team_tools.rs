@@ -140,9 +140,9 @@ pub fn offered(seat: &TeamSeat) -> Vec<Value> {
     offers.into_iter().filter(|(_, offered)| offered(seat)).filter_map(|(name, _)| definition(name)).collect()
 }
 
-/// U9 turns `task_fix` on.
-fn task_fix_offered(_seat: &TeamSeat) -> bool {
-    false
+/// A Captain sends its workers' review findings back.
+fn task_fix_offered(seat: &TeamSeat) -> bool {
+    seat.captain
 }
 
 /// U3 turns `feature_map_read` on.
@@ -179,7 +179,11 @@ fn ask_worker_offered(_seat: &TeamSeat) -> bool {
 pub fn definition(name: &str) -> Option<Value> {
     let task_id = json!({ "type": "string", "description": "The task's id, as delegate_task answered it." });
     let (description, properties, required): (&str, Value, &[&str]) = match name {
-        "task_fix" => ("Send a finished task's review findings back to its worker for one more round.", json!({ "taskId": task_id, "note": { "type": "string" } }), &["taskId"]),
+        "task_fix" => (
+            "Send the findings of pinned's Reviewer on a task you delegated back to its worker, in its own thread, for one more round. The findings go as the Reviewer wrote them; you add only a note. Refused once the rounds run out: then stop and ask the user.",
+            json!({ "taskId": task_id, "note": { "type": "string", "maxLength": 500, "description": "What you add for the worker, at most 500 characters." } }),
+            &["taskId"],
+        ),
         "feature_map_read" => ("Read the project's feature map, or one feature.", json!({ "feature": { "type": "string" } }), &[]),
         "feature_map_set" => (
             "Set the files of one feature of the project's feature map.",
@@ -200,8 +204,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_team_tool_is_offered_yet() {
-        for seat in [TeamSeat::default(), TeamSeat { captain: true, ..TeamSeat::default() }, TeamSeat { worker: true, ..TeamSeat::default() }, TeamSeat { worker: true, child: true, ..TeamSeat::default() }] {
+    fn only_a_captain_is_offered_task_fix_and_no_other_team_tool_is_offered_yet() {
+        assert_eq!(offered(&TeamSeat { captain: true, ..TeamSeat::default() }), vec![definition("task_fix").unwrap()]);
+        for seat in [TeamSeat::default(), TeamSeat { worker: true, ..TeamSeat::default() }, TeamSeat { worker: true, child: true, ..TeamSeat::default() }] {
             assert_eq!(offered(&seat), Vec::<Value>::new(), "{seat:?}");
         }
     }

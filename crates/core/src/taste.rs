@@ -439,6 +439,11 @@ impl Taste {
 
     /// What a session of this scope is told, one line per knob. The settings page previews this text.
     pub fn brief(&self) -> String {
+        self.brief_for(false)
+    }
+
+    /// `brief`, for a Captain whose project's Reviewer switch is on when `reviewer` (U9).
+    pub fn brief_for(&self, reviewer: bool) -> String {
         let mut lines = vec![match self.parallel {
             1 => "Run one worker at a time.".to_owned(),
             n => format!("Run up to {n} workers at once."),
@@ -466,7 +471,9 @@ impl Taste {
             }
             .to_owned(),
         );
-        if self.review_diffs {
+        if reviewer {
+            lines.push("pinned's Reviewer checks each worker's change against your rules. Send its findings back with task_fix, or accept the work; when the rounds run out, stop and ask the user.".to_owned());
+        } else if self.review_diffs {
             lines.push("Review each worker's diff before you accept its work.".to_owned());
         }
         if self.second_opinion {

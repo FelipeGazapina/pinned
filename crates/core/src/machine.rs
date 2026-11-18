@@ -2503,7 +2503,7 @@ impl Machine {
             prompt.push(role.prompt().to_owned());
             if role == Role::Orchestrator {
                 let scoped = tastes.as_ref().map(|t| t.resolve(&captain_scope(&cwd)));
-                prompt.extend(scoped.as_ref().map(taste::Taste::brief));
+                prompt.extend(scoped.as_ref().map(|t| t.brief_for(tastes.as_ref().is_some_and(|all| send_back::reviewer_on(all, &cwd)))));
                 prompt.extend(scoped.map(|t| t.limits().hint()));
                 prompt.push(global::captain_prompt(&settings.name, settings.reports));
             }
@@ -5127,7 +5127,8 @@ impl Machine {
     fn task_review(&self, tab: Option<String>, task: Option<String>, id: &str, verdict: &str, note: Option<String>) -> Result<String, String> {
         let caller = Self::require_caller(tab, task)?;
         let verdict = crate::delegate::Verdict::parse(verdict)?;
-        let answer = self.delegates.review(&caller, id, verdict, note)?;
+        let mut answer = self.delegates.review(&caller, id, verdict, note)?;
+        self.warn_unfixed(id, verdict, &mut answer);
         self.send_records();
         Ok(answer.to_string())
     }

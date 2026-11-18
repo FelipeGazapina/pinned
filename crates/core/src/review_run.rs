@@ -9,7 +9,6 @@
 use crate::reviewer::{Finding, Reviewer, Rule, Switch, FINDING_CHARS};
 use crate::taste::ModelRef;
 use serde_json::Value;
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Stdio;
 
@@ -30,12 +29,10 @@ pub const MOST_FINDINGS: usize = 50;
 /// The project's switch, and the rules a change in the project is read against: the account's,
 /// less the ones a project rule replaces, then the project's.
 pub fn rules_in_force(reviewer: &Reviewer, repo: Option<&str>) -> (Switch, Vec<Rule>) {
-    let project = repo.and_then(|repo| reviewer.projects.get(repo));
-    let switch = project.map_or(Switch::Auto, |project| project.switch);
-    let own = project.map_or(&[][..], |project| project.rules.as_slice());
-    let replaced: BTreeSet<&str> = own.iter().filter_map(|rule| rule.replaces.as_deref()).collect();
-    let rules = reviewer.rules.iter().filter(|rule| !replaced.contains(rule.id.as_str())).chain(own).cloned().collect();
-    (switch, rules)
+    match repo {
+        Some(repo) => (reviewer.switch(repo), reviewer.resolved(repo).into_iter().cloned().collect()),
+        None => (Switch::Auto, reviewer.rules.clone()),
+    }
 }
 
 /// Whether a change gets a review. Off never does. On and Auto do when there is a rule to read the

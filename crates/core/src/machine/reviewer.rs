@@ -222,8 +222,8 @@ impl Machine {
                 // A diff the reviewer did not read whole passes nothing.
                 Some((findings, _)) if findings.is_empty() && answered.cut.is_some() => answered.cut.clone(),
                 Some((findings, _)) => {
-                    // Sending findings back is U9's; until then the Captain hears them with the task's end.
-                    let state = if findings.is_empty() { ReviewState::Passed } else { ReviewState::Limit };
+                    // Findings wait on the Captain while rounds are left (U9's send_back.rs).
+                    let state = if findings.is_empty() { ReviewState::Passed } else { self.findings_state(answered.round) };
                     let note = answered.note.iter().chain(&answered.cut).cloned().collect::<Vec<_>>().join("; ");
                     self.delegates.put_review(task, ReviewRound { round: answered.round, findings, state, model: model.clone(), note: (!note.is_empty()).then_some(note) });
                     None

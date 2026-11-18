@@ -120,6 +120,9 @@ pub struct ReviewRound {
 pub enum ReviewState {
     /// No finding: the change passed.
     Passed,
+    /// Findings with rounds left, waiting on the Captain: `task_fix` sends them back, or
+    /// `task_review` accepts the work (U9).
+    Found,
     /// The findings went back to the worker.
     Sent,
     /// The rounds ran out with findings left, and the Captain heard.
@@ -139,6 +142,25 @@ pub struct Finding {
     pub lines: Vec<u32>,
     /// What is wrong, at most 300 characters.
     pub what: String,
+}
+
+/// What the Captain's task-end news adds about task `task`'s last review round (U9): findings
+/// that wait on it, or rounds that ran out with findings left. Empty otherwise.
+pub fn review_news(task: &str, reviews: &[ReviewRound]) -> String {
+    match reviews.last() {
+        Some(last) if last.state == ReviewState::Found => format!(
+            " Reviewer round {}: {}. Send them back to the worker with task_fix taskId \"{task}\", or accept the work with task_review.",
+            last.round,
+            crate::delegate::many_of(last.findings.len(), "finding")
+        ),
+        Some(last) if last.state == ReviewState::Limit => format!(" The {}.", rounds_ran_out(last.findings.len())),
+        _ => String::new(),
+    }
+}
+
+/// What the Captain hears when the Reviewer's last round still had `left` findings.
+pub fn rounds_ran_out(left: usize) -> String {
+    format!("Reviewer's rounds ran out with {} left; stop and ask the user what to do", crate::delegate::many_of(left, "finding"))
 }
 
 /// Who sends a round's findings back to the worker.

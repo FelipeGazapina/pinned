@@ -1560,7 +1560,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert!(!plain.contains(&"delegate".to_owned()), "delegate_task is the one delegation tool: {plain:?}");
         let empty_task = offered(None, Some(""));
         assert!(empty_task.contains(&"delegate_task".to_owned()), "{empty_task:?}");
-        assert_eq!(offered(Some("orchestrator"), None), [&plain[..], &CAPTAIN_TOOLS.map(String::from)].concat());
+        assert_eq!(offered(Some("orchestrator"), None), [&plain[..], &CAPTAIN_TOOLS.map(String::from), &["task_fix".to_owned()]].concat());
         assert_eq!(offered(Some("worker"), None), plain, "a worker starts workers the way a plain thread does");
         let child = offered(None, Some("task-1"));
         assert!(!child.contains(&"delegate_task".to_owned()), "{child:?}");
@@ -1578,7 +1578,7 @@ fn restore_var(name: &str, value: Option<String>) {
         let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats", "agents", "work_cost"], &memory].concat();
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
         assert_eq!(offered(Some("worker"), None), today);
-        assert_eq!(offered(Some("orchestrator"), None), [&today[..], &CAPTAIN_TOOLS].concat());
+        assert_eq!(offered(Some("orchestrator"), None), [&today[..], &CAPTAIN_TOOLS, &["task_fix"]].concat());
         assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &["delegation_stats"], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session", "repo_overview", "repo_read", "repo_search"]].concat());
         assert_eq!(offered(Some("taste-chat"), None), [&today[..], &["taste_get", "taste_set", "taste_reset"]].concat(), "only a taste chat may change the way of working");
         assert_eq!(offered(Some("taste-chat"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a taste chat's delegated child can't");

@@ -449,6 +449,39 @@ impl Delegates {
         }
     }
 
+    /// Puts thread task `id`, which ended with a result, back to work in the same thread for one
+    /// more turn (U9's send-back), unless `at_once` tasks already work in its project, counted
+    /// under the same lock as `claim`. The time it stood ended does not count toward its time
+    /// limit, and its notice goes again when it ends. Err(Some(working)) when the project is full,
+    /// Err(None) when the task has no finished thread.
+    pub fn reopen_thread(&self, id: &str, at_once: u32) -> Result<(), Option<usize>> {
+        {
+            let mut tasks = self.tasks.lock().unwrap();
+            let index = tasks.iter().position(|task| task.id == id && task.state == WorkState::ResultAvailable && task.thread.as_ref().is_some_and(|thread| thread.runs)).ok_or(None)?;
+            let project = crate::history::project_of(&tasks[index].cwd);
+            let working = tasks.iter().filter(|task| !task.state.terminal() && crate::history::project_of(&task.cwd) == project).count();
+            if working >= at_once as usize {
+                return Err(Some(working));
+            }
+            // Its earlier rounds' reviews told their end through the round, never to the thread, so
+            // its new turn waits on none of them.
+            let reviewer = Some(crate::agent::Role::Reviewer.name());
+            for review in tasks.iter_mut().filter(|task| matches!(&task.parent, Parent::Task(parent) if parent == id) && task.state.terminal() && task.role.as_deref() == reviewer) {
+                review.delivered = true;
+            }
+            let task = &mut tasks[index];
+            let stood = unix_millis().saturating_sub(task.ended.unwrap_or_else(unix_millis));
+            task.run.paused += Duration::from_millis(stood);
+            task.run.turn_done = false;
+            task.run.held_on.clear();
+            task.state = WorkState::Working;
+            (task.ended, task.error, task.ended_by, task.review) = (None, None, None, None);
+            (task.delivered, task.claimed, task.delivered_at, task.recorded) = (false, false, None, false);
+        }
+        self.persist();
+        Ok(())
+    }
+
     /// The thread running task `id` started a turn.
     pub fn turn_started(&self, id: &str) {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
@@ -1937,7 +1970,8 @@ fn notice_line(task: &Task) -> String {
         (None, Some(thread)) => format!(" Its thread is {}.", thread.tab),
         (None, None) => String::new(),
     };
-    format!("[pinned] Delegated task {} {} ({who}) finished: {outcome}.{note}{thread} Call task_status with taskId \"{}\".", task.id, title(task), task.id)
+    let review = crate::reviewer::review_news(&task.id, &task.reviews);
+    format!("[pinned] Delegated task {} {} ({who}) finished: {outcome}.{note}{review}{thread} Call task_status with taskId \"{}\".", task.id, title(task), task.id)
 }
 
 fn card_state(state: WorkState) -> subagents::State {
