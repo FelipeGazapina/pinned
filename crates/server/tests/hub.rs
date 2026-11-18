@@ -13746,4 +13746,58 @@ fn act_cannot_set_the_reviewer_or_worker_profiles_for_any_role_and_the_user_can(
     let tastes: Tastes = serde_json::from_value(ana.hub(json!({ "cmd": "get_tastes" })).unwrap()).unwrap();
     assert_eq!((tastes.reviewer.rounds, tastes.worker_profiles.projects["github.com/acme/app"][0].name.as_str()), (3, "scout"));
     assert_eq!(ana.hub(json!({ "cmd": "set_reviewer", "patch": { "rounds": 9 } })), Err("review rounds go from 1 to 5".into()));
+
+    // Every hub action that writes the way of working, as every role, with args naming the reviewer.
+    // set_box_size writes only box_size, so it has no way to name it.
+    let writers = ["set_taste", "reset_taste_field", "set_box_size", "import_tastes", "set_reviewer", "set_worker_profiles"];
+    for name in writers {
+        assert_eq!(pinned_core::surface::find(name).map(|a| a.side), Some(pinned_core::surface::Side::Hub), "{name}");
+    }
+    let naming = [
+        ("set_taste", json!({ "scope": { "kind": "captains" }, "patch": { "reviewer": { "rounds": 1 } } })),
+        ("set_taste", json!({ "scope": { "kind": "project", "repo": "github.com/acme/app" }, "patch": { "reviewer": { "rules": [] } } })),
+        ("reset_taste_field", json!({ "scope": { "kind": "captains" }, "field": "reviewer" })),
+        ("import_tastes", json!({ "tastes": { "reviewer": { "rounds": 1 } } })),
+        ("set_reviewer", json!({ "patch": { "rules": [] } })),
+        ("set_worker_profiles", json!({ "profiles": [], "reviewer": { "rounds": 1 } })),
+    ];
+    let set_by_user = tastes.reviewer.clone();
+    for t in &tabs {
+        for (action, args) in &naming {
+            assert!(raw.ask(json!({ "cmd": "act", "act": { "tab": t["id"], "action": action, "args": args } })).is_err(), "{action} as {}", t["id"]);
+        }
+    }
+    let tastes: Tastes = serde_json::from_value(ana.hub(json!({ "cmd": "get_tastes" })).unwrap()).unwrap();
+    assert_eq!(tastes.reviewer, set_by_user, "no agent path reaches the reviewer");
+}
+
+#[test]
+fn set_reviewer_round_trips_and_a_project_rule_that_replaces_a1_drops_it() {
+    let hub = TestHub::start("reviewer_store");
+    let (_, _, mut ana) = signed_in(&hub.url, "ana@example.test");
+    let site = "github.com/acme/site";
+    let account = json!({ "model": { "model": "claude-sonnet-5-5" }, "rounds": 4, "rules": [{ "id": "A1", "text": "No unwrap." }, { "id": "A2", "text": "  Tests first.  " }] });
+    ana.hub(json!({ "cmd": "set_reviewer", "patch": account })).unwrap();
+    let project = json!({ "project": site, "switch": "on", "rules": [{ "id": "P1", "text": "No unwrap outside tests.", "replaces": "A1" }] });
+    let set = ana.hub(json!({ "cmd": "set_reviewer", "patch": project })).unwrap();
+
+    let expected = json!({
+        "model": { "model": "claude-sonnet-5-5" },
+        "rounds": 4,
+        "rules": [{ "id": "A1", "text": "No unwrap." }, { "id": "A2", "text": "Tests first." }],
+        "projects": { site: { "switch": "on", "rules": [{ "id": "P1", "text": "No unwrap outside tests.", "replaces": "A1" }] } },
+    });
+    assert_eq!(set["reviewer"], expected);
+    let tastes: Tastes = serde_json::from_value(ana.hub(json!({ "cmd": "get_tastes" })).unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(&tastes.reviewer).unwrap(), expected, "get_tastes reads back what set_reviewer stored");
+    let resolved: Vec<&str> = tastes.reviewer.resolved(site).into_iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(resolved, ["A2", "P1"], "P1 stands in for A1 in the site's list");
+    let elsewhere: Vec<&str> = tastes.reviewer.resolved("github.com/acme/docs").into_iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(elsewhere, ["A1", "A2"]);
+
+    let too_many: Vec<Value> = (1..=31).map(|i| json!({ "id": format!("A{i}"), "text": "x" })).collect();
+    assert_eq!(ana.hub(json!({ "cmd": "set_reviewer", "patch": { "rules": too_many } })), Err("the account's rules go up to 30, not 31".into()));
+    let replaces_none = json!({ "project": site, "rules": [{ "id": "P1", "text": "x", "replaces": "A3" }] });
+    assert_eq!(ana.hub(json!({ "cmd": "set_reviewer", "patch": replaces_none })), Err("github.com/acme/site's rule P1 replaces A3, which is no account rule".into()));
+    assert_eq!(ana.hub(json!({ "cmd": "get_tastes" })).unwrap()["reviewer"], expected, "a refused patch stored nothing");
 }

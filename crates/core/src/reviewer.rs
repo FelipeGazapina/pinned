@@ -181,6 +181,17 @@ impl Tastes {
 }
 
 impl Reviewer {
+    /// The rules a review in `repo`'s project reads: the account's, then the project's.
+    pub fn resolved(&self, repo: &str) -> Vec<&Rule> {
+        let project = self.projects.get(repo).map_or(&[][..], |p| &p.rules[..]);
+        self.rules.iter().chain(project).collect()
+    }
+
+    /// Whether `repo`'s workers get a review: the project's switch, or Auto when it has none.
+    pub fn switch(&self, repo: &str) -> Switch {
+        self.projects.get(repo).map_or(Switch::Auto, |p| p.switch)
+    }
+
     pub fn check(&self) -> Result<(), String> {
         if !(1..=MAX_ROUNDS).contains(&self.rounds) {
             return Err(format!("review rounds go from 1 to {MAX_ROUNDS}"));
@@ -282,5 +293,68 @@ mod tests {
 
         tastes.set_reviewer(ReviewerPatch { project: Some("github.com/acme/site".into()), switch: Some(Switch::Auto), rules: Some(vec![]), ..ReviewerPatch::default() }).unwrap();
         assert!(tastes.reviewer.projects.is_empty(), "a project back to the defaults is dropped");
+    }
+
+    fn rules(prefix: char, n: usize) -> Vec<Rule> {
+        (1..=n).map(|i| rule(&format!("{prefix}{i}"), "Tests first.")).collect()
+    }
+
+    fn ids<'a>(rules: Vec<&'a Rule>) -> Vec<&'a str> {
+        rules.into_iter().map(|r| r.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_project_rule_that_replaces_an_account_rule_drops_it_from_that_projects_list() {
+        let mut tastes = Tastes::default();
+        tastes.set_reviewer(ReviewerPatch { rules: Some(vec![rule("A1", "No unwrap."), rule("A2", "Tests first.")]), ..ReviewerPatch::default() }).unwrap();
+        let p1 = Rule { replaces: Some("A1".into()), ..rule("P1", "No unwrap outside tests.") };
+        tastes.set_reviewer(ReviewerPatch { project: Some("github.com/acme/site".into()), switch: Some(Switch::On), rules: Some(vec![p1, rule("P2", "No new deps.")]), ..ReviewerPatch::default() }).unwrap();
+        tastes.set_reviewer(ReviewerPatch { project: Some("github.com/acme/docs".into()), switch: Some(Switch::Off), ..ReviewerPatch::default() }).unwrap();
+
+        let reviewer = &tastes.reviewer;
+        assert_eq!(ids(reviewer.resolved("github.com/acme/site")), ["A2", "P1", "P2"]);
+        assert_eq!(ids(reviewer.resolved("github.com/acme/docs")), ["A1", "A2"]);
+        assert_eq!(ids(reviewer.resolved("github.com/acme/other")), ["A1", "A2"], "a project with no settings reads the account's");
+        assert_eq!(reviewer.switch("github.com/acme/site"), Switch::On);
+        assert_eq!(reviewer.switch("github.com/acme/docs"), Switch::Off);
+        assert_eq!(reviewer.switch("github.com/acme/other"), Switch::Auto);
+        assert_eq!(reviewer.rounds, 2, "rounds stay at the default");
+
+        let before = tastes.clone();
+        let without_a1 = ReviewerPatch { rules: Some(vec![rule("A2", "Tests first.")]), ..ReviewerPatch::default() };
+        assert_eq!(tastes.set_reviewer(without_a1), Err("github.com/acme/site's rule P1 replaces A1, which is no account rule".into()));
+        assert_eq!(tastes, before);
+    }
+
+    #[test]
+    fn each_cap_refuses_one_past_its_limit_and_stores_nothing() {
+        let site = || Some("github.com/acme/site".to_owned());
+        let mut tastes = Tastes::default();
+        tastes.set_reviewer(ReviewerPatch { rules: Some(rules('A', 30)), ..ReviewerPatch::default() }).unwrap();
+        tastes.set_reviewer(ReviewerPatch { project: site(), rules: Some(rules('P', 30)), ..ReviewerPatch::default() }).unwrap();
+        let long = format!("  {}  ", "x".repeat(500));
+        tastes.set_reviewer(ReviewerPatch { project: Some("github.com/acme/long".into()), rules: Some(vec![rule("P1", &long)]), ..ReviewerPatch::default() }).unwrap();
+        assert_eq!(tastes.reviewer.projects["github.com/acme/long"].rules[0].text, "x".repeat(500), "the text is kept trimmed");
+        for i in 3..=200 {
+            tastes.set_reviewer(ReviewerPatch { project: Some(format!("github.com/acme/r{i}")), switch: Some(Switch::On), ..ReviewerPatch::default() }).unwrap();
+        }
+        assert_eq!(tastes.reviewer.projects.len(), 200);
+
+        let before = tastes.clone();
+        let refusals = [
+            (ReviewerPatch { rules: Some(rules('A', 31)), ..ReviewerPatch::default() }, "the account's rules go up to 30, not 31"),
+            (ReviewerPatch { project: site(), rules: Some(rules('P', 31)), ..ReviewerPatch::default() }, "github.com/acme/site's rules go up to 30, not 31"),
+            (ReviewerPatch { rules: Some(vec![rule("A1", &"x".repeat(501))]), ..ReviewerPatch::default() }, "rule A1 runs past 500 characters"),
+            (ReviewerPatch { project: site(), rules: Some(vec![rule("P1", &format!(" {} ", "y".repeat(501)))]), ..ReviewerPatch::default() }, "rule P1 runs past 500 characters"),
+            (ReviewerPatch { rules: Some(vec![rule("A1", "  \n ")]), ..ReviewerPatch::default() }, "rule A1 says nothing"),
+            (ReviewerPatch { project: site(), rules: Some(vec![rule("P1", "x"), rule("P1", "y")]), ..ReviewerPatch::default() }, "github.com/acme/site's rules name P1 twice"),
+            (ReviewerPatch { project: site(), rules: Some(vec![Rule { replaces: Some("A31".into()), ..rule("P1", "x") }]), ..ReviewerPatch::default() }, "github.com/acme/site's rule P1 replaces A31, which is no account rule"),
+            (ReviewerPatch { rules: Some(vec![Rule { replaces: Some("A2".into()), ..rule("A1", "x") }]), ..ReviewerPatch::default() }, "rule A1 is an account rule: only a project rule replaces one"),
+            (ReviewerPatch { project: Some("github.com/acme/r201".into()), switch: Some(Switch::On), ..ReviewerPatch::default() }, "review settings cover up to 200 projects, not 201"),
+        ];
+        for (patch, refusal) in refusals {
+            assert_eq!(tastes.set_reviewer(patch.clone()), Err(refusal.to_owned()), "{patch:?}");
+            assert_eq!(tastes, before, "a refused change stored something: {patch:?}");
+        }
     }
 }
