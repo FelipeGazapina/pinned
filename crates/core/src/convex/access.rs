@@ -1,7 +1,7 @@
 //! Which Convex reads a session may make. The hub decides here and nowhere else, from the tab list
 //! its machine reported and the repo key that machine names for the tab.
 
-use super::{Ask, Connection, Offer, NO_ORIGIN, UNKNOWN_TAB};
+use super::{Ask, Connection, Offer, NO_ORIGIN, QUERY_OFF, UNKNOWN_TAB};
 use crate::agent::{Role, CAPTAIN_CONNECTOR, DELEGATE_CONNECTOR, EXTERNAL_CONNECTOR_PREFIX, INTERACTIVE_CONNECTOR};
 use crate::wire::TabView;
 use std::collections::BTreeSet;
@@ -107,14 +107,20 @@ fn walk(machine: &str, calling: TabView, find: &dyn Fn(&str, &str) -> Option<Tab
     Err(format!("This session sits more than {WALK_MAX} sessions below the one that started the work, so pinned cannot tell who it works for."))
 }
 
+/// No session runs its own JavaScript, whoever opened it: every call comes from the model in a tab,
+/// so a call by hand cannot be told from an agent's.
 fn admit(scope: &Scope, ask: &Ask) -> Result<(), String> {
+    if let Ask::Query { .. } = ask {
+        return Err(QUERY_OFF.into());
+    }
     let Scope::Tables(tables) = scope else { return Ok(()) };
     let limit = format!("This run's Read Convex data step limits it to the tables {}", tables.iter().cloned().collect::<Vec<_>>().join(", "));
     match ask {
         Ask::Offer | Ask::Tables { table: None } => Ok(()),
         Ask::Tables { table: Some(table) } | Ask::Data { table, .. } if tables.contains(table) => Ok(()),
         Ask::Tables { table: Some(table) } | Ask::Data { table, .. } => Err(format!("{limit}, so {} cannot read {table}.", ask.tool())),
-        Ask::Query { .. } | Ask::Run { .. } | Ask::Logs { .. } => Err(format!("{limit}, so {} is off.", ask.tool())),
+        Ask::Query { .. } => Err(QUERY_OFF.into()),
+        Ask::Run { .. } | Ask::Logs { .. } => Err(format!("{limit}, so {} is off.", ask.tool())),
     }
 }
 
@@ -220,24 +226,27 @@ mod tests {
             ("m1", "thread", Some(SITE), tables.clone(), everything.clone()),
             ("m1", "thread", Some("github.com/acme/blog"), tables.clone(), Err("Convex is not connected for `github.com/acme/blog`. The user connects it under Settings, Connectors, Convex.".into())),
             ("m1", "thread", None, Ask::Offer, Err("This folder has no git origin, so it cannot be connected to Convex yet.".into())),
-            ("m1", "worktree", Some(SITE), Ask::Query { code: "return 1;".into() }, everything.clone()),
+            ("m1", "worktree", Some(SITE), Ask::Data { table: "payouts".into(), limit: None, cursor: None, oldest_first: false }, everything.clone()),
+            ("m1", "thread", Some(SITE), Ask::Query { code: "return process.env;".into() }, Err(QUERY_OFF.into())),
+            ("m1", "worktree", Some(SITE), Ask::Query { code: "return 1;".into() }, Err(QUERY_OFF.into())),
             ("m1", "captain", Some(SITE), Ask::Logs { function: None, errors: false, limit: None }, everything.clone()),
             ("m1", "worker", Some(SITE), Ask::Run { function: "invoices:byNumber".into(), args: json!({}) }, everything.clone()),
             ("m2", "delegate-box", Some(SITE), tables.clone(), everything.clone()),
-            ("m1", "wf-all-tab", Some(SITE), Ask::Query { code: "return 1;".into() }, everything.clone()),
+            ("m1", "wf-all-tab", Some(SITE), Ask::Data { table: "payouts".into(), limit: None, cursor: None, oldest_first: false }, everything.clone()),
+            ("m1", "wf-all-tab", Some(SITE), Ask::Query { code: "return 1;".into() }, Err(QUERY_OFF.into())),
             ("m1", "wf-invoices-tab", Some(SITE), Ask::Offer, limited.clone()),
             ("m1", "wf-invoices-tab", Some(SITE), tables.clone(), limited.clone()),
             ("m1", "wf-invoices-tab", Some(SITE), Ask::Tables { table: Some("invoices".into()) }, limited.clone()),
             ("m1", "wf-invoices-tab", Some(SITE), Ask::Tables { table: Some("payouts".into()) }, Err("This run's Read Convex data step limits it to the tables customers, invoices, so convex_tables cannot read payouts.".into())),
             ("m1", "wf-invoices-tab", Some(SITE), Ask::Data { table: "customers".into(), limit: None, cursor: None, oldest_first: false }, limited.clone()),
             ("m1", "wf-invoices-tab", Some(SITE), Ask::Data { table: "payouts".into(), limit: None, cursor: None, oldest_first: false }, Err("This run's Read Convex data step limits it to the tables customers, invoices, so convex_data cannot read payouts.".into())),
-            ("m1", "wf-invoices-tab", Some(SITE), Ask::Query { code: "return 1;".into() }, Err("This run's Read Convex data step limits it to the tables customers, invoices, so convex_query is off.".into())),
+            ("m1", "wf-invoices-tab", Some(SITE), Ask::Query { code: "return 1;".into() }, Err(QUERY_OFF.into())),
             ("m1", "wf-invoices-tab", Some(SITE), Ask::Run { function: "invoices:byNumber".into(), args: json!({}) }, Err("This run's Read Convex data step limits it to the tables customers, invoices, so convex_run is off.".into())),
             ("m1", "wf-invoices-tab", Some(SITE), Ask::Logs { function: None, errors: true, limit: None }, Err("This run's Read Convex data step limits it to the tables customers, invoices, so convex_logs is off.".into())),
             ("m1", "wf-none-tab", Some(SITE), tables.clone(), no_step.clone()),
             ("m1", "wf-other-tab", Some(SITE), tables.clone(), Err("This workflow's Read Convex data step reads `happy-otter-123`, but this project is connected to `quick-lemur-789`.".into())),
             ("m1", "run-now-tab", Some(SITE), tables.clone(), no_step.clone()),
-            ("m1", "run-now-limited", Some(SITE), Ask::Query { code: "return 1;".into() }, Err("This run's Read Convex data step limits it to the tables customers, invoices, so convex_query is off.".into())),
+            ("m1", "run-now-limited", Some(SITE), Ask::Query { code: "return 1;".into() }, Err(QUERY_OFF.into())),
             ("m1", "limited-child", Some(SITE), tables.clone(), limited.clone()),
             ("m1", "grandchild", Some(SITE), Ask::Logs { function: None, errors: false, limit: None }, Err("This run's Read Convex data step limits it to the tables customers, invoices, so convex_logs is off.".into())),
             ("m1", "orphan", Some(SITE), tables.clone(), Err("The session that started this one is gone, so pinned cannot tell who it works for. It reads no Convex data.".into())),

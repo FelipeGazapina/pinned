@@ -179,9 +179,9 @@ impl Ask {
             Ask::Offer => "convex_offer",
             Ask::Tables { .. } => TOOLS[0],
             Ask::Data { .. } => TOOLS[1],
-            Ask::Query { .. } => TOOLS[2],
-            Ask::Run { .. } => TOOLS[3],
-            Ask::Logs { .. } => TOOLS[4],
+            Ask::Query { .. } => QUERY_TOOL,
+            Ask::Run { .. } => TOOLS[2],
+            Ask::Logs { .. } => TOOLS[3],
         }
     }
 }
@@ -200,10 +200,18 @@ pub const UNKNOWN_TAB: &str = "the hub does not know this session's tab yet";
 pub const SIGNED_OUT: &str = "Convex needs pinned signed in: the hub keeps the deploy keys.";
 pub const NO_ORIGIN: &str = "This folder has no git origin, so it cannot be connected to Convex yet.";
 
-pub const TOOLS: [&str; 5] = ["convex_tables", "convex_data", "convex_query", "convex_run", "convex_logs"];
+pub const TOOLS: [&str; 4] = ["convex_tables", "convex_data", "convex_run", "convex_logs"];
+
+/// Ran a session's own JavaScript in a Convex query with the admin key, which can read the
+/// deployment's environment values. An older app still lists it; the hub refuses every call.
+pub const QUERY_TOOL: &str = "convex_query";
+pub const QUERY_OFF: &str = "pinned no longer runs arbitrary Convex code for a session; read tables with convex_data";
 
 /// The ask a call of tool `name` makes, with the op taken from the name.
 pub fn ask(name: &str, arguments: &Value) -> Result<Ask, String> {
+    if name == QUERY_TOOL {
+        return Err(QUERY_OFF.into());
+    }
     if !TOOLS.contains(&name) {
         return Err(format!("no Convex tool {name}"));
     }
@@ -216,7 +224,7 @@ pub fn ask(name: &str, arguments: &Value) -> Result<Ask, String> {
     serde_json::from_value(Value::Object(body)).map_err(|e| format!("{name}: {e}"))
 }
 
-/// The five tools for `offer`. With a table limit, only tables and data.
+/// The four tools for `offer`. With a table limit, only tables and data.
 pub fn tool_definitions(offer: &Offer) -> Vec<Value> {
     let on = format!("Convex deployment {} ({})", offer.deployment, offer.kind.name());
     let mut after = String::new();
@@ -251,15 +259,6 @@ pub fn tool_definitions(offer: &Offer) -> Vec<Value> {
         }),
         json!({
             "name": TOOLS[2],
-            "description": format!("Runs a read-only JavaScript query on {on}. code is the body of async (ctx) => {{ … }}, such as: return await ctx.db.query(\"invoices\").filter((q) => q.eq(q.field(\"number\"), 1042)).collect(); It cannot write.{after}"),
-            "inputSchema": {
-                "type": "object",
-                "properties": { "code": { "type": "string", "description": "The body of async (ctx) => { … }." } },
-                "required": ["code"],
-            },
-        }),
-        json!({
-            "name": TOOLS[3],
             "description": format!("Runs a deployed query function of {on} by path, with args. The project's convex/ folder defines them: export byNumber in convex/invoices.ts is invoices:byNumber. A mutation or an action is refused.{after}"),
             "inputSchema": {
                 "type": "object",
@@ -271,7 +270,7 @@ pub fn tool_definitions(offer: &Offer) -> Vec<Value> {
             },
         }),
         json!({
-            "name": TOOLS[4],
+            "name": TOOLS[3],
             "description": format!("Shows recent function runs of {on} with their log lines and errors, newest last.{after}"),
             "inputSchema": {
                 "type": "object",
@@ -368,7 +367,6 @@ mod tests {
         let asks = [
             ("convex_tables", json!({}), Ask::Tables { table: None }),
             ("convex_data", json!({ "table": "invoices", "limit": 5 }), Ask::Data { table: "invoices".into(), limit: Some(5), cursor: None, oldest_first: false }),
-            ("convex_query", json!({ "code": "return 1;" }), Ask::Query { code: "return 1;".into() }),
             ("convex_run", json!({ "function": "invoices:byNumber", "args": { "number": 1042 } }), Ask::Run { function: "invoices:byNumber".into(), args: json!({ "number": 1042 }) }),
             ("convex_logs", Value::Null, Ask::Logs { function: None, errors: false, limit: None }),
         ];
@@ -378,6 +376,8 @@ mod tests {
             assert_eq!(expected.tool(), name);
         }
         assert_eq!(ask("convex_offer", &json!({})), Err("no Convex tool convex_offer".into()));
+        assert_eq!(ask("convex_query", &json!({ "code": "return 1;" })), Err(QUERY_OFF.into()));
+        assert_eq!(Ask::Query { code: "return 1;".into() }.tool(), "convex_query");
         assert_eq!(ask("convex_tables", &json!({ "table": "invoices" })), Ok(Ask::Tables { table: Some("invoices".into()) }));
         assert_eq!(ask("convex_tables", &json!({ "op": "query", "code": "x" })), Ok(Ask::Tables { table: None }), "the name decides the op");
         assert_eq!(ask("convex_data", &json!({})).unwrap_err(), "convex_data: missing field `table`");
@@ -388,19 +388,27 @@ mod tests {
     }
 
     #[test]
-    fn a_full_offer_lists_five_tools_that_name_the_deployment() {
+    fn a_full_offer_lists_four_tools_that_name_the_deployment() {
         let tools = tool_definitions(&Offer { deployment: "quick-lemur-789".into(), kind: Kind::Dev, tables: None });
         assert_eq!(
             named(&tools),
             [
                 ("convex_tables", "Lists the tables of Convex deployment quick-lemur-789 (dev), which holds this project's data. Pass table for one table's fields and indexes. Start here. Read only."),
                 ("convex_data", "Reads documents of one table of Convex deployment quick-lemur-789 (dev), newest first. limit is 20 by default and at most 100. Pass next_cursor as cursor to read on."),
-                ("convex_query", "Runs a read-only JavaScript query on Convex deployment quick-lemur-789 (dev). code is the body of async (ctx) => { … }, such as: return await ctx.db.query(\"invoices\").filter((q) => q.eq(q.field(\"number\"), 1042)).collect(); It cannot write."),
                 ("convex_run", "Runs a deployed query function of Convex deployment quick-lemur-789 (dev) by path, with args. The project's convex/ folder defines them: export byNumber in convex/invoices.ts is invoices:byNumber. A mutation or an action is refused."),
                 ("convex_logs", "Shows recent function runs of Convex deployment quick-lemur-789 (dev) with their log lines and errors, newest last."),
             ]
         );
         assert_eq!(tools[1]["inputSchema"]["required"], json!(["table"]));
+    }
+
+    #[test]
+    fn no_offer_lists_convex_query() {
+        for tables in [None, Some(vec!["invoices".into()])] {
+            let tools = tool_definitions(&Offer { deployment: "quick-lemur-789".into(), kind: Kind::Dev, tables });
+            assert!(!named(&tools).iter().any(|(name, _)| *name == "convex_query"), "{tools:?}");
+        }
+        assert!(!TOOLS.contains(&"convex_query"));
     }
 
     #[test]
