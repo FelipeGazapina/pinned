@@ -463,15 +463,15 @@ mod tests {
     fn a_cite_with_a_control_format_or_fence_character_or_over_300_characters_is_refused() {
         let t = team("cite-chars");
         let src = t.dir.join("app/src");
-        let control = "line break or other control character";
-        let format = "invisible or direction-changing character";
-        let fence = "backtick or tilde";
+        let control = "a line break or other control character";
+        let format = "an invisible or direction-changing character";
+        let fence = "a backtick or tilde";
         let mut cases: Vec<(String, String)> = vec![];
         for (name, kind) in [("a\nb.rs", control), ("a\tb.rs", control), ("a\u{2028}b.rs", control), ("a\u{202E}sr.b", format), ("a\u{200B}b.rs", format), ("a\u{FEFF}b.rs", format), ("a`b.rs", fence), ("a~b.rs", fence)] {
             std::fs::write(src.join(name), "x\n").unwrap();
-            cases.push((format!("src/{name}"), format!("its cite holds a {kind}")));
+            cases.push((format!("src/{name}"), format!("its cite holds {kind}")));
         }
-        cases.push(("src/login.rs\n".into(), format!("its cite holds a {control}")));
+        cases.push(("src/login.rs\n".into(), format!("its cite holds {control}")));
         let deep = src.join("d".repeat(200));
         std::fs::create_dir_all(&deep).unwrap();
         for n in [92, 93] {
