@@ -1483,6 +1483,10 @@ impl Delegates {
             .collect()
     }
 
+    pub fn review_cards(&self, _tab: &str) -> Vec<crate::wire::TaskReviews> {
+        vec![]
+    }
+
     pub fn steps_for(&self, tab: &str, tool: &str) -> Option<Vec<Item>> {
         if tool.is_empty() {
             return None;

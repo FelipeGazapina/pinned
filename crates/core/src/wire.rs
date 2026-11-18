@@ -1012,6 +1012,21 @@ pub struct ThreadPage {
     /// For a read with `limit` that does not reach the start: the conversation's first prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opening: Option<String>,
+    /// The review rounds of the tasks this tab shows: its own worker's, or its Captain's children's.
+    /// A machine on an older pinned leaves it out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviews: Vec<TaskReviews>,
+}
+
+/// The review rounds of one delegated task, for the tab that shows them.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct TaskReviews {
+    pub task: String,
+    pub name: String,
+    /// The task's worker tab, for a Captain's line to link to; the worker's own tab leaves it out.
+    #[serde(default)]
+    pub tab: Option<String>,
+    pub reviews: Vec<crate::reviewer::ReviewRound>,
 }
 
 /// A connector's session, the same on any machine.

@@ -2988,6 +2988,32 @@ exec '{real}' "$@"
         assert!(end > start, "a sub-second task collapsed to one stamp: {started} {end}");
     }
 
+    #[test]
+    fn review_rounds_reach_the_worker_tab_and_its_captain_but_not_a_remote_or_unreviewed_task() {
+        let round = |state| crate::reviewer::ReviewRound { round: 1, findings: vec![crate::reviewer::Finding { rule: "A1".into(), file: "src/a.rs".into(), lines: vec![3], what: "unwrap".into() }], state, model: None, note: None };
+        let delegates = Delegates::default();
+        let reviewed = new_on(&delegates, Provider::Claude);
+        delegates.link_thread(&reviewed.id, Thread { tab: "tab-w".into(), runs: true });
+        delegates.put_review(&reviewed.id, round(crate::reviewer::ReviewState::Sent));
+        let plain = new_on(&delegates, Provider::Claude);
+        delegates.link_thread(&plain.id, Thread { tab: "tab-p".into(), runs: true });
+        let remote = new_on(&delegates, Provider::Claude);
+        delegates.link_thread(&remote.id, Thread { tab: "tab-r".into(), runs: true });
+        delegates.put_review(&remote.id, round(crate::reviewer::ReviewState::Passed));
+        delegates.set_remote(&remote.id, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: None, waiting: None });
+
+        let own = delegates.review_cards("tab-w");
+        assert_eq!(own.len(), 1, "{own:?}");
+        assert_eq!((own[0].task.as_str(), own[0].name.as_str(), own[0].tab.clone(), own[0].reviews.len()), (reviewed.id.as_str(), "Fix", None, 1));
+        let captain = delegates.review_cards("tab-1");
+        assert_eq!(captain.len(), 1, "{captain:?}");
+        assert_eq!((captain[0].task.as_str(), captain[0].tab.as_deref()), (reviewed.id.as_str(), Some("tab-w")));
+        assert_eq!(captain[0].reviews[0].state, crate::reviewer::ReviewState::Sent);
+        assert!(delegates.review_cards("tab-p").is_empty(), "a task without rounds");
+        assert!(delegates.review_cards("tab-r").is_empty(), "a remote task, in its own tab");
+        assert!(captain.iter().all(|c| c.task != remote.id), "a remote task, in the Captain's");
+    }
+
     fn thread_task(delegates: &Delegates, limit: Duration) -> Task {
         let task = new_on(delegates, Provider::Claude);
         delegates.link_thread(&task.id, Thread { tab: "tab-w".into(), runs: true });

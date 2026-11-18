@@ -1889,7 +1889,7 @@ impl Machine {
         let (session, process) = self.tab(tab, |t| (t.claude_session.clone(), t.session.as_ref().and(t.started)))?;
         let Some(file) = self.transcript_of(tab)? else {
             let start = limit.map(|_| 0);
-            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: self.delegates.cards(tab), start, opening: None });
+            return Ok(ThreadPage { session, items: vec![], next: 0, reset: false, context: None, branch: None, todos: None, agents: self.delegates.cards(tab), start, opening: None, reviews: self.delegates.review_cards(tab) });
         };
         let failed = |e: std::io::Error| format!("could not read the transcript: {e}");
         let (page, start) = match limit {
@@ -1902,7 +1902,7 @@ impl Machine {
         let opening = start.filter(|s| *s > 0).and_then(|_| thread::opening(&file));
         let mut agents = subagents::scan(&file.with_extension("").join("subagents"), &mut self.agents.lock().unwrap(), process);
         agents.extend(self.delegates.cards(tab));
-        Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents, start, opening })
+        Ok(ThreadPage { session, items: page.items, next: page.next, reset: page.reset, context: page.context, branch: page.branch, todos: page.todos, agents, start, opening, reviews: self.delegates.review_cards(tab) })
     }
 
     /// The tab's transcript, once claude reported a session that has one.
