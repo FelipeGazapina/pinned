@@ -1063,3 +1063,88 @@ test("while the team's line is held, the key notes are not shown: the read faile
   assert.ok(!(await wizard(held)).includes(slackOff), "no Slack note while held");
   assert.ok((await wizard({ ...OWNER_TEAM, credential: none })).includes(slackOff), "the Slack note while not held and Slack is missing");
 });
+
+// ---- The team's lists after a change to a bot ----------------------------------------------------
+
+/** Counts the reads of the team's lists: `tcRefresh`, which the sidebar's bots and their dots come from. */
+function countReads(a) {
+  const reads = { n: 0 };
+  a.context.tcRefresh = () => {
+    reads.n += 1;
+  };
+  return reads;
+}
+
+test("a bot the wizard saves reads the team's lists again, once, so the sidebar shows it", async () => {
+  const a = app({ answers: wizardAnswers(saving()) });
+  const reads = countReads(a);
+  await a.open("team-bot-new");
+  await a.click("idea", { idea: "weekly" });
+  for (let i = 0; i < 3; i++) await a.click("next");
+  await a.click("project", { key: "github.com/acme/site" });
+  await a.click("next");
+  assert.equal(reads.n, 1);
+});
+
+test("a save the hub refuses reads nothing; the retry that works reads the lists again, once", async () => {
+  let fail = true;
+  const a = app({ answers: wizardAnswers({ save_bot: (op) => (fail ? new Error("this team has no group @publish") : { workflow: op.bot.workflow }) }) });
+  const reads = countReads(a);
+  await a.open("team-bot-new");
+  await a.click("idea", { idea: "weekly" });
+  for (let i = 0; i < 3; i++) await a.click("next");
+  await a.click("project", { key: "github.com/acme/site" });
+  await a.click("next");
+  assert.equal(reads.n, 0, "a refused save");
+  fail = false;
+  await a.click("next");
+  assert.equal(reads.n, 1, "the save that worked");
+});
+
+test("turning a draft on from its page reads the team's lists again, so its dot in the sidebar is right", async () => {
+  const a = app({ answers: botAnswers({ bots: [bot({ on: false, on_by: null })], turn_bot_on: null }) });
+  const reads = countReads(a);
+  await openBot(a);
+  await a.click("toggle");
+  assert.deepEqual(a.frames.filter((f) => f.op === "turn_bot_on").at(-1), { op: "turn_bot_on", workflow: "c1", on: true });
+  assert.equal(reads.n, 1);
+});
+
+test("turning a bot off from its page reads the team's lists again; a refused turn reads nothing", async () => {
+  let fail = true;
+  const a = app({ answers: botAnswers({ turn_bot_on: () => (fail ? new Error("the team needs its Claude token before a bot can run") : null) }) });
+  const reads = countReads(a);
+  await openBot(a);
+  await a.click("toggle");
+  assert.equal(reads.n, 0, "a refused turn");
+  fail = false;
+  await a.click("toggle");
+  assert.deepEqual(a.frames.filter((f) => f.op === "turn_bot_on").at(-1), { op: "turn_bot_on", workflow: "c1", on: false });
+  assert.equal(reads.n, 1, "the turn that worked");
+});
+
+test("turning a new bot on from the done screen reads the team's lists again", async () => {
+  const a = app({ team: OWNER_TEAM, email: "ana.prado@acme.dev", answers: wizardAnswers(saving("c1", { turn_bot_on: null })) });
+  const reads = countReads(a);
+  await a.open("team-bot-new");
+  await a.click("idea", { idea: "review" });
+  await a.click("next");
+  await a.click("next");
+  await a.click("next");
+  await a.click("project", { key: "github.com/acme/site" });
+  await a.click("next");
+  assert.equal(reads.n, 1, "the save");
+  await a.click("turn-on");
+  assert.deepEqual(a.frames.filter((f) => f.op === "turn_bot_on").at(-1), { op: "turn_bot_on", workflow: "c1", on: true });
+  assert.equal(reads.n, 2, "and then the turn-on");
+});
+
+test("deleting a draft reads the team's lists again, so the sidebar loses it", async () => {
+  const a = app({ team: OWNER_TEAM, email: "ana.prado@acme.dev", answers: botAnswers({ bots: [bot({ on: false })], delete_bot: null }) });
+  const reads = countReads(a);
+  await openBot(a);
+  await a.click("delete-ask");
+  await a.click("delete");
+  assert.deepEqual(a.frames.filter((f) => f.op === "delete_bot"), [{ op: "delete_bot", workflow: "c1" }]);
+  assert.equal(reads.n, 1);
+});

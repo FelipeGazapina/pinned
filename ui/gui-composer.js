@@ -161,8 +161,14 @@ function menuKind(menu) {
 const declineOption = (menu) => menuKind(menu) === "approval" && menu.options.findLast((o) => /^No\b/.test(o.head));
 const freeOption = (menu) => menuKind(menu) !== "approval" && menu.options.find((o) => /^(Type something|Tell Claude what to change)/.test(o.head));
 
-/** The prompt says what its Send does while claude waits on an approval or a plan. */
+/** The prompt says it is personal while a team is current: a thread here is the person's own, not the team's. */
 function placeholderFor(tab, t) {
+  const text = promptText(tab, t);
+  return typeof teamsNow !== "undefined" && teamsNow !== null ? `Personal · ${text}` : text;
+}
+
+/** The prompt says what its Send does while claude waits on an approval or a plan. */
+function promptText(tab, t) {
   const menu = tab.menu;
   const desk = matchMedia("(min-width: 769px)").matches;
   if (menu && menuKind(menu) === "approval") {
@@ -240,6 +246,7 @@ function renderComposer(tab) {
   // A phone's one-line prompt grows to the lines its placeholder wraps to.
   if (narrow(768) && !prompt.value) fitPrompt();
 }
+document.addEventListener("teams:changed", () => active && renderComposer(active));
 function fitPrompt() {
   prompt.style.height = "auto";
   prompt.style.height = `${Math.min(prompt.scrollHeight, 208)}px`;

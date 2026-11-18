@@ -625,7 +625,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pinned-mcp-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir.canonicalize().unwrap()
+        dunce::canonicalize(&dir).unwrap()
     }
 
     fn write(file: &Path, value: Value) {

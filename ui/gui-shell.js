@@ -231,6 +231,7 @@ function openPicked(tab) {
 }
 const openProjectIn = (machine, path) => (machine === LOCAL ? openTab(LOCAL, path) : openRemote(machine, path, false)).catch((e) => tell(`Couldn't open a thread: ${esc(e)}`, 6000));
 function paletteProjects() {
+  if (!globalThis.PinnedProjects) return [];
   const seen = new Map(palette.projects.map((p) => [`${p.machine}:${p.path}`, p]));
   for (const tab of tabs) {
     const path = projectOfTab(tab);
@@ -310,6 +311,8 @@ async function openSettings(name) {
 const linkedThreadItems = () =>
   palette.linked.threads.map((tab) => ({ icon: "message-square", title: esc(threadTitle(tab)), sub: "Linked thread", terms: [palette.linked.query, threadTitle(tab)], run: () => openPicked(tab) }));
 
+/** Whether a team is the current one: the palettes say "personal" only while it is. */
+const paletteTeamCurrent = () => typeof teamsNow !== "undefined" && teamsNow !== null;
 const PALETTE_VIEWS = {
   root: {
     placeholder: "Search commands, projects, and threads...",
@@ -319,7 +322,7 @@ const PALETTE_VIEWS = {
       const actions = { label: "Actions", items: actionItems() };
       if (actionsOnly) return filterGroups([actions], query.slice(1));
       const byRecent = [...tabs].sort((a, b) => latestUserAt(b) - latestUserAt(a));
-      if (!normalize(query)) return [actions, { label: "Recent Threads", items: byRecent.slice(0, RECENT_THREADS).map((t) => threadItem(t)) }].filter((g) => g.items.length);
+      if (!normalize(query)) return [actions, { label: paletteTeamCurrent() ? "Personal · Recent Threads" : "Recent Threads", items: byRecent.slice(0, RECENT_THREADS).map((t) => threadItem(t)) }].filter((g) => g.items.length);
       searchThreads(query);
       const directory = machineDirectory();
       const projects = paletteProjects().map((p) => ({
@@ -333,7 +336,7 @@ const PALETTE_VIEWS = {
         },
       }));
       const linked = palette.linked && palette.linked.query === query;
-      const threadsGroup = { label: "Threads", items: linked ? linkedThreadItems() : byRecent.map((t) => threadItem(t, query)) };
+      const threadsGroup = { label: paletteTeamCurrent() ? "Personal · Threads" : "Threads", items: linked ? linkedThreadItems() : byRecent.map((t) => threadItem(t, query)) };
       return filterGroups([actions, { label: "Projects", items: projects }, { label: "Settings", items: settingsSearchItems() }, threadsGroup], query);
     },
     empty: (query) => (palette.search?.pending ? "Searching thread messages…" : query.startsWith(">") ? "No matching actions." : "No matching commands, projects, or threads."),
@@ -363,7 +366,7 @@ const PALETTE_VIEWS = {
     submit: (query) => createProject(query),
   },
   "new-thread-in": {
-    placeholder: "Search...",
+    placeholder: () => (paletteTeamCurrent() ? "New personal thread..." : "Search..."),
     groups(query) {
       const directory = machineDirectory();
       const all = paletteProjects();
@@ -602,6 +605,7 @@ paletteEl.querySelector(".backdrop").onclick = () => cancelPalette();
 paletteEl.querySelector(".lead").onclick = () => (palette.views.length > 1 ? popPalette() : paletteInput.focus());
 
 onGuiKey("k", () => (paletteOpen() ? cancelPalette() : openPalette()));
+document.addEventListener("teams:changed", () => paletteOpen() && renderPalette());
 
 /** Draws the page, keeping where its body was scrolled. */
 function setPage(html) {
