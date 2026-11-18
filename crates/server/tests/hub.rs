@@ -4561,6 +4561,50 @@ fn an_external_agent_connects_through_oauth_and_works_only_where_it_was_let_in()
     drop(node);
 }
 
+#[test]
+fn an_external_agents_message_never_opens_or_starts_an_orchestrator_that_skips_permissions() {
+    let hub = TestHub::start("agent_orchestrator_prompts");
+    let url = hub.url.clone();
+    let http = agent_http();
+    let client_id = register_agent(&url, &http);
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut client = Client::connect(&url, &token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let dir = temp("agent-orchestrator-prompts");
+    let creds = pair(&url, &mut client, "mac", &dir);
+    let node = Node::start(&dir, creds.clone());
+    std::fs::write(dir.join("claude"), "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nstty raw -echo 2>/dev/null\nexec cat\n").unwrap();
+    client.wait_machines(&[("mac", true)]);
+    node.machine.listen(|_| Err("not in this test".into())).unwrap();
+    let open = |name: &str| {
+        let folder = dir.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        node.machine.open_project(folder).display().to_string()
+    };
+    let (fresh, opened) = (open("fresh"), open("opened"));
+    let m = creds.machine_id.as_str();
+    let (access, _) = connect_agent(&url, &http, &mut client, &client_id, &["orchestrator"], json!([{ "machine": m, "path": fresh }, { "machine": m, "path": opened }]));
+    let listed = tool(&url, &http, &access, "list_projects", json!({})).unwrap();
+    let pid = |name: &str| listed["projects"].as_array().unwrap().iter().find(|p| p["name"] == name).unwrap()["id"].as_str().unwrap().to_owned();
+    let captain = |path: &str| node.machine.tabs().into_iter().find(|t| t.role == Some(Role::Orchestrator) && t.cwd == path);
+
+    // The project has no Captain: the one the agent's message opens asks for its permission prompts.
+    let told = tool(&url, &http, &access, "message_orchestrator", json!({ "project": pid("fresh"), "message": "plan the release", "request_id": "o-1" })).unwrap();
+    assert_eq!(told["started"], true, "{told}");
+    let made = captain(&fresh).expect("the message opened the Captain");
+    assert!(made.running && !made.bypass, "an external agent opened a Captain that skips its permission prompts");
+
+    // The user's app opened the other Captain and left it stopped: in Full access the agent can't start it.
+    let full = node.machine.open_orchestrator(&opened).unwrap();
+    if captain(&opened).unwrap().bypass {
+        let refused = tool(&url, &http, &access, "message_orchestrator", json!({ "project": pid("opened"), "message": "drop the tables", "request_id": "o-2" })).unwrap_err();
+        assert!(refused.contains("skips its permission prompts"), "{refused}");
+        std::thread::sleep(Duration::from_millis(300));
+        let view = captain(&opened).unwrap();
+        assert!(view.id == full && !view.running, "an external agent started a session that skips its permission prompts");
+    }
+}
+
 enum RawReply {
     Ok(Value),
     Err(String),

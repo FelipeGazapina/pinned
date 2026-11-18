@@ -13707,6 +13707,68 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn an_agents_enqueue_never_opens_a_captain_wider_than_the_agent() {
+        let dir = temp("act-enqueue-ceiling");
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let project = |name: &str| {
+            let folder = dir.join(name);
+            std::fs::create_dir_all(&folder).unwrap();
+            m.open_project(folder).display().to_string()
+        };
+        let (home, full_home) = (project("home"), project("full-home"));
+        let auto = m.open_tab(Some(home.clone()), false).unwrap();
+        let full = m.open_tab(Some(full_home), true).unwrap();
+        let enqueue = |from: &str, path: &str, request: &str| {
+            let sent = act_as(&m, from, "enqueue", json!({ "path": path, "text": "Ship it.", "request_id": request }));
+            sent.unwrap_or_else(|e| panic!("{e}"))["tab"].as_str().unwrap().to_owned()
+        };
+        let bypass = |tab: &str| m.view(tab).unwrap().bypass;
+
+        let captain = enqueue(&auto, &project("from-auto"), "r-1");
+        assert!(!bypass(&captain), "an agent that asks for its permission prompts opened a Captain that skips them");
+        assert!(!started(&dir.join("claude"), &captain).iter().any(|a| a == "--dangerously-skip-permissions"), "the Captain started on the agent's text skips its prompts");
+        let captain = enqueue("", &project("from-elsewhere"), "r-2");
+        assert!(!bypass(&captain), "an agent on another machine, whose access this machine can't know, opened a Captain that skips its prompts");
+        assert!(bypass(&enqueue(&full, &project("from-full"), "r-3")), "a Full agent's Captain is Full like it");
+
+        let opened: String = serde_json::from_value(m.call(Call::Enqueue { path: project("from-app"), text: "Ship it.".into(), request_id: "r-4".into(), sender: String::new(), busy: None }).unwrap()["tab"].clone()).unwrap();
+        assert!(bypass(&opened), "the user's own enqueue opens the Captain in Full access");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_default_codex_or_cursor_worker_of_a_full_session_gets_no_bypass_flag() {
+        let root = temp("default-cli-workers");
+        let argv = root.join("argv");
+        let (codex, cursor) = (root.join("codex"), root.join("cursor-agent"));
+        let record = format!("printf '%s\\n' \"$@\" > \"{}\"\n", argv.display());
+        std::fs::write(&codex, format!("#!/bin/sh\nif [ \"$1 $2\" = \"login status\" ]; then echo 'Logged in using ChatGPT'; exit 0; fi\n{record}echo '{{\"type\":\"thread.started\",\"thread_id\":\"t1\"}}'\n")).unwrap();
+        std::fs::write(&cursor, format!("#!/bin/sh\nif [ \"$1\" = status ]; then echo 'Logged in as ana@acme.dev'; exit 0; fi\nif [ \"$1\" = \"--list-models\" ]; then exit 0; fi\n{record}echo '{{\"type\":\"result\",\"result\":\"ok\"}}'\n")).unwrap();
+        for bin in [&codex, &cursor] {
+            std::fs::set_permissions(bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Codex, codex), (Provider::Cursor, cursor)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
+        let run = |args: Value| {
+            let _ = std::fs::remove_file(&argv);
+            m.start_delegate(Some(tab.clone()), None, None, crate::delegate::parse_request(&args).unwrap()).unwrap();
+            wait_for("the worker's argv", || std::fs::read(&argv).is_ok_and(|b| !b.is_empty()));
+            String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect::<Vec<String>>()
+        };
+        for (instance, skip) in [("codex", "--dangerously-bypass-approvals-and-sandbox"), ("cursor", "--force")] {
+            let lines = run(json!({ "task": "look", "target": { "providerInstanceId": instance }, "mode": "async" }));
+            assert!(!lines.iter().any(|a| a == skip), "a default {instance} worker of a Full session skips its prompts: {lines:?}");
+            let lines = run(json!({ "task": "look", "target": { "providerInstanceId": instance }, "mode": "async", "runtimeMode": "full-access" }));
+            assert!(lines.iter().any(|a| a == skip), "a {instance} worker asked for in Full access is Full: {lines:?}");
+        }
+        assert!(run(json!({ "task": "look", "target": { "providerInstanceId": "codex" }, "mode": "async" })).iter().any(|a| a == "--full-auto"), "a default Codex worker runs at its old level, auto");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn an_agents_prompt_reaches_another_running_session_and_never_itself_a_captain_or_the_global_tab() {
         let (m, dir, captain) = limited_captain("act-prompt", TastePatch::default());
         let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();

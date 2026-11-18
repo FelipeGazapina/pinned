@@ -438,6 +438,116 @@ mod tests {
         }
     }
 
+    /// What a session reads when the hook could not read a tool call it guards.
+    const UNREADABLE: &str = "pinned could not read this tool call, so it does not run: make the call again with its usual fields.";
+
+    #[test]
+    fn a_tool_call_the_hook_cannot_read_is_denied_and_a_tool_it_does_not_guard_runs() {
+        let unreadable = [
+            "not json".to_owned(),
+            json!({ "tool_name": "Write", "tool_input": {}, "cwd": "/work/site" }).to_string(),
+            json!({ "tool_name": "Bash", "tool_input": { "cmd": "echo {} > .mcp.json" }, "cwd": "/work/site" }).to_string(),
+            json!({ "tool_input": { "file_path": "/x/.mcp.json" }, "cwd": "/work/site" }).to_string(),
+        ];
+        for team_box in [false, true] {
+            for call in &unreadable {
+                let (out, message) = decision(call, team_box, Ok(r#"{"id":"k1","granted":true}"#));
+                let out = out.unwrap_or_else(|| panic!("allowed: {call} (team box {team_box})"));
+                assert_eq!(denied(&out), UNREADABLE, "{call}");
+                assert!(message.is_none(), "{call}");
+            }
+            let other = payload("Frobnicate", json!({ "file_path": "/x/.mcp.json" }));
+            let (out, message) = decision(&other, team_box, Ok(r#"{"id":"k1"}"#));
+            assert!(out.is_none() && message.is_none(), "a tool the hook does not guard was stopped (team box {team_box})");
+        }
+    }
+
+    #[test]
+    fn with_no_cwd_an_owners_file_is_still_known_by_its_path() {
+        let calls = [
+            (json!({ "tool_name": "Write", "tool_input": { "file_path": "/x/.mcp.json", "content": "{}" } }), ".mcp.json"),
+            (json!({ "tool_name": "Edit", "tool_input": { "file_path": "/x/.claude/settings.local.json", "old_string": "a", "new_string": "b" } }), "settings.local.json"),
+            (json!({ "tool_name": "Bash", "tool_input": { "command": "echo {} > .mcp.json" } }), ".mcp.json"),
+        ];
+        for (call, name) in calls {
+            let (out, _) = decision(&call.to_string(), false, Ok(r#"{"id":"k1"}"#));
+            assert_eq!(denied(&out.unwrap_or_else(|| panic!("allowed: {call}"))), owners(name), "{call}");
+        }
+        let plain = json!({ "tool_name": "Write", "tool_input": { "file_path": "/x/notes.md", "content": "" } }).to_string();
+        assert!(decision(&plain, false, Ok(r#"{"id":"k1"}"#)).0.is_none(), "{plain}");
+    }
+
+    #[test]
+    fn a_copy_into_a_folder_that_names_an_owners_file_is_denied() {
+        let folder = std::env::temp_dir().join(format!("pinned-owners-copy-{}", std::process::id()));
+        std::fs::create_dir_all(folder.join("conf")).unwrap();
+        let at = |command: &str| json!({ "tool_name": "Bash", "tool_input": { "command": command }, "cwd": folder }).to_string();
+        let calls = [
+            (payload("Bash", json!({ "command": "cp /tmp/settings.local.json .claude/" })), "settings.local.json"),
+            (payload("Bash", json!({ "command": "cp -t .claude /tmp/.mcp.json" })), ".mcp.json"),
+            (payload("Bash", json!({ "command": "cp --target-directory=.claude /tmp/.mcp.json" })), ".mcp.json"),
+            (payload("Bash", json!({ "command": "rsync /tmp/.mcp.json ./" })), ".mcp.json"),
+            (payload("Bash", json!({ "command": "rsync -a /tmp/x/settings.local.json .claude/" })), "settings.local.json"),
+            (payload("Bash", json!({ "command": "install -m 600 /tmp/.mcp.json sub/" })), ".mcp.json"),
+            (payload("Bash", json!({ "command": "ln -s /tmp/.mcp.json ." })), ".mcp.json"),
+            (payload("Bash", json!({ "command": "cp a.txt /tmp/settings.json .claude/" })), ".claude/settings.json"),
+            (payload("Bash", json!({ "command": "cp /tmp/.claude.json ~/" })), ".claude.json"),
+            (at("cp /tmp/.mcp.json conf"), ".mcp.json"),
+            (at("rsync /tmp/settings.local.json conf"), "settings.local.json"),
+        ];
+        for (call, name) in calls {
+            let (out, _) = decision(&call, false, Ok(r#"{"id":"k1"}"#));
+            assert_eq!(denied(&out.unwrap_or_else(|| panic!("allowed: {call}"))), owners(name), "{call}");
+        }
+        for command in ["cp a.txt .claude/", "cp -t .claude a.txt b.txt", "rsync -a src/ ./", "cp .mcp.json.bak backup/"] {
+            let (out, _) = decision(&payload("Bash", json!({ "command": command })), false, Ok(r#"{"id":"k1"}"#));
+            assert!(out.is_none(), "{command}");
+        }
+        assert!(decision(&at("cp /tmp/notes.md conf"), false, Ok(r#"{"id":"k1"}"#)).0.is_none());
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn claude_mcp_add_or_remove_through_bash_is_denied_as_an_owners_file() {
+        for command in ["claude mcp add x -- cmd", "claude mcp add-json x '{}'", "claude mcp remove x", "claude --debug mcp add -s user x -- npx y", "cd sub && claude mcp add x -- cmd"] {
+            for team_box in [false, true] {
+                let (out, message) = decision(&payload("Bash", json!({ "command": command })), team_box, Ok(r#"{"id":"k1","granted":true}"#));
+                assert_eq!(denied(&out.unwrap_or_else(|| panic!("allowed: {command}"))), owners(".mcp.json"), "{command}");
+                assert!(message.is_none(), "{command}");
+            }
+        }
+        for command in ["claude mcp list", "claude mcp get x", "claude -p 'add an mcp server'"] {
+            assert!(decision(&payload("Bash", json!({ "command": command })), false, Ok(r#"{"id":"k1"}"#)).0.is_none(), "{command}");
+        }
+    }
+
+    #[test]
+    fn the_claude_settings_file_and_claude_json_are_the_owners_too() {
+        let calls = [
+            (payload("Write", json!({ "file_path": "/work/site/.claude/settings.json", "content": "{}" })), ".claude/settings.json"),
+            (payload("Edit", json!({ "file_path": "/Users/ana/.claude/settings.json", "old_string": "a", "new_string": "b" })), ".claude/settings.json"),
+            (payload("Bash", json!({ "command": "echo x > .claude.json" })), ".claude.json"),
+            (payload("Bash", json!({ "command": "sed -i s/a/b/ .claude/settings.json" })), ".claude/settings.json"),
+            (payload("Write", json!({ "file_path": "/Users/ana/.claude.json", "content": "{}" })), ".claude.json"),
+            (payload("Bash", json!({ "command": "cd .claude && echo {} > settings.json" })), ".claude/settings.json"),
+        ];
+        for (call, name) in calls {
+            for team_box in [false, true] {
+                let (out, message) = decision(&call, team_box, Ok(r#"{"id":"k1","granted":true}"#));
+                assert_eq!(denied(&out.unwrap_or_else(|| panic!("allowed: {call}"))), owners(name), "{call}");
+                assert!(message.is_none(), "{call}");
+            }
+        }
+        for call in [
+            payload("Write", json!({ "file_path": "/work/site/docs/settings.json", "content": "" })),
+            payload("Write", json!({ "file_path": "/work/site/claude/settings.json", "content": "" })),
+            payload("Write", json!({ "file_path": "/work/site/.claude.json.md", "content": "" })),
+            payload("Bash", json!({ "command": "cat .claude/settings.json" })),
+        ] {
+            assert!(decision(&call, false, Ok(r#"{"id":"k1"}"#)).0.is_none(), "{call}");
+        }
+    }
+
     #[test]
     fn every_sessions_settings_register_the_hook_and_a_team_box_runs_it_on_every_tool() {
         let exe = Path::new("/usr/local/bin/pinned");
