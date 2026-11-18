@@ -3083,7 +3083,7 @@ impl Connectors {
             }
         }
         // A run of this check that no tab opened yet has not started.
-        let opening: Vec<String> = settled.work.iter().filter_map(|work| match work { Work::Run(run) => Some(subject_key(&run.subject)), _ => None }).collect();
+        let opening: Vec<String> = work.iter().filter_map(|(work, _)| match work { Work::Run(run) => Some(subject_key(&run.subject)), _ => None }).collect();
         if let Err(e) = self.settle_apps(&opening) {
             errors.push(e);
         }
@@ -11635,6 +11635,39 @@ mod tests {
         let mut again = ts[..slack::APPS_PER_CHECK].to_vec();
         again.push(ts[0].clone());
         assert_eq!(*opened.lock().unwrap(), again, "the next check opens the freed post again, and none of the five left out");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// No tab takes the ten app posts a local router's first check hands over, so the next check
+    /// hands the same ten over again.
+    #[test]
+    fn a_local_router_takes_again_the_app_posts_whose_open_failed() {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreVercelRoot);
+        let now = Utc::now();
+        let ts: Vec<String> = (0..15).map(|i| slack_ts(now - chrono::Duration::seconds(40 - i))).collect();
+        let posts: Vec<Value> = ts.iter().map(|ts| json!({ "ts": ts, "subtype": "bot_message", "bot_id": "B9", "username": "CI Bot", "text": format!("alert {ts}") })).collect();
+        let threads: serde_json::Map<String, Value> = posts.iter().map(|m| (m["ts"].as_str().unwrap().to_owned(), json!([m]))).collect();
+        let (connectors, dir, _, stop) = app_router("apps-router-open-failed", json!({ "history": posts, "threads": threads }));
+        let fail = std::sync::atomic::AtomicBool::new(true);
+        let opened = Mutex::new(Vec::<String>::new());
+        let open = |work: Work| {
+            let failing = fail.load(std::sync::atomic::Ordering::SeqCst);
+            if let (false, Work::Run(Run { subject: Subject::SlackThread { thread, .. }, .. })) = (failing, &work) {
+                opened.lock().unwrap().push(thread.clone());
+            }
+            async move {
+                match failing {
+                    true => Err("no machine is online".to_owned()),
+                    false => Ok(Some(Placement { machine: "m1".into(), tab: "tab-1".into() })),
+                }
+            }
+        };
+        let _ = block_on(connectors.check_once(&open));
+        fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(block_on(connectors.check_once(&open)).error, None);
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(*opened.lock().unwrap(), ts[..slack::APPS_PER_CHECK].to_vec(), "the second check opens the ten the first could not");
         let _ = std::fs::remove_dir_all(dir);
     }
 
