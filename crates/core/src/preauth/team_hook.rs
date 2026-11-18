@@ -21,6 +21,7 @@ use crate::agent::Message;
 use crate::team_call;
 use crate::teams::Situation;
 use serde_json::{json, Value};
+use std::io::Write;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,9 +84,12 @@ const WATCHDOG: std::time::Duration = std::time::Duration::from_secs(58);
 pub fn run() -> i32 {
     static ANSWERED: AtomicBool = AtomicBool::new(false);
     // Where it panicked, never the panic's text, which can quote the call.
-    std::panic::set_hook(Box::new(|panic| match panic.location() {
-        Some(at) => eprintln!("pinned team-guard panicked at {}:{}", at.file(), at.line()),
-        None => eprintln!("pinned team-guard panicked"),
+    // A closed stderr is ignored: a panic inside the hook aborts the process.
+    std::panic::set_hook(Box::new(|panic| {
+        let _ = match panic.location() {
+            Some(at) => writeln!(std::io::stderr(), "pinned team-guard panicked at {}:{}", at.file(), at.line()),
+            None => writeln!(std::io::stderr(), "pinned team-guard panicked"),
+        };
     }));
     std::thread::spawn(|| {
         std::thread::sleep(watchdog());
@@ -101,20 +105,25 @@ pub fn run() -> i32 {
         }
     }
     match decided {
-        Ok(output) => {
-            if let Some(output) = output {
-                println!("{output}");
-            }
-            0
-        }
+        Ok(output) => match output {
+            // A deny that could not be written is still a deny.
+            Some(output) if writeln!(std::io::stdout(), "{output}").is_err() => fail_closed(),
+            _ => 0,
+        },
         Err(_) => fail_closed(),
     }
 }
 
 /// Prints the deny, with its reason on stderr, which Claude Code reads with exit code 2.
 fn fail_closed() -> i32 {
-    println!("{}", deny(COULD_NOT_CHECK));
-    eprintln!("{COULD_NOT_CHECK}");
+    fail_closed_to(std::io::stdout(), std::io::stderr())
+}
+
+/// `fail_closed` to `out` and `err`. A closed pipe is ignored, where `println!` would panic and
+/// keep the watchdog from exiting: the code is 2 whatever was written.
+fn fail_closed_to(mut out: impl Write, mut err: impl Write) -> i32 {
+    let _ = writeln!(out, "{}", deny(COULD_NOT_CHECK));
+    let _ = writeln!(err, "{COULD_NOT_CHECK}");
     2
 }
 
