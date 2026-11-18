@@ -9587,7 +9587,7 @@ fn concurrent_extend_box_asks_for_one_box_wait_only_as_far_as_the_box_budget_goe
                 let ask = json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 1.5 }, "request_id": format!("r-{n}") });
                 tokio::spawn(async move {
                     loop {
-                        match pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await {
+                        match pinned_server::surface::act(&running, &account, &origin, false, serde_json::from_value(ask.clone()).unwrap()).await {
                             Err(busy) if busy == pinned_core::wire::HUB_BUSY => tokio::time::sleep(Duration::from_millis(10)).await,
                             answer => return answer,
                         }
@@ -9934,7 +9934,7 @@ fn concurrent_extend_box_asks_for_different_boxes_of_one_account_fill_its_cap_ex
             .map(|n| {
                 let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
                 let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": boxes[n % 3], "extra_usd": 0.1 } })).unwrap();
-                tokio::spawn(async move { pinned_server::surface::act(&running, &account, &origin, act).await })
+                tokio::spawn(async move { pinned_server::surface::act(&running, &account, &origin, false, act).await })
             })
             .collect();
         let mut answers = vec![];
@@ -10027,7 +10027,7 @@ fn extends_watched(hub: &TestHub, account: uuid::Uuid, ana: &Agent, asks: &[Valu
         .map(|ask| {
             let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
             let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": ask })).unwrap();
-            hub.runtime.spawn(async move { pinned_server::surface::act(&running, &account, &origin, act).await })
+            hub.runtime.spawn(async move { pinned_server::surface::act(&running, &account, &origin, false, act).await })
         })
         .collect();
     let mut most = 0;
@@ -10132,7 +10132,7 @@ fn a_flood_of_extend_box_asks_for_one_box_never_starves_the_owners_decision() {
                 tokio::time::sleep(Duration::from_millis(10 * n)).await;
                 let mut answers = vec![];
                 while !stop.load(Ordering::SeqCst) {
-                    answers.push(pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await);
+                    answers.push(pinned_server::surface::act(&running, &account, &origin, false, serde_json::from_value(ask.clone()).unwrap()).await);
                 }
                 answers
             })
@@ -10158,7 +10158,7 @@ fn timed_extend(hub: &TestHub, account: &Arc<pinned_server::hub::Account>, ana: 
     let act = serde_json::from_value(act).unwrap();
     hub.runtime.spawn(async move {
         let started = tokio::time::Instant::now();
-        let answer = pinned_server::surface::act(&running, &account, &origin, act).await;
+        let answer = pinned_server::surface::act(&running, &account, &origin, false, act).await;
         (answer, started.elapsed())
     })
 }
@@ -10210,7 +10210,7 @@ fn a_flood_of_extend_box_asks_for_one_box_keeps_another_box_waiting_behind_at_mo
                 tokio::time::sleep(Duration::from_millis(5 * n)).await;
                 let mut answers = vec![];
                 while !stop.load(Ordering::SeqCst) {
-                    let answer = pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await;
+                    let answer = pinned_server::surface::act(&running, &account, &origin, false, serde_json::from_value(ask.clone()).unwrap()).await;
                     // A client asks again a little after a busy answer, as one that asks at once would only load the hub.
                     if answer == Err(pinned_core::wire::HUB_BUSY.to_owned()) {
                         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -10280,7 +10280,7 @@ fn a_later_extend_box_ask_waits_2_s_from_its_own_start() {
         let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
         hub.runtime.spawn(async move {
             let started = tokio::time::Instant::now();
-            let answer = tokio::time::timeout(Duration::from_secs(6), pinned_server::surface::act(&running, &account, &origin, act)).await;
+            let answer = tokio::time::timeout(Duration::from_secs(6), pinned_server::surface::act(&running, &account, &origin, false, act)).await;
             (answer, started.elapsed())
         })
     };
@@ -10319,7 +10319,7 @@ fn an_extend_box_asks_reads_before_its_turn_count_in_its_2_s() {
     table_taken.recv().unwrap();
     let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
     let started = Instant::now();
-    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, false, act));
     let waited = started.elapsed();
     blocker.join().unwrap();
     lock.release();
@@ -10358,7 +10358,7 @@ fn an_extend_box_ask_with_a_request_id_answers_within_its_2_s_across_two_held_re
     let second = hold("agent_confirmations", Duration::from_millis(3000));
     let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 }, "request_id": "r-two-holds" })).unwrap();
     let started = Instant::now();
-    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, false, act));
     let waited = started.elapsed();
     first.join().unwrap();
     second.join().unwrap();
@@ -10397,7 +10397,7 @@ fn an_extend_box_ask_answers_within_its_2_s_when_its_box_read_and_the_confirmati
     let second = hold("agent_confirmations", Duration::from_millis(3000));
     let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
     let started = Instant::now();
-    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, false, act));
     let waited = started.elapsed();
     first.join().unwrap();
     second.join().unwrap();
@@ -10434,7 +10434,7 @@ fn an_extend_box_ask_answers_within_its_2_s_when_its_turn_lock_is_held() {
     table_taken.recv().unwrap();
     let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
     let started = Instant::now();
-    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, false, act));
     let waited = started.elapsed();
     blocker.join().unwrap();
     holder.join().unwrap();
@@ -10472,7 +10472,7 @@ fn an_extend_box_ask_answers_within_its_2_s_when_a_read_in_its_turn_is_held() {
         });
     });
     let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "request_id": "r-read-held", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
-    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, false, act));
     let waited = started.elapsed();
     blocker.join().unwrap();
     holder.join().unwrap();
@@ -13280,6 +13280,7 @@ mod teams_groups;
 mod teams_box_call;
 #[path = "hub/teams_calls.rs"] mod teams_calls;
 #[path = "hub/teams_runs.rs"] mod teams_runs;
+#[path = "hub/box_push_gate.rs"] mod box_push_gate;
 #[path = "hub/teams_go_ahead.rs"] mod teams_go_ahead;
 #[path = "hub/teams_separation_fixes.rs"] mod teams_separation_fixes;
 #[path = "hub/teams_hardening.rs"]

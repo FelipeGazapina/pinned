@@ -97,7 +97,8 @@ fn json<T: serde::Serialize>(value: T) -> Result<Value, String> {
 
 /// Runs `act` for the session in tab `act.tab` of `origin`, a machine of `account`, or holds it
 /// for the user's approval. Every outcome but a repeat or a busy refusal writes one audit row.
-pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: AgentAct) -> Result<Value, String> {
+/// `boxed`: whether the connection the act came on signed in as a box (`box_gate::is_box`).
+pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, boxed: bool, act: AgentAct) -> Result<Value, String> {
     // An extend's wait counts from here, its own start, so its reads before its turn count in it.
     let deadline = ExtendTurn::deadline();
     let caller = Caller::of(account, origin, &act.tab)?;
@@ -115,7 +116,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             Some((earlier, at)) => return json(ActAnswer::Repeat { earlier, at }),
         }
     }
-    let mut admitted = match admit(hub, account, origin, &caller, &act, deadline).await {
+    let mut admitted = match admit(hub, account, origin, boxed, &caller, &act, deadline).await {
         Ok(admitted) => admitted,
         // Refused for a busy lock, nothing was done: no row, so the same request_id asks again.
         Err(busy) if busy == crate::db::BUSY => return Err(busy),
@@ -246,7 +247,7 @@ pub fn refuse_review_setting(call: &HubCall) -> Result<(), String> {
 }
 
 /// The act as it may run, or why it may not, checked in the order the contract lists.
-async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act: &AgentAct, deadline: tokio::time::Instant) -> Result<Admitted, String> {
+async fn admit(hub: &Hub, account: &Account, origin: &str, boxed: bool, caller: &Caller, act: &AgentAct, deadline: tokio::time::Instant) -> Result<Admitted, String> {
     if !caller.known {
         let name = account.name_of(origin).unwrap_or_else(|| origin.to_owned());
         return Err(format!("{name} runs no session {}", caller.tab));
@@ -282,6 +283,41 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
     if surface::skips_prompts(&call) && !caller.bypass {
         return Err(format!("{name} would run a session that skips its permission prompts, and your own session asks for them"));
     }
+    if let Parsed::Hub(HubCall::SaveConnector { connector }) = &call {
+        let connectors = hub.connectors(account).await?;
+        // A save with no graph keeps the stored one, which then runs on the trigger this save sets.
+        if let Some(graph) = connectors.kept_graph(connector).filter(|_| !caller.bypass) {
+            let kept = Parsed::Hub(HubCall::SaveConnector { connector: Connector { graph: Some(graph), ..connector.clone() } });
+            if surface::skips_prompts(&kept) {
+                return Err(format!("{name} would keep this workflow's session that skips its permission prompts, and your own session asks for them"));
+            }
+        }
+        // A called workflow opens its session from its own stored setup, on this save's trigger.
+        let skips = |target: &Connector| surface::skips_prompts(&Parsed::Hub(HubCall::SaveConnector { connector: target.clone() }));
+        if !caller.bypass && connectors.calls_any(connector, skips) {
+            return Err(format!("{name} would call a workflow whose session skips its permission prompts, or one pinned cannot read, and your own session asks for them"));
+        }
+        if connectors.widens_convex(connector) {
+            return Err(format!("{name} would let this workflow read more of Convex than it does now. Only the user sets what a workflow reads from Convex, on its Read Convex data step in the app."));
+        }
+    }
+    let asked = act.machine.as_deref().map(str::trim).filter(|m| !m.is_empty() && action.side == Side::Node);
+    let target = match asked {
+        Some(asked) => crate::remote::resolve(hub, account, asked).await?.0,
+        None => origin.to_owned(),
+    };
+    let on_origin = target == origin;
+    if action.elsewhere && on_origin {
+        return Err(format!("{name} reads files on another machine of the account: on your own machine use your own shell and files"));
+    }
+    if action.starts_work && !on_origin {
+        return Err(format!("{name} starts work only on this session's own machine for now"));
+    }
+    // A box may only pull the account's files: its sessions' acts are held to `box_gate` as its
+    // own calls are, and on the account's other machines they only read.
+    if crate::box_gate::is_box(boxed, account, origin) {
+        crate::box_gate::box_may_act(origin, &call, on_origin, action.class == Class::Read)?;
+    }
     // An extend that cannot run is refused now, with the text its run would give, so the owner is
     // never asked for it. Its run after the approval checks again. A repeat of an ask this session
     // made is answered as that ask, when it is held, and not checked again. The check and the hold
@@ -315,36 +351,6 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
             tokio::time::timeout_at(deadline, crate::boxes::extended(hub, account, machine, *extra_usd, for_box)).await.map_err(|_| crate::db::BUSY.to_owned())??;
         }
         turn = Some(held);
-    }
-    if let Parsed::Hub(HubCall::SaveConnector { connector }) = &call {
-        let connectors = hub.connectors(account).await?;
-        // A save with no graph keeps the stored one, which then runs on the trigger this save sets.
-        if let Some(graph) = connectors.kept_graph(connector).filter(|_| !caller.bypass) {
-            let kept = Parsed::Hub(HubCall::SaveConnector { connector: Connector { graph: Some(graph), ..connector.clone() } });
-            if surface::skips_prompts(&kept) {
-                return Err(format!("{name} would keep this workflow's session that skips its permission prompts, and your own session asks for them"));
-            }
-        }
-        // A called workflow opens its session from its own stored setup, on this save's trigger.
-        let skips = |target: &Connector| surface::skips_prompts(&Parsed::Hub(HubCall::SaveConnector { connector: target.clone() }));
-        if !caller.bypass && connectors.calls_any(connector, skips) {
-            return Err(format!("{name} would call a workflow whose session skips its permission prompts, or one pinned cannot read, and your own session asks for them"));
-        }
-        if connectors.widens_convex(connector) {
-            return Err(format!("{name} would let this workflow read more of Convex than it does now. Only the user sets what a workflow reads from Convex, on its Read Convex data step in the app."));
-        }
-    }
-    let asked = act.machine.as_deref().map(str::trim).filter(|m| !m.is_empty() && action.side == Side::Node);
-    let target = match asked {
-        Some(asked) => crate::remote::resolve(hub, account, asked).await?.0,
-        None => origin.to_owned(),
-    };
-    let on_origin = target == origin;
-    if action.elsewhere && on_origin {
-        return Err(format!("{name} reads files on another machine of the account: on your own machine use your own shell and files"));
-    }
-    if action.starts_work && !on_origin {
-        return Err(format!("{name} starts work only on this session's own machine for now"));
     }
     Ok(Admitted { action, call, target, on_origin, turn })
 }
