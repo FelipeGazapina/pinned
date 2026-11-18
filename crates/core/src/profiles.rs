@@ -89,22 +89,6 @@ impl Tastes {
         }
         Ok(())
     }
-
-    /// `profile_propose`: keeps `profile` in `proposed`, by the orchestrator, in place of an
-    /// earlier proposal of the same name. Never the account's or a project's list: only the user
-    /// takes a proposal into one, and `resolve` never reads `proposed`.
-    pub fn propose_worker_profile(&mut self, profile: WorkerProfile) -> Result<(), String> {
-        profile.check()?;
-        not_the_reviewer(&profile)?;
-        let profile = WorkerProfile { by: ProfileAuthor::Orchestrator, ..profile };
-        let proposed = &mut self.worker_profiles.proposed;
-        match proposed.iter().position(|p| same_name(&p.name, &profile.name)) {
-            Some(earlier) => proposed[earlier] = profile,
-            None if proposed.len() >= MAX_PROPOSED => return Err(format!("{MAX_PROPOSED} proposals already wait for the user; nothing changed")),
-            None => proposed.push(profile),
-        }
-        Ok(())
-    }
 }
 
 impl WorkerProfile {
@@ -130,8 +114,6 @@ impl WorkerProfile {
     }
 }
 
-/// The most proposals that wait for the user at once.
-pub const MAX_PROPOSED: usize = 20;
 /// The seed whose model, rules and rounds are `Tastes::reviewer`'s, and no list's.
 pub const REVIEWER: &str = "Reviewer";
 
@@ -362,11 +344,11 @@ mod tests {
         let mut tastes = Tastes::default();
         tastes.propose_worker_profile(profile("fixer")).unwrap();
         tastes.propose_worker_profile(WorkerProfile { delivers: "A fix.".into(), ..profile("Fixer") }).unwrap();
-        assert_eq!(tastes.worker_profiles.proposed, vec![WorkerProfile { delivers: "A fix.".into(), by: ProfileAuthor::Orchestrator, ..profile("Fixer") }], "the same name replaces, by the orchestrator");
+        tastes.propose_worker_profile(WorkerProfile { delivers: "A fix.".into(), ..profile(" Fixer ") }).unwrap();
+        assert_eq!(tastes.worker_profiles.proposed, vec![WorkerProfile { delivers: "A fix.".into(), by: ProfileAuthor::Orchestrator, ..profile("Fixer") }], "the same name replaces, trimmed, by the orchestrator");
         assert_eq!((tastes.worker_profiles.account.len(), tastes.worker_profiles.projects.len()), (0, 0));
         let before = tastes.clone();
         assert_eq!(tastes.propose_worker_profile(profile(" ")), Err("every profile needs a name".into()));
-        assert_eq!(tastes.propose_worker_profile(profile("Reviewer")), Err("the Reviewer is set in its own section, so no profile takes its name".into()));
         assert_eq!(tastes, before);
     }
 
