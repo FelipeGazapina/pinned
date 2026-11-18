@@ -13739,6 +13739,19 @@ fn act_cannot_set_the_reviewer_or_worker_profiles_for_any_role_and_the_user_can(
     let tastes: Tastes = serde_json::from_value(ana.hub(json!({ "cmd": "get_tastes" })).unwrap()).unwrap();
     assert_eq!((tastes.reviewer.rounds, tastes.worker_profiles.account.len()), (2, 0), "no agent changed them");
 
+    // A machine forwards neither as a plain hub call.
+    let plain = Err("a machine may only forward a workflow session's callbacks".to_owned());
+    assert_eq!(raw.ask(json!({ "cmd": "set_reviewer", "patch": { "rounds": 5 } })), plain);
+    assert_eq!(raw.ask(json!({ "cmd": "set_worker_profiles", "profiles": [{ "name": "scout" }] })), plain);
+    // A signed-out app's tastes, which a machine imports into an empty account, pass the same checks.
+    let import = |tastes: Value| raw.ask(json!({ "cmd": "import_tastes", "tastes": tastes }));
+    assert_eq!(import(json!({ "reviewer": { "rounds": 0 } })), Err("review rounds go from 1 to 5".into()));
+    assert_eq!(import(json!({ "reviewer": { "rules": [{ "id": "R1", "text": "Tests first." }] } })), Err(r#"the account's rule ids go A1, A2 and on, not "R1""#.into()));
+    assert_eq!(import(json!({ "worker_profiles": { "proposed": [{ "name": " " }] } })), Err("every profile needs a name".into()));
+    assert_eq!(import(json!({ "worker_profiles": { "projects": { "github.com/acme/app": [{ "name": "scout", "delivers": "a\nb" }] } } })), Err("what scout delivers fits one line".into()));
+    assert_eq!(ana.hub(json!({ "cmd": "get_tastes" })).unwrap(), serde_json::to_value(Tastes::default()).unwrap(), "a refused import stored nothing");
+    assert_eq!(import(json!({ "reviewer": { "rounds": 4 } })), Ok(json!(true)), "the account is still empty and takes a good one");
+
     // The user's own app writes them, and reads them back.
     let set = ana.hub(json!({ "cmd": "set_reviewer", "patch": { "rounds": 3, "rules": [{ "id": "A1", "text": "Tests first." }] } })).unwrap();
     assert_eq!((&set["reviewer"]["rounds"], &set["reviewer"]["rules"][0]["id"]), (&json!(3), &json!("A1")));
@@ -13746,4 +13759,36 @@ fn act_cannot_set_the_reviewer_or_worker_profiles_for_any_role_and_the_user_can(
     let tastes: Tastes = serde_json::from_value(ana.hub(json!({ "cmd": "get_tastes" })).unwrap()).unwrap();
     assert_eq!((tastes.reviewer.rounds, tastes.worker_profiles.projects["github.com/acme/app"][0].name.as_str()), (3, "scout"));
     assert_eq!(ana.hub(json!({ "cmd": "set_reviewer", "patch": { "rounds": 9 } })), Err("review rounds go from 1 to 5".into()));
+
+    // A Captain or the global orchestrator proposes a profile through its machine, into `proposed` alone.
+    let propose = |tab: &str, profile: Value| raw.ask(json!({ "cmd": "propose_worker_profile", "tab": tab, "profile": profile }));
+    let not_theirs = Err("only a Captain or the global orchestrator proposes a worker profile".to_owned());
+    for tab in ["tab-worker", "tab-reviewer", "tab-chat", "tab-workflow", "tab-plain", "tab-gone"] {
+        assert_eq!(propose(tab, json!({ "name": "tester" })), not_theirs, "{tab}");
+    }
+    assert_eq!(ana.hub(json!({ "cmd": "propose_worker_profile", "tab": "tab-captain", "profile": { "name": "tester" } })), not_theirs, "the user's app writes profiles with set_worker_profiles");
+    let before = ana.hub(json!({ "cmd": "get_tastes" })).unwrap();
+    assert_eq!(before["worker_profiles"]["proposed"], json!([]));
+    let mut proposed = propose("tab-captain", json!({ "name": "  tester ", "access": "read_only", "by": "user" })).unwrap();
+    assert_eq!(proposed["worker_profiles"]["proposed"], json!([{ "name": "tester", "skills": [], "tools": [], "access": "read_only", "delivers": "", "by": "orchestrator" }]), "the hub writes who proposed it");
+    proposed["worker_profiles"]["proposed"] = json!([]);
+    assert_eq!(proposed, before, "nothing outside proposed changed");
+    let replaced = propose("tab-global", json!({ "name": "Tester", "delivers": "A list." })).unwrap();
+    assert_eq!(replaced["worker_profiles"]["proposed"], json!([{ "name": "Tester", "skills": [], "tools": [], "access": "edit", "delivers": "A list.", "by": "orchestrator" }]), "a proposal of the same name is replaced");
+    assert_eq!(propose("tab-captain", json!({ "name": "x", "delivers": "a\nb" })), Err("what x delivers fits one line".into()));
+    for n in 2..=20 {
+        propose("tab-captain", json!({ "name": format!("p{n}") })).unwrap();
+    }
+    assert_eq!(propose("tab-captain", json!({ "name": "p21" })), Err("20 proposed profiles already wait for the user to take or drop; nothing changed".into()));
+    assert!(propose("tab-captain", json!({ "name": "p20", "delivers": "Again." })).is_ok(), "a full list still takes a new version of one it holds");
+
+    // Approving moves the row into a list and drops it from proposed in one write; discarding only drops it.
+    let names = |tastes: &Value| tastes["worker_profiles"]["proposed"].as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let scout = json!({ "name": "scout", "access": "read_only" });
+    let approved = ana.hub(json!({ "cmd": "set_worker_profiles", "project": "github.com/acme/app", "profiles": [scout, { "name": "Tester", "delivers": "A list.", "by": "orchestrator" }], "drop_proposed": ["tester"] })).unwrap();
+    assert_eq!(approved["worker_profiles"]["projects"]["github.com/acme/app"].as_array().unwrap().len(), 2);
+    assert_eq!(names(&approved), (2..=20).map(|n| format!("p{n}")).collect::<Vec<_>>(), "only the approved row left proposed");
+    let discarded = ana.hub(json!({ "cmd": "set_worker_profiles", "project": "github.com/acme/app", "profiles": approved["worker_profiles"]["projects"]["github.com/acme/app"], "drop_proposed": ["p2", "nobody"] })).unwrap();
+    assert_eq!(names(&discarded), (3..=20).map(|n| format!("p{n}")).collect::<Vec<_>>(), "only the named row was dropped");
+    assert_eq!(discarded["worker_profiles"]["projects"], approved["worker_profiles"]["projects"]);
 }
