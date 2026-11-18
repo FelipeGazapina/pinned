@@ -1581,8 +1581,8 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(offered(Some("orchestrator"), None), [&today[..], &CAPTAIN_TOOLS, &["board_read"]].concat());
         assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &["delegation_stats"], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session", "repo_overview", "repo_read", "repo_search"]].concat());
         assert_eq!(offered(Some("taste-chat"), None), [&today[..], &["taste_get", "taste_set", "taste_reset"]].concat(), "only a taste chat may change the way of working");
-        assert_eq!(offered(Some("taste-chat"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory, &["board_note", "board_read"]].concat(), "a taste chat's delegated child can't");
-        assert_eq!(offered(Some("global-orchestrator"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory, &["board_note", "board_read"]].concat(), "a delegated child plays no role");
+        assert_eq!(offered(Some("taste-chat"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory, &["board_note", "board_read"]].concat(), "a taste chat's delegated child gets no taste tools, only the board tools every worker is offered");
+        assert_eq!(offered(Some("global-orchestrator"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory, &["board_note", "board_read"]].concat(), "a delegated child plays no role: it is a worker, offered the board tools, which the machine refuses when its task keeps no board");
 
         let ask = |name, args| project_request(name, &args, Some("tab-9".into())).map(|m| serde_json::to_string(&m).unwrap());
         assert_eq!(
