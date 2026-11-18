@@ -105,10 +105,12 @@ impl Machine {
         self.delegates.set_limits(&review, budget_ms, limit_ms);
         self.delegates.hold_to(&review, limits);
 
-        // The reviewer's own folder, which holds its empty MCP config and is removed once it ends.
+        // The reviewer's own folder, which holds its empty MCP config and the empty folder it runs
+        // in, and is removed once it ends. It does not run in the worker's checkout, whose
+        // CLAUDE.md and settings would load as instructions; it reads the files through --add-dir.
         let own = self.review_dir(&review);
-        let mcp = own.join("mcp.json");
-        if let Err(error) = std::fs::create_dir_all(&own).and_then(|()| std::fs::write(&mcp, "{\"mcpServers\":{}}\n")) {
+        let (mcp, neutral) = (own.join("mcp.json"), own.join("cwd"));
+        if let Err(error) = std::fs::create_dir_all(&neutral).and_then(|()| std::fs::write(&mcp, "{\"mcpServers\":{}}\n")) {
             let error = format!("the reviewer's folder could not be made: {error}");
             self.delegates.fail(&review, error.clone(), path.as_deref());
             let _ = std::fs::remove_dir_all(&own);
@@ -129,20 +131,24 @@ impl Machine {
         let mut argv = driver_args(Provider::Claude, &spec);
         // Only the MCP config above, which names no server. The tool lists take any number of
         // values, so the flag after each ends it.
-        argv.push("--strict-mcp-config".to_owned());
+        argv.extend(["--strict-mcp-config".to_owned(), "--setting-sources".to_owned(), "user".to_owned(), "--add-dir".to_owned(), cwd.display().to_string()]);
         argv.push("--allowedTools".to_owned());
         argv.extend(REVIEWER_TOOLS.iter().map(|tool| tool.to_string()));
         argv.push("--disallowedTools".to_owned());
         argv.extend(Role::Reviewer.disallowed_tools().iter().map(|tool| tool.to_string()));
-        argv.extend(["--append-system-prompt".to_owned(), review_run::system_prompt(&rules)]);
+        let system = format!("{}\n\nThe worker's files are in {}.", review_run::system_prompt(&rules), cwd.display());
+        argv.extend(["--append-system-prompt".to_owned(), system]);
         let mut env = self.delegate_env(&account, &review);
         env.set.extend(role_env(Role::Reviewer, &project));
+        // An added folder's CLAUDE.md loads only with this set, so the reviewer never has it.
+        env.set.retain(|(name, _)| name != ADDED_DIRS_CLAUDE_MD);
+        let strip: Vec<&str> = env.strip.iter().copied().chain([ADDED_DIRS_CLAUDE_MD]).collect();
 
         let me = self.me.clone();
         let ended = AtomicBool::new(false);
         let (id, author_id, worker) = (review.clone(), task.to_owned(), tab.to_owned());
         let (child_path, sent_model) = (path.clone(), model.clone());
-        let pid = spawn(ChildSpec { bin: &self.launch.bin(Provider::Claude), argv: &argv, cwd: &cwd, env: &env.set, path: path.as_deref(), strip: env.strip }, move |event| {
+        let pid = spawn(ChildSpec { bin: &self.launch.bin(Provider::Claude), argv: &argv, cwd: &neutral, env: &env.set, path: path.as_deref(), strip: &strip }, move |event| {
             let Some(machine) = me.upgrade() else { return };
             let ready = machine.delegates.apply(&id, event, child_path.as_deref());
             if machine.delegates.is_terminal(&id) && !ended.swap(true, Ordering::SeqCst) {
@@ -198,6 +204,9 @@ impl Machine {
         }
     }
 }
+
+/// The variable that makes Claude Code load the CLAUDE.md of an --add-dir folder.
+const ADDED_DIRS_CLAUDE_MD: &str = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD";
 
 /// All the reviewer may use: it reads the change and the files around it.
 const REVIEWER_TOOLS: [&str; 3] = ["Read", "Grep", "Glob"];
