@@ -23,6 +23,9 @@ pub struct AskCtx<'a> {
     /// The session's scratch dir. Writes there are fine.
     pub scratch: Option<&'a Path>,
     pub home: &'a Path,
+    /// The session's Claude home, `CLAUDE_CONFIG_DIR`, when it is known. pinned runs an added
+    /// account with its own, which has no `.claude` component.
+    pub claude_home: Option<&'a Path>,
     /// The tool call's cwd.
     pub cwd: &'a Path,
     /// `main` usually.
@@ -206,7 +209,8 @@ fn secret(c: &[String]) -> Option<&'static str> {
             ".ssh" | ".aws" | ".gnupg" | ".kube" | ".netrc" | ".git-credentials" | ".pypirc" | "keychains" => return Some("credentials"),
             ".config" if matches!(next, Some("gh" | "gcloud")) => return Some("credentials"),
             ".config" | "application support" if next == Some("pinned") && c.get(i + 2).map(String::as_str) != Some("uploads") => return Some("pinned's config"),
-            ".claude" if next.is_some_and(|n| n.starts_with(".credentials")) => return Some("credentials"),
+            // `$CLAUDE_CONFIG_DIR` the scan could not resolve is a Claude home all the same.
+            ".claude" | "$claude_config_dir" | "${claude_config_dir}" if next.is_some_and(|n| n.starts_with(".credentials")) => return Some("credentials"),
             ".docker" if next == Some("config.json") => return Some("credentials"),
             "proc" if c.get(i + 2).map(String::as_str) == Some("environ") => return Some("the environment"),
             _ => {}
@@ -226,6 +230,11 @@ fn secret(c: &[String]) -> Option<&'static str> {
     None
 }
 
+/// Whether a component right under a Claude home is its settings or hooks.
+fn settings_or_hooks(n: &str) -> bool {
+    n == "hooks" || (n.starts_with("settings") && n.ends_with(".json"))
+}
+
 /// Whether writing the path changes what the agent may do, or what runs on this machine.
 fn self_grant(c: &[String]) -> bool {
     let Some(last) = c.last() else { return false };
@@ -235,7 +244,8 @@ fn self_grant(c: &[String]) -> bool {
     for (i, s) in c.iter().enumerate() {
         let next = c.get(i + 1).map(String::as_str);
         match s.as_str() {
-            ".claude" if next.is_some_and(|n| n == "hooks" || (n.starts_with("settings") && n.ends_with(".json"))) => return true,
+            // `$CLAUDE_CONFIG_DIR` the scan could not resolve is a Claude home all the same.
+            ".claude" | "$claude_config_dir" | "${claude_config_dir}" if next.is_some_and(settings_or_hooks) => return true,
             ".husky" => return true,
             ".git" => {
                 let hooks_or_config = |n: Option<&str>| matches!(n, Some("config" | "hooks" | "config.worktree"));
@@ -337,6 +347,7 @@ struct Lexer<'h> {
     c: Vec<char>,
     i: usize,
     home: &'h str,
+    claude_home: Option<&'h str>,
     out: Vec<Segment>,
     next_id: usize,
     pending: Vec<Pending>,
@@ -346,8 +357,8 @@ fn blank(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\r')
 }
 
-fn lex(src: &str, home: &str) -> Vec<Segment> {
-    let mut lx = Lexer::new(src, home, 0);
+fn lex(src: &str, home: &str, claude_home: Option<&str>) -> Vec<Segment> {
+    let mut lx = Lexer::new(src, home, claude_home, 0);
     lx.list(0, false);
     lx.out
 }
@@ -357,8 +368,18 @@ fn is_fetch(seg: &Segment) -> bool {
 }
 
 impl<'h> Lexer<'h> {
-    fn new(src: &str, home: &'h str, next_id: usize) -> Self {
-        Lexer { c: src.chars().collect(), i: 0, home, out: vec![], next_id, pending: vec![] }
+    fn new(src: &str, home: &'h str, claude_home: Option<&'h str>, next_id: usize) -> Self {
+        Lexer { c: src.chars().collect(), i: 0, home, claude_home, out: vec![], next_id, pending: vec![] }
+    }
+
+    /// The value of a variable the lexer knows: `HOME`, and `CLAUDE_CONFIG_DIR` when the session's
+    /// Claude home is known.
+    fn known(&self, name: &str) -> Option<&'h str> {
+        match name {
+            "HOME" => Some(self.home),
+            "CLAUDE_CONFIG_DIR" => self.claude_home,
+            _ => None,
+        }
     }
 
     fn peek(&self) -> Option<char> {
@@ -477,7 +498,7 @@ impl<'h> Lexer<'h> {
             }
             if !p.quoted {
                 // An unquoted body runs its `$(...)` and backticks, and nothing else of it.
-                let mut sub = Lexer::new(&body, self.home, self.next_id);
+                let mut sub = Lexer::new(&body, self.home, self.claude_home, self.next_id);
                 let mut w = WordBuilder::default();
                 sub.dq(&mut w, d + 1, false);
                 self.next_id = sub.next_id;
@@ -752,8 +773,8 @@ impl<'h> Lexer<'h> {
                     }
                     name.push(c);
                 }
-                if name == "HOME" {
-                    w.push_str(self.home);
+                if let Some(value) = self.known(&name) {
+                    w.push_str(value);
                 } else {
                     w.var();
                     w.push_str(&format!("${{{name}}}"));
@@ -766,8 +787,8 @@ impl<'h> Lexer<'h> {
                     self.i += 1;
                     name.push(c);
                 }
-                if name == "HOME" {
-                    w.push_str(self.home);
+                if let Some(value) = self.known(&name) {
+                    w.push_str(value);
                 } else {
                     w.var();
                     w.push_str(&format!("${name}"));
@@ -863,7 +884,7 @@ impl<'h> Lexer<'h> {
                 c => inner.push(c),
             }
         }
-        let mut sub = Lexer::new(&inner, self.home, self.next_id);
+        let mut sub = Lexer::new(&inner, self.home, self.claude_home, self.next_id);
         sub.list(d + 1, false);
         self.next_id = sub.next_id;
         w.word.fetch |= sub.out.iter().any(is_fetch);
@@ -1026,6 +1047,8 @@ struct Scan<'c, 'a> {
     ctx: &'c AskCtx<'a>,
     work: PathBuf,
     scratch: Option<PathBuf>,
+    /// The session's Claude home, canonical.
+    claude: Option<PathBuf>,
     hits: Vec<NeverHit>,
     tagged: bool,
     pushed: bool,
@@ -1035,9 +1058,10 @@ const DEV_OK: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin
 
 impl<'c, 'a> Scan<'c, 'a> {
     fn new(ctx: &'c AskCtx<'a>) -> Self {
-        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, hits: vec![], tagged: false, pushed: false };
+        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, claude: None, hits: vec![], tagged: false, pushed: false };
         scan.work = walk(&scan.abs(ctx.worktree));
         scan.scratch = ctx.scratch.map(|s| walk(&scan.abs(s)));
+        scan.claude = ctx.claude_home.map(|c| walk(&scan.abs(c)));
         scan
     }
 
@@ -1125,7 +1149,7 @@ impl<'c, 'a> Scan<'c, 'a> {
     }
 
     fn secret_path(&mut self, text: &str, resolved: Option<&Path>) {
-        let found = secret(&comps(text)).or_else(|| resolved.and_then(|p| secret(&path_comps(p))));
+        let found = secret(&comps(text)).or_else(|| resolved.and_then(|p| secret(&path_comps(p)).or_else(|| self.claude_home_secret(p))));
         if let Some(what) = found {
             self.hit(NeverItem::Secrets, format!("reads {what}: {}", short(text)));
         }
@@ -1154,7 +1178,8 @@ impl<'c, 'a> Scan<'c, 'a> {
             return;
         }
         self.production(line);
-        let segs = lex(line, &self.home());
+        let claude_home = self.ctx.claude_home.map(|c| c.to_string_lossy().into_owned());
+        let segs = lex(line, &self.home(), claude_home.as_deref());
         let mut frames = vec![Frame { cwd, fetched: false }];
         for seg in &segs {
             while frames.len() <= seg.depth {
@@ -1233,7 +1258,7 @@ impl<'c, 'a> Scan<'c, 'a> {
             }
             if w.var_at.is_none() && w.glob_at.is_none() && !t.starts_with('-') {
                 if let Some(p) = self.resolve(cwd, t) {
-                    if let Some(what) = secret(&path_comps(&p)) {
+                    if let Some(what) = secret(&path_comps(&p)).or_else(|| self.claude_home_secret(&p)) {
                         self.hit(NeverItem::Secrets, format!("reads {what}: {}", short(t)));
                         return;
                     }
@@ -1261,16 +1286,30 @@ impl<'c, 'a> Scan<'c, 'a> {
         self.write_check(text, text, resolved, unresolved);
     }
 
+    /// Whether `p` is the settings or hooks of the session's own Claude home, which has no `.claude`
+    /// component when pinned runs an added account.
+    fn claude_home_grant(&self, p: &Path) -> bool {
+        let Some(home) = &self.claude else { return false };
+        let (home, p) = (path_comps(home), path_comps(p));
+        p.starts_with(&home) && p.get(home.len()).is_some_and(|n| settings_or_hooks(n))
+    }
+
+    /// Whether `p` is a credentials file right under the session's own Claude home.
+    fn claude_home_secret(&self, p: &Path) -> Option<&'static str> {
+        let Some(home) = &self.claude else { return None };
+        let (home, p) = (path_comps(home), path_comps(p));
+        (p.starts_with(&home) && p.get(home.len()).is_some_and(|n| n.starts_with(".credentials"))).then_some("credentials")
+    }
+
     fn write_check(&mut self, raw: &str, shown: &str, path: Option<PathBuf>, unresolved: bool) {
-        let grant = self_grant(&comps(raw)) || path.as_deref().is_some_and(|p| self_grant(&path_comps(p)));
+        let grant = self_grant(&comps(raw)) || path.as_deref().is_some_and(|p| self_grant(&path_comps(p)) || self.claude_home_grant(p));
         if grant {
             self.hit(NeverItem::SelfGrant, format!("writes {}", short(shown)));
         }
-        // A self-grant is never approved ahead of time, and a write outside may be, so one in
-        // another checkout, such as the main one of this worktree, stops as a self-grant only.
-        // The account's own `~/.claude` stays a write outside, as the design's table has it.
-        let account_own = path.as_deref().is_some_and(|p| p.starts_with(self.ctx.home.join(".claude")));
-        if (unresolved || path.as_deref().is_some_and(|p| self.outside(p))) && (!grant || account_own) {
+        // A self-grant is never approved ahead of time, and a write outside may be, so a write that
+        // is a self-grant stops as one only: one in another checkout, such as the main one of this
+        // worktree, or one in the account's own `~/.claude`, such as its settings and hooks.
+        if (unresolved || path.as_deref().is_some_and(|p| self.outside(p))) && !grant {
             self.hit(NeverItem::WriteOutside, format!("writes {}", short(shown)));
         }
     }
@@ -1745,6 +1784,8 @@ mod tests {
         scratch: PathBuf,
         home: PathBuf,
         elsewhere: PathBuf,
+        /// The session's Claude home, as pinned gives an added account.
+        claude: PathBuf,
     }
 
     /// A worktree with a project in it, a scratch dir, a home with an ssh key, and a folder outside all three.
@@ -1752,23 +1793,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let base = dunce::canonicalize(tmp.path()).unwrap();
         let (work, scratch, home, elsewhere) = (base.join("work"), base.join("scratch"), base.join("home"), base.join("elsewhere"));
-        for d in [work.join("crates/core/src"), work.join("node_modules/.bin"), scratch.clone(), home.join(".ssh"), home.join(".config/pinned/uploads"), elsewhere.clone()] {
+        let claude = home.join("cfg").join("accounts").join("work");
+        for d in [work.join("crates/core/src"), work.join("node_modules/.bin"), scratch.clone(), home.join(".ssh"), home.join(".config/pinned/uploads"), elsewhere.clone(), claude.clone()] {
             std::fs::create_dir_all(d).unwrap();
         }
         std::fs::write(home.join(".ssh/id_ed25519"), "key").unwrap();
         std::fs::write(work.join("node_modules/.bin/playwright"), "").unwrap();
-        Fx { _tmp: tmp, work, scratch, home, elsewhere }
+        Fx { _tmp: tmp, work, scratch, home, elsewhere, claude }
     }
 
     /// `s` with each `{name}` a path of the fixture, spelled with `/`: a shell reads `\` as an
     /// escape, so `C:\…` in a command would lose its separators on Windows.
     fn sub(f: &Fx, s: &str) -> String {
         let show = |p: &Path| p.display().to_string().replace('\\', "/");
-        s.replace("{work}", &show(&f.work)).replace("{scratch}", &show(&f.scratch)).replace("{home}", &show(&f.home)).replace("{elsewhere}", &show(&f.elsewhere))
+        s.replace("{work}", &show(&f.work)).replace("{scratch}", &show(&f.scratch)).replace("{home}", &show(&f.home)).replace("{elsewhere}", &show(&f.elsewhere)).replace("{claude}", &show(&f.claude))
     }
 
     fn ctx<'a>(f: &'a Fx, branch: Option<&'a str>) -> AskCtx<'a> {
-        AskCtx { worktree: &f.work, scratch: Some(&f.scratch), home: &f.home, cwd: &f.work, default_branch: "main", current_branch: branch }
+        AskCtx { worktree: &f.work, scratch: Some(&f.scratch), home: &f.home, claude_home: Some(&f.claude), cwd: &f.work, default_branch: "main", current_branch: branch }
     }
 
     fn item(f: &Fx, branch: Option<&str>, ask: &Ask) -> Option<NeverItem> {
@@ -1994,6 +2036,14 @@ mod tests {
             ("cat ~/.config/gh/hosts.yml", Some(Secrets)),
             ("cat ~/.claude/.credentials.json", Some(Secrets)),
             ("cat {home}/.config/pinned/accounts/a/login.json", Some(Secrets)),
+            ("cat {home}/.config/pinned/accounts/work/.credentials.json", Some(Secrets)),
+            // The session's own Claude home, which has no `.claude` component when pinned runs an
+            // added account.
+            ("cat {claude}/.credentials.json", Some(Secrets)),
+            ("cp {claude}/.credentials.json /tmp/x", Some(Secrets)),
+            ("cat \"$CLAUDE_CONFIG_DIR/.credentials.json\"", Some(Secrets)),
+            ("echo x > ~/.claude/.credentials.json", Some(Secrets)),
+            ("echo x > {claude}/.credentials.json", Some(Secrets)),
             ("cat .env", Some(Secrets)),
             ("cat .env.local", Some(Secrets)),
             ("cat cert.pem", Some(Secrets)),
@@ -2018,11 +2068,30 @@ mod tests {
             ("cat .env.template", None),
             ("git log -- .env.example", None),
             ("cat {home}/.config/pinned/uploads/shot.png", None),
+            ("cat .credentials.json", None),
+            ("echo x > .credentials.json", None),
             ("cargo test id_map", None),
             ("env FOO=1 cargo test", None),
             ("set -e", None),
             ("export FOO=1", None),
         ]);
+    }
+
+    #[test]
+    fn secrets_with_no_claude_home() {
+        // A session whose Claude home is unknown: `$CLAUDE_CONFIG_DIR` before a credentials file is
+        // a credential still.
+        let f = fx();
+        let unknown = AskCtx { claude_home: None, ..ctx(&f, FOO) };
+        let rows = [
+            ("cat \"$CLAUDE_CONFIG_DIR/.credentials.json\"", Some(Secrets)),
+            ("cat ${CLAUDE_CONFIG_DIR}/.credentials.json", Some(Secrets)),
+        ];
+        let bad: Vec<String> = rows.iter().filter_map(|(line, want)| {
+            let got = never(&unknown, &Ask::Bash { command: &sub(&f, line) }).map(|h| h.item);
+            (got != *want).then(|| format!("{line:?} (no Claude home): wanted {want:?}, got {got:?}"))
+        }).collect();
+        assert!(bad.is_empty(), "\n{}", bad.join("\n"));
     }
 
     #[test]
@@ -2073,7 +2142,11 @@ mod tests {
             ("git diff --output=/etc/x", Some(WriteOutside)),
             ("cd {elsewhere} && touch x", Some(WriteOutside)),
             ("rsync -a x /tmp/y", Some(WriteOutside)),
-            ("echo x > ~/.claude/settings.json", Some(WriteOutside)),
+            ("echo x > ~/.claude/settings.json", Some(SelfGrant)),
+            ("echo x > ~/.claude/skills/a/SKILL.md", Some(WriteOutside)),
+            ("echo x > {claude}/skills/x/SKILL.md", Some(WriteOutside)),
+            ("echo x > {claude}/projects/p/x.jsonl", Some(WriteOutside)),
+            ("echo x > \"$CLAUDE_CONFIG_DIR/skills/x/SKILL.md\"", Some(WriteOutside)),
             ("echo hi > /dev/null", None),
             ("ls 2>/dev/null", None),
             ("ls 2>&1 | head", None),
@@ -2109,6 +2182,19 @@ mod tests {
             ("echo {} > /home/u/client/.mcp.json", Some(SelfGrant)),
             ("echo x > {elsewhere}/.claude/settings.local.json", Some(SelfGrant)),
             ("cd {elsewhere}/.claude && echo x > settings.local.json", Some(SelfGrant)),
+            // The account's own `~/.claude`: its settings and hooks, as a project's are.
+            ("echo x > ~/.claude/settings.local.json", Some(SelfGrant)),
+            ("tee ~/.claude/hooks/x.sh", Some(SelfGrant)),
+            ("echo x > {home}/.claude/settings.json", Some(SelfGrant)),
+            ("cd ~/.claude && echo x > settings.json", Some(SelfGrant)),
+            // The session's own Claude home, `CLAUDE_CONFIG_DIR`, which has no `.claude` component
+            // when pinned runs an added account.
+            ("echo x > \"$CLAUDE_CONFIG_DIR/settings.json\"", Some(SelfGrant)),
+            ("echo x > ${CLAUDE_CONFIG_DIR}/settings.local.json", Some(SelfGrant)),
+            ("cd \"$CLAUDE_CONFIG_DIR\" && tee hooks/x.sh", Some(SelfGrant)),
+            ("echo x > {claude}/settings.json", Some(SelfGrant)),
+            ("tee {claude}/hooks/x.sh", Some(SelfGrant)),
+            ("cd {claude} && echo x > settings.local.json", Some(SelfGrant)),
             ("echo {} > {elsewhere}/.mcp.json", Some(SelfGrant)),
             ("git config core.hooksPath x", Some(SelfGrant)),
             ("git config core.fsmonitor 'x'", Some(SelfGrant)),
@@ -2121,6 +2207,26 @@ mod tests {
             ("echo x > .claude/skills/a/SKILL.md", None),
             ("echo x > .claude/worktrees/a/b.rs", None),
         ]);
+    }
+
+    #[test]
+    fn self_grant_with_no_claude_home() {
+        // A session whose Claude home is unknown: `$CLAUDE_CONFIG_DIR` before settings or hooks is
+        // a self-grant still.
+        let f = fx();
+        let unknown = AskCtx { claude_home: None, ..ctx(&f, FOO) };
+        let rows = [
+            ("echo x > \"$CLAUDE_CONFIG_DIR/settings.json\"", Some(SelfGrant)),
+            ("echo x > ${CLAUDE_CONFIG_DIR}/settings.local.json", Some(SelfGrant)),
+            ("tee $CLAUDE_CONFIG_DIR/hooks/x.sh", Some(SelfGrant)),
+            ("echo x > $CLAUDE_CONFIG_DIR/skills/x/SKILL.md", Some(WriteOutside)),
+            ("echo x > {claude}/settings.json", Some(WriteOutside)),
+        ];
+        let bad: Vec<String> = rows.iter().filter_map(|(line, want)| {
+            let got = never(&unknown, &Ask::Bash { command: &sub(&f, line) }).map(|h| h.item);
+            (got != *want).then(|| format!("{line:?} (no Claude home): wanted {want:?}, got {got:?}"))
+        }).collect();
+        assert!(bad.is_empty(), "\n{}", bad.join("\n"));
     }
 
     #[test]
@@ -2292,7 +2398,19 @@ mod tests {
             ("{elsewhere}/.claude/settings.local.json", Some(SelfGrant)),
             ("{elsewhere}/.mcp.json", Some(SelfGrant)),
             ("../.claude/settings.local.json", Some(SelfGrant)),
-            ("~/.claude/settings.json", Some(WriteOutside)),
+            ("~/.claude/settings.json", Some(SelfGrant)),
+            ("~/.claude/settings.local.json", Some(SelfGrant)),
+            ("~/.claude/hooks/x.sh", Some(SelfGrant)),
+            ("{home}/.claude/settings.json", Some(SelfGrant)),
+            ("~/.claude/skills/a/SKILL.md", Some(WriteOutside)),
+            ("{claude}/settings.json", Some(SelfGrant)),
+            ("{claude}/settings.local.json", Some(SelfGrant)),
+            ("{claude}/hooks/x.sh", Some(SelfGrant)),
+            ("{claude}/skills/x/SKILL.md", Some(WriteOutside)),
+            ("{claude}/projects/p/x.jsonl", Some(WriteOutside)),
+            ("~/.claude/.credentials.json", Some(Secrets)),
+            ("{claude}/.credentials.json", Some(Secrets)),
+            (".credentials.json", None),
             ("~/.ssh/config", Some(Secrets)),
             ("~/.aws/credentials", Some(Secrets)),
             (".env", Some(Secrets)),
@@ -2305,9 +2423,12 @@ mod tests {
             (".env.local", Some(Secrets)),
             ("~/.config/gh/hosts.yml", Some(Secrets)),
             ("~/.claude/.credentials.json", Some(Secrets)),
+            ("{home}/.config/pinned/accounts/work/.credentials.json", Some(Secrets)),
+            ("{claude}/.credentials.json", Some(Secrets)),
             ("cert.pem", Some(Secrets)),
             ("~/.netrc", Some(Secrets)),
             ("README.md", None),
+            (".credentials.json", None),
             ("crates/x.rs", None),
             (".env.example", None),
             ("/etc/hosts", None),
