@@ -312,7 +312,10 @@ fn blocks_of(task: &Task) -> Vec<BoardBlock> {
         let said = [task.newest_text.as_deref(), task.summary.as_deref()];
         let mut needs: Vec<String> = vec![];
         for line in said.into_iter().flatten().flat_map(str::lines).map(str::trim).filter(|line| crate::board::needs_line(line)) {
-            let line: String = line.chars().take(crate::board::NOTE_CHARS).collect();
+            if needs.len() >= crate::board::NEEDS_BY {
+                break;
+            }
+            let line = crate::board::neutral(&line.chars().take(crate::board::NOTE_CHARS).collect::<String>());
             if !needs.contains(&line) {
                 needs.push(line);
             }

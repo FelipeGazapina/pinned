@@ -125,8 +125,11 @@ pub fn format_char(c: char) -> bool {
 /// one author); its older ones go first.
 pub const NOTES_BY: usize = 20;
 
-/// The most handoffs, and the most blocks, one board stores; older ones go first.
+/// The most progress lines, handoffs, and blocks one board stores; older ones go first.
 pub const MAX_STORED: usize = 200;
+
+/// The most NEEDS lines one task shows as blocks; its first ones stay.
+pub const NEEDS_BY: usize = 20;
 
 /// The most notes one board keeps; older ones go first.
 pub const MAX_NOTES: usize = 200;
@@ -149,6 +152,9 @@ pub fn trim(board: &mut BoardView, author: impl Fn(&str) -> String) {
     board.notes.retain(|_| keep.next().unwrap_or(true));
     if board.notes.len() > MAX_NOTES {
         board.notes.drain(..board.notes.len() - MAX_NOTES);
+    }
+    if board.progress.len() > MAX_STORED {
+        board.progress.drain(..board.progress.len() - MAX_STORED);
     }
     if board.handoffs.len() > MAX_STORED {
         board.handoffs.drain(..board.handoffs.len() - MAX_STORED);
