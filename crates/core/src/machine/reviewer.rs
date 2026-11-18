@@ -607,7 +607,7 @@ mod tests {
             t.change(CHANGED, json!({ "findings": [a1("unwrap on the input")] }));
             t.end_turn();
             let rounds = t.rounds();
-            assert_eq!(serde_json::to_value(rounds[0].state).unwrap(), "limit");
+            assert_eq!(serde_json::to_value(rounds[0].state).unwrap(), "found");
             assert!(rounds[0].note.as_deref().unwrap_or_default().contains("the diff was cut at 96 KiB"), "{rounds:?}");
         }
 
@@ -711,7 +711,7 @@ mod tests {
             t.end_turn();
             t.reviewer();
             let rounds = t.rounds();
-            assert_eq!((rounds.len(), serde_json::to_value(rounds[0].state).unwrap()), (1, json!("limit")), "{rounds:?}");
+            assert_eq!((rounds.len(), serde_json::to_value(rounds[0].state).unwrap()), (1, json!("found")), "{rounds:?}");
         }
 
         #[test]
