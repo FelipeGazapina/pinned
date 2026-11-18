@@ -842,10 +842,10 @@ impl Tab {
     /// The tab as clients see it. `turns` are the projects whose Capitão runs a turn that a message
     /// from the global orchestrator started.
     /// `plans` is every Captain session's plans, of which a Captain's tab glances at its own.
-    fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>, work: &HashMap<String, crate::delegate::WorkCost>, plans: &crate::plan_store::PlanStore) -> TabView {
+    fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>, work: &HashMap<String, crate::delegate::WorkCost>, plans: &crate::plan_store::PlanStore, facts: &[crate::plan::TaskFacts]) -> TabView {
         let role = role_of(&self.env);
         let captain = matches!(role, Some((Role::Orchestrator, _))) && !global::is_global(&self.env);
-        let plans = self.claude_session.as_deref().filter(|_| captain).and_then(|s| plans.get(s)).map(|p| crate::plan::glance_list(p, &[])).unwrap_or_default();
+        let plans = self.claude_session.as_deref().filter(|_| captain).and_then(|s| plans.get(s)).map(|p| crate::plan::glance_list(p, facts)).unwrap_or_default();
         let compacting = self.compacting();
         TabView {
             id: id.to_owned(),
@@ -1580,9 +1580,10 @@ impl Machine {
             Call::Thread { tab, from, limit, before } => json(self.thread_page(&tab, from, limit, before)?),
             Call::Plan { tab, plan } => {
                 let session = self.captain_session(&tab)?;
+                let facts = self.plan_facts();
                 let plans = self.plans.lock().unwrap();
                 let kept = session.as_deref().and_then(|s| plans.get(s)).map_or(&[][..], |p| &p.plans[..]);
-                let views: Vec<crate::plan::PlanView> = kept.iter().filter(|p| plan.as_deref().is_none_or(|id| p.id == id)).map(|p| crate::plan::derive(p, &[])).collect();
+                let views: Vec<crate::plan::PlanView> = kept.iter().filter(|p| plan.as_deref().is_none_or(|id| p.id == id)).map(|p| crate::plan::derive(p, &facts)).collect();
                 Ok(json!(views))
             }
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text).map_err(NotTyped::for_person)?),
@@ -1975,8 +1976,9 @@ impl Machine {
         let turns = self.turns.lock().unwrap().clone();
         let queued = self.delegates.queued();
         let work = self.delegates.work_costs();
+        let facts = self.plan_facts();
         let plans = self.plans.lock().unwrap();
-        let views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns, &queued, &work, &plans)).collect();
+        let views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns, &queued, &work, &plans, &facts)).collect();
         drop(plans);
         let mut views: Vec<TabView> = views.into_iter().map(|v| self.shown(v)).collect();
         views.sort_by_key(|v| v.opened);
@@ -1987,7 +1989,8 @@ impl Machine {
         let turns = self.turns.lock().unwrap().clone();
         let queued = self.delegates.queued();
         let work = self.delegates.work_costs();
-        let view = { let plans = self.plans.lock().unwrap(); self.tab(tab, |t| t.view(tab, &turns, &queued, &work, &plans)) };
+        let facts = self.plan_facts();
+        let view = { let plans = self.plans.lock().unwrap(); self.tab(tab, |t| t.view(tab, &turns, &queued, &work, &plans, &facts)) };
         view.map(|v| self.shown(v))
     }
 
@@ -3270,7 +3273,7 @@ impl Machine {
             let turns = self.turns.lock().unwrap().clone();
             let queued = self.delegates.queued();
             let tabs = self.tabs.lock().unwrap();
-            tabs.iter().map(|(id, t)| (t.view(id, &turns, &queued, &HashMap::new(), &Default::default()), t.idle_for_archive())).collect()
+            tabs.iter().map(|(id, t)| (t.view(id, &turns, &queued, &HashMap::new(), &Default::default(), &[]), t.idle_for_archive())).collect()
         };
         let candidates: Vec<(TabView, bool)> = candidates.into_iter().map(|(view, idle)| (self.shown(view), idle)).collect();
         let looked = Instant::now();
@@ -3768,6 +3771,21 @@ impl Machine {
         }
     }
 
+    /// What each task the Captains' plans link to reads now, for the plans to derive their states from.
+    fn plan_facts(&self) -> Vec<crate::plan::TaskFacts> {
+        let ids = self.plans.lock().unwrap().linked_tasks();
+        self.delegates.plan_facts(&ids)
+    }
+
+    /// Settles the plans against the tasks they link to: what a task ended with is saved on its step, and
+    /// a finish time is set or cleared. The tabs show the change when a plan changed.
+    fn settle_plans(&self) {
+        let facts = self.plan_facts();
+        if self.plans.lock().unwrap().settle_all(&facts, unix_millis()) {
+            self.emit_tabs();
+        }
+    }
+
     /// Refuses a plan write while another open tab holds `session`: both would write the same
     /// plans, each without the other's.
     fn sole_holder(&self, session: &str) -> Result<(), String> {
@@ -3855,11 +3873,12 @@ impl Machine {
                 let session = self.captain_session(tab)?.ok_or("only a project's Captain keeps a plan")?;
                 self.sole_holder(&session)?;
                 let now = unix_millis();
+                let facts = self.plan_facts();
                 let written = self.plans.lock().unwrap().write(&session, |plans| match tool {
-                    ProjectTool::PlanSet(call) => crate::plan::set(plans, call, now, &[], now),
-                    ProjectTool::PlanStep(call) => crate::plan::step(plans, call, &[], now),
-                    ProjectTool::PlanFix(call) => crate::plan::fix(plans, call, &[], now),
-                    ProjectTool::PlanClose(call) => crate::plan::close(plans, call, &[], now),
+                    ProjectTool::PlanSet(call) => crate::plan::set(plans, call, now, &facts, now),
+                    ProjectTool::PlanStep(call) => crate::plan::step(plans, call, &facts, now),
+                    ProjectTool::PlanFix(call) => crate::plan::fix(plans, call, &facts, now),
+                    ProjectTool::PlanClose(call) => crate::plan::close(plans, call, &facts, now),
                     _ => unreachable!("only plan tools reach here"),
                 });
                 // The Captain's glance rides on its tab, so the account's clients read it in the next tabs.
@@ -4260,7 +4279,7 @@ impl Machine {
     /// The workers `from` sees, one per line, each indented under the worker that started it:
     /// the orchestrator sees every worker of its project, any other thread the ones it started.
     fn workers(&self, from: &str, project: &Path) -> String {
-        let workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new(), &HashMap::new(), &HashMap::new(), &Default::default())).collect();
+        let workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new(), &HashMap::new(), &HashMap::new(), &Default::default(), &[])).collect();
         let mut workers: Vec<TabView> = workers.into_iter().map(|w| self.shown(w)).collect();
         workers.sort_by_key(|w| w.opened);
         let everyone = self.tab(from, |t| role_of(&t.env)).ok().flatten().is_some_and(|(role, _)| role == Role::Orchestrator);
@@ -5400,7 +5419,7 @@ impl Machine {
 
     /// What the thread `tab` waits on the user for right now, or None while it waits on nothing.
     fn thread_ask(&self, tab: &str) -> Option<crate::delegate::RemoteAsk> {
-        let view = self.shown(self.tab(tab, |t| t.view(tab, &HashSet::new(), &HashMap::new(), &HashMap::new(), &Default::default())).ok()?);
+        let view = self.shown(self.tab(tab, |t| t.view(tab, &HashSet::new(), &HashMap::new(), &HashMap::new(), &Default::default(), &[])).ok()?);
         if global::waiting_kind(&view) != Some(global::WaitingKind::NeedsInput) {
             return None;
         }
@@ -5593,9 +5612,51 @@ impl Machine {
         Err(format!("no tab {tab}"))
     }
 
+    /// Starts a worker as `delegate_task` asks. A `planStep` is checked before anything starts, then the
+    /// new task is linked to the step or list it names once the task exists.
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
-        use crate::placement::{By, Placed, Route};
         let caller = Self::require_caller(tab, parent_task)?;
+        // A replayed request answers with the task it started, which is already linked.
+        let link = match request.plan_step.clone() {
+            Some(step) if self.delegates.requested(&caller.key(), request.client_request_id.as_deref()).is_none() => {
+                let session = self.plan_session(&caller)?;
+                let facts = self.plan_facts();
+                let mut plans = self.plans.lock().unwrap().get(&session).cloned().unwrap_or_default();
+                crate::plan::link(&mut plans, &step, "pending", &request.title, &facts, unix_millis())?;
+                Some((session, step, request.title.clone()))
+            }
+            _ => None,
+        };
+        let body = self.start_task(caller, tool, request)?;
+        let (Some((session, step, title)), Ok(mut started)) = (link, serde_json::from_str::<Value>(&body)) else { return Ok(body) };
+        let Some(task) = started["taskId"].as_str().map(str::to_owned) else { return Ok(body) };
+        let facts = self.plan_facts();
+        let (linked, changed) = self
+            .plans
+            .lock()
+            .unwrap()
+            .write(&session, |plans| crate::plan::link(plans, &step, &task, &title, &facts, unix_millis()))
+            .map_err(|error| format!("{task} started, but its plan link was refused: {error}"))?;
+        if changed {
+            self.emit_tabs();
+        }
+        started["planStep"] = json!(linked.id);
+        Ok(started.to_string())
+    }
+
+    /// The Captain session that owns the plans a `planStep` names. Only a project's Captain keeps a plan.
+    fn plan_session(&self, caller: &crate::delegate::Caller) -> Result<String, String> {
+        let session = match caller.tab.as_deref() {
+            Some(tab) if caller.task.is_none() => self.captain_session(tab)?,
+            _ => None,
+        };
+        let session = session.ok_or("only a project's Captain keeps a plan. Nothing changed.")?;
+        self.sole_holder(&session)?;
+        Ok(session)
+    }
+
+    fn start_task(&self, caller: crate::delegate::Caller, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
+        use crate::placement::{By, Placed, Route};
         if let Some(tab) = caller.tab.as_deref() {
             if self.tab(tab, |t| global::is_global(&t.env))? {
                 return Err(NO_PROJECT_WORK.into());
@@ -6335,6 +6396,7 @@ impl Machine {
                 let stopped = machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
                 machine.clear_answered_asks(Instant::now());
                 machine.note_user_waits(Instant::now());
+                machine.settle_plans();
                 machine.look_after_remotes(stopped);
                 machine.send_remote_ends(Instant::now());
                 machine.send_remote_asks(Instant::now());
@@ -17942,6 +18004,136 @@ Have another model review a risky change before it goes ahead.";
     #[test]
     fn an_accounts_status_asked_in_a_real_home_stops_the_test_process() {
         assert_refused_in_a_real_home("accounts::tests::status_is_what_each_cli_reports_for_the_accounts_home");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_step_reads_waiting_while_its_worker_asks_and_running_again_once_the_user_answers() {
+        use crate::questions::{Answer, QOption, Question, QuestionsReply};
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("plan-waiting");
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        m.tab(&captain, |t| t.claude_session = Some("cap-1".into())).unwrap();
+        let set = crate::plan::SetCall { lists: vec![crate::plan::ListInput { id: None, name: "Build".into(), steps: vec![crate::plan::StepInput { id: None, name: "Compare".into(), what: None }] }], ..Default::default() };
+        m.plans.lock().unwrap().write("cap-1", |plans| crate::plan::set(plans, set, 1, &[], 1)).unwrap();
+        // The facts are read before the write takes the plans lock, as the machine reads them.
+        let facts = m.plan_facts();
+        m.plans.lock().unwrap().write("cap-1", |plans| crate::plan::link(plans, "s1", &task, "Board check", &facts, 2)).unwrap();
+        let strips = || m.view(&captain).unwrap().plans[0].strips.clone();
+        assert_eq!(strips(), vec!["r".to_string()]);
+
+        let question = Question {
+            header: Some("Branch".into()),
+            question: "Base the fix on main?".into(),
+            changes: "which branch the PR targets".into(),
+            options: vec![QOption { label: "main".into(), description: None, recommended: true }],
+            multi_select: false,
+        };
+        let id = m.questions.lock().unwrap().open(&child, Some("s-child".into()), None, Some("Checkout".into()), vec![question], vec![], unix_now()).unwrap();
+        m.note_user_waits(Instant::now());
+        assert_eq!(strips(), vec!["w".to_string()], "a question open on the worker's tab reads waiting");
+
+        let answer = Call::AnswerQuestions { tab: child.clone(), id, reply: QuestionsReply::Answered { answers: vec![Answer { chosen: vec!["main".into()], text: None }] } };
+        assert_eq!(m.call(answer), Ok(Value::Null));
+        m.note_user_waits(Instant::now());
+        assert_eq!(strips(), vec!["r".to_string()], "answered: the step runs again");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_step_keeps_how_its_task_ended_once_the_registry_drops_the_task() {
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("plan-outcome");
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        m.tab(&captain, |t| t.claude_session = Some("cap-1".into())).unwrap();
+        let set = crate::plan::SetCall { lists: vec![crate::plan::ListInput { id: None, name: "Build".into(), steps: vec![crate::plan::StepInput { id: None, name: "Compare".into(), what: None }] }], ..Default::default() };
+        m.plans.lock().unwrap().write("cap-1", |plans| crate::plan::set(plans, set, 1, &[], 1)).unwrap();
+        let facts = m.plan_facts();
+        m.plans.lock().unwrap().write("cap-1", |plans| crate::plan::link(plans, "s1", &task, "Board check", &facts, 2)).unwrap();
+        let step = || m.call(Call::Plan { tab: captain.clone(), plan: None }).unwrap()[0]["lists"][0]["steps"][0].clone();
+        assert_eq!(step()["state"], "running");
+
+        m.delegates.settle_thread(&task, Some("Compared.".into()), None, None, vec![], None);
+        // What the one-second tick does: the task's end is saved on its step.
+        m.settle_plans();
+        assert_eq!(step()["state"], "done");
+        m.delegates.discard(&task);
+        assert!(m.delegates.get(&task).is_none(), "the registry no longer holds the task");
+        assert_eq!((step()["state"].clone(), step()["task"].clone()), (json!("done"), json!(task)), "the step keeps how the task ended");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Starts a worker under `parent`, as the Captain's machine starts one, with no cost reported yet.
+    #[cfg(unix)]
+    fn unmetered_worker(m: &Machine, dir: &Path, captain: &str, parent: &str) -> String {
+        use crate::delegate::{NewTask, Parent};
+        m.delegates
+            .begin(NewTask {
+                parent: Parent::Task(parent.to_owned()),
+                tool: None,
+                title: "Worker under the board check".into(),
+                account: "claude".into(),
+                provider: Provider::Claude,
+                model: Some("claude-haiku-5-5".into()),
+                cwd: dir.join("app"),
+                mode: crate::delegate::Mode::Async,
+                access: crate::delegate::Access::Auto,
+                isolated: false,
+                caller_key: format!("tab:{captain}"),
+                client_request_id: None,
+                role: None,
+            })
+            .id
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_step_costs_what_its_task_tree_is_known_to_cost_and_nothing_while_a_worker_is_unknown() {
+        use crate::usage::TaskUsage;
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("plan-cost");
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        m.tab(&captain, |t| t.claude_session = Some("cap-1".into())).unwrap();
+        let set = crate::plan::SetCall { lists: vec![crate::plan::ListInput { id: None, name: "Build".into(), steps: vec![crate::plan::StepInput { id: None, name: "Compare".into(), what: None }] }], ..Default::default() };
+        m.plans.lock().unwrap().write("cap-1", |plans| crate::plan::set(plans, set, 1, &[], 1)).unwrap();
+        let facts = m.plan_facts();
+        m.plans.lock().unwrap().write("cap-1", |plans| crate::plan::link(plans, "s1", &task, "Board check", &facts, 2)).unwrap();
+        let cost = || m.call(Call::Plan { tab: captain.clone(), plan: None }).unwrap()[0]["lists"][0]["steps"][0]["cost"].clone();
+        let usage = |usd: f64| TaskUsage { tokens_in: 1, tokens_out: 1, cost_usd: Some(usd), wall_ms: 1, box_usd: None, box_ms: None };
+
+        assert_eq!(cost(), json!(null), "the linked task has reported no cost: unknown, not zero");
+        m.delegates.meter(&[(task.clone(), usage(0.25))], None);
+        assert_eq!(cost(), json!(0.25), "every task in the tree is known");
+
+        let worker = unmetered_worker(&m, &dir, &captain, &task);
+        assert_eq!(cost(), json!(null), "the worker under the task has no cost yet, so the step's total is a floor and shows none");
+        m.delegates.meter(&[(worker, usage(0.5))], None);
+        assert_eq!(cost(), json!(0.75), "the known tree sums once the worker reports");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_step_keeps_no_cost_when_its_task_ended_with_an_unknown_worker_after_the_registry_drops_the_task() {
+        use crate::usage::TaskUsage;
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("plan-cost-saved");
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        m.tab(&captain, |t| t.claude_session = Some("cap-1".into())).unwrap();
+        let set = crate::plan::SetCall { lists: vec![crate::plan::ListInput { id: None, name: "Build".into(), steps: vec![crate::plan::StepInput { id: None, name: "Compare".into(), what: None }] }], ..Default::default() };
+        m.plans.lock().unwrap().write("cap-1", |plans| crate::plan::set(plans, set, 1, &[], 1)).unwrap();
+        let facts = m.plan_facts();
+        m.plans.lock().unwrap().write("cap-1", |plans| crate::plan::link(plans, "s1", &task, "Board check", &facts, 2)).unwrap();
+        let step = || m.call(Call::Plan { tab: captain.clone(), plan: None }).unwrap()[0]["lists"][0]["steps"][0].clone();
+        m.delegates.meter(&[(task.clone(), TaskUsage { tokens_in: 1, tokens_out: 1, cost_usd: Some(0.25), wall_ms: 1, box_usd: None, box_ms: None })], None);
+        let worker = unmetered_worker(&m, &dir, &captain, &task);
+
+        // The task waits on its worker until the worker ends, so the worker ends first.
+        m.delegates.settle_thread(&worker, Some("Found the gap.".into()), None, None, vec![], None);
+        m.delegates.settle_thread(&task, Some("Compared.".into()), None, None, vec![], None);
+        m.settle_plans();
+        assert_eq!((step()["state"].clone(), step()["cost"].clone()), (json!("done"), json!(null)), "the step saves no cost for a tree with an unknown worker");
+        m.delegates.discard(&task);
+        assert!(m.delegates.get(&task).is_none(), "the registry no longer holds the task");
+        assert_eq!((step()["state"].clone(), step()["cost"].clone()), (json!("done"), json!(null)), "the saved outcome keeps no cost, not zero");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A machine on its socket with a Captain of Claude session `cap-1` and a plain thread of
