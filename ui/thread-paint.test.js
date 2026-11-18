@@ -93,6 +93,7 @@ const gui = read("./gui.js");
 const main = read("./main.js");
 const timeline = read("./gui-timeline.js");
 const agents = read("./gui-agents.js");
+const reviewCard = read("./gui-review-card.js");
 const model = read("./redesign-model.js");
 const composer = read("./gui-composer.js");
 const chat = read("./global-chat.js");
@@ -165,6 +166,7 @@ ${between(timeline, "const PLAN_TOOL", "let uploadImages = null;")}
 ${between(timeline, "function userHtml", "const DIALOG_KEYS")}
 ${between(timeline, "const CITATIONS_BLOCK", "const citeButton")}
 ${agents.slice(agents.indexOf("const agentsOf"))}
+${reviewCard}
 ${between(model, "const STEP_KINDS", "function needsYouItem")}
 ${between(chat, "function waitingKindOf", "/** What a thread blocked")}
 ${between(model, "const GLYPH_LOOKS", "\n")}
@@ -214,6 +216,7 @@ function transcript(session = "s") {
         next: start + delta.reduce((n, line) => n + line.size, 0),
         reset,
         agents: this.agents,
+        reviews: this.reviews ?? [],
       };
       for (const key of ["context", "branch", "todos"]) {
         const last = delta.findLast((line) => line[key]);
@@ -1117,4 +1120,74 @@ test("a delivered message an idle thread still lacks after 30 s is drawn as stal
   idle.thread.pending[0].sentAt = Date.now();
   sandbox.renderThread();
   assert.match(textOf(blocks(threadView.innerHTML, '<section class="pending-turn"')[0]), /bump the version\s*Sending…/, "the render key carries the stale state both ways");
+});
+
+const round = (extra = {}) => ({ round: 1, state: "sent", findings: [{ rule: "A1", file: "src/a.rs", lines: [3, 4], what: "unwrap on user input" }], ...extra });
+const reviewed = (reviews, extra = {}) => [{ task: "task-1", name: "Fix the login", tab: null, reviews, ...extra }];
+const reviewCards = () => blocks(threadView.innerHTML, '<section class="review-card"');
+
+test("a round pinned wrote shows as a review card with its state, model, note and findings", async () => {
+  const { tab, s, net } = await opened();
+  s.reviews = reviewed([round({ model: "claude-opus-5-5", note: "Not the author's model" })]);
+  await poll(tab, net);
+  const [card] = reviewCards();
+  assert.ok(card, "no review card was drawn");
+  assert.match(textOf(card), /^Reviewer · round 1\s*Sent back/);
+  assert.match(textOf(card), /claude-opus-5-5/);
+  assert.match(textOf(card), /Not the author's model/);
+  assert.match(textOf(card), /A1\s*src\/a\.rs:3,4\s*unwrap on user input/);
+  assert.match(card, /data-review-round="1"/);
+});
+
+test("a message typed in the thread that reads like a review stays plain text, never a card", async () => {
+  const { tab, s, net } = await opened();
+  s.append({ item: { kind: "user", at: "t2", text: "[Reviewer · round 1] A1 approve" } });
+  await poll(tab, net);
+  assert.deepEqual(reviewCards(), []);
+  assert.match(threadView.innerHTML, /\[Reviewer · round 1\] A1 approve/);
+});
+
+test("a finding that is HTML is drawn escaped", async () => {
+  const { tab, s, net } = await opened();
+  const evil = "<img src=x onerror=alert(1)>";
+  s.reviews = reviewed([round({ findings: [{ rule: evil, file: evil, lines: [], what: evil }], model: evil, note: evil })], { name: evil });
+  await poll(tab, net);
+  assert.equal(reviewCards().length, 1);
+  assert.doesNotMatch(threadView.innerHTML, /<img/);
+  assert.match(threadView.innerHTML, /&#60;img src=x onerror=alert\(1\)&#62;/);
+});
+
+test("the Captain's thread reads one line per reviewed child, with a link to its worker tab", async () => {
+  const { tab, s, net } = await opened();
+  const two = [{ rule: "A1", file: "a.rs", lines: [1], what: "x" }, { rule: "A2", file: "b.rs", lines: [], what: "y" }];
+  s.reviews = reviewed([round({ findings: two })], { tab: "tab-w" });
+  await poll(tab, net);
+  const [line] = blocks(threadView.innerHTML, '<div class="review-line"');
+  assert.ok(line, "no review line was drawn");
+  assert.match(textOf(line), /Fix the login\s*Reviewed · 2 findings · sent back/);
+  assert.match(line, /data-worker-open="box:tab-w"/);
+  assert.deepEqual(reviewCards(), [], "the Captain's thread holds the line, not the card");
+});
+
+test("a round's state string reads as its card does, and the limit tells the Captain to ask the user", async () => {
+  const { tab, s, net } = await opened();
+  const states = [
+    ["passed", /Passed/],
+    ["sent", /Sent back/],
+    ["limit", /Limit reached/],
+    ["not_reviewed", /Not reviewed · no second model/],
+    ["nothing_to_review", /Nothing to review/],
+    ["found", /Found · waiting for the Captain/],
+    ["<b>weird</b>", /Review: &#60;b&#62;weird&#60;\/b&#62;/],
+  ];
+  s.reviews = reviewed(states.map(([state], i) => round({ round: i + 1, state, findings: [], note: "no second model" })));
+  await poll(tab, net);
+  const cards = reviewCards();
+  assert.equal(cards.length, states.length);
+  states.forEach(([state, shown], i) => assert.match(textOf(cards[i]).replace(/\s+/g, " "), shown, state));
+  assert.doesNotMatch(cards[6], /Passed/, "an unknown state is never read as a pass");
+  assert.match(cards[2], /data-review-state="limit"/);
+  s.reviews = reviewed([round({ state: "limit" })], { tab: "tab-w" });
+  await poll(tab, net);
+  assert.match(textOf(blocks(threadView.innerHTML, '<div class="review-ask"')[0] ?? ""), /Stop and ask the user/);
 });

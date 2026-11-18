@@ -1257,7 +1257,7 @@ function renderThread() {
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.start, !!t.fetchingOlder, t.olderError, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), !!tab.view.compacting, resume, boxKey(box), convex && [convex.repo, convex.deployment], globalLane(tab) ? globalLaneKey() : null, workersKey(tab), workerViewKey(tab), panelTurn(tab), waiting.rows.map((p) => [p.id, p.state, p.sent, p.text]), waiting.busy, waiting.stale]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.start, !!t.fetchingOlder, t.olderError, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.reviewsKey, t.sendErrors ?? null, phaseOf(tab), !!tab.view.compacting, resume, boxKey(box), convex && [convex.repo, convex.deployment], globalLane(tab) ? globalLaneKey() : null, workersKey(tab), workerViewKey(tab), panelTurn(tab), waiting.rows.map((p) => [p.id, p.state, p.sent, p.text]), waiting.busy, waiting.stale]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
@@ -1292,7 +1292,7 @@ function renderThread() {
   const card = threadView.querySelector("#dialog-slot > .dialog-card");
   const focused = card?.contains(document.activeElement);
   const saying = document.activeElement?.dataset?.workerSay;
-  threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${resume ? resumeHtml(tab) : ""}${box ? boxHtml(box) : ""}${convex ? convexBannerHtml(convex) : ""}${body}${sub ? "" : `<div id="dialog-slot"></div>`}</div>`;
+  threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${resume ? resumeHtml(tab) : ""}${box ? boxHtml(box) : ""}${convex ? convexBannerHtml(convex) : ""}${body}${sub ? "" : reviewsHtml(tab, t)}${sub ? "" : `<div id="dialog-slot"></div>`}</div>`;
   drawUploadImages();
   laneGrowth.disconnect();
   laneGrowth.observe(threadView.firstElementChild);

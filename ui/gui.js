@@ -191,6 +191,7 @@ async function fetchThread(tab) {
       t.next = page.next;
       t.loaded = true;
       takeAgents(t, page.agents);
+      takeReviews(t, page.reviews);
       if ((page.reset || drawnOf(t) !== before) && guiOn()) {
         if (tab === active) {
           if (terminalOnly(tab)) renderTerminalOnly();
