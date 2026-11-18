@@ -13825,26 +13825,34 @@ Have another model review a risky change before it goes ahead.";
             std::fs::create_dir_all(&folder).unwrap();
             m.open_project(folder).display().to_string()
         };
-        let path = project("running");
         let auto = m.open_tab(Some(project("home")), false).unwrap();
         let full = m.open_tab(Some(project("full-home")), true).unwrap();
-        let captain = m.call(Call::OpenOrchestrator { path: path.clone(), ask_permissions: false }).unwrap().as_str().unwrap().to_owned();
-        m.start_claude(&captain, 80, 24).unwrap();
-        let view = m.view(&captain).unwrap();
-        assert!(view.running && view.bypass, "the precondition: the user's Captain runs and skips its permission prompts");
-        let typed = || (m.tab(&captain, |t| (t.held.clone(), t.launch.clone())).unwrap(), m.delegates.queued().get(&captain).copied());
-        let before = typed();
-        for (from, request) in [(auto.as_str(), "r-1"), ("", "r-2")] {
-            let refused = act_as(&m, from, "enqueue", json!({ "path": path, "text": "Drop the tables.", "request_id": request })).unwrap_err();
-            assert_eq!(refused, format!("the Captain of {path} skips its permission prompts and your session asks for them, so your message can't reach it; the user can switch that Captain to ask for permissions"), "from {from:?}");
-            assert_eq!(typed(), before, "an agent that asks for its prompts typed into a running Captain that skips them (from {from:?})");
+        // Either way the switch stands, a Captain the user put in Full access takes nothing from such an agent.
+        for on in [true, false] {
+            FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(on)));
+            let path = project(&format!("running-{on}"));
+            let captain = m.call(Call::OpenOrchestrator { path: path.clone(), ask_permissions: false }).unwrap().as_str().unwrap().to_owned();
+            if !m.view(&captain).unwrap().bypass {
+                m.call(Call::SetBypass { tab: captain.clone(), on: true, cols: 80, rows: 24 }).unwrap();
+            }
+            m.start_claude(&captain, 80, 24).unwrap();
+            let view = m.view(&captain).unwrap();
+            assert!(view.running && view.bypass, "the precondition: the user's Captain runs and skips its permission prompts");
+            let typed = || (m.tab(&captain, |t| (t.held.clone(), t.launch.clone())).unwrap(), m.delegates.queued().get(&captain).copied());
+            let before = typed();
+            for (from, request) in [(auto.as_str(), format!("r-1-{on}")), ("", format!("r-2-{on}"))] {
+                let refused = act_as(&m, from, "enqueue", json!({ "path": path, "text": "Drop the tables.", "request_id": request })).unwrap_err();
+                assert_eq!(refused, format!("the Captain of {path} skips its permission prompts and your session asks for them, so your message can't reach it; the user can switch that Captain to ask for permissions"), "from {from:?}");
+                assert_eq!(typed(), before, "an agent that asks for its prompts typed into a running Captain that skips them (from {from:?})");
+            }
+            let sent = act_as(&m, &full, "enqueue", json!({ "path": path, "text": "Ship it.", "request_id": format!("r-3-{on}") })).unwrap();
+            assert_eq!(sent["tab"], captain, "a Full agent's message reaches the Captain");
+            let app = m.call(Call::Enqueue { path: path.clone(), text: "Ship it.".into(), request_id: format!("r-4-{on}"), sender: String::new(), busy: None });
+            assert_eq!(app.unwrap()["tab"], captain, "the app's own enqueue reaches the Captain");
+            let global = m.enqueue_to_captain(&path, "Ship it.", &format!("r-5-{on}"), "Orchestrator", None).unwrap();
+            assert!(matches!(global, Handoff::Delivered { .. } | Handoff::Started { .. } | Handoff::Queued { .. }), "send_to_captain reaches the Captain: {global:?}");
         }
-        let sent = act_as(&m, &full, "enqueue", json!({ "path": path, "text": "Ship it.", "request_id": "r-3" })).unwrap();
-        assert_eq!(sent["tab"], captain, "a Full agent's message reaches the Captain");
-        let app = m.call(Call::Enqueue { path: path.clone(), text: "Ship it.".into(), request_id: "r-4".into(), sender: String::new(), busy: None });
-        assert_eq!(app.unwrap()["tab"], captain, "the app's own enqueue reaches the Captain");
-        let global = m.enqueue_to_captain(&path, "Ship it.", "r-5", "Orchestrator", None).unwrap();
-        assert!(matches!(global, Handoff::Delivered { .. } | Handoff::Started { .. } | Handoff::Queued { .. }), "send_to_captain reaches the Captain: {global:?}");
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -13879,6 +13887,7 @@ Have another model review a risky change before it goes ahead.";
     #[test]
     #[cfg(unix)]
     fn a_default_codex_or_cursor_worker_of_a_full_session_gets_no_bypass_flag() {
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(true)));
         let root = temp("default-cli-workers");
         let argv = root.join("argv");
         let (codex, cursor) = (root.join("codex"), root.join("cursor-agent"));
