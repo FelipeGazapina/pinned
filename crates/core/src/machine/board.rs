@@ -449,4 +449,40 @@ mod tests {
         let nobody = read(&t.m, Some("tab-none"), None, None);
         assert!(nobody.is_err(), "{nobody:?}");
     }
+
+    /// A second Captain (`cap-b`) in the same app, whose plan links one root task with one worker.
+    fn foreign_captain(t: &Team) -> (String, String, String) {
+        let project = t.dir.join("app");
+        let env = crate::agent::role_env(crate::agent::Role::Orchestrator, &project);
+        let tab = t.m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], env, false, Some("cap-b".into()));
+        let root = task(&t.m, Parent::Tab(tab.clone()), "Implement billing", &project);
+        let worker = task(&t.m, Parent::Task(root.clone()), "Test billing", &project);
+        let plans = json!({
+            "next": { "plan": 1, "list": 1, "step": 1, "fix": 0 },
+            "plans": [{ "id": "p1", "rev": 1, "asked_at": 1, "lists": [
+                { "id": "l1", "name": "Billing", "steps": [{ "id": "s1", "name": "Billing", "reported": "pending", "task": root }] },
+            ] }],
+        });
+        t.m.plans.lock().unwrap().write("cap-b", |saved| Ok(*saved = serde_json::from_value(plans).unwrap())).unwrap();
+        (tab, root, worker)
+    }
+
+    #[test]
+    fn the_board_call_answers_only_the_boards_of_the_callers_plans() {
+        let t = team("fenced-call");
+        let (theirs, their_root, their_worker) = foreign_captain(&t);
+        noted(&t.m, &t.worker, "src/login.rs", "the token check moved");
+        noted(&t.m, &their_worker, "src/login.rs", "billing reads the token");
+        assert_eq!(t.m.board(&t.captain, Some(&t.root)).unwrap().notes.len(), 1, "its own plan's board answers");
+        assert_eq!(t.m.board(&t.captain, Some(&t.worker)).unwrap().notes.len(), 1, "and one worker's part of it");
+        for (tab, of) in [(&t.captain, &their_root), (&t.captain, &their_worker), (&theirs, &t.root), (&theirs, &t.worker), (&t.captain, &t.unplanned_worker)] {
+            let answer = t.m.board(tab, Some(of));
+            assert_eq!(answer, Err(format!("task {of} is not on a board of your plans. Nothing was read.")), "{tab} asked for {of}");
+        }
+        let answer = t.m.call(crate::wire::Call::Board { tab: theirs.clone(), task: Some(t.root.clone()) });
+        assert!(answer.is_err(), "{answer:?}");
+        let whole = t.m.board(&theirs, None).unwrap();
+        assert_eq!(whole.notes.iter().map(|n| n.text.as_str()).collect::<Vec<_>>(), ["billing reads the token"], "without task, unchanged: its own plans' boards");
+        assert_eq!(t.m.board("tab-none", Some(&t.root)), Err(format!("task {} is not on a board of your plans. Nothing was read.", t.root)));
+    }
 }

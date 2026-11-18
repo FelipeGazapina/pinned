@@ -1045,6 +1045,14 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
+    fn agents_read_the_team_board_only_through_board_read() {
+        let board = find("board").expect("the app's board call keeps its entry");
+        assert_eq!((board.class, board.wired), (Excluded, false), "act board would hand any agent any board, unfenced");
+        assert_eq!(board.about, "agents read the team board with board_read, which fences what other workers wrote");
+        assert!(!listing(Some("board")).iter().any(|a| a.name == "board"), "actions never offers it");
+    }
+
+    #[test]
     fn every_wire_call_has_one_action() {
         let wire: BTreeSet<(bool, String)> = variant_schemas::<Call>().into_keys().map(|cmd| (false, cmd)).chain(variant_schemas::<HubCall>().into_keys().map(|cmd| (true, cmd))).collect();
         let listed: BTreeSet<(bool, String)> = ACTIONS.iter().map(|a| (a.side == Side::Hub, a.cmd.to_owned())).collect();

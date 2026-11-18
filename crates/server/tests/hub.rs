@@ -13747,3 +13747,16 @@ fn act_cannot_set_the_reviewer_or_worker_profiles_for_any_role_and_the_user_can(
     assert_eq!((tastes.reviewer.rounds, tastes.worker_profiles.projects["github.com/acme/app"][0].name.as_str()), (3, "scout"));
     assert_eq!(ana.hub(json!({ "cmd": "set_reviewer", "patch": { "rounds": 9 } })), Err("review rounds go from 1 to 5".into()));
 }
+
+#[test]
+fn an_agents_act_board_is_refused_and_the_team_board_is_read_with_board_read() {
+    let hub = TestHub::start_with("agent_board", Signup::Invite);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-mac");
+    let closed = "board is not open to agents: agents read the team board with board_read, which fences what other workers wrote";
+    assert_eq!(act(&ana.dir, &ana.tab, "board", json!({ "tab": ana.tab, "task": "task-1" })), Err(closed.into()));
+    assert_eq!(act(&ana.dir, &ana.tab, "board", json!({ "tab": ana.tab })), Err(closed.into()), "not even its own Captain's board, unfenced");
+    let found = session_tool(&ana.dir, &ana.tab, json!({ "name": "actions", "search": "board" })).unwrap();
+    assert!(!found["actions"].as_array().unwrap().iter().any(|a| a["name"] == "board"), "{found}");
+}
