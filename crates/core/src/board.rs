@@ -168,6 +168,9 @@ pub fn note_text(text: &str) -> Result<String, String> {
     if text.contains(['\n', '\r', '\u{2028}', '\u{2029}']) {
         return Err("a board note is one line. Nothing was noted.".into());
     }
+    if text.chars().any(char::is_control) {
+        return Err("a board note may not hold a control character. Nothing was noted.".into());
+    }
     if text.chars().any(format_char) {
         return Err("a board note may not hold an invisible or direction-changing character. Nothing was noted.".into());
     }
