@@ -313,6 +313,17 @@ mod tests {
     }
 
     #[test]
+    fn the_users_list_is_kept_as_the_users_with_names_trimmed() {
+        let mut tastes = Tastes::default();
+        let sent = vec![WorkerProfile { by: ProfileAuthor::Orchestrator, ..profile("  scout ") }, profile("fixer\t")];
+        tastes.set_worker_profiles(None, sent.clone()).unwrap();
+        tastes.set_worker_profiles(Some("github.com/acme/site"), sent).unwrap();
+        for list in [&tastes.worker_profiles.account, &tastes.worker_profiles.projects["github.com/acme/site"]] {
+            assert_eq!(list.iter().map(|p| (p.name.as_str(), p.by)).collect::<Vec<_>>(), [("scout", ProfileAuthor::User), ("fixer", ProfileAuthor::User)]);
+        }
+    }
+
+    #[test]
     fn every_cap_takes_its_limit_and_refuses_one_past_it() {
         let set = |profiles: Vec<WorkerProfile>| Tastes::default().set_worker_profiles(None, profiles);
         let many = |n: usize| (0..n).map(|i| format!("t{i}")).collect::<Vec<String>>();
