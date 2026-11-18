@@ -1583,7 +1583,7 @@
                 ]
               },
               {
-                "description": "`board::BoardView`: the team board of the Captain of `tab`, or only `task`'s part of it.\nKept apart from `Plan`. Empty until U11 fills it in.",
+                "description": "`board::BoardView`: the team board of the Captain of `tab`: its plans' workers' progress,\nnotes, handoffs, blocks and spend, or only `task`'s part of it, refused for a task whose root\nno plan of that Captain links. Kept apart from `Plan`. The app's call: agents read the board\nwith `board_read`.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -14493,7 +14493,7 @@
                 ]
               },
               {
-                "description": "`board::BoardView`: the team board of the Captain of `tab`, or only `task`'s part of it.\nKept apart from `Plan`. Empty until U11 fills it in.",
+                "description": "`board::BoardView`: the team board of the Captain of `tab`: its plans' workers' progress,\nnotes, handoffs, blocks and spend, or only `task`'s part of it, refused for a task whose root\nno plan of that Captain links. Kept apart from `Plan`. The app's call: agents read the board\nwith `board_read`.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -77730,7 +77730,7 @@
                 ]
               },
               {
-                "description": "`board::BoardView`: the team board of the Captain of `tab`, or only `task`'s part of it.\nKept apart from `Plan`. Empty until U11 fills it in.",
+                "description": "`board::BoardView`: the team board of the Captain of `tab`: its plans' workers' progress,\nnotes, handoffs, blocks and spend, or only `task`'s part of it, refused for a task whose root\nno plan of that Captain links. Kept apart from `Plan`. The app's call: agents read the board\nwith `board_read`.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -83365,7 +83365,7 @@
                 ]
               },
               {
-                "description": "`board::BoardView`: the team board of the Captain of `tab`, or only `task`'s part of it.\nKept apart from `Plan`. Empty until U11 fills it in.",
+                "description": "`board::BoardView`: the team board of the Captain of `tab`: its plans' workers' progress,\nnotes, handoffs, blocks and spend, or only `task`'s part of it, refused for a task whose root\nno plan of that Captain links. Kept apart from `Plan`. The app's call: agents read the board\nwith `board_read`.",
                 "type": "object",
                 "properties": {
                   "cmd": {

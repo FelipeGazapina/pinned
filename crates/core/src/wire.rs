@@ -502,8 +502,10 @@ pub enum Call {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan: Option<String>,
     },
-    /// `board::BoardView`: the team board of the Captain of `tab`, or only `task`'s part of it.
-    /// Kept apart from `Plan`. Empty until U11 fills it in.
+    /// `board::BoardView`: the team board of the Captain of `tab`: its plans' workers' progress,
+    /// notes, handoffs, blocks and spend, or only `task`'s part of it, refused for a task whose root
+    /// no plan of that Captain links. Kept apart from `Plan`. The app's call: agents read the board
+    /// with `board_read`.
     Board {
         tab: TabId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
