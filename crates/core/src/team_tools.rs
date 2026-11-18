@@ -186,13 +186,13 @@ pub fn definition(name: &str) -> Option<Value> {
             &[],
         ),
         "feature_map_set" => (
-            "Set one feature of this project's feature map (Captain only): its name (1 to 60 characters), its files (at most 50, each a path of at most 300 characters, relative to the project, with no .. part) and what it does in one line (about, at most 200 characters). The project has at most 200 features. Control, zero-width and bidirectional characters are refused. Empty files with no about deletes the feature.",
+            "Set one feature of this project's feature map (Captain only): its name (1 to 60 characters), its files (at most 50, each a path of at most 300 characters, relative to the project, with no .. part) and what it does in one line (about, at most 200 characters). The project has at most 200 features. Control, zero-width and bidirectional characters are refused. To delete a feature, pass files: [] with no about.",
             json!({
                 "feature": { "type": "string", "minLength": 1, "maxLength": crate::feature_map::FEATURE_CHARS, "description": "The feature's name." },
                 "files": { "type": "array", "maxItems": crate::feature_map::FILES, "items": { "type": "string", "maxLength": crate::feature_map::FILE_CHARS }, "description": "Paths relative to the project." },
                 "about": { "type": "string", "maxLength": crate::feature_map::ABOUT_CHARS, "description": "What the feature does, in one line." },
             }),
-            &["feature"],
+            &["feature", "files"],
         ),
         "profile_propose" => ("Propose a worker profile for the user to take or drop.", json!({ "profile": { "type": "object" }, "why": { "type": "string" } }), &["profile"]),
         "board_note" => ("Leave a note about one file on your Captain's board.", json!({ "file": { "type": "string" }, "text": { "type": "string", "maxLength": crate::board::NOTE_CHARS } }), &["file", "text"]),
@@ -226,7 +226,7 @@ mod tests {
     #[test]
     fn the_feature_map_definitions_say_what_is_required_and_capped() {
         let set = definition("feature_map_set").unwrap();
-        assert_eq!(set["inputSchema"]["required"], json!(["feature"]));
+        assert_eq!(set["inputSchema"]["required"], json!(["feature", "files"]));
         assert_eq!(set["inputSchema"]["properties"]["files"]["type"], "array");
         assert_eq!(set["inputSchema"]["properties"]["files"]["items"]["type"], "string");
         assert_eq!(set["inputSchema"]["properties"]["feature"]["maxLength"], 60);
