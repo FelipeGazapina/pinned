@@ -23,6 +23,7 @@ use crate::teams::Situation;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const SUBCOMMAND: &str = "team-guard";
 
@@ -77,14 +78,28 @@ const WATCHDOG: std::time::Duration = std::time::Duration::from_secs(58);
 /// Runs inside the hook process and returns its exit code. Prints a deny, or nothing so Claude
 /// Code's own permissions decide. It fails closed: Claude Code lets a call run when its hook exits
 /// with any code but 2 or times out, so a panic, or no answer before the watchdog, is a deny with
-/// exit code 2.
+/// exit code 2. Only the first of the answer and the watchdog prints, so the exit code is always
+/// the printed answer's.
 pub fn run() -> i32 {
-    std::panic::set_hook(Box::new(|_| {}));
+    static ANSWERED: AtomicBool = AtomicBool::new(false);
+    // Where it panicked, never the panic's text, which can quote the call.
+    std::panic::set_hook(Box::new(|panic| match panic.location() {
+        Some(at) => eprintln!("pinned team-guard panicked at {}:{}", at.file(), at.line()),
+        None => eprintln!("pinned team-guard panicked"),
+    }));
     std::thread::spawn(|| {
         std::thread::sleep(watchdog());
-        std::process::exit(fail_closed());
+        if !ANSWERED.swap(true, Ordering::SeqCst) {
+            std::process::exit(fail_closed());
+        }
     });
     let decided = std::panic::catch_unwind(|| decide(&crate::hooks::hook_payload(), &HookEnv::from_process(), crate::hooks::ask));
+    if ANSWERED.swap(true, Ordering::SeqCst) {
+        // The watchdog answered first, and ends the process with its code.
+        loop {
+            std::thread::park();
+        }
+    }
     match decided {
         Ok(output) => {
             if let Some(output) = output {
