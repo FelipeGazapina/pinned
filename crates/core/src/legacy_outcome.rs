@@ -288,17 +288,17 @@ fn message_workflows() -> Vec<Connector> {
 
 fn fallback_router() -> Vec<Connector> {
     let mut workflows = message_workflows();
-    let Trigger::SlackMessage { channel, decide } = workflows[0].trigger.clone() else { unreachable!() };
-    workflows[0].trigger = Trigger::SlackMessage { channel, decide: Decide { fallback: Some("doubt".into()), ..decide } };
+    let Trigger::SlackMessage { channel, decide, apps } = workflows[0].trigger.clone() else { unreachable!() };
+    workflows[0].trigger = Trigger::SlackMessage { channel, decide: Decide { fallback: Some("doubt".into()), ..decide }, apps };
     workflows
 }
 
 fn nowhere_router() -> Vec<Connector> {
     let mut workflow = router();
-    let Trigger::SlackMessage { channel, mut decide } = workflow.trigger else { unreachable!() };
+    let Trigger::SlackMessage { channel, mut decide, apps } = workflow.trigger else { unreachable!() };
     decide.categories = vec![category("escalation", "Production is down", None, Some("prod-engg"))];
     decide.fallback = None;
-    workflow.trigger = Trigger::SlackMessage { channel, decide };
+    workflow.trigger = Trigger::SlackMessage { channel, decide, apps };
     vec![workflow]
 }
 

@@ -4,6 +4,9 @@
 /// The line that opens and closes the framed text.
 pub const FENCE: &str = "=====pinned-untrusted-text=====";
 
+/// The source of a Slack thread's text, which a Slack run is triggered by.
+pub const SLACK_THREAD: &str = "a Slack thread";
+
 /// The source of a Slack thread's later reply, which reaches the thread's run.
 pub const SLACK_REPLY: &str = "a Slack reply in this thread";
 

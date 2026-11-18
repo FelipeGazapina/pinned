@@ -8175,7 +8175,7 @@
                 ]
               },
               {
-                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own. With `apps`, the\ntop-level posts of apps and integrations count too, never those of the account's own bots.",
                 "type": "object",
                 "properties": {
                   "kind": {
@@ -8187,12 +8187,17 @@
                   },
                   "decide": {
                     "$ref": "#/$defs/Decide"
+                  },
+                  "apps": {
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
                   "kind",
                   "channel",
-                  "decide"
+                  "decide",
+                  "apps"
                 ]
               },
               {
@@ -9104,11 +9109,17 @@
                   },
                   "channel": {
                     "type": "string"
+                  },
+                  "apps": {
+                    "description": "Also read the top-level posts of apps and integrations, never the account's own bots.",
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
                   "kind",
-                  "channel"
+                  "channel",
+                  "apps"
                 ]
               },
               {
@@ -20999,7 +21010,7 @@
                 ]
               },
               {
-                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own. With `apps`, the\ntop-level posts of apps and integrations count too, never those of the account's own bots.",
                 "type": "object",
                 "properties": {
                   "kind": {
@@ -21011,6 +21022,10 @@
                   },
                   "decide": {
                     "$ref": "#/$defs/Decide"
+                  },
+                  "apps": {
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
@@ -21902,6 +21917,11 @@
                   },
                   "channel": {
                     "type": "string"
+                  },
+                  "apps": {
+                    "description": "Also read the top-level posts of apps and integrations, never the account's own bots.",
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
@@ -30051,7 +30071,7 @@
                 ]
               },
               {
-                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own. With `apps`, the\ntop-level posts of apps and integrations count too, never those of the account's own bots.",
                 "type": "object",
                 "properties": {
                   "kind": {
@@ -30063,12 +30083,17 @@
                   },
                   "decide": {
                     "$ref": "#/$defs/Decide"
+                  },
+                  "apps": {
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
                   "kind",
                   "channel",
-                  "decide"
+                  "decide",
+                  "apps"
                 ]
               },
               {
@@ -30989,11 +31014,17 @@
                   },
                   "channel": {
                     "type": "string"
+                  },
+                  "apps": {
+                    "description": "Also read the top-level posts of apps and integrations, never the account's own bots.",
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
                   "kind",
-                  "channel"
+                  "channel",
+                  "apps"
                 ]
               },
               {
@@ -39768,7 +39799,7 @@
                 ]
               },
               {
-                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own. With `apps`, the\ntop-level posts of apps and integrations count too, never those of the account's own bots.",
                 "type": "object",
                 "properties": {
                   "kind": {
@@ -39780,6 +39811,10 @@
                   },
                   "decide": {
                     "$ref": "#/$defs/Decide"
+                  },
+                  "apps": {
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
@@ -40680,6 +40715,11 @@
                   },
                   "channel": {
                     "type": "string"
+                  },
+                  "apps": {
+                    "description": "Also read the top-level posts of apps and integrations, never the account's own bots.",
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
@@ -46823,7 +46863,7 @@
                 ]
               },
               {
-                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own. With `apps`, the\ntop-level posts of apps and integrations count too, never those of the account's own bots.",
                 "type": "object",
                 "properties": {
                   "kind": {
@@ -46835,12 +46875,17 @@
                   },
                   "decide": {
                     "$ref": "#/$defs/Decide"
+                  },
+                  "apps": {
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
                   "kind",
                   "channel",
-                  "decide"
+                  "decide",
+                  "apps"
                 ]
               },
               {
@@ -47761,11 +47806,17 @@
                   },
                   "channel": {
                     "type": "string"
+                  },
+                  "apps": {
+                    "description": "Also read the top-level posts of apps and integrations, never the account's own bots.",
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
                   "kind",
-                  "channel"
+                  "channel",
+                  "apps"
                 ]
               },
               {
@@ -48380,7 +48431,7 @@
                 ]
               },
               {
-                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own. With `apps`, the\ntop-level posts of apps and integrations count too, never those of the account's own bots.",
                 "type": "object",
                 "properties": {
                   "kind": {
@@ -48392,6 +48443,10 @@
                   },
                   "decide": {
                     "$ref": "#/$defs/Decide"
+                  },
+                  "apps": {
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
@@ -49292,6 +49347,11 @@
                   },
                   "channel": {
                     "type": "string"
+                  },
+                  "apps": {
+                    "description": "Also read the top-level posts of apps and integrations, never the account's own bots.",
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
@@ -56625,7 +56685,7 @@
                 ]
               },
               {
-                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own. With `apps`, the\ntop-level posts of apps and integrations count too, never those of the account's own bots.",
                 "type": "object",
                 "properties": {
                   "kind": {
@@ -56637,12 +56697,17 @@
                   },
                   "decide": {
                     "$ref": "#/$defs/Decide"
+                  },
+                  "apps": {
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
                   "kind",
                   "channel",
-                  "decide"
+                  "decide",
+                  "apps"
                 ]
               },
               {
@@ -57563,11 +57628,17 @@
                   },
                   "channel": {
                     "type": "string"
+                  },
+                  "apps": {
+                    "description": "Also read the top-level posts of apps and integrations, never the account's own bots.",
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
                   "kind",
-                  "channel"
+                  "channel",
+                  "apps"
                 ]
               },
               {
@@ -59193,7 +59264,7 @@
                 ]
               },
               {
-                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own. With `apps`, the\ntop-level posts of apps and integrations count too, never those of the account's own bots.",
                 "type": "object",
                 "properties": {
                   "kind": {
@@ -59205,6 +59276,10 @@
                   },
                   "decide": {
                     "$ref": "#/$defs/Decide"
+                  },
+                  "apps": {
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
@@ -60105,6 +60180,11 @@
                   },
                   "channel": {
                     "type": "string"
+                  },
+                  "apps": {
+                    "description": "Also read the top-level posts of apps and integrations, never the account's own bots.",
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
@@ -68586,7 +68666,7 @@
                 ]
               },
               {
-                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own. With `apps`, the\ntop-level posts of apps and integrations count too, never those of the account's own bots.",
                 "type": "object",
                 "properties": {
                   "kind": {
@@ -68598,12 +68678,17 @@
                   },
                   "decide": {
                     "$ref": "#/$defs/Decide"
+                  },
+                  "apps": {
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
                   "kind",
                   "channel",
-                  "decide"
+                  "decide",
+                  "apps"
                 ]
               },
               {
@@ -69524,11 +69609,17 @@
                   },
                   "channel": {
                     "type": "string"
+                  },
+                  "apps": {
+                    "description": "Also read the top-level posts of apps and integrations, never the account's own bots.",
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
                   "kind",
-                  "channel"
+                  "channel",
+                  "apps"
                 ]
               },
               {
@@ -73325,7 +73416,7 @@
                 ]
               },
               {
-                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own.",
+                "description": "Every new message people start in this channel, by name or id, which a decision model sorts\ninto one of `decide`'s categories. The workflow has no session of its own. With `apps`, the\ntop-level posts of apps and integrations count too, never those of the account's own bots.",
                 "type": "object",
                 "properties": {
                   "kind": {
@@ -73337,6 +73428,10 @@
                   },
                   "decide": {
                     "$ref": "#/$defs/Decide"
+                  },
+                  "apps": {
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
@@ -74237,6 +74332,11 @@
                   },
                   "channel": {
                     "type": "string"
+                  },
+                  "apps": {
+                    "description": "Also read the top-level posts of apps and integrations, never the account's own bots.",
+                    "type": "boolean",
+                    "default": false
                   }
                 },
                 "required": [
