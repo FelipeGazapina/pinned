@@ -64,7 +64,7 @@ impl Machine {
             return Ok(false);
         }
         let path = self.launch.path_env.clone();
-        let diff = match review_run::diff(&cwd, path.as_deref()) {
+        let diff = match review_run::diff(&cwd, None, path.as_deref()) {
             Ok(diff) => diff,
             Err(error) if switch != Switch::Off => return Ok(self.not_reviewed(task, round, None, &error, None)),
             Err(_) => return Ok(false),
@@ -141,7 +141,7 @@ impl Machine {
             return Ok(self.not_reviewed(task, round, Some(model), &error, note));
         }
         let spec = SpawnSpec {
-            task: &review_run::first_prompt(author.summary.as_deref().unwrap_or_default(), &diff),
+            task: &review_run::first_prompt(author.summary.as_deref().unwrap_or_default(), &diff.text),
             model: Some(&model),
             effort: effort.as_deref(),
             access: Access::ReadOnly,
@@ -171,13 +171,13 @@ impl Machine {
         let me = self.me.clone();
         let ended = AtomicBool::new(false);
         let (id, author_id, worker) = (review.clone(), task.to_owned(), tab.to_owned());
-        let (child_path, sent_model, sent_note) = (path.clone(), model.clone(), note.clone());
+        let (child_path, sent_model, sent_note, cut) = (path.clone(), model.clone(), note.clone(), diff.cut_note());
         let pid = spawn(ChildSpec { bin: &self.launch.bin(Provider::Claude), argv: &argv, cwd: &neutral, env: &env.set, path: path.as_deref(), strip: &strip }, move |event| {
             let Some(machine) = me.upgrade() else { return };
             let ready = machine.delegates.apply(&id, event, child_path.as_deref());
             if machine.delegates.is_terminal(&id) && !ended.swap(true, Ordering::SeqCst) {
                 let _ = std::fs::remove_dir_all(machine.review_dir(&id));
-                machine.review_answered(&author_id, &id, &worker, Answered { round, rules: &rules, model: &sent_model, note: sent_note.clone() });
+                machine.review_answered(&author_id, &id, &worker, Answered { round, rules: &rules, model: &sent_model, note: sent_note.clone(), cut: cut.clone() });
             }
             if let Some(tab) = ready {
                 machine.maybe_deliver(&tab);
@@ -210,10 +210,13 @@ impl Machine {
             Some(ended) => match ended.summary.as_deref().and_then(|answer| review_run::findings(answer, answered.rules)) {
                 None => Some("the reviewer's answer was not a {\"findings\": [...]} object".to_owned()),
                 Some((findings, unknown)) if findings.is_empty() && !unknown.is_empty() => Some(format!("the reviewer named rules pinned did not send: {}", review_run::clipped_ids(&unknown))),
+                // A diff the reviewer did not read whole passes nothing.
+                Some((findings, _)) if findings.is_empty() && answered.cut.is_some() => answered.cut.clone(),
                 Some((findings, _)) => {
                     // Sending findings back is U9's; until then the Captain hears them with the task's end.
                     let state = if findings.is_empty() { ReviewState::Passed } else { ReviewState::Limit };
-                    self.delegates.put_review(task, ReviewRound { round: answered.round, findings, state, model: model.clone(), note: answered.note.clone() });
+                    let note = answered.note.iter().chain(&answered.cut).cloned().collect::<Vec<_>>().join("; ");
+                    self.delegates.put_review(task, ReviewRound { round: answered.round, findings, state, model: model.clone(), note: (!note.is_empty()).then_some(note) });
                     None
                 }
             },
@@ -257,6 +260,8 @@ struct Answered<'a> {
     rules: &'a [Rule],
     model: &'a str,
     note: Option<String>,
+    /// What the round says when the diff was cut.
+    cut: Option<String>,
 }
 
 #[cfg(test)]

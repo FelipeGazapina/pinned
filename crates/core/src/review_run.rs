@@ -36,8 +36,8 @@ pub fn rules_in_force(reviewer: &Reviewer, repo: Option<&str>) -> (Switch, Vec<R
 
 /// Whether a change gets a review. Off never does. On and Auto do when there is a rule to read the
 /// change against and the worker changed something; Auto decides by the change in just that way.
-pub fn wanted(switch: Switch, rules: &[Rule], diff: &str) -> bool {
-    switch != Switch::Off && !rules.is_empty() && !diff.trim().is_empty()
+pub fn wanted(switch: Switch, rules: &[Rule], diff: &Diff) -> bool {
+    switch != Switch::Off && !rules.is_empty() && (!diff.text.trim().is_empty() || diff.cut > 0)
 }
 
 /// The reviewer's `--append-system-prompt`: its role's prompt, then the rules, one a line.
@@ -127,41 +127,100 @@ pub fn transcript_model(file: &Path) -> Option<String> {
     })
 }
 
-/// What the worker changed: its folder against its base, the commit of the project's checkout
-/// that the folder's branch came from, with the files it added. Empty when nothing changed.
-pub fn diff(cwd: &Path, path: Option<&str>) -> Result<String, String> {
-    let root = crate::history::project_of(cwd);
-    let head = git(&root, path, &["rev-parse", "HEAD"])?;
-    let base = git(cwd, path, &["merge-base", "HEAD", head.trim()]).unwrap_or(head);
-    let mut diff = git(cwd, path, &["diff", "--no-color", "--no-ext-diff", base.trim(), "--"])?;
-    let added = git(cwd, path, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-    for file in added.split('\0').filter(|file| !file.is_empty()) {
-        if diff.len() > DIFF_BYTES {
-            break;
+/// What a worker changed, as the reviewer reads it.
+#[derive(Debug, Default)]
+pub struct Diff {
+    pub text: String,
+    /// The bytes of the change left out of `text`, which holds at most `DIFF_BYTES`.
+    pub cut: usize,
+}
+
+impl Diff {
+    /// What a round says when the diff was cut, so a cut diff never reads as a full review.
+    pub fn cut_note(&self) -> Option<String> {
+        (self.cut > 0).then(|| format!("the diff was cut at {} KiB: {} bytes were not read", DIFF_BYTES / 1024, self.cut))
+    }
+}
+
+/// The most files of a change read one by one; the rest count as cut.
+const MOST_FILES: usize = 500;
+
+/// What the worker changed: its folder against `base`, the commit its task started from, with
+/// the files it added. A task from before bases were kept uses the commit of the project's
+/// checkout that the folder's branch came from. Each file's diff is read on its own and the
+/// smallest go first, so a large file is the one cut, not the change beside it.
+pub fn diff(cwd: &Path, base: Option<&str>, path: Option<&str>) -> Result<Diff, String> {
+    let base = match base {
+        Some(base) => base.to_owned(),
+        None => {
+            let root = crate::history::project_of(cwd);
+            let head = git(&root, path, &["rev-parse", "HEAD"])?;
+            git(cwd, path, &["merge-base", "HEAD", head.trim()]).unwrap_or(head)
         }
+    };
+    let base = base.trim();
+    let names = |out: String| out.split('\0').filter(|file| !file.is_empty()).map(str::to_owned).collect::<Vec<_>>();
+    let tracked = names(git(cwd, path, &["diff", "--name-only", "-z", "--no-renames", base, "--"])?);
+    let added = names(git(cwd, path, &["ls-files", "--others", "--exclude-standard", "-z"])?);
+    let on_disk = |file: &str| std::fs::metadata(cwd.join(file)).map_or(0, |meta| usize::try_from(meta.len()).unwrap_or(usize::MAX));
+    let mut diff = Diff::default();
+    let mut parts: Vec<(String, usize)> = vec![];
+    for (at, (file, is_added)) in tracked.iter().map(|file| (file, false)).chain(added.iter().map(|file| (file, true))).enumerate() {
+        if at >= MOST_FILES {
+            diff.cut = diff.cut.saturating_add(on_disk(file).max(1));
+            continue;
+        }
+        let literal = format!(":(literal){file}");
         // --no-index exits 1 when the files differ, which is the point here.
-        diff.push_str(&git_out(cwd, path, &["diff", "--no-color", "--no-ext-diff", "--no-index", "--", "/dev/null", file])?);
+        let (text, whole) = if is_added {
+            git_read(cwd, path, &["diff", "--no-color", "--no-ext-diff", "--no-index", "--", "/dev/null", file], DIFF_BYTES + 1)?
+        } else {
+            let (ok, text, whole) = git_capped(cwd, path, &["diff", "--no-color", "--no-ext-diff", base, "--", &literal], DIFF_BYTES + 1)?;
+            if whole && !ok {
+                return Err(format!("git diff failed in {}", cwd.display()));
+            }
+            (text, whole)
+        };
+        let size = if whole { text.len() } else { text.len().max(on_disk(file)) };
+        parts.push((if whole { text } else { String::new() }, size));
+    }
+    parts.sort_by_key(|(_, size)| *size);
+    for (text, size) in parts {
+        if !text.is_empty() && diff.text.len() + text.len() <= DIFF_BYTES {
+            diff.text.push_str(&text);
+        } else {
+            diff.cut = diff.cut.saturating_add(size);
+        }
     }
     Ok(diff)
 }
 
 fn git(dir: &Path, path: Option<&str>, args: &[&str]) -> Result<String, String> {
-    let (ok, out) = git_run(dir, path, args)?;
+    let (ok, out, _) = git_capped(dir, path, args, usize::MAX)?;
     ok.then_some(out).ok_or_else(|| format!("git {} failed in {}", args.first().copied().unwrap_or_default(), dir.display()))
 }
 
-fn git_out(dir: &Path, path: Option<&str>, args: &[&str]) -> Result<String, String> {
-    git_run(dir, path, args).map(|(_, out)| out)
+/// Git's output up to `most` bytes, and whether that was all of it, whatever git exits with.
+fn git_read(dir: &Path, path: Option<&str>, args: &[&str], most: usize) -> Result<(String, bool), String> {
+    git_capped(dir, path, args, most).map(|(_, out, whole)| (out, whole))
 }
 
-fn git_run(dir: &Path, path: Option<&str>, args: &[&str]) -> Result<(bool, String), String> {
+/// Runs git, reading at most `most` bytes of what it prints: whether it succeeded, what it
+/// printed, and whether that was all of it. Git stops on a closed pipe past `most`.
+fn git_capped(dir: &Path, path: Option<&str>, args: &[&str], most: usize) -> Result<(bool, String, bool), String> {
+    use std::io::Read;
     let mut cmd = crate::process::command("git");
-    cmd.arg("-C").arg(dir).args(["-c", "core.quotepath=off"]).args(args).stdin(Stdio::null()).stderr(Stdio::null());
+    cmd.arg("-C").arg(dir).args(["-c", "core.quotepath=off"]).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     if let Some(path) = path {
         cmd.env("PATH", path);
     }
-    let out = cmd.output().map_err(|error| format!("git: {error}"))?;
-    Ok((out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned()))
+    let mut child = cmd.spawn().map_err(|error| format!("git: {error}"))?;
+    let mut out = vec![];
+    let read = child.stdout.take().map(|stdout| stdout.take(u64::try_from(most).unwrap_or(u64::MAX)).read_to_end(&mut out));
+    let status = child.wait().map_err(|error| format!("git: {error}"))?;
+    read.transpose().map_err(|error| format!("git: {error}"))?;
+    let whole = out.len() < most;
+    Ok((status.success(), String::from_utf8_lossy(&out).into_owned(), whole))
 }
 
 /// The findings in the reviewer's answer that name a rule in `rules`, and the ids it named that
@@ -248,10 +307,12 @@ mod tests {
         assert_eq!(rules.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["A2", "P1"]);
         let (switch, rules) = rules_in_force(&reviewer, Some("github.com/acme/other"));
         assert_eq!((switch, rules.len()), (Switch::Auto, 2));
-        assert!(!wanted(Switch::Off, &rules, "diff"));
-        assert!(!wanted(Switch::On, &[], "diff"));
-        assert!(!wanted(Switch::Auto, &rules, " \n"));
-        assert!(wanted(Switch::Auto, &rules, "diff"));
+        let change = |text: &str, cut| Diff { text: text.into(), cut };
+        assert!(!wanted(Switch::Off, &rules, &change("diff", 0)));
+        assert!(!wanted(Switch::On, &[], &change("diff", 0)));
+        assert!(!wanted(Switch::Auto, &rules, &change(" \n", 0)));
+        assert!(wanted(Switch::Auto, &rules, &change("diff", 0)));
+        assert!(wanted(Switch::Auto, &rules, &change("", 200_000)), "a change cut whole is still a change");
     }
 
     #[test]
