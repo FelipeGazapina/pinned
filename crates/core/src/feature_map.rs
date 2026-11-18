@@ -39,14 +39,57 @@ pub struct Feature {
 /// The maps saved in the config folder `dir`: none when the file is missing. A file that cannot be
 /// read or parsed is renamed to `feature-map.json.corrupt-<unix millis>` first, so nothing is ever
 /// saved over it, and the map starts empty. When even the rename fails, the answer is an error.
-pub fn load(_dir: &Path) -> Result<FeatureMaps, String> {
-    Ok(FeatureMaps::default())
+pub fn load(dir: &Path) -> Result<FeatureMaps, String> {
+    let path = dir.join(FILE);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(FeatureMaps::default()),
+        Err(e) => return keep_aside(&path, &e.to_string()),
+    };
+    // serde's message may quote the file, and a feature's text stays out of the log.
+    match serde_json::from_slice(&bytes) {
+        Ok(maps) => Ok(maps),
+        Err(e) => keep_aside(&path, &format!("no JSON feature map at line {} column {}", e.line(), e.column())),
+    }
+}
+
+fn keep_aside(path: &Path, why: &str) -> Result<FeatureMaps, String> {
+    let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    let name = format!("{FILE}.corrupt-{millis}");
+    eprintln!("pinned: {FILE} is unreadable ({why}); kept aside as {name}");
+    match std::fs::rename(path, path.with_file_name(&name)) {
+        Ok(()) => Ok(FeatureMaps::default()),
+        Err(e) => {
+            eprintln!("pinned: {FILE} could not be kept aside ({e}); the feature map will not change");
+            Err(format!("{FILE} is unreadable and could not be kept aside; nothing changed"))
+        }
+    }
 }
 
 /// Writes `maps` to `dir`: a sibling file only this user may read, flushed, then renamed over the
 /// last save, so a failed or cut write keeps that one.
-pub fn save(_dir: &Path, _maps: &FeatureMaps) -> Result<(), String> {
-    Ok(())
+pub fn save(dir: &Path, maps: &FeatureMaps) -> Result<(), String> {
+    use std::io::Write;
+    let file = dir.join(FILE);
+    let saved = (|| {
+        std::fs::create_dir_all(dir)?;
+        let tmp = file.with_extension("json.tmp");
+        let _ = std::fs::remove_file(&tmp);
+        let written = crate::private::file().create_new(true).open(&tmp).and_then(|mut f| {
+            f.write_all(&serde_json::to_vec(maps).expect("a feature map serializes"))?;
+            f.sync_all()
+        });
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        std::fs::rename(&tmp, &file)?;
+        // The rename itself lasts once the folder is flushed too.
+        #[cfg(unix)]
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok(())
+    })();
+    saved.map_err(|e| format!("the feature map did not save: {e}"))
 }
 
 #[cfg(test)]
