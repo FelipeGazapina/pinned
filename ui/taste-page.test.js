@@ -732,7 +732,7 @@ test("a hub that sends no worker profiles shows a note and no profile controls",
   await p.show();
   const html = section(p.html(), "Profiles");
   assert.match(html, /Update pinned on the hub to set worker profiles\./);
-  assert.doesNotMatch(html, /data-act="p/);
+  assert.doesNotMatch(html, /data-act="wp/);
 });
 
 test("Approve moves a proposed profile into the shown list with one set_worker_profiles, and never set_taste", async () => {
@@ -743,12 +743,12 @@ test("Approve moves a proposed profile into the shown list with one set_worker_p
   await p.show();
   let html = section(p.html(), "Profiles");
   assert.match(html, /Created by the Orchestrator/);
-  assert.match(html, /data-act="papprove"/);
-  assert.match(html, /data-act="pdismiss"/);
-  await p.click(/data-act="papprove"/);
+  assert.match(html, /data-act="wpapprove"/);
+  assert.match(html, /data-act="wpdismiss"/);
+  await p.click(/data-act="wpapprove"/);
   assert.deepEqual(sent(p), [["set_worker_profiles", { project: null, profiles: [wp(), proposed] }]]);
   html = section(p.html(), "Profiles");
-  assert.doesNotMatch(html, /data-act="papprove"|Created by the Orchestrator/, "the row left the proposed ones");
+  assert.doesNotMatch(html, /data-act="wpapprove"|Created by the Orchestrator/, "the row left the proposed ones");
   assert.match(html, /tester/);
   assert.ok(!sent(p).some(([cmd]) => cmd === "set_taste"));
 });
@@ -758,8 +758,8 @@ test("Approve on a project tab fills that project's list", async () => {
   const before = profilesOf({ proposed: [proposed] });
   const p = page({ answer: profilesHub(before, profilesOf({ projects: { [SITE]: [proposed] } })), projects: siteProjects });
   await p.show();
-  await p.click(new RegExp(`data-act="pscope" data-repo="${SITE}"`));
-  await p.click(/data-act="papprove"/);
+  await p.click(new RegExp(`data-act="wpscope" data-repo="${SITE}"`));
+  await p.click(/data-act="wpapprove"/);
   assert.deepEqual(sent(p), [["set_worker_profiles", { project: SITE, profiles: [proposed] }]]);
 });
 
@@ -767,9 +767,9 @@ test("Discard drops a proposed profile from the page and sends no set_taste", as
   const before = profilesOf({ proposed: [wp({ name: "tester", by: "orchestrator" })] });
   const p = page({ answer: profilesHub(before) });
   await p.show();
-  await p.click(/data-act="pdismiss"/);
+  await p.click(/data-act="wpdismiss"/);
   const html = section(p.html(), "Profiles");
-  assert.doesNotMatch(html, /data-act="pdismiss"|Created by the Orchestrator/);
+  assert.doesNotMatch(html, /data-act="wpdismiss"|Created by the Orchestrator/);
   assert.ok(!sent(p).some(([cmd]) => cmd === "set_taste"));
 });
 
@@ -781,10 +781,10 @@ test("a profile's name, skills, tools and line are escaped wherever they are dra
   let html = section(p.html(), "Profiles");
   assert.ok(html.includes(esc(bad)), "the account's profile is drawn escaped");
   assert.ok(!html.includes("<b>x</b>"), "no markup from a profile reaches the page");
-  await p.click(/data-act="pedit" data-index="0"/);
+  await p.click(/data-act="wpedit" data-index="0"/);
   html = section(p.html(), "Profiles");
   assert.ok(!html.includes("<b>x</b>"), "nor from the edit form");
-  await p.click(new RegExp(`data-act="pscope" data-repo="${SITE}"`));
+  await p.click(new RegExp(`data-act="wpscope" data-repo="${SITE}"`));
   html = section(p.html(), "Profiles");
   assert.ok(html.includes(esc(bad)) && !html.includes("<b>x</b>"), "so is the project's");
 });
@@ -794,15 +794,15 @@ test("editing a project's profile and Save sends set_worker_profiles for that pr
   const after = profilesOf({ account: before.account, projects: { [SITE]: [wp({ name: "fixer", access: "read_only", delivers: "A diagnosis." })] } });
   const p = page({ answer: profilesHub(before, after), projects: siteProjects });
   await p.show();
-  await p.click(new RegExp(`data-act="pscope" data-repo="${SITE}"`));
-  await p.click(/data-act="pedit" data-index="0"/);
-  await p.click(/data-act="paccess" data-value="read_only"/);
+  await p.click(new RegExp(`data-act="wpscope" data-repo="${SITE}"`));
+  await p.click(/data-act="wpedit" data-index="0"/);
+  await p.click(/data-act="wpaccess" data-value="read_only"/);
   p.typeOn("data-profile-delivers", "A diagnosis.");
   await p.submitOn("data-profile-form");
   assert.deepEqual(sent(p), [], "nothing is sent before Save");
-  await p.click(/data-act="psave"/);
+  await p.click(/data-act="wpsave"/);
   assert.deepEqual(sent(p), [["set_worker_profiles", { project: SITE, profiles: [wp({ name: "fixer", access: "read_only", delivers: "A diagnosis." })] }]]);
-  assert.doesNotMatch(section(p.html(), "Profiles"), /data-act="psave"/, "the saved list has nothing left to save");
+  assert.doesNotMatch(section(p.html(), "Profiles"), /data-act="wpsave"/, "the saved list has nothing left to save");
 });
 
 test("adding a profile with a picked installed skill saves it on the account, and Remove drops one", async () => {
@@ -813,27 +813,27 @@ test("adding a profile with a picked installed skill saves it on the account, an
     skills: { mm: { copies: [{ key: "deploy", scope: { kind: "personal" }, description: "Ship it." }] } },
   });
   await p.show();
-  await p.click(/data-act="padd"/);
+  await p.click(/data-act="wpadd"/);
   p.typeOn("data-profile-name", "docs");
   p.typeOn("data-profile-tools", "Read, Grep");
   p.typeOn("data-profile-delivers", "Docs.");
   await p.changeOn("data-profile-effort", "high");
-  await p.click(/data-act="paccess" data-value="edit"/);
-  await p.click(/data-act="pskill" data-skill="deploy"/);
+  await p.click(/data-act="wpaccess" data-value="edit"/);
+  await p.click(/data-act="wpskill" data-skill="deploy"/);
   await p.submitOn("data-profile-form");
-  await p.click(/data-act="pdrop" data-index="0"/);
-  await p.click(/data-act="psave"/);
+  await p.click(/data-act="wpdrop" data-index="0"/);
+  await p.click(/data-act="wpsave"/);
   assert.deepEqual(sent(p), [["set_worker_profiles", { project: null, profiles: [added] }]]);
 });
 
 test("a failed Save shows the hub's refusal and keeps the draft", async () => {
   const p = page({ answer: (cmd) => (cmd === "set_worker_profiles" ? Promise.reject(new Error("two profiles are named scout")) : tastesWith({ worker_profiles: profilesOf({ account: [wp()] }) })) });
   await p.show();
-  await p.click(/data-act="pdrop" data-index="0"/);
-  await p.click(/data-act="psave"/);
+  await p.click(/data-act="wpdrop" data-index="0"/);
+  await p.click(/data-act="wpsave"/);
   const html = section(p.html(), "Profiles");
   assert.match(html, /two profiles are named scout/);
-  assert.match(html, /data-act="psave"/);
+  assert.match(html, /data-act="wpsave"/);
 });
 
 test("a rule id is escaped in the Reviewer section", async () => {

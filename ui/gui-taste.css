@@ -157,3 +157,10 @@ button.taste-card:hover { background: var(--g-hover); }
 .taste-rule-text { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; color: var(--g-text); font-size: 13px; }
 .taste-rounds { width: 72px; height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--g-input); background: var(--g-canvas); color: var(--g-fg); font: inherit; font-size: 13px; }
 .taste-reviewer .taste-note-form select { height: 36px; }
+
+.taste-profiles-list li { align-items: center; }
+.taste-profile-text { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+.taste-profile-form { display: flex; flex-direction: column; gap: 12px; padding: 12px; border: 1px solid var(--g-border); border-radius: 12px; }
+.taste-profile-form input[type="text"] { width: 100%; box-sizing: border-box; height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--g-input); background: var(--g-canvas); color: var(--g-fg); font: inherit; font-size: 13px; }
+.taste-wrap { flex-wrap: wrap; height: auto; }
+@media (pointer: coarse) { .taste-profile-form input[type="text"] { font-size: 16px; } }
