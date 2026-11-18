@@ -283,4 +283,18 @@ mod tests {
         assert!(!inside.contains(HEADER), "{text}");
         assert!(inside.contains("[header text removed]"), "{text}");
     }
+
+    #[test]
+    fn more_invisible_characters_are_refused_in_notes_and_cites_and_blanked_by_neutral() {
+        let mut chars: Vec<char> = vec!['\u{034F}', '\u{115F}', '\u{1160}', '\u{17B4}', '\u{17B5}', '\u{2800}', '\u{3164}', '\u{FFA0}'];
+        chars.extend('\u{180B}'..='\u{180F}');
+        chars.extend('\u{FE00}'..='\u{FE0F}');
+        chars.extend('\u{E0100}'..='\u{E01EF}');
+        for c in chars {
+            assert_eq!(note_text(&format!("the token{c}check moved")), Err("a board note may not hold an invisible or direction-changing character. Nothing was noted.".into()), "U+{:04X}", c as u32);
+            let cited = cite(std::path::Path::new("."), &format!("src/a{c}b.rs"));
+            assert!(cited.as_ref().is_err_and(|e| e.contains("an invisible or direction-changing character")), "U+{:04X}: {cited:?}", c as u32);
+            assert_eq!(neutral(&format!("a{c}b")), "ab", "U+{:04X}", c as u32);
+        }
+    }
 }
