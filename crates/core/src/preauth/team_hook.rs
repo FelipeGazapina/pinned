@@ -595,12 +595,18 @@ mod tests {
     #[test]
     fn claude_mcp_add_or_remove_through_bash_is_denied_as_an_owners_file() {
         for (command, name) in [
-            ("claude mcp add x -- cmd", ".mcp.json"),
-            ("claude mcp add-json x '{}'", ".mcp.json"),
-            ("claude mcp remove x", ".mcp.json"),
+            // Claude Code's own default scope is local, which writes ~/.claude.json.
+            ("claude mcp add x -- cmd", "~/.claude.json"),
+            ("claude mcp add-json x '{}'", "~/.claude.json"),
+            ("claude mcp remove x", "~/.claude.json"),
             ("claude --debug mcp add -s user x -- npx y", "~/.claude.json"),
             ("claude mcp add --scope user x -- npx y", "~/.claude.json"),
-            ("cd sub && claude mcp add x -- cmd", ".mcp.json"),
+            ("claude mcp add -s local x -- npx y", "~/.claude.json"),
+            ("cd sub && claude mcp add x -- cmd", "~/.claude.json"),
+            ("claude mcp add -s project x -- cmd", ".mcp.json"),
+            ("claude mcp add --scope project x -- cmd", ".mcp.json"),
+            ("claude mcp add-json --scope=project x '{}'", ".mcp.json"),
+            ("cd sub && claude mcp remove -s project x", ".mcp.json"),
         ] {
             for team_box in [false, true] {
                 let (out, message) = decision(&payload("Bash", json!({ "command": command })), team_box, Ok(r#"{"id":"k1","granted":true}"#));
