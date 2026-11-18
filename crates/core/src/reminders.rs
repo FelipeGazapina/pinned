@@ -159,7 +159,7 @@ pub fn permissions() -> Vec<String> {
 
 /// pinned's own tools that only read. A read-only session calls these without asking and is
 /// refused every other tool of `permissions`, which act.
-const READ_TOOLS: [&str; 22] = [
+const READ_TOOLS: [&str; 21] = [
     LIST_TOOL,
     CAPABILITIES_TOOL,
     STATUS_TOOL,
@@ -179,7 +179,6 @@ const READ_TOOLS: [&str; 22] = [
     "taste_get",
     "convex_tables",
     "convex_data",
-    "convex_query",
     "convex_run",
     "convex_logs",
 ];
