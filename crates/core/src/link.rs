@@ -290,9 +290,9 @@ struct Syncer {
 /// one; either way the hub refuses a push that grows past it whichever project sends it, so one
 /// hold covers every project and plugin share. Until it ends, a sync sends only what does not grow
 /// the hub's copy (see `sync::sync_shrinking`); when the wait is over, the next cycle is a probe
-/// that sends everything. A probe cycle in which no sync is refused at the limit ends the hold,
-/// whatever other errors its syncs had; one in which any is refused doubles it, whatever the other
-/// projects did. The hold is not restarted when the files to send change. The project lists and
+/// that sends everything. A probe cycle in which no sync is refused at the limit and one came back
+/// Ok ends the hold, whatever other errors its syncs had; one whose every sync errored leaves it as
+/// it is, to probe again; one in which any is refused doubles it, whatever the other projects did. The hold is not restarted when the files to send change. The project lists and
 /// pulls every cycle all the same.
 ///
 /// A cycle runs `begin`, then a sync of each project and plugin share, then `finish`.
@@ -310,6 +310,8 @@ struct Round {
     /// The hold is on, and its wait is not over: this cycle only shrinks.
     held: bool,
     refused: bool,
+    /// A sync of the cycle came back Ok: it reached the hub, and pushed or had nothing to push.
+    synced: bool,
     /// A sync of the cycle never ran, so the cycle says nothing of the hub's room.
     unclean: bool,
 }
@@ -343,12 +345,13 @@ impl PushBackoff {
         self.round = Round { probe: on && !shrinking, held: on && shrinking, ..Round::default() };
     }
 
-    /// Ends the cycle: the hold ends when a probe cycle ran every sync and none was refused at the
-    /// limit. A sync that failed for another reason says nothing of the hub's room, so it does not
-    /// keep the hold.
+    /// Ends the cycle: the hold ends when a probe cycle ran every sync, none was refused at the
+    /// limit and at least one came back Ok. A sync that failed for another reason says nothing of
+    /// the hub's room, so it does not keep the hold; but a probe whose every sync failed, perhaps
+    /// before it pushed, has not asked the hub anything, so the hold stays as it is.
     fn finish(&mut self) {
         let round = std::mem::take(&mut self.round);
-        if round.probe && !round.refused && !round.unclean {
+        if round.probe && !round.refused && round.synced && !round.unclean {
             self.limit = None;
         }
     }
@@ -378,6 +381,9 @@ impl PushBackoff {
     /// Notes what a sync did. The first refusal of a cycle sets the hold, or doubles it when the
     /// cycle is a probe; a refusal of a cycle that only shrinks leaves the hold as it is.
     fn record(&mut self, done: Result<sync::Synced, String>, now: Instant) -> Result<sync::Synced, String> {
+        if done.is_ok() {
+            self.round.synced = true;
+        }
         match &done {
             Ok(sync::Synced { push: sync::Push::Refused { error }, .. }) => {
                 let first = !self.round.refused;
@@ -495,6 +501,10 @@ impl Syncer {
             }
         }
         for share in shares {
+            if !shared.online() {
+                self.backoff.skipped();
+                break;
+            }
             match self.backoff.sync_plugins(hub, state, &share, Instant::now()) {
                 Ok(done) => {
                     self.reported_old_hub = false;
