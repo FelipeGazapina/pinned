@@ -68,7 +68,12 @@ impl Machine {
     /// board. It wakes nobody and types into no thread.
     pub(super) fn board_note(&self, tab: Option<&str>, task: Option<&str>, call: BoardNoteArgs) -> Result<String, String> {
         let (task, root) = self.worker_board(tab, task, "board_note")?;
-        let cwd = self.delegates.get(&task).map(|task| task.cwd).ok_or_else(|| format!("no task {task}. Nothing was noted."))?;
+        let worker = self.delegates.get(&task).ok_or_else(|| format!("no task {task}. Nothing was noted."))?;
+        // A worker on another machine or a box cites a folder this machine cannot check.
+        if worker.remote.is_some() || !worker.cwd.is_dir() {
+            return Err("board notes work for workers on the Captain's machine only in this build. Nothing was noted.".into());
+        }
+        let cwd = worker.cwd;
         let file = crate::board::cite(&cwd, &call.file)?;
         let text = crate::board::note_text(&call.text)?;
         let note = BoardNote { by: task, file, text, at: super::unix_millis() };
