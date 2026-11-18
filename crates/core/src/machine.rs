@@ -9736,7 +9736,7 @@ pub(crate) mod tests {
     fn a_tab_command_starts_only_with_what_its_kind_sets() {
         let m = machine();
         let account = Account::builtin(Provider::Claude);
-        let cmd = parent::with(every_session_variable(), || m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None));
+        let cmd = parent::with(every_session_variable(), || m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None, None));
         let session: BTreeMap<&str, &str> = INHERITED_SESSION_ENV.iter().filter_map(|name| Some((*name, cmd.get_env(name)?.to_str()?))).collect();
         assert_eq!(session, BTreeMap::from([("PINNED_SOCK", "k"), ("PINNED_TAB", "tab-1"), ("PINNED_TUTORIAL_HELPER", "t"), ("PINNED_ACCOUNT", "claude")]));
     }
@@ -9838,13 +9838,13 @@ pub(crate) mod tests {
         assert_eq!(m.accounts.home(&account), own, "the home a resume and sync read");
         assert_eq!(m.find_transcript(&account, session), Some(transcript.clone()));
         assert_eq!(m.claude_config(&account), own.join(".claude.json"));
-        let cmd = m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None);
+        let cmd = m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None, None);
         assert_eq!(cmd.get_env("CLAUDE_CONFIG_DIR").and_then(|v| v.to_str()), own.to_str());
 
         let m = machine_started_with(root.path(), shell(&[("PINNED_ROLE", "worker")]));
         assert_eq!(m.accounts.home(&account), home().join(".claude"));
         assert_eq!(m.find_transcript(&account, session), None);
-        let cmd = m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None);
+        let cmd = m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None, None);
         assert_eq!(cmd.get_env("CLAUDE_CONFIG_DIR"), None);
     }
 
