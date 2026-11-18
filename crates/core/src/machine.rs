@@ -14006,6 +14006,29 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn the_global_orchestrator_set_to_ask_types_nothing_into_a_full_captain() {
+        let dir = temp("global-asks");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = m.open_project(project).display().to_string();
+        let captain = idle_captain(&m, &path, &file);
+        m.tab(&captain, |t| t.bypass = true).unwrap();
+        let global = m.open_global_orchestrator().unwrap();
+        m.tab(&global, |t| t.bypass = false).unwrap();
+        let send = |request: &str| m.project_tool(&global, ProjectTool::SendToCaptain { project: path.clone(), message: "Ship it.".into(), request_id: request.into(), machine: None, boxed: None });
+        assert_eq!(send("r-1"), Err(format!("the Captain of {path} skips its permission prompts and your session asks for them, so your message can't reach it; the user can switch that Captain to ask for permissions")));
+        assert_eq!(m.delegates.queued().get(&captain).copied(), None, "nothing waits in its queue");
+        m.tab(&global, |t| t.bypass = true).unwrap();
+        assert!(send("r-2").is_ok(), "the global Orchestrator in Full access reaches it");
+        let shipped = b"\x1b[200~[Orchestrator] Ship it.\x1b[201~\r";
+        assert_eq!(typed(&file, shipped), shipped, "only the Full Orchestrator's message reached the terminal");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_guarded_prompt_types_nothing_into_a_session_that_skips_its_prompts() {
         let (m, dir, captain) = limited_captain("guarded-prompt", TastePatch::default());
         let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
