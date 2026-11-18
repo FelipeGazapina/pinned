@@ -711,6 +711,28 @@ mod tests {
         (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned(), out.status.code(), started.elapsed())
     }
 
+    /// A pipe whose reader is gone: every write fails as a closed stdout or stderr does.
+    struct Closed;
+
+    impl std::io::Write for Closed {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    #[test]
+    fn a_deny_to_a_closed_pipe_still_exits_with_code_2() {
+        assert_eq!(std::panic::catch_unwind(|| fail_closed_to(Closed, Closed)).ok(), Some(2), "a closed pipe kept the watchdog from exiting 2");
+        let (mut out, mut err) = (vec![], vec![]);
+        assert_eq!(fail_closed_to(&mut out, &mut err), 2);
+        assert_eq!(String::from_utf8(out).unwrap(), format!("{}\n", deny(COULD_NOT_CHECK)));
+        assert_eq!(String::from_utf8(err).unwrap(), format!("{COULD_NOT_CHECK}\n"));
+    }
+
     /// The hook's entry point as `pinned team-guard` runs it, exiting with its code.
     #[test]
     #[ignore = "the hook's own process, which a_hook_that_panics_or_stalls_denies_its_call_with_exit_code_2 starts"]
