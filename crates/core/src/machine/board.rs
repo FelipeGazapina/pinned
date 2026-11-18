@@ -553,6 +553,20 @@ mod tests {
         assert_eq!(crate::board::NOTES_BY, 20);
     }
 
+    #[test]
+    fn a_captain_tab_reads_its_plans_boards_whatever_its_task() {
+        let t = team("captain-task");
+        noted(&t.m, &t.worker, "src/login.rs", "the token check moved");
+        noted(&t.m, &t.other_worker, "src/login.rs", "signup reads it too");
+        for its_task in [Some(t.worker.clone()), Some(t.unplanned_worker.clone()), Some("task-gone".to_owned())] {
+            t.m.tab(&t.captain, |tab| tab.task = its_task.clone()).unwrap();
+            let text = read(&t.m, Some(&t.captain), None, None);
+            assert!(text.as_ref().is_ok_and(|text| text.contains("the token check moved") && text.contains("signup reads it too")), "{its_task:?}: {text:?}");
+            let one = read(&t.m, Some(&t.captain), None, Some(&t.other_worker));
+            assert!(one.as_ref().is_ok_and(|text| text.contains("signup reads it too") && !text.contains("the token check moved")), "{its_task:?}: {one:?}");
+        }
+    }
+
     /// A second Captain (`cap-b`) in the same app, whose plan links one root task with one worker.
     fn foreign_captain(t: &Team) -> (String, String, String) {
         let project = t.dir.join("app");
