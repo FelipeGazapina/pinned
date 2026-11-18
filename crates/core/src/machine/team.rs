@@ -52,7 +52,8 @@ mod tests {
     #[test]
     fn every_team_tool_answers_that_it_is_not_available_yet() {
         let m = Machine::new(launch(), None, None, |_| {});
-        for name in crate::team_tools::NAMES {
+        // U5's profile_propose answers in machine/profiles.rs.
+        for name in crate::team_tools::NAMES.into_iter().filter(|name| *name != "profile_propose") {
             let args = match name {
                 "task_fix" | "board_read" => json!({ "taskId": "t1" }),
                 "feature_map_set" => json!({ "feature": "login", "files": [] }),

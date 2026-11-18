@@ -72,6 +72,7 @@ impl Tastes {
         let mut names = std::collections::BTreeSet::new();
         for profile in &profiles {
             profile.check()?;
+            not_the_reviewer(profile)?;
             if !names.insert(profile.name.trim().to_lowercase()) {
                 return Err(format!("two profiles are named {}", profile.name.trim()));
             }
@@ -89,8 +90,19 @@ impl Tastes {
         Ok(())
     }
 
-    /// `profile_propose`: keeps `profile` in `proposed` for the user.
-    pub fn propose_worker_profile(&mut self, _profile: WorkerProfile) -> Result<(), String> {
+    /// `profile_propose`: keeps `profile` in `proposed`, by the orchestrator, in place of an
+    /// earlier proposal of the same name. Never the account's or a project's list: only the user
+    /// takes a proposal into one, and `resolve` never reads `proposed`.
+    pub fn propose_worker_profile(&mut self, profile: WorkerProfile) -> Result<(), String> {
+        profile.check()?;
+        not_the_reviewer(&profile)?;
+        let profile = WorkerProfile { by: ProfileAuthor::Orchestrator, ..profile };
+        let proposed = &mut self.worker_profiles.proposed;
+        match proposed.iter().position(|p| same_name(&p.name, &profile.name)) {
+            Some(earlier) => proposed[earlier] = profile,
+            None if proposed.len() >= MAX_PROPOSED => return Err(format!("{MAX_PROPOSED} proposals already wait for the user; nothing changed")),
+            None => proposed.push(profile),
+        }
         Ok(())
     }
 }
@@ -110,20 +122,83 @@ impl WorkerProfile {
     }
 
     /// Whether every skill the profile names is one of `installed`, as the `skills` action lists them.
-    pub fn check_skills(&self, _installed: &[&str]) -> Result<(), String> {
-        Ok(())
+    pub fn check_skills(&self, installed: &[&str]) -> Result<(), String> {
+        match self.skills.iter().find(|skill| !installed.contains(&skill.name.trim())) {
+            Some(skill) => Err(format!("{} names {}, which is no installed skill: name one the skills action lists", self.name.trim(), skill.name.trim())),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The most proposals that wait for the user at once.
+pub const MAX_PROPOSED: usize = 20;
+/// The seed whose model, rules and rounds are `Tastes::reviewer`'s, and no list's.
+pub const REVIEWER: &str = "Reviewer";
+
+fn same_name(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
+}
+
+fn not_the_reviewer(profile: &WorkerProfile) -> Result<(), String> {
+    match same_name(&profile.name, REVIEWER) {
+        true => Err("the Reviewer is set in its own section, so no profile takes its name".into()),
+        false => Ok(()),
     }
 }
 
 /// The built-in profiles, which every list starts from: Explorer, Implementer, Tester and the
-/// Reviewer, whose model, rules and rounds are `Tastes::reviewer`'s.
-pub fn seeds(_reviewer: &Reviewer, _project: Option<&str>) -> Vec<WorkerProfile> {
-    vec![]
+/// Reviewer, whose model, rules and rounds are `Tastes::reviewer`'s. A seed's model of None is the
+/// ladder's rung for its kind of work.
+pub fn seeds(reviewer: &Reviewer, project: Option<&str>) -> Vec<WorkerProfile> {
+    let seed = |name: &str, tools: &[&str], access, delivers: &str| WorkerProfile {
+        name: name.into(),
+        skills: vec![],
+        tools: tools.iter().map(|t| (*t).to_owned()).collect(),
+        access,
+        model: None,
+        effort: None,
+        delivers: delivers.into(),
+        by: ProfileAuthor::User,
+    };
+    vec![
+        seed("Explorer", &["Read", "Grep", "Glob"], ProfileAccess::ReadOnly, "What it found, with file:line, and no change."),
+        seed("Implementer", &["Read", "Grep", "Glob", "Edit", "Write", "Bash"], ProfileAccess::Edit, "The change on its branch, with the tests it ran."),
+        seed("Tester", &["Read", "Grep", "Glob", "Edit", "Write", "Bash"], ProfileAccess::Edit, "The tests it ran and their output, with screenshot proof only when the work changes a screen."),
+        WorkerProfile { model: reviewer.model.clone(), ..seed(REVIEWER, &["Read", "Grep", "Glob"], ProfileAccess::ReadOnly, &reviewer_delivers(reviewer, project)) },
+    ]
 }
 
-/// The profiles `delegate_task` may name in `project`, or in any project when None.
-pub fn approved(_tastes: &Tastes, _project: Option<&str>) -> Vec<WorkerProfile> {
-    vec![]
+/// What the Reviewer seed delivers: the rules it reads in `project` and the rounds it sends back.
+fn reviewer_delivers(reviewer: &Reviewer, project: Option<&str>) -> String {
+    let own = project.and_then(|repo| reviewer.projects.get(repo.trim()));
+    let replaced = |id: &str| own.is_some_and(|own| own.rules.iter().any(|rule| rule.replaces.as_deref() == Some(id)));
+    let rules: Vec<&str> = reviewer.rules.iter().map(|rule| rule.id.as_str()).filter(|id| !replaced(id)).chain(own.into_iter().flat_map(|own| own.rules.iter().map(|rule| rule.id.as_str()))).collect();
+    let rounds = match reviewer.rounds {
+        1 => "1 round".to_owned(),
+        n => format!("{n} rounds"),
+    };
+    match rules.is_empty() {
+        true => format!("Findings on the change, sent back to the worker for at most {rounds}."),
+        false => format!("Findings against rules {}, sent back to the worker for at most {rounds}.", rules.join(", ")),
+    }
+}
+
+/// The profiles `delegate_task` may name in `project`, or in any project when None: the seeds,
+/// then the account's list over them by name, then the project's over both. The Reviewer stays the
+/// seed. Never a proposal.
+pub fn approved(tastes: &Tastes, project: Option<&str>) -> Vec<WorkerProfile> {
+    let mut list = seeds(&tastes.reviewer, project);
+    let own = project.and_then(|repo| tastes.worker_profiles.projects.get(repo.trim()));
+    for profile in tastes.worker_profiles.account.iter().chain(own.into_iter().flatten()) {
+        if same_name(&profile.name, REVIEWER) {
+            continue;
+        }
+        match list.iter_mut().find(|p| same_name(&p.name, &profile.name)) {
+            Some(earlier) => *earlier = profile.clone(),
+            None => list.push(profile.clone()),
+        }
+    }
+    list
 }
 
 /// Why `resolve` found no profile.
@@ -143,9 +218,16 @@ impl fmt::Display for Unresolved {
     }
 }
 
-/// The profile named `name` in `project`, or in any project when None.
-pub fn resolve(_tastes: &Tastes, _project: Option<&str>, name: &str) -> Result<WorkerProfile, Unresolved> {
-    Err(Unresolved::Unknown(name.trim().to_owned()))
+/// The profile named `name` in `project`, or in any project when None, as `approved` lists it. A
+/// name only `proposed` holds is not approved: `delegate_task` never runs a proposal.
+pub fn resolve(tastes: &Tastes, project: Option<&str>, name: &str) -> Result<WorkerProfile, Unresolved> {
+    if let Some(profile) = approved(tastes, project).into_iter().find(|p| same_name(&p.name, name)) {
+        return Ok(profile);
+    }
+    match tastes.worker_profiles.proposed.iter().any(|p| same_name(&p.name, name)) {
+        true => Err(Unresolved::NotApproved(name.trim().to_owned())),
+        false => Err(Unresolved::Unknown(name.trim().to_owned())),
+    }
 }
 
 /// `delegate_task`'s `profile`, which `parse_request` calls. U6 turns it on.

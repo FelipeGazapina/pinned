@@ -3,6 +3,7 @@
 
 use super::Machine;
 use crate::delegate::{Caller, Request};
+use crate::global_orchestrator as global;
 use crate::profiles::WorkerProfile;
 use crate::taste::{self, Tastes};
 use crate::team_tools::ProfilePropose;
@@ -10,7 +11,18 @@ use crate::team_tools::ProfilePropose;
 impl Machine {
     /// `Tastes::set_worker_profiles` on this machine's own tastes, for a signed-out app.
     pub fn set_local_worker_profiles(&self, project: Option<&str>, profiles: Vec<WorkerProfile>) -> Result<Tastes, String> {
+        self.check_skills(&profiles)?;
         taste::change(self.orchestration_dir.as_deref(), |tastes| tastes.set_worker_profiles(project, profiles))
+    }
+
+    /// Whether every skill `profiles` name is installed here, as the `skills` action lists them.
+    fn check_skills(&self, profiles: &[WorkerProfile]) -> Result<(), String> {
+        if profiles.iter().all(|p| p.skills.is_empty()) {
+            return Ok(());
+        }
+        let listing = crate::skills::list(&self.places());
+        let installed: Vec<&str> = listing.copies.iter().map(|copy| copy.key.as_str()).collect();
+        profiles.iter().try_for_each(|p| p.check_skills(&installed))
     }
 
     /// `delegate_task`'s request as the profile it names sets it up. U6 resolves the profile;
@@ -20,8 +32,22 @@ impl Machine {
         Ok(request)
     }
 
-    pub(super) fn profile_propose(&self, _tab: Option<&str>, _task: Option<&str>, _call: ProfilePropose) -> Result<String, String> {
-        super::team::not_yet("profile_propose")
+    /// `profile_propose`, the global orchestrator's alone: keeps the profile in `proposed`, which
+    /// `delegate_task` never reads, until the user takes it into a list. `why` is not kept.
+    pub(super) fn profile_propose(&self, tab: Option<&str>, task: Option<&str>, call: ProfilePropose) -> Result<String, String> {
+        let orchestrator = task.is_none() && tab.is_some_and(|tab| self.tab(tab, |t| global::is_global(&t.env)).unwrap_or(false));
+        if !orchestrator {
+            return Err("profile_propose is the Orchestrator's own: a Captain or a worker cannot propose a profile".into());
+        }
+        // A linked machine's tastes are the hub's, which take no proposal yet: one kept here would
+        // be overwritten by the hub's next answer.
+        if self.hub.lock().unwrap().is_some() {
+            return Err("profile_propose keeps a proposal only on a signed-out app in this build; nothing changed".into());
+        }
+        self.check_skills(std::slice::from_ref(&call.profile))?;
+        let name = call.profile.name.trim().to_owned();
+        taste::change(self.orchestration_dir.as_deref(), |tastes| tastes.propose_worker_profile(call.profile))?;
+        Ok(format!("{name} waits for the user on the Way of working page. delegate_task cannot name it until they take it into a list."))
     }
 }
 
