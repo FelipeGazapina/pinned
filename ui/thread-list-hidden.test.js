@@ -22,14 +22,14 @@ function sidebar({ screen }) {
       this.children = rows;
     },
     querySelectorAll(selector) {
-      return selector === ".thread-row" ? this.children : [];
+      return selector === ".thread-row" ? this.children : selector === "[data-since]" ? this.children.map((row) => row.since) : [];
     },
     insertAdjacentHTML() {},
   };
   const state = { order: ["m:1", "m:2"], modelChanges: 0 };
   const tabs = () => state.order.map((key) => ({ key, machine: "m" }));
   const context = {
-    document: { activeElement: null, body, getElementById: () => ({ hidden: false, dataset: {} }) },
+    document: { activeElement: null, body, getElementById: () => ({ hidden: false, dataset: {} }), querySelectorAll: () => [] },
     MutationObserver: class {
       constructor(fn) {
         observers.push(fn);
@@ -42,7 +42,7 @@ function sidebar({ screen }) {
       return tabs();
     },
     firstSeen: new Map(),
-    nowS: () => 0,
+    nowS: () => 117,
     selected: new Set(),
     tabByKey: (key) => tabs().find((t) => t.key === key),
     noteReturns() {},
@@ -68,20 +68,29 @@ function sidebar({ screen }) {
     emptyListText: () => "",
     renderSyncAlert() {},
     drawSidebarToggle() {},
-    tickDurations() {},
     scheduleWake() {},
     modelChanged: () => state.modelChanges++,
-    shelfRows: (inScope) => inScope.map((tab) => ({ dataset: { tab: tab.key } })),
+    shelfRows: (inScope) => inScope.map((tab) => ({ dataset: { tab: tab.key }, since: { dataset: { since: "100" }, textContent: "" } })),
     searchRows: () => [],
   };
   vm.createContext(context);
-  vm.runInContext(`${between("function rowTabs", "function markThreadSeen")}\n${between("function renderSidebar", "/** What the closed sidebar holds")}`, context);
+  vm.runInContext(
+    [
+      between("function rowTabs", "function markThreadSeen"),
+      between("const durationLabel", "\n"),
+      between("let linkDownAt", "function noteHubLink"),
+      between("function tickDurations", "visibleInterval("),
+      between("function renderSidebar", "/** What the closed sidebar holds"),
+    ].join("\n"),
+    context,
+  );
   const shown = () => threadList.children.map((row) => row.dataset.tab);
+  const durations = () => threadList.children.map((row) => row.since.textContent);
   const show = (next) => {
     body.dataset.phoneScreen = next;
     for (const fn of observers) fn();
   };
-  return { context, state, shown, show };
+  return { context, state, shown, durations, show };
 }
 
 test("a render while the phone shows a thread leaves the hidden list alone, and the list is current once it shows", () => {
@@ -95,6 +104,7 @@ test("a render while the phone shows a thread leaves the hidden list alone, and 
   assert.equal(s.state.modelChanges, 2, "the other surfaces still hear of every change");
   s.show("threads");
   assert.deepEqual(s.shown(), ["m:3", "m:1", "m:2"]);
+  assert.deepEqual(s.durations(), ["17s", "17s", "17s"], "the rows drawn as the list comes back show their timers at once");
 });
 
 test("a list read while hidden, as stepping or settling the open thread does, gets the current rows", () => {

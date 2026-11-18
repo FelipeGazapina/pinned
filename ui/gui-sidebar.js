@@ -527,7 +527,11 @@ function renderSidebar() {
 const threadListShown = () => (document.body.dataset.phoneScreen ? document.body.dataset.phoneScreen === "threads" : ui.sidebarOpen);
 /** A render left the list as it was, since it was off screen; it is drawn when it comes back or a row is read. */
 let threadListStale = false;
-new MutationObserver(() => threadListStale && threadListShown() && drawThreadList()).observe(document.body, { attributeFilter: ["data-phone-screen", "data-sidebar"] });
+new MutationObserver(() => {
+  if (!threadListStale || !threadListShown()) return;
+  drawThreadList();
+  tickDurations();
+}).observe(document.body, { attributeFilter: ["data-phone-screen", "data-sidebar"] });
 
 function drawThreadList(scope = projectGroups().find((g) => g.key === ui.project)) {
   threadListStale = false;
