@@ -3192,6 +3192,31 @@ mod tests {
         format!("claude/memory/{name}.md")
     }
 
+    /// The hub refuses every push of a box with a refusal that reads as the size limit, so a box's
+    /// node backs off its push and still pulls the account's files in the same cycle.
+    #[test]
+    fn a_box_whose_push_the_hub_refuses_still_pulls_the_accounts_skill_in_the_same_sync() {
+        let root = root("box-refused");
+        let hub = QuotaHub::new(u64::MAX);
+        let (mac_home, box_home) = (root.join("mac"), root.join("box"));
+        put(&mac_home.join(".claude/skills/ship/SKILL.md"), "---\nname: ship\ndescription: Ship the branch\n---\n");
+        let (mac, boxed) = (
+            PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") },
+            PluginShare { claude_home: box_home.join(".claude"), dir: root.join("box-synced") },
+        );
+        sync_plugins(&hub, &mut State::default(), &mac, SystemTime::now()).unwrap();
+        put(&box_home.join(".claude/skills/local/SKILL.md"), "---\nname: local\n---\n");
+        let refusal = "the account's synced projects would pass 0 MB from a box: a box only pulls the account's files";
+        *hub.refuse.borrow_mut() = Some(refusal.to_owned());
+
+        let done = sync_plugins_with(&hub, &mut State::default(), &boxed, SystemTime::now(), None).unwrap();
+        assert!(matches!(&done.push, Push::Refused { error, .. } if error == refusal), "{:?}", done.push);
+        assert_eq!(done.pulled, vec!["user-skills/ship/SKILL.md".to_owned()]);
+        assert_eq!(std::fs::read_to_string(box_home.join(".claude/skills/ship/SKILL.md")).unwrap(), "---\nname: ship\ndescription: Ship the branch\n---\n");
+        assert!(!hub.inner.0.borrow().contains_key("user-skills/local/SKILL.md"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn deletions_reach_the_hub_first_in_a_batch_of_their_own_and_the_same_files_are_sent() {
         let root = root("deletions-first");

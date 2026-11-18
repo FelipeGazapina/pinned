@@ -1,4 +1,5 @@
 pub mod box_exit;
+pub mod box_gate;
 pub mod boxes;
 pub mod db;
 pub mod dev;

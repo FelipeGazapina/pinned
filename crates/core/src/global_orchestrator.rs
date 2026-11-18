@@ -801,7 +801,7 @@ fn session(machine: &MachineSnapshot, tab: &TabView, now: u64) -> Session {
     };
     let role = match tab.role {
         Some(Role::Orchestrator) => SessionRole::Captain,
-        Some(Role::Worker) => SessionRole::Worker,
+        Some(Role::Worker | Role::Reviewer) => SessionRole::Worker,
         None => SessionRole::Thread,
     };
     let captain = (role == SessionRole::Worker).then(|| owning_captain(machine.tabs, tab).or_else(|| captain_tab(machine.tabs, &project.path)).map(|c| c.id.clone())).flatten();

@@ -209,6 +209,33 @@ impl Delegates {
         }
     }
 
+    /// Notes the worker profile task `id` runs as (U6).
+    pub fn set_profile(&self, id: &str, profile: Option<String>) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.profile = profile;
+        }
+        self.persist();
+    }
+
+    /// Notes where task `id` stands in its handoff chain (U12).
+    pub fn set_chain(&self, id: &str, chain: Option<crate::chain::ChainLink>) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.chain = chain;
+        }
+        self.persist();
+    }
+
+    /// Adds a review round to task `id`, or replaces the one with its number (U8, U9).
+    pub fn put_review(&self, id: &str, round: crate::reviewer::ReviewRound) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            match task.reviews.iter_mut().find(|known| known.round == round.round) {
+                Some(known) => *known = round,
+                None => task.reviews.push(round),
+            }
+        }
+        self.persist();
+    }
+
     /// Notes where task `id` runs and who chose that.
     pub fn set_placement(&self, id: &str, placed: crate::placement::Placed) {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
@@ -1755,6 +1782,9 @@ fn status_json(task: &Task) -> Value {
     if let Some(review) = &task.review {
         body["review"] = json!(review);
     }
+    if !task.reviews.is_empty() {
+        body["reviews"] = json!(task.reviews);
+    }
     body["next"] = if task.state.terminal() {
         json!(result_next(task))
     } else if let Some((remote, ask)) = task.remote.as_ref().and_then(|remote| Some((remote, remote.waiting.as_ref()?))) {
@@ -2026,6 +2056,9 @@ fn fresh(new: NewTask) -> Task {
         thread_tab: None,
         recorded: false,
         placement: None,
+        reviews: vec![],
+        profile: None,
+        chain: None,
     }
 }
 
@@ -2172,6 +2205,12 @@ struct SavedTask {
     remote_tab: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     placement: Option<crate::placement::Placed>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    reviews: Vec<crate::reviewer::ReviewRound>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chain: Option<crate::chain::ChainLink>,
     /// The milliseconds a working task had counted toward its time limit when this was written.
     /// A restart counts on from there, so the time pinned was down does not count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2270,6 +2309,9 @@ impl SavedTask {
             remote: task.remote.as_ref().map(|remote| SavedRemote { machine: remote.machine.clone(), name: remote.name.clone(), tab: remote.tab.clone() }),
             remote_tab: task.remote_tab.clone(),
             placement: task.placement.clone(),
+            reviews: task.reviews.clone(),
+            profile: task.profile.clone(),
+            chain: task.chain.clone(),
             counted_ms: (!task.state.terminal()).then(|| task.run.counted(Instant::now())),
         }
     }
@@ -2324,6 +2366,9 @@ impl SavedTask {
             thread_tab: self.thread_tab,
             recorded: self.recorded,
             placement: self.placement,
+            reviews: self.reviews,
+            profile: self.profile,
+            chain: self.chain,
         }
     }
 }
