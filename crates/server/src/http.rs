@@ -1,6 +1,6 @@
 use crate::db;
 use crate::{mcp, oauth};
-use crate::hub::{Account, Hub, Outbox};
+use crate::hub::{Account, Hub, Outbox, OutboxQueue};
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -926,7 +926,7 @@ async fn serve_client(server: Arc<Server>, mut socket: WebSocket) {
         Err(e) => return eprintln!("pinned-server: client sign in failed: {e}"),
     };
     let id = hub.next_socket();
-    let (out, mut outbox, overflowed) = Outbox::new();
+    let (out, outbox, overflowed) = Outbox::new();
     let login = db::hash(&token);
     let unlocked = unlock.and_then(|unlock| hub.unlocked_until(&unlock, &login));
     account.client_connected(id, login, locked, unlocked, out, machines);
@@ -934,38 +934,10 @@ async fn serve_client(server: Arc<Server>, mut socket: WebSocket) {
     let (pushing, to) = (hub.clone(), account.clone());
     tokio::spawn(async move { crate::surface::send_confirmations(&pushing, &to, id).await });
 
-    let (mut sink, mut stream) = socket.split();
-    let mut ping = tokio::time::interval(PING);
-    let mut going_away = hub.watch_going_away();
-    loop {
-        tokio::select! {
-            text = outbox.recv() => match text {
-                Some(text) => if sink.send(Message::Text(text.into())).await.is_err() { break },
-                None => {
-                    let _ = sink.send(close_unauthorized()).await;
-                    break;
-                }
-            },
-            _ = hub_going_away(&mut going_away) => {
-                let _ = sink.send(close_going_away()).await;
-                break;
-            }
-            frame = stream.next() => match frame {
-                Some(Ok(Message::Text(text))) => client_frame(&server, &account, id, &text),
-                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
-                Some(Ok(_)) => {}
-            },
-            _ = ping.tick() => if sink.send(Message::Ping(Default::default())).await.is_err() { break },
-            _ = overflowed.notified() => {
-                let _ = sink.send(close_behind()).await;
-                break;
-            }
-        }
-    }
-    // Answers a client's close frame, so the client sees a clean close instead of 1006.
-    let _ = sink.close().await;
+    let pump = Pump { outbox, overflowed, going_away: hub.watch_going_away(), silent: None, closed: Some(close_unauthorized()) };
+    let ended = pump_socket(socket, pump, |text| client_frame(&server, &account, id, text)).await;
     account.client_gone(id);
-    eprintln!("pinned-server: client {id} of account {} disconnected", account.id);
+    eprintln!("pinned-server: client {id} of account {} disconnected ({ended})", account.id);
 }
 
 fn client_frame(server: &Arc<Server>, account: &Arc<Account>, client: u64, text: &str) {
@@ -1098,7 +1070,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
         Err(e) => return eprintln!("pinned-server: machine sign in failed: {e}"),
     };
     let (machine, socket_id) = (row.id.to_string(), hub.next_socket());
-    let (out, mut outbox, overflowed) = Outbox::new();
+    let (out, outbox, overflowed) = Outbox::new();
     let view = MachineView { id: machine.clone(), name: row.name.clone(), os, online: true, last_seen: 0, upstash_box: None, version: version.clone(), update: None, state: None, background: None };
     let _ = out.send(crate::hub::frame(&ToMachine::Hello { machine: view }));
     // A machine that reconnects before its old socket timed out goes offline and back, so clients attach again.
@@ -1111,39 +1083,110 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
     tokio::spawn(crate::remote::deliver_held(hub.clone(), account.clone(), machine.clone()));
     eprintln!("pinned-server: machine {machine} of account {} connected (pinned {version})", account.id);
 
-    let (mut sink, mut stream) = socket.split();
-    let mut ping = tokio::time::interval(PING);
-    let mut going_away = hub.watch_going_away();
-    loop {
-        tokio::select! {
-            text = outbox.recv() => match text {
-                Some(text) => if sink.send(Message::Text(text.into())).await.is_err() { break },
-                None => break,
-            },
-            _ = hub_going_away(&mut going_away) => {
-                let _ = sink.send(close_going_away()).await;
-                break;
-            }
-            frame = tokio::time::timeout(MACHINE_SILENT, stream.next()) => match frame {
-                Ok(Some(Ok(Message::Text(text)))) => machine_frame(&hub, &account, &machine, socket_id, team, row.dedicated, &text),
-                Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) | Err(_) => break,
-                Ok(Some(Ok(_))) => {}
-            },
-            _ = ping.tick() => if sink.send(Message::Ping(Default::default())).await.is_err() { break },
-            _ = overflowed.notified() => {
-                let _ = sink.send(close_behind()).await;
-                break;
-            }
-        }
-    }
-    let _ = sink.close().await;
+    let pump = Pump { outbox, overflowed, going_away: hub.watch_going_away(), silent: Some(MACHINE_SILENT), closed: None };
+    let ended = pump_socket(socket, pump, |text| machine_frame(&hub, &account, &machine, socket_id, team, row.dedicated, text)).await;
     if account.went_offline(&machine, Some(socket_id)) {
         if let Err(e) = hub.db.machine_seen(account.id, row.id).await {
             eprintln!("pinned-server: could not record when machine {machine} was last seen: {e}");
         }
         hub.push_machines(&account).await;
     }
-    eprintln!("pinned-server: machine {machine} of account {} disconnected", account.id);
+    eprintln!("pinned-server: machine {machine} of account {} disconnected ({ended})", account.id);
+}
+
+/// What a socket's loop needs from its frame type, so the loop runs over axum's socket and a test's alike.
+pub(crate) trait Wire: Sized + Send + 'static {
+    fn text(text: String) -> Self;
+    fn ping() -> Self;
+    /// `frame`, one of the hub's close frames, as a frame of this type.
+    fn close(frame: Message) -> Self;
+    fn as_text(&self) -> Option<&str>;
+    fn is_close(&self) -> bool;
+}
+
+impl Wire for Message {
+    fn text(text: String) -> Self {
+        Message::Text(text.into())
+    }
+
+    fn ping() -> Self {
+        Message::Ping(Default::default())
+    }
+
+    fn close(frame: Message) -> Self {
+        frame
+    }
+
+    fn as_text(&self) -> Option<&str> {
+        match self {
+            Message::Text(text) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    fn is_close(&self) -> bool {
+        matches!(self, Message::Close(_))
+    }
+}
+
+/// A signed in socket's side of the hub: what it sends, and when it ends.
+pub(crate) struct Pump {
+    pub outbox: OutboxQueue,
+    /// Fires once the peer let the outbox fill up.
+    pub overflowed: Arc<tokio::sync::Notify>,
+    pub going_away: tokio::sync::watch::Receiver<bool>,
+    /// A peer that sends nothing for this long is gone. A browser has no such bound.
+    pub silent: Option<Duration>,
+    /// The frame that ends the socket once its outbox closes, if any.
+    pub closed: Option<Message>,
+}
+
+/// Runs a signed in socket until it ends, handing each text frame to `on_text`. Returns why it ended, for the log.
+pub(crate) async fn pump_socket<S, M, E>(socket: S, pump: Pump, mut on_text: impl FnMut(&str)) -> &'static str
+where
+    S: futures_util::Stream<Item = Result<M, E>> + futures_util::Sink<M> + Send + 'static,
+    M: Wire,
+{
+    let Pump { mut outbox, overflowed, mut going_away, silent, mut closed } = pump;
+    let (mut sink, mut stream) = socket.split();
+    let mut ping = tokio::time::interval(PING);
+    let ended = loop {
+        tokio::select! {
+            text = outbox.recv() => match text {
+                Some(text) => if sink.send(M::text(text)).await.is_err() { break "could not write" },
+                None => {
+                    if let Some(frame) = closed.take() {
+                        let _ = sink.send(M::close(frame)).await;
+                    }
+                    break "the outbox closed";
+                }
+            },
+            _ = hub_going_away(&mut going_away) => {
+                let _ = sink.send(M::close(close_going_away())).await;
+                break "the hub is restarting";
+            }
+            frame = async {
+                match silent {
+                    Some(silent) => tokio::time::timeout(silent, stream.next()).await,
+                    None => Ok(stream.next().await),
+                }
+            } => match frame {
+                Ok(Some(Ok(frame))) if frame.is_close() => break "the peer closed",
+                Ok(Some(Ok(frame))) => if let Some(text) = frame.as_text() { on_text(text) },
+                Ok(Some(Err(_))) => break "could not read",
+                Ok(None) => break "the peer closed",
+                Err(_) => break "the peer went silent",
+            },
+            _ = ping.tick() => if sink.send(M::ping()).await.is_err() { break "could not write" },
+            _ = overflowed.notified() => {
+                let _ = sink.send(M::close(close_behind())).await;
+                break "fell behind";
+            }
+        }
+    };
+    // Answers a peer's close frame, so the peer sees a clean close instead of 1006.
+    let _ = sink.close().await;
+    ended
 }
 
 /// `boxed`: whether the machine was a box when this connection signed in (`db::machine_connected`).
@@ -1840,5 +1883,150 @@ mod tests {
             rest = &rest[end..];
         }
         assert_eq!(used.as_slice(), ROUTES);
+    }
+}
+
+#[cfg(test)]
+mod socket_tests {
+    use super::{pump_socket, Pump, Wire, MACHINE_SILENT};
+    use crate::hub::{Frame, Outbox};
+    use axum::extract::ws::Message;
+    use futures_util::{SinkExt, StreamExt};
+    use std::time::Duration;
+    use tokio::io::DuplexStream;
+    use tokio::sync::{mpsc, watch};
+    use tokio_tungstenite::tungstenite::protocol::{frame::CloseFrame, Role};
+    use tokio_tungstenite::tungstenite::Message as TMessage;
+    use tokio_tungstenite::WebSocketStream;
+
+    impl Wire for TMessage {
+        fn text(text: String) -> Self {
+            TMessage::Text(text.into())
+        }
+
+        fn ping() -> Self {
+            TMessage::Ping(Default::default())
+        }
+
+        fn close(frame: Message) -> Self {
+            match frame {
+                Message::Close(Some(close)) => TMessage::Close(Some(CloseFrame { code: close.code.into(), reason: close.reason.as_str().to_owned().into() })),
+                _ => TMessage::Close(None),
+            }
+        }
+
+        fn as_text(&self) -> Option<&str> {
+            match self {
+                TMessage::Text(text) => Some(text.as_str()),
+                _ => None,
+            }
+        }
+
+        fn is_close(&self) -> bool {
+            matches!(self, TMessage::Close(_))
+        }
+    }
+
+    const BIG: usize = 2 * 1024 * 1024;
+
+    /// The hub's end and the peer's end of a socket whose pipe holds 64 KiB each way, so a peer
+    /// that reads nothing stops the hub's writes as TCP would.
+    async fn pair() -> (WebSocketStream<DuplexStream>, WebSocketStream<DuplexStream>) {
+        let (hub, peer) = tokio::io::duplex(64 * 1024);
+        (WebSocketStream::from_raw_socket(hub, Role::Server, None).await, WebSocketStream::from_raw_socket(peer, Role::Client, None).await)
+    }
+
+    /// The next frame that is not a ping or a pong, as text for an assert.
+    async fn next_frame(peer: &mut WebSocketStream<DuplexStream>) -> String {
+        loop {
+            match peer.next().await {
+                Some(Ok(TMessage::Ping(_) | TMessage::Pong(_))) => continue,
+                Some(Ok(TMessage::Text(text))) => return format!("text of {} bytes", text.len()),
+                Some(Ok(TMessage::Close(Some(close)))) => return format!("close {} {}", u16::from(close.code), close.reason),
+                other => return format!("{other:?}"),
+            }
+        }
+    }
+
+    /// A machine's socket with `outbox` frames waiting, and what it hands on as the lengths of the text frames it reads.
+    struct Hub {
+        out: Outbox,
+        _away: watch::Sender<bool>,
+        ended: tokio::task::JoinHandle<&'static str>,
+        heard: mpsc::UnboundedReceiver<usize>,
+    }
+
+    fn machine(socket: WebSocketStream<DuplexStream>, outbox: &[String]) -> Hub {
+        let (out, queue, overflowed) = Outbox::new();
+        for text in outbox {
+            out.send(Frame::raw(text.clone())).unwrap();
+        }
+        let (away, going_away) = watch::channel(false);
+        let (heard_tx, heard) = mpsc::unbounded_channel();
+        let pump = Pump { outbox: queue, overflowed, going_away, silent: Some(MACHINE_SILENT), closed: None };
+        let ended = tokio::spawn(pump_socket(socket, pump, move |text| {
+            let _ = heard_tx.send(text.len());
+        }));
+        Hub { out, _away: away, ended, heard }
+    }
+
+    #[tokio::test]
+    async fn a_machine_sending_a_big_frame_while_the_hub_sends_one_gets_both_through() {
+        let (socket, mut peer) = pair().await;
+        let mut hub = machine(socket, &["h".repeat(BIG)]);
+        let both = async {
+            peer.send(TMessage::text("m".repeat(BIG))).await.unwrap();
+            let read = next_frame(&mut peer).await;
+            (read, hub.heard.recv().await)
+        };
+        let got = tokio::time::timeout(Duration::from_secs(10), both).await;
+        assert_eq!(got, Ok(("text of 2097152 bytes".to_owned(), Some(2097152))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_machine_that_never_reads_or_sends_is_ended_as_silent_after_a_minute() {
+        let (socket, _peer) = pair().await;
+        let hub = machine(socket, &[]);
+        let started = tokio::time::Instant::now();
+        let ended = tokio::time::timeout(Duration::from_secs(600), hub.ended).await.map(Result::unwrap);
+        assert_eq!(ended, Ok("the peer went silent"));
+        assert_eq!(started.elapsed().as_secs(), 60);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_machine_that_sends_but_never_reads_is_ended_once_a_write_stalls_for_a_minute() {
+        let (socket, mut peer) = pair().await;
+        let hub = machine(socket, &["h".repeat(BIG)]);
+        let started = tokio::time::Instant::now();
+        let chatty = async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                peer.send(TMessage::text("still here")).await.unwrap();
+            }
+        };
+        let ended = tokio::time::timeout(Duration::from_secs(600), async {
+            tokio::select! {
+                ended = hub.ended => ended.unwrap(),
+                _ = chatty => unreachable!(),
+            }
+        })
+        .await;
+        assert_eq!(ended, Ok("the peer stopped reading"));
+        assert_eq!(started.elapsed().as_secs(), 60);
+    }
+
+    #[tokio::test]
+    async fn an_outbox_that_overflows_during_a_stuck_write_still_closes_with_1013() {
+        let (socket, mut peer) = pair().await;
+        let hub = machine(socket, &["h".repeat(BIG)]);
+        // The hub's write of the big frame now waits on the peer.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        for _ in 0..1100 {
+            let _ = hub.out.send(Frame::raw("small".into()));
+        }
+        let ended = tokio::time::timeout(Duration::from_secs(5), hub.ended).await.map(Result::unwrap);
+        assert_eq!(ended, Ok("fell behind"));
+        assert_eq!(next_frame(&mut peer).await, "text of 2097152 bytes");
+        assert_eq!(next_frame(&mut peer).await, "close 1013 fell behind");
     }
 }

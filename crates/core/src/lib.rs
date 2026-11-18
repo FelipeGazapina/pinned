@@ -1,6 +1,7 @@
 pub mod account;
 pub mod accounts;
 pub mod agent;
+pub mod app_log;
 pub mod auto_archive;
 pub mod board;
 pub mod boot;

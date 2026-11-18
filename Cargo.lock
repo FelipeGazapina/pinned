@@ -3496,6 +3496,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-postgres",
+ "tokio-tungstenite 0.28.0",
  "tower-http",
  "tungstenite 0.28.0",
  "url",

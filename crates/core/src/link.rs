@@ -635,7 +635,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
         return std::future::pending().await;
     }
 
-    let (out, mut incoming) = channel::unbounded_channel();
+    let (out, incoming) = channel::unbounded_channel();
     *shared.out.lock().unwrap() = Some(out.clone());
     let calls = in_order(shared.clone(), machine.clone());
     eprintln!("pinned: connected to {}", creds.hub);
@@ -655,8 +655,18 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
         shared.send(&MachineFrame::Event { event: MachineEvent::Background { on } });
     }
 
+    pump(sink, stream, incoming, |t| answer(shared, machine, &out, &calls, t, version)).await
+}
+
+/// Runs a connection the hub accepted: sends what `incoming` queues and hands each text frame to `on_text`.
+/// Ok means the hub closed it.
+async fn pump<W, R>(mut sink: W, mut stream: R, mut incoming: channel::UnboundedReceiver<Outgoing>, mut on_text: impl FnMut(&str)) -> Result<(), Fault>
+where
+    W: futures_util::Sink<Frame, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    R: futures_util::Stream<Item = Result<Frame, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
     let mut ping = tokio::time::interval(PING);
-    let mut heard = Instant::now();
+    let mut heard = tokio::time::Instant::now();
     loop {
         tokio::select! {
             Some(outgoing) = incoming.recv() => {
@@ -666,9 +676,9 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
                 }
             }
             frame = stream.next() => {
-                heard = Instant::now();
+                heard = tokio::time::Instant::now();
                 match frame {
-                    Some(Ok(Frame::Text(t))) => answer(shared, machine, &out, &calls, &t, version),
+                    Some(Ok(Frame::Text(t))) => on_text(&t),
                     Some(Ok(Frame::Close(_))) | None => return Ok(()),
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(transport(e)),
@@ -708,6 +718,7 @@ fn in_order(shared: Arc<Shared>, machine: Arc<Machine>) -> mpsc::Sender<(u64, Ca
     calls
 }
 
+#[derive(Debug, PartialEq)]
 enum Fault {
     Transport(String),
     /// The hub answered the sign in with something that is not a hello.
@@ -2344,5 +2355,94 @@ mod tests {
         assert_eq!(syncer.backoff.limit.as_ref().map(|limit| limit.wait), Some(PUSH_HOLD_MAX), "the steps reach the cap");
         assert!(holds.iter().all(|seconds| *seconds <= PUSH_HOLD_MAX.as_secs()), "no hold is longer than {PUSH_HOLD_MAX:?}: {holds:?}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod pump_tests {
+    use super::{pump, Fault, Outgoing, Frame};
+    use futures_util::{SinkExt, StreamExt};
+    use std::time::Duration;
+    use tokio::io::DuplexStream;
+    use tokio::sync::mpsc as channel;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+    use tokio_tungstenite::WebSocketStream;
+
+    const BIG: usize = 2 * 1024 * 1024;
+
+    /// The machine's end and the hub's end of a socket whose pipe holds 64 KiB each way, so a hub
+    /// that reads nothing stops the machine's writes as TCP would.
+    async fn pair() -> (WebSocketStream<DuplexStream>, WebSocketStream<DuplexStream>) {
+        let (machine, hub) = tokio::io::duplex(64 * 1024);
+        (WebSocketStream::from_raw_socket(machine, Role::Client, None).await, WebSocketStream::from_raw_socket(hub, Role::Server, None).await)
+    }
+
+    /// The machine's link with `queued` frames waiting to go, and the lengths of the text frames it reads.
+    fn link(socket: WebSocketStream<DuplexStream>, queued: &[String]) -> (channel::UnboundedSender<Outgoing>, tokio::task::JoinHandle<Result<(), Fault>>, channel::UnboundedReceiver<usize>) {
+        let (out, incoming) = channel::unbounded_channel();
+        for text in queued {
+            out.send(Outgoing { text: text.clone(), wrote: None }).unwrap();
+        }
+        let (heard_tx, heard) = channel::unbounded_channel();
+        let (sink, stream) = socket.split();
+        let ended = tokio::spawn(pump(sink, stream, incoming, move |text| {
+            let _ = heard_tx.send(text.len());
+        }));
+        (out, ended, heard)
+    }
+
+    async fn next_text(hub: &mut WebSocketStream<DuplexStream>) -> String {
+        loop {
+            match hub.next().await {
+                Some(Ok(Frame::Ping(_) | Frame::Pong(_))) => continue,
+                Some(Ok(Frame::Text(text))) => return format!("text of {} bytes", text.len()),
+                other => return format!("{other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hub_sending_a_big_frame_while_the_machine_sends_one_gets_both_through() {
+        let (socket, mut hub) = pair().await;
+        let (_out, _ended, mut heard) = link(socket, &["m".repeat(BIG)]);
+        let both = async {
+            hub.send(Frame::text("h".repeat(BIG))).await.unwrap();
+            let read = next_text(&mut hub).await;
+            (read, heard.recv().await)
+        };
+        let got = tokio::time::timeout(Duration::from_secs(10), both).await;
+        assert_eq!(got, Ok(("text of 2097152 bytes".to_owned(), Some(2097152))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_that_never_reads_or_sends_is_left_as_silent() {
+        let (socket, _hub) = pair().await;
+        let (_out, ended, _heard) = link(socket, &[]);
+        let started = tokio::time::Instant::now();
+        let ended = tokio::time::timeout(Duration::from_secs(600), ended).await.map(Result::unwrap);
+        assert_eq!(ended, Ok(Err(Fault::Transport("the hub stopped answering".into()))));
+        assert_eq!(started.elapsed().as_secs(), 80);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_that_sends_but_never_reads_is_left_once_a_send_stalls_for_a_minute() {
+        let (socket, mut hub) = pair().await;
+        let (_out, ended, _heard) = link(socket, &["m".repeat(BIG)]);
+        let started = tokio::time::Instant::now();
+        let chatty = async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                hub.send(Frame::text("still here")).await.unwrap();
+            }
+        };
+        let ended = tokio::time::timeout(Duration::from_secs(600), async {
+            tokio::select! {
+                ended = ended => ended.unwrap(),
+                _ = chatty => unreachable!(),
+            }
+        })
+        .await;
+        assert_eq!(ended, Ok(Err(Fault::Transport("the hub stopped reading".into()))));
+        assert_eq!(started.elapsed().as_secs(), 60);
     }
 }

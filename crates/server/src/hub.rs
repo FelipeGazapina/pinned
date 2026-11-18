@@ -450,6 +450,13 @@ fn client_of(viewer: &str) -> Option<u64> {
     viewer.strip_prefix("client-")?.parse().ok()
 }
 
+#[cfg(test)]
+impl Frame {
+    pub(crate) fn raw(text: String) -> Frame {
+        Frame { label: "test", text }
+    }
+}
+
 pub(crate) fn frame<T: Serialize + crate::traffic::Labeled>(frame: &T) -> Frame {
     Frame { label: frame.label(), text: serde_json::to_string(frame).unwrap() }
 }
