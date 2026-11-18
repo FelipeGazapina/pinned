@@ -11297,6 +11297,85 @@ echo '{"type":"result","result":"ok"}'
         ["--resume", session].map(str::to_owned).into_iter().chain(crate::delegate::claude_read_only_args()).collect()
     }
 
+    /// A fake claude that writes its arguments to `root/argv` and stays up.
+    fn claude_holding_argv(root: &Path) -> (PathBuf, PathBuf) {
+        let argv = root.join("argv");
+        let claude = root.join("claude");
+        std::fs::write(&claude, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nexec sleep 30\n", argv.display())).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        (claude, argv)
+    }
+
+    fn launched(argv: &Path) -> Vec<String> {
+        wait_for("argv", || std::fs::read(argv).is_ok_and(|bytes| !bytes.is_empty()));
+        String::from_utf8(std::fs::read(argv).unwrap()).unwrap().lines().map(str::to_owned).collect()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_headless_read_only_thread_bypassed_while_its_child_works_resumes_without_the_bypass() {
+        use crate::delegate::Access;
+        let root = temp("headless-read-only-bypass");
+        let (claude, argv) = claude_holding_argv(&root);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let account = Account::builtin(Provider::Claude);
+        let parent = m.add_tab(root.clone(), account.clone(), vec![], vec![], false, None);
+        let task = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab(parent.clone()),
+            tool: None,
+            title: "Headless".into(),
+            account: account.id.clone(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: root.clone(),
+            mode: crate::delegate::Mode::Async,
+            access: Access::ReadOnly,
+            isolated: false,
+            caller_key: format!("tab:{parent}"),
+            client_request_id: None,
+            role: None,
+        });
+        m.watch_thread(ThreadChild { from: &parent, origin: None, task: &task.id, title: "Headless", cwd: &root, made: None, model: None }, account);
+        let thread = m.delegates.get(&task.id).and_then(|t| t.thread).unwrap().tab;
+        // While the child works the thread is not read-only yet, so the switch passes and starts nothing.
+        m.set_bypass(&thread, true, 80, 24).unwrap();
+        m.delegates.apply(&task.id, crate::delegate::ChildEvent::Line(json!({"type":"system","subtype":"init","session_id":"read-session"}).to_string()), None);
+        m.delegates.apply(&task.id, crate::delegate::ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        m.follow_headless_threads();
+        assert_eq!(m.tab(&thread, |t| (t.bypass, t.read_only)).unwrap(), (false, true), "read-only wins over the bypass");
+        assert_eq!(m.set_bypass(&thread, true, 80, 24), Err("a read-only worker cannot switch to Full access".into()));
+        assert!(!m.tab(&thread, |t| t.bypass).unwrap(), "a refused switch changes nothing");
+        m.start_claude(&thread, 80, 24).unwrap();
+        let lines = launched(&argv);
+        assert!(!lines.iter().any(|arg| arg == "--dangerously-skip-permissions"), "{lines:?}");
+        let resumed = resumed_read_only("read-session");
+        assert!(lines.windows(resumed.len()).any(|flags| flags == resumed), "{lines:?}");
+        assert!(!m.tab(&thread, |t| t.saved().unwrap().bypass).unwrap(), "the save carries the cleared bypass");
+        m.quit();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_read_only_session_saved_with_bypass_restores_without_it() {
+        let root = temp("restored-read-only-bypass");
+        let repo = root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let (claude, argv) = claude_holding_argv(&root);
+        let saved = json!([{ "cwd": repo, "session": "s1", "env": [], "bypass": true, "interrupted": false, "resume_at": null, "held": false, "account": "claude", "permission_mode": "dontAsk", "read_only": true }]);
+        std::fs::write(root.join("sessions.json"), saved.to_string()).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.clone()), Some(repo), |_| {});
+        let tab = m.restore_tabs().pop().expect("the session restored");
+        assert_eq!(m.tab(&tab, |t| (t.bypass, t.read_only)).unwrap(), (false, true));
+        m.start_claude(&tab, 80, 24).unwrap();
+        let lines = launched(&argv);
+        assert!(!lines.iter().any(|arg| arg == "--dangerously-skip-permissions"), "{lines:?}");
+        let resumed = resumed_read_only("s1");
+        assert!(lines.windows(resumed.len()).any(|flags| flags == resumed), "{lines:?}");
+        m.quit();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     #[cfg(unix)]
     fn an_opened_thread_takes_its_access_from_the_task() {

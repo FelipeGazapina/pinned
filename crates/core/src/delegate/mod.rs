@@ -674,6 +674,52 @@ pub(crate) use drivers::{driver, replay};
 mod tests {
     use super::*;
 
+    fn owned(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn a_prompt_only_launch_keeps_its_prompt_last() {
+        // `hand_to` on a tab with no session launches with the prompt alone.
+        let mut args = owned(&["look at the repo"]);
+        keep_read_only(&mut args);
+        let mut expect = claude_read_only_args();
+        expect.push("look at the repo".into());
+        assert_eq!(args, expect);
+    }
+
+    #[test]
+    fn a_stale_refused_list_gets_the_current_one_and_one_mode() {
+        let mut args = owned(&["--resume", "s1", "--allowedTools", "Read", "--disallowedTools", "Write", "--permission-mode", "dontAsk", "go on"]);
+        keep_read_only(&mut args);
+        let read_only = claude_read_only_args();
+        assert_eq!(args[..2], ["--resume", "s1"]);
+        assert_eq!(args[2..2 + read_only.len()], read_only[..]);
+        assert_eq!(args[2 + read_only.len()..], ["--allowedTools", "Read", "--disallowedTools", "Write", "go on"]);
+        assert_eq!(args.iter().filter(|arg| *arg == "--permission-mode").count(), 1);
+    }
+
+    #[test]
+    fn a_launch_with_only_a_mode_trades_it_for_the_read_only_flags() {
+        let mut args = owned(&["--resume", "s1", "--permission-mode", "acceptEdits"]);
+        keep_read_only(&mut args);
+        let mut expect = owned(&["--resume", "s1"]);
+        expect.extend(claude_read_only_args());
+        assert_eq!(args, expect);
+        let mut fresh = owned(&["--permission-mode", "auto"]);
+        keep_read_only(&mut fresh);
+        assert_eq!(fresh, claude_read_only_args());
+    }
+
+    #[test]
+    fn a_launch_that_already_refuses_the_current_list_is_left_alone() {
+        let mut args = owned(&["--resume", "s1"]);
+        args.extend(claude_read_only_args());
+        let before = args.clone();
+        keep_read_only(&mut args);
+        assert_eq!(args, before);
+    }
+
     #[test]
     fn a_costly_word_in_a_model_id_outranks_a_cheap_one() {
         let tiers: Vec<_> = ["claude-opus-5-5", "claude-haiku-5-5", "opus-fast", "gpt-6-max-mini", "minimax-m3", "minimax-m3.1-flash", "qwen3.8-max", "glm-5.3"].iter().map(|id| cost_of(id).name()).collect();
