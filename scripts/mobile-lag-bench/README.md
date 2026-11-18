@@ -56,5 +56,6 @@ Each run writes `<load>-x<throttle>-run<n>.json`, and the command writes `summar
 - `taps` and `inpMs`: Event Timing durations per interaction; `inpMs` is the worst interaction, which is INP with fewer than 50 interactions.
 - `scroll`: animation frames during the touch scroll gestures. A gap of n frame times counts n - 1 dropped frames.
 - `received`: the frames and bytes the hub sent per second, by kind.
+- `sidebarAnimations`: CSS animations running in the sidebar while the Orchestrator screen hides it (`hidden`) and while the thread list shows it (`shown`).
 
 Compare two `ui/` folders by alternating them, one run each per round, since the machine's load drifts between runs.

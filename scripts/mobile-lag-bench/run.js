@@ -106,7 +106,7 @@ async function runOnce(browser, throttle, index) {
   await cdp.send("Emulation.setCPUThrottlingRate", { rate: throttle });
   hub.start();
   await sleep(4000);
-  if (TRACE) await browser.startTracing(page, { path: path.join(OUT, `${LOAD}-x${throttle}-run${index}.trace.json`), categories: ["devtools.timeline", "disabled-by-default-devtools.timeline", "disabled-by-default-devtools.timeline.stack", "v8.execute"] });
+  if (TRACE) await browser.startTracing(page, { path: path.join(OUT, `${LOAD}-x${throttle}-run${index}.trace.json`), categories: ["devtools.timeline", "disabled-by-default-devtools.timeline", "disabled-by-default-devtools.timeline.stack", "v8.execute", ...(process.env.INVALIDATIONS ? ["disabled-by-default-devtools.timeline.invalidationTracking"] : [])] });
   if (PROFILE) {
     await cdp.send("Profiler.enable");
     await cdp.send("Profiler.setSamplingInterval", { interval: 200 });
@@ -180,6 +180,8 @@ async function runOnce(browser, throttle, index) {
     await page.waitForFunction(() => document.body.dataset.phoneScreen === "orchestrator" && document.querySelector("#thread")?.childElementCount > 0, null, { timeout: 60000 });
   });
   await shot("orchestrator");
+  const spinning = () => page.evaluate(() => document.getAnimations().filter((a) => a.playState === "running" && document.getElementById("sidebar").contains(a.effect?.target)).length);
+  const sidebarAnimations = { hidden: await spinning() };
   await timed("focus composer", () => page.tap("#prompt"));
   await page.evaluate(() => __bench.mark("type"));
   await timed("type", () => page.keyboard.type(TYPED, { delay: 120 }));
@@ -194,6 +196,7 @@ async function runOnce(browser, throttle, index) {
     await page.waitForFunction(() => document.body.dataset.phoneScreen === "threads", null, { timeout: 60000 });
   });
   await shot("list");
+  sidebarAnimations.shown = await spinning();
   await timed("open thread", async () => {
     await openRow(worker);
     await shows(key(worker));
@@ -256,6 +259,7 @@ async function runOnce(browser, throttle, index) {
     inpMs: Math.max(0, ...interactions.values()),
     scroll: { frames: b.frames.length, dropped, droppedShare: round((100 * dropped) / Math.max(1, dropped + b.frames.length)), worstGapMs: round(Math.max(0, ...gaps)) },
     received: { frames: sent.frames, bytes: sent.bytes, framesPerSec: round(sent.frames / seconds), kbPerSec: round(sent.bytes / 1024 / seconds), kinds: sent.kinds },
+    sidebarAnimations,
     calls,
     counts: b.counts,
     dom: b.dom,
@@ -304,7 +308,7 @@ function summarizeProfile(profile) {
           fs.writeFileSync(`${base}.cpuprofile`, JSON.stringify(profile));
           fs.writeFileSync(`${base}.profile-top.json`, JSON.stringify(summarizeProfile(profile), null, 2));
         }
-        console.log(`x${throttle} run ${run}: main thread busy ${result.mainThread.busyPct}% (script ${result.mainThread.scriptMs}, layout ${result.mainThread.layoutMs} in ${result.mainThread.layouts}, style ${result.mainThread.styleMs} ms), long tasks ${result.longTasks.count} (${result.longTasks.totalMs} ms, max ${result.longTasks.maxMs}, busy ${result.longTasks.busyShare}%), keys p50 ${result.keystrokes.p50Ms} p95 ${result.keystrokes.p95Ms} max ${result.keystrokes.maxMs} ms, INP ${result.inpMs} ms, scroll dropped ${result.scroll.dropped}/${result.scroll.frames + result.scroll.dropped}, ${result.received.framesPerSec} frames/s ${result.received.kbPerSec} KB/s, typed ${result.typedOk ? "ok" : "WRONG"}, errors ${result.errors.length}`);
+        console.log(`x${throttle} run ${run}: main thread busy ${result.mainThread.busyPct}% (script ${result.mainThread.scriptMs}, layout ${result.mainThread.layoutMs} in ${result.mainThread.layouts}, style ${result.mainThread.styleMs} ms), long tasks ${result.longTasks.count} (${result.longTasks.totalMs} ms, max ${result.longTasks.maxMs}, busy ${result.longTasks.busyShare}%), keys p50 ${result.keystrokes.p50Ms} p95 ${result.keystrokes.p95Ms} max ${result.keystrokes.maxMs} ms, INP ${result.inpMs} ms, scroll dropped ${result.scroll.dropped}/${result.scroll.frames + result.scroll.dropped}, ${result.received.framesPerSec} frames/s ${result.received.kbPerSec} KB/s, typed ${result.typedOk ? "ok" : "WRONG"}, sidebar animations hidden ${result.sidebarAnimations.hidden} shown ${result.sidebarAnimations.shown}, errors ${result.errors.length}`);
       }
     }
   } finally {
