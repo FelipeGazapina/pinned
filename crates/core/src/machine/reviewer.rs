@@ -1,9 +1,14 @@
 //! The machine side of the Reviewer: U4's signed-out store and U8's review run. U9's send-back
 //! is in `send_back.rs`.
 
-use super::Machine;
-use crate::reviewer::ReviewerPatch;
+use super::{captain_scope, git_remote, repo_key, Machine};
+use crate::accounts::{Account, Provider};
+use crate::agent::{role_env, role_of, Role};
+use crate::delegate::{driver_args, spawn, Access, ChildSpec, Claim, Mode, NewTask, Parent, SpawnSpec};
+use crate::review_run;
+use crate::reviewer::{ReviewRound, ReviewState, ReviewerPatch, Rule};
 use crate::taste::{self, Tastes};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 impl Machine {
     /// `Tastes::set_reviewer` on this machine's own tastes, for a signed-out app.
@@ -13,10 +18,172 @@ impl Machine {
 
     /// U8's hook: the worker thread in `tab` running task `task` finished a turn that the task
     /// would end with. True when a review now holds the task's end; the worker's notice then waits
-    /// for the review. Nothing reviews yet.
-    pub(super) fn review_turn_end(&self, _task: &str, _tab: &str) -> bool {
-        false
+    /// for the review, which ends the task once it has answered.
+    pub(super) fn review_turn_end(&self, task: &str, tab: &str) -> bool {
+        match self.start_review(task, tab) {
+            Ok(holds) => holds,
+            Err(error) => {
+                eprintln!("pinned: {task} gets no review: {error}");
+                false
+            }
+        }
     }
+
+    /// Starts a review of task `task` when its project wants one: a headless `Role::Reviewer` on
+    /// this machine, a task of the project under `task` (so its cost is on the author's card),
+    /// claimed within the project's workers at once. Ok(false) when no review starts.
+    fn start_review(&self, task: &str, tab: &str) -> Result<bool, String> {
+        let Some(author) = self.delegates.get(task) else { return Ok(false) };
+        let (cwd, remote, tab_model, role) = self.tab(tab, |t| (t.cwd.clone(), t.origin.is_some(), t.model.clone(), role_of(&t.env).map(|(role, _)| role)))?;
+        // Only a worker's change is reviewed, and on the Captain's machine: a thread for another
+        // machine's Captain is not reviewed here.
+        if role != Some(Role::Worker) || remote || author.remote.is_some() || author.role.as_deref() == Some(Role::Reviewer.name()) {
+            return Ok(false);
+        }
+        let round = u8::try_from(author.reviews.len() + 1).unwrap_or(u8::MAX);
+        let (key, request) = (format!("review:{task}"), format!("round-{round}"));
+        if let Some(running) = self.delegates.requested(&key, Some(&request)) {
+            // This round already ran, or still runs: a later turn of the worker waits on it.
+            return Ok(!self.delegates.is_terminal(&running));
+        }
+        let tastes = self.tastes();
+        let project = crate::history::project_of(&cwd);
+        let repo = git_remote(&project).and_then(|url| repo_key(&url));
+        let (switch, rules) = review_run::rules_in_force(&tastes.reviewer, repo.as_deref());
+        if rules.is_empty() || round > tastes.reviewer.rounds {
+            return Ok(false);
+        }
+        let path = self.launch.path_env.clone();
+        let diff = review_run::diff(&cwd, path.as_deref())?;
+        if !review_run::wanted(switch, &rules, &diff) {
+            return Ok(false);
+        }
+
+        // The reviewer is never the author's model, so a review whose author's model is not known does not run.
+        let author_model = tab_model
+            .or_else(|| author.model.clone())
+            .or_else(|| self.transcript(tab).ok().and_then(|file| review_run::transcript_model(&file)))
+            .ok_or("the worker's model is not known, so no reviewer model can be told apart from it")?;
+        let limits = self.caller_limits_from(&tastes, tab)?;
+        let account = self.accounts.get(&author.account).filter(|account| account.provider == Provider::Claude).unwrap_or_else(|| Account::builtin(Provider::Claude));
+        let taste = tastes.resolve(&captain_scope(&project));
+        let (wanted, models) = review_run::models(&taste.ladder, taste.hard_model.as_ref(), tastes.reviewer.model.as_ref(), &author_model);
+        let claude = self.claude_models();
+        let (model, effort) = models
+            .into_iter()
+            .find_map(|model| limits.admit(&account, Some(&model), None, &claude).ok().map(|effort| (model, effort)))
+            .ok_or_else(|| format!("no model on the ladder but the worker's own ({author_model}) is within this project's limits"))?;
+        let note = (!review_run::same_model(&model, &wanted)).then(|| {
+            let why = if review_run::same_model(&wanted, &author_model) { "is the worker's own model" } else { "is outside this project's limits" };
+            format!("{wanted} {why}, so this review ran on {model}, the next model on the ladder")
+        });
+
+        let review = match self.delegates.claim(
+            NewTask {
+                parent: Parent::Task(task.to_owned()),
+                tool: None,
+                title: format!("Review of {}", author.title),
+                account: account.id.clone(),
+                provider: Provider::Claude,
+                model: Some(model.clone()),
+                cwd: cwd.clone(),
+                mode: Mode::Async,
+                access: Access::Auto,
+                isolated: false,
+                caller_key: key,
+                client_request_id: Some(request),
+                role: Some(Role::Reviewer.name().to_owned()),
+            },
+            Some(limits.parallel),
+        ) {
+            Claim::Fresh(review) => review.id,
+            Claim::Existing(running) => return Ok(!self.delegates.is_terminal(&running)),
+            // A full project holds the review rather than run one worker past its limit.
+            Claim::Full(_) => return Ok(false),
+        };
+        let (budget_ms, limit_ms) = crate::delegate::run_limits(None, None, limits.time_limit_ms())?;
+        self.delegates.set_limits(&review, budget_ms, limit_ms);
+        self.delegates.hold_to(&review, limits);
+
+        let spec = SpawnSpec {
+            task: &review_run::first_prompt(author.summary.as_deref().unwrap_or_default(), &diff),
+            model: Some(&model),
+            effort: effort.as_deref(),
+            access: Access::Auto,
+            mcp_config: None,
+            session_mcp: None,
+            exe: &self.launch.exe,
+            sock: &self.launch.sock,
+            task_id: &review,
+            reminders: false,
+        };
+        let mut argv = driver_args(Provider::Claude, &spec);
+        // --disallowedTools takes any number of values, so the flag after it ends them.
+        argv.push("--disallowedTools".to_owned());
+        argv.extend(Role::Reviewer.disallowed_tools().iter().map(|tool| tool.to_string()));
+        argv.extend(["--append-system-prompt".to_owned(), review_run::system_prompt(&rules)]);
+        let mut env = self.delegate_env(&account, &review);
+        env.set.extend(role_env(Role::Reviewer, &project));
+
+        let me = self.me.clone();
+        let ended = AtomicBool::new(false);
+        let (id, author_id, worker) = (review.clone(), task.to_owned(), tab.to_owned());
+        let (child_path, sent_model) = (path.clone(), model.clone());
+        let pid = spawn(ChildSpec { bin: &self.launch.bin(Provider::Claude), argv: &argv, cwd: &cwd, env: &env.set, path: path.as_deref(), strip: env.strip }, move |event| {
+            let Some(machine) = me.upgrade() else { return };
+            let ready = machine.delegates.apply(&id, event, child_path.as_deref());
+            if machine.delegates.is_terminal(&id) && !ended.swap(true, Ordering::SeqCst) {
+                machine.review_answered(&author_id, &id, &worker, Answered { round, rules: &rules, model: &sent_model, note: note.clone() });
+            }
+            if let Some(tab) = ready {
+                machine.maybe_deliver(&tab);
+            }
+        });
+        match pid {
+            Ok(pid) => self.delegates.remember_pid(&review, pid),
+            Err(error) => {
+                self.delegates.fail(&review, error.clone(), path.as_deref());
+                return Err(error);
+            }
+        }
+        self.arm_delegate_pass();
+        Ok(true)
+    }
+
+    /// Review `review` of task `task` ended: its findings become the task's round, and the task
+    /// ends as its worker's turn would have. A review that failed or answered no findings list
+    /// adds no round.
+    fn review_answered(&self, task: &str, review: &str, tab: &str, answered: Answered) {
+        let answer = self.delegates.get(review).filter(|review| review.error.is_none()).and_then(|review| review.summary);
+        if let Some(findings) = answer.and_then(|answer| review_run::findings(&answer, answered.rules)) {
+            // Sending findings back is U9's; until then the Captain hears them with the task's end.
+            let state = if findings.is_empty() { ReviewState::Passed } else { ReviewState::Limit };
+            self.delegates.put_review(task, ReviewRound { round: answered.round, findings, state, model: Some(answered.model.to_owned()), note: answered.note });
+        }
+        self.end_reviewed(task, tab);
+    }
+
+    /// Ends the task a review held, as `settle_thread_task` ends a worker's: with its latest reply.
+    fn end_reviewed(&self, task: &str, tab: &str) {
+        let Some(info) = self.delegates.get(task) else { return };
+        if info.state.terminal() {
+            return;
+        }
+        let parent = self.delegates.settle_thread(task, info.summary.clone(), None, None, self.thread_steps(tab), self.launch.path_env.as_deref());
+        self.board_write(task, crate::board::BoardEvent::Settled { task: task.to_owned() });
+        self.chain_settled(task);
+        if let Some(parent) = parent.filter(|parent| self.tabs.lock().unwrap().contains_key(parent)) {
+            self.maybe_deliver(&parent);
+        }
+    }
+}
+
+/// What a review's end needs to make its round.
+struct Answered<'a> {
+    round: u8,
+    rules: &'a [Rule],
+    model: &'a str,
+    note: Option<String>,
 }
 
 #[cfg(test)]
