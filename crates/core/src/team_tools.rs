@@ -199,11 +199,37 @@ pub fn definition(name: &str) -> Option<Value> {
 mod tests {
     use super::*;
 
+    fn offered_names(seat: &TeamSeat) -> Vec<String> {
+        offered(seat).iter().map(|tool| tool["name"].as_str().unwrap().to_owned()).collect()
+    }
+
     #[test]
-    fn no_team_tool_is_offered_yet() {
-        for seat in [TeamSeat::default(), TeamSeat { captain: true, ..TeamSeat::default() }, TeamSeat { worker: true, ..TeamSeat::default() }, TeamSeat { worker: true, child: true, ..TeamSeat::default() }] {
-            assert_eq!(offered(&seat), Vec::<Value>::new(), "{seat:?}");
+    fn the_feature_map_tools_are_offered_per_seat_and_no_other_team_tool_is_yet() {
+        let plain = TeamSeat::default();
+        let captain = TeamSeat { captain: true, ..TeamSeat::default() };
+        let worker = TeamSeat { worker: true, ..TeamSeat::default() };
+        let child = TeamSeat { worker: true, child: true, ..TeamSeat::default() };
+        assert_eq!(offered_names(&plain), Vec::<String>::new(), "a plain seat");
+        assert_eq!(offered_names(&captain), ["feature_map_read", "feature_map_set"], "a Captain reads and writes");
+        assert_eq!(offered_names(&worker), ["feature_map_read"], "a worker only reads");
+        assert_eq!(offered_names(&child), ["feature_map_read"], "a child only reads");
+    }
+
+    #[test]
+    fn the_feature_map_definitions_say_what_is_required_and_capped() {
+        let set = definition("feature_map_set").unwrap();
+        assert_eq!(set["inputSchema"]["required"], json!(["feature"]));
+        assert_eq!(set["inputSchema"]["properties"]["files"]["type"], "array");
+        assert_eq!(set["inputSchema"]["properties"]["files"]["items"]["type"], "string");
+        assert_eq!(set["inputSchema"]["properties"]["feature"]["maxLength"], 60);
+        assert_eq!(set["inputSchema"]["properties"]["about"]["maxLength"], 200);
+        let text = set["description"].as_str().unwrap();
+        for cap in ["60", "200", "50", "300"] {
+            assert!(text.contains(cap), "the description names the cap {cap}: {text}");
         }
+        let read = definition("feature_map_read").unwrap();
+        assert_eq!(read["inputSchema"]["required"], json!([]));
+        assert!(read["description"].as_str().unwrap().contains("data"), "{read}");
     }
 
     #[test]
