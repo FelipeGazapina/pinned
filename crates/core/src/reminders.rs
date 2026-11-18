@@ -157,6 +157,38 @@ pub fn permissions() -> Vec<String> {
         .collect()
 }
 
+/// pinned's own tools that only read. A read-only session calls these without asking and is
+/// refused every other tool of `permissions`, which act.
+const READ_TOOLS: [&str; 22] = [
+    LIST_TOOL,
+    CAPABILITIES_TOOL,
+    STATUS_TOOL,
+    STATS_TOOL,
+    "agents",
+    "work_cost",
+    "memory_search",
+    "actions",
+    "projects",
+    "read_captain",
+    "waiting",
+    "sessions",
+    "read_session",
+    "repo_overview",
+    "repo_read",
+    "repo_search",
+    "taste_get",
+    "convex_tables",
+    "convex_data",
+    "convex_query",
+    "convex_run",
+    "convex_logs",
+];
+
+/// `permissions` split into the tools that only read and the tools that act.
+pub fn read_and_acting_permissions() -> (Vec<String>, Vec<String>) {
+    permissions().into_iter().partition(|tool| READ_TOOLS.iter().any(|read| *tool == format!("mcp__{SERVER}__{read}")))
+}
+
 pub fn serve(reminders: bool) {
     let stdin = std::io::stdin();
     let _ = serve_io(reminders, stdin.lock(), std::io::stdout());
@@ -994,6 +1026,16 @@ fn send(message: &Message) -> Result<String, String> {
 mod tests {
     use super::*;
     use chrono::FixedOffset;
+
+    #[test]
+    fn every_read_tool_is_one_of_pinneds_and_the_rest_act() {
+        let (reads, acting) = read_and_acting_permissions();
+        assert_eq!(reads.len(), READ_TOOLS.len(), "a read tool pinned no longer has: {reads:?}");
+        assert_eq!(reads.len() + acting.len(), permissions().len());
+        for tool in ["memory_save", "memory_forget", "delegate_task", "act", "task_cancel", "remind_me", "taste_set", "send_to_captain", "plan_set"] {
+            assert!(acting.contains(&format!("mcp__{SERVER}__{tool}")), "{tool} {acting:?}");
+        }
+    }
 
     fn at_noon() -> DateTime<FixedOffset> {
         FixedOffset::west_opt(3 * 3600).unwrap().with_ymd_and_hms(2026, 10, 21, 12, 0, 0).unwrap()

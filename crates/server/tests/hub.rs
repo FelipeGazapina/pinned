@@ -3941,6 +3941,7 @@ fn node_with_a_transcript(name: &str) -> (TestHub, Client, String, PathBuf, Node
             model: None,
             permission_mode: None,
             spawned_by: None,
+            read_only: false,
         }],
     )
     .unwrap();
