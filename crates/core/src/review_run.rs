@@ -323,13 +323,13 @@ fn ignored_unread(git: &Git, top: &Path, base: &str, ignored: Vec<String>) -> Re
     let input: String = ignored.iter().map(|file| format!("./{file}\0")).collect();
     let (_, out, _) = git.capped_in(&["check-ignore", "--verbose", "--non-matching", "--no-index", "-z", "--stdin"], usize::MAX, Some(input.as_bytes()))?;
     let fields: Vec<&str> = out.split('\0').collect();
-    let records: Vec<&[&str]> = fields.chunks_exact(4).collect();
+    let (records, _) = fields.as_chunks::<4>();
     if records.len() != ignored.len() {
         return Err(format!("git check-ignore failed in {}", top.display()));
     }
     let mut as_at_base: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
     let mut unread: Vec<String> = vec![];
-    for (record, file) in records.into_iter().zip(&ignored) {
+    for (record, file) in records.iter().zip(&ignored) {
         let source = record[0];
         if unread.iter().any(|folder| folder.ends_with('/') && file.starts_with(folder.as_str())) {
             continue;
