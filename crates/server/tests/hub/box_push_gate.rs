@@ -398,3 +398,40 @@ fn a_refused_box_act_takes_no_place_in_the_accounts_line_of_extends() {
     lock.release();
     assert_eq!(waiting(), 0);
 }
+
+const NOT_TASTES: &str = "a box may not change the account's way of working";
+
+#[test]
+fn a_boxs_node_act_on_a_persons_machine_is_refused_when_it_writes_and_goes_through_when_it_reads() {
+    let s = setup("boxgate_node_act");
+    let host = RawMachine::start(&s.hub.url, &s.mac_token, |call| match call["cmd"].as_str() {
+        Some("list_projects") => RawReply::Ok(json!([])),
+        _ => RawReply::Err("not in this test".into()),
+    });
+    let mut vps = reporting(&s, &s.box_token, &s.box_id, vec![tab("tab-1", "worker", json!({}))]);
+    let on_mac = |action: &str, args: Value, request_id: &str| {
+        let mut call = act("tab-1", action, args, request_id);
+        call["act"]["machine"] = json!(s.mac_id);
+        call
+    };
+
+    assert_eq!(send_call(&mut vps, 1, on_mac("make_folder", json!({ "path": "/w/new" }), "n-1")), Err(NOT_MACHINES.to_owned()));
+    assert_eq!(host.calls("make_folder"), 0, "the write never reaches the person's machine");
+    let read = send_call(&mut vps, 2, on_mac("list_projects", Value::Null, "n-2")).unwrap();
+    assert_eq!(read["outcome"], "done", "a read of the person's machine passes the gate");
+    assert_eq!(host.calls("list_projects"), 1);
+}
+
+#[test]
+fn a_taste_chats_own_set_taste_from_a_box_is_refused_while_a_persons_machine_changes_the_taste() {
+    let s = setup("boxgate_taste_chat");
+    let chat = || vec![tab("tab-t", "worker", json!({ "taste_chat": true }))];
+    let mut vps = reporting(&s, &s.box_token, &s.box_id, chat());
+    let mut mac = reporting(&s, &s.mac_token, &s.mac_id, chat());
+    let set = json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "parallel": 2 } });
+
+    assert_eq!(send_call(&mut vps, 1, set.clone()), Err(NOT_TASTES.to_owned()));
+    let reset = json!({ "cmd": "reset_taste_field", "scope": { "kind": "captains" }, "field": "parallel" });
+    assert_eq!(send_call(&mut vps, 2, reset), Err(NOT_TASTES.to_owned()));
+    assert!(send_call(&mut mac, 1, set).is_ok(), "the same call from a person's machine with a taste chat open goes through");
+}
