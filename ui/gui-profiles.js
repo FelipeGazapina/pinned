@@ -16,6 +16,49 @@ const PROFILE_ACCESS = [
   { id: "read_only", label: "Read only", about: "Reads and reports; changes nothing." },
 ];
 
+/** The built-in profiles every list starts from, as `profiles::seeds` in pinned-core makes them. A
+ * test there reads this array as JSON and fails when the two differ. The fourth seed, the Reviewer,
+ * is drawn from `tasteUi.saved.reviewer` by `profilesReviewerSeed`. */
+const PROFILE_SEEDS = [
+  {"name": "Explorer", "skills": [], "tools": ["Read", "Grep", "Glob"], "access": "read_only", "delivers": "What it found, with file:line, and no change.", "by": "user"},
+  {"name": "Implementer", "skills": [], "tools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"], "access": "edit", "delivers": "The change on its branch, with the tests it ran.", "by": "user"},
+  {"name": "Tester", "skills": [], "tools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"], "access": "edit", "delivers": "The tests it ran and their output, with screenshot proof only when the work changes a screen.", "by": "user"}
+];
+const PROFILE_REVIEWER = "Reviewer";
+
+const profilesSameName = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
+
+/** The Reviewer seed in `repo`, as `profiles::seeds` makes it: its model and what it delivers come
+ * from the Reviewer section (the rules it reads there and the rounds it sends back). */
+function profilesReviewerSeed(repo) {
+  const r = { rounds: 2, rules: [], projects: {}, ...(tasteUi.saved?.reviewer ?? {}) };
+  const own = repo ? r.projects?.[repo.trim()] : null;
+  const replaced = (id) => (own?.rules ?? []).some((rule) => rule.replaces === id);
+  const rules = [...r.rules.map((rule) => rule.id).filter((id) => !replaced(id)), ...(own?.rules ?? []).map((rule) => rule.id)];
+  const rounds = r.rounds === 1 ? "1 round" : `${r.rounds} rounds`;
+  const delivers = rules.length ? `Findings against rules ${rules.join(", ")}, sent back to the worker for at most ${rounds}.` : `Findings on the change, sent back to the worker for at most ${rounds}.`;
+  return { name: PROFILE_REVIEWER, skills: [], tools: ["Read", "Grep", "Glob"], access: "read_only", ...(r.model ? { model: r.model } : {}), delivers, by: "user" };
+}
+
+/** What `delegate_task` may name in `repo` ("" for the account), as `profiles::approved` gives it:
+ * the seeds, then the account's list over them by name, then the project's over both. Each row
+ * says where it comes from ("seed", "reviewer", "account" or "project"), its `index` in that list,
+ * and whether it replaced an earlier row of that name. The Reviewer stays the seed. */
+function profilesApproved(w, repo) {
+  const rows = [...PROFILE_SEEDS.map((profile) => ({ profile, from: "seed", index: -1 })), { profile: profilesReviewerSeed(repo), from: "reviewer", index: -1 }];
+  const layer = (list, from) =>
+    list.forEach((profile, index) => {
+      if (profilesSameName(profile.name, PROFILE_REVIEWER)) return;
+      const row = { profile, from, index };
+      const at = rows.findIndex((r) => profilesSameName(r.profile.name, profile.name));
+      if (at < 0) rows.push(row);
+      else rows[at] = { ...row, replaced: true };
+    });
+  layer(w.account ?? [], "account");
+  if (repo) layer(w.projects?.[repo] ?? [], "project");
+  return rows;
+}
+
 const profilesSaved = () => {
   const w = tasteUi.saved?.worker_profiles;
   return w ? { account: [], projects: {}, proposed: [], ...w } : null;
@@ -86,10 +129,12 @@ async function profilesApprove(b) {
 
 const profilesBlank = () => ({ name: "", skills: [], access: "edit", delivers: "", by: "user" });
 
-function profilesOpenForm(index) {
-  const profile = index < 0 ? profilesBlank() : profilesListOf(profilesShown(), profilesUi.scope)[index];
+/** Opens the form on the scope's own profile at `index`, a blank one for -1, or, with `copy`, on a
+ * built-in or the account's row that Keep saves as the scope's own of the same name. */
+function profilesOpenForm(index, copy = null) {
+  const profile = copy ?? (index < 0 ? profilesBlank() : profilesListOf(profilesShown(), profilesUi.scope)[index]);
   if (!profile) return;
-  profilesUi.form = { index, profile: { ...profile }, tools: (profile.tools ?? []).join(", "), error: null };
+  profilesUi.form = { index, copy: !!copy, profile: { skills: [], ...profile }, tools: (profile.tools ?? []).join(", "), error: null };
   tasteRender();
 }
 
@@ -112,6 +157,7 @@ function profilesSubmitForm() {
   const profile = profilesFormProfile(form);
   const list = profilesListOf(profilesShown(), profilesUi.scope);
   if (!profile.name) form.error = "Every profile needs a name.";
+  else if (profilesSameName(profile.name, PROFILE_REVIEWER)) form.error = "The Reviewer is set in its own section, so no profile takes its name.";
   else if (list.some((p, i) => i !== form.index && p.name.trim().toLowerCase() === profile.name.toLowerCase())) form.error = `Two profiles are named ${profile.name}.`;
   if (form.error) return tasteRender();
   profilesUi.form = null;
@@ -162,18 +208,33 @@ function profilesFormHtml(form) {
     <label class="taste-label"><span>Tools</span><input type="text" data-profile-tools value="${esc(form.tools)}" placeholder="Read, Grep, Bash" aria-label="Tools, separated by commas"></label>
     ${profileSkillsHtml(p)}
     <div class="taste-limit-pair">${profileModelHtml(p)}${profileEffortHtml(p)}</div>
-    <div class="taste-inline">${error}<span class="spacer"></span><button type="button" class="outline" data-act="wpcancel">Cancel</button><button type="submit" class="primary">${form.index < 0 ? "Add profile" : "Keep changes"}</button></div></form>`;
+    <div class="taste-inline">${error}<span class="spacer"></span><button type="button" class="outline" data-act="wpcancel">Cancel</button><button type="submit" class="primary">${form.index < 0 && !form.copy ? "Add profile" : "Keep changes"}</button></div></form>`;
 }
 
-function profileRowHtml(profile, index, names) {
+/** One row of the shown list. The scope's own rows edit and remove by `index`; a built-in row, or the
+ * account's on a project tab, edits into a copy of the scope's own and has no remove; the Reviewer
+ * is set in its own section. */
+function profileRowHtml({ profile, from, index, replaced }, repo, names) {
+  const own = from === (repo ? "project" : "account");
   const access = PROFILE_ACCESS.find((a) => a.id === profile.access)?.label ?? profile.access;
-  const chips = [access, profile.effort ? `${profile.effort} effort` : "", profile.model ? tasteRefLabel(profile.model, names) : ""].filter(Boolean).map((c) => `<span class="taste-chip">${esc(c)}</span>`).join("");
+  const tag = from === "seed" || from === "reviewer" ? "Built-in" : own ? (replaced ? "Yours" : "") : "Account";
+  const chips = [tag, access, profile.model ? tasteRefLabel(profile.model, names) : "ladder", profile.effort ? `${profile.effort} effort` : "default effort"]
+    .filter(Boolean)
+    .map((c, i) => `<span class="taste-chip"${i === 0 && tag ? ` data-tag="${from === "seed" || from === "reviewer" ? "built-in" : own ? "yours" : "account"}"` : ""}>${esc(c)}</span>`)
+    .join("");
   const skills = (profile.skills ?? []).map((s) => `<code>${esc(s.name)}</code>`).join(" ");
   const tools = (profile.tools ?? []).length ? `Tools: ${profile.tools.map((t) => `<code>${esc(t)}</code>`).join(" ")}` : "";
   const detail = [profile.delivers ? esc(profile.delivers) : "", skills ? `Skills: ${skills}` : "", tools].filter(Boolean).join(" · ");
-  return `<li><span class="taste-profile-text"><span class="taste-skill-name"><b>${esc(profile.name)}</b>${chips}</span>${detail ? `<span class="taste-skill-about">${detail}</span>` : ""}</span>
-    <button type="button" class="taste-icon" data-act="wpedit" data-index="${index}" aria-label="Edit profile ${esc(profile.name)}">${icon("pencil")}</button>
-    <button type="button" class="taste-icon" data-act="wpdrop" data-index="${index}" aria-label="Remove profile ${esc(profile.name)}">${icon("trash-2")}</button></li>`;
+  const name = esc(profile.name);
+  const acts =
+    from === "reviewer"
+      ? `<span class="taste-quiet">set in Reviewer</span>`
+      : own
+        ? `<button type="button" class="taste-icon" data-act="wpedit" data-index="${index}" aria-label="Edit profile ${name}">${icon("pencil")}</button>
+    <button type="button" class="taste-icon" data-act="wpdrop" data-index="${index}" aria-label="Remove profile ${name}">${icon("trash-2")}</button>`
+        : `<button type="button" class="taste-icon" data-act="wpedit" data-${from === "seed" ? "seed" : "account"}="${name}" aria-label="Edit profile ${name}">${icon("pencil")}</button>`;
+  return `<li><span class="taste-profile-text"><span class="taste-skill-name"><b>${name}</b>${chips}</span>${detail ? `<span class="taste-skill-about">${detail}</span>` : ""}</span>
+    ${acts}</li>`;
 }
 
 function profileProposedHtml(w, names, where) {
@@ -205,9 +266,8 @@ function tasteProfilesHtml(_t) {
     .join("");
   const names = new Map(tasteCatalog(claudeModels(), OPENCODE_GO_MODELS).flatMap((group) => group.models.map((m) => [m.slug, m.name])));
   const where = repo ? projects.find((p) => p.repo === repo)?.name ?? repo : "the account";
-  const list = profilesListOf(w, repo);
-  const inherited = repo && w.account.length ? `<span class="taste-quiet">The account's ${w.account.length === 1 ? "profile also applies" : "profiles also apply"} here: ${w.account.map((p) => esc(p.name)).join(", ")}.</span>` : "";
-  const rows = list.map((p, i) => profileRowHtml(p, i, names)).join("");
+  const inherited = repo ? `<span class="taste-quiet">Built-in and account profiles apply here too; editing one keeps a copy for this project.</span>` : "";
+  const rows = profilesApproved(w, repo).map((row) => profileRowHtml(row, repo, names)).join("");
   const form = profilesUi.form ? profilesFormHtml(profilesUi.form) : `<div class="taste-inline"><button type="button" class="outline" data-act="wpadd">Add profile</button></div>`;
   return `<section class="taste-section taste-profiles">${head}
     <div class="taste-scopes"><div class="taste-seg" role="group" aria-label="Whose profiles">${tabs}</div>${inherited}</div>
@@ -222,7 +282,12 @@ const TASTE_PROFILE_ACTS = {
     tasteRender();
   },
   wpadd: () => profilesOpenForm(-1),
-  wpedit: (b) => profilesOpenForm(Number(b.dataset.index)),
+  wpedit: (b) => {
+    const copy = b.dataset.seed ?? b.dataset.account;
+    if (copy == null) return profilesOpenForm(Number(b.dataset.index));
+    const row = profilesApproved(profilesShown(), profilesUi.scope).find((r) => r.from !== "reviewer" && profilesSameName(r.profile.name, copy));
+    if (row) profilesOpenForm(-1, row.profile);
+  },
   wpcancel: () => {
     profilesUi.form = null;
     tasteRender();

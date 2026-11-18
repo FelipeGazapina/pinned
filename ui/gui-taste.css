@@ -159,6 +159,9 @@ button.taste-card:hover { background: var(--g-hover); }
 .taste-reviewer .taste-note-form select { height: 36px; }
 
 .taste-profiles-list li { align-items: center; }
+.taste-profiles-list .taste-chip[data-tag="built-in"] { background: rgb(var(--g-primary-rgb) / 0.12); color: var(--g-primary); }
+.taste-profiles-list .taste-chip[data-tag="yours"] { background: color-mix(in srgb, var(--g-success) 14%, transparent); color: var(--g-success); }
+.taste-profiles-list li > .taste-quiet { flex: none; font-size: 12px; }
 .taste-profile-text { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
 .taste-profile-form { display: flex; flex-direction: column; gap: 12px; padding: 12px; border: 1px solid var(--g-border); border-radius: 12px; }
 .taste-profile-form input[type="text"] { width: 100%; box-sizing: border-box; height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--g-input); background: var(--g-canvas); color: var(--g-fg); font: inherit; font-size: 13px; }
