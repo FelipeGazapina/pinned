@@ -3468,24 +3468,35 @@ impl Machine {
     /// Hands `message` from the global orchestrator in `caller` to `project`'s Capitão: on this
     /// machine when the project is here and `machine` names no other, else on the machine the hub
     /// finds. Here, an orchestrator that asks for its permission prompts reaches no Capitão that
-    /// skips them and opens none, as an agent's enqueue.
+    /// skips them and opens none, as an agent's enqueue. With Full access by default it reaches no
+    /// Capitão elsewhere either: this machine can't check whether that one asks.
     fn send_to_captain(&self, caller: &str, project: &str, machine: Option<&str>, message: &str, request_id: &str) -> Result<Handoff, String> {
         let sender = self.global_settings().name;
+        let full = self.caller_full(caller);
         match self.local_project(project, machine) {
             Some(path) => {
-                let full = self.tab(caller, |t| t.child_access() == crate::delegate::Access::Full).unwrap_or(false);
                 let asking = (!full).then(|| {
                     format!("the Captain of {} skips its permission prompts and your session asks for them, so your message can't reach it; the user can switch that Captain to ask for permissions", path.display())
                 });
                 self.hand_to_captain(&path.display().to_string(), message, request_id, &sender, None, full && full_access_by_default(), asking)
             }
-            None => self.route_remote(project, machine, message, request_id, &sender),
+            None => {
+                remote_needs_full(project, full)?;
+                self.route_remote(project, machine, message, request_id, &sender)
+            }
         }
+    }
+
+    /// Whether `caller` runs in Full access, so that what it sends may reach a session that skips
+    /// its permission prompts.
+    fn caller_full(&self, caller: &str) -> bool {
+        self.tab(caller, |t| t.child_access() == crate::delegate::Access::Full).unwrap_or(false)
     }
 
     /// `send_to_captain` with `box`: the hub opens the Capitão of `project`'s repository in an
     /// Upstash Box, with the account's connection, or hands the message to the box that runs it.
-    fn send_to_captain_box(&self, project: &str, machine: Option<&str>, boxed: crate::delegate::BoxTarget, message: &str, request_id: &str) -> Result<Value, String> {
+    fn send_to_captain_box(&self, caller: &str, project: &str, machine: Option<&str>, boxed: crate::delegate::BoxTarget, message: &str, request_id: &str) -> Result<Value, String> {
+        remote_needs_full(project, self.caller_full(caller))?;
         let repo = match boxed.repo {
             Some(repo) => repo,
             None => self.project_origin(project, machine)?,
@@ -3870,7 +3881,7 @@ impl Machine {
             }
             ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: Some(boxed) } => {
                 only_global()?;
-                text_json(self.send_to_captain_box(&project, machine.as_deref(), boxed, &message, &request_id)?)
+                text_json(self.send_to_captain_box(tab, &project, machine.as_deref(), boxed, &message, &request_id)?)
             }
             ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: None } => {
                 only_global()?;
@@ -7302,6 +7313,16 @@ fn needs_update(e: String) -> String {
 }
 
 /// A tool's answer as one line of JSON, which the session reads and the chat can render.
+/// Refuses a global orchestrator's message to a Capitão on another machine or in a box when the
+/// orchestrator asks for its permission prompts and Full access is the default: that Capitão likely
+/// skips them, and this machine can't check that it asks too. With the switch off it goes as before.
+fn remote_needs_full(project: &str, full: bool) -> Result<(), String> {
+    if !full && full_access_by_default() {
+        return Err(format!("the Captain of {project} runs on another machine, and your session asks for permissions, so pinned can't check that it asks too; the user can send it from that machine"));
+    }
+    Ok(())
+}
+
 fn text_json<T: Serialize>(value: T) -> Result<String, String> {
     serde_json::to_string(&value).map_err(|e| e.to_string())
 }
