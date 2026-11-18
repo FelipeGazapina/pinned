@@ -14038,6 +14038,54 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn the_global_orchestrator_set_to_ask_relays_nothing_to_another_machine_or_a_box_with_the_switch_on() {
+        let dir = temp("global-asks-remote");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let global = m.open_global_orchestrator().unwrap();
+        let calls: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+        let seen = calls.clone();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::Relay { .. } => {
+                seen.lock().unwrap().push("relay");
+                Ok(json!({ "outcome": "na_fila", "tab": "tab-b-1", "position": 1 }))
+            }
+            HubCall::Overview => {
+                seen.lock().unwrap().push("overview");
+                Err("this hub runs pinned 0.17.19, which can't answer that yet".to_owned())
+            }
+            _ => Err("not this test's".into()),
+        }));
+        let send = |boxed: bool, request: &str| {
+            let boxed = boxed.then(|| crate::delegate::BoxTarget { size: None, repo: Some("github.com/o/site".into()) });
+            m.project_tool(&global, ProjectTool::SendToCaptain { project: "m-book:/w/site".into(), message: "Ship it.".into(), request_id: request.into(), machine: None, boxed })
+        };
+        let refused = Err("the Captain of m-book:/w/site runs on another machine, and your session asks for permissions, so pinned can't check that it asks too; the user can send it from that machine".to_owned());
+
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(true)));
+        m.tab(&global, |t| t.bypass = false).unwrap();
+        assert_eq!(send(false, "r-1"), refused, "to another machine");
+        assert_eq!(send(true, "r-2"), refused, "to a box");
+        m.tab(&global, |t| (t.bypass, t.permission_mode) = (true, Some("plan".into()))).unwrap();
+        assert_eq!(send(false, "r-3"), refused, "from plan mode, to another machine");
+        assert_eq!(send(true, "r-4"), refused, "from plan mode, to a box");
+        assert!(calls.lock().unwrap().is_empty(), "an asking Orchestrator's text reached the hub: {:?}", calls.lock().unwrap());
+
+        m.tab(&global, |t| t.permission_mode = None).unwrap();
+        assert!(send(false, "r-5").is_ok(), "a Full Orchestrator reaches another machine");
+        assert!(send(true, "r-6").is_ok(), "a Full Orchestrator reaches a box");
+        assert_eq!(calls.lock().unwrap().iter().filter(|c| **c == "relay").count(), 2);
+
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(false)));
+        m.tab(&global, |t| t.bypass = false).unwrap();
+        assert!(send(false, "r-7").is_ok(), "with the switch off, an asking Orchestrator still reaches another machine");
+        assert!(send(true, "r-8").is_ok(), "with the switch off, an asking Orchestrator still reaches a box");
+        assert_eq!(calls.lock().unwrap().iter().filter(|c| **c == "relay").count(), 4);
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_guarded_prompt_types_nothing_into_a_session_that_skips_its_prompts() {
         let (m, dir, captain) = limited_captain("guarded-prompt", TastePatch::default());
         let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
