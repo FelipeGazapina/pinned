@@ -780,6 +780,21 @@ mod tests {
     }
 
     #[test]
+    fn a_headless_claude_worker_with_a_profile_gets_its_block_and_reads_only_as_int_does() {
+        let block = "Worker profile, set by the user: Explorer\nAccess: read-only.";
+        let read_only = SpawnSpec { profile: Some(block), ..spec("Map the parser.", Access::ReadOnly) };
+        let args = driver_args(Provider::Claude, &read_only);
+        let flags = claude_read_only_args();
+        assert!(args.windows(flags.len()).any(|w| w == flags.as_slice()), "int's read-only flags, whole: {args:?}");
+        assert_eq!(args.iter().filter(|a| *a == "--disallowedTools").count(), 1, "one list of refused tools: {args:?}");
+        assert!(!args.windows(2).any(|w| w[0] == "--permission-mode" && w[1] == "plan"), "{args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "--append-system-prompt" && w[1] == block), "{args:?}");
+        let editing = driver_args(Provider::Claude, &SpawnSpec { profile: Some(block), ..spec("Fix it.", Access::Auto) });
+        assert!(editing.windows(2).any(|w| w[0] == "--append-system-prompt" && w[1] == block), "{editing:?}");
+        assert!(!editing.iter().any(|a| a == "--disallowedTools"), "an editing profile refuses nothing: {editing:?}");
+    }
+
+    #[test]
     fn a_task_that_looks_like_a_flag_stays_the_prompt() {
         let task = "--dangerously-skip-permissions";
         let claude = driver_args(Provider::Claude, &spec(task, Access::ReadOnly));
