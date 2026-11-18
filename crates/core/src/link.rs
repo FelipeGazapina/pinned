@@ -2205,6 +2205,73 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// `AccountHub`, except that listing the project `broken` fails, as a hub that cannot read it.
+    struct BrokenList<'a> {
+        hub: &'a AccountHub,
+        broken: &'a str,
+    }
+
+    impl sync::Hub for BrokenList<'_> {
+        fn list(&self, project: &str) -> Result<Vec<sync::Entry>, String> {
+            if project == self.broken {
+                return Err("the hub could not list the project".into());
+            }
+            self.hub.list(project)
+        }
+        fn push(&self, project: &str, files: Vec<sync::File>) -> Result<(), String> {
+            self.hub.push(project, files)
+        }
+        fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<sync::File>, String> {
+            self.hub.pull(project, paths)
+        }
+        fn mark_executable(&self, project: &str, repairs: Vec<sync::ModeRepair>) -> Result<(), String> {
+            self.hub.mark_executable(project, repairs)
+        }
+    }
+
+    /// The app and the site, the app refused at 0 s with draw 0.5, so the hold is `PUSH_HOLD_MIN`
+    /// and the cycle at 20 s is a probe. Returns the probe's errors, with the site's listing failing.
+    fn probe_with_a_broken_site(name: &str, room: bool) -> (PushBackoff, Vec<String>) {
+        let (dir, app, app_notes) = project_checkout("github.com/acme/app", &format!("{name}-app"));
+        let (site_dir, site, site_notes) = project_checkout("github.com/acme/site", &format!("{name}-site"));
+        let hub = AccountHub::default();
+        let mut backoff = PushBackoff::with_draw(|| 0.5);
+        let (mut state, start) = (sync::State::default(), Instant::now());
+        std::fs::write(&app_notes, grown(0)).unwrap();
+        std::fs::write(&site_notes, grown(0)).unwrap();
+        backoff.begin(start);
+        assert!(matches!(backoff.sync(&hub, &mut state, &app, start).unwrap().push, sync::Push::Refused { .. }));
+        backoff.sync(&hub, &mut state, &site, start).unwrap();
+        backoff.finish();
+        assert_eq!(backoff.limit.as_ref().map(|limit| limit.wait), Some(PUSH_HOLD_MIN));
+
+        hub.room.set(room);
+        std::fs::write(&app_notes, grown(20)).unwrap();
+        let broken = BrokenList { hub: &hub, broken: "github.com/acme/site" };
+        let probe = start + SYNC_EVERY;
+        backoff.begin(probe);
+        let errors = [&site, &app].into_iter().filter_map(|checkout| backoff.sync(&broken, &mut state, checkout, probe).err()).collect();
+        backoff.finish();
+        let _ = (std::fs::remove_dir_all(dir), std::fs::remove_dir_all(site_dir));
+        (backoff, errors)
+    }
+
+    #[test]
+    fn a_probe_cycle_with_an_error_but_no_limit_refusal_ends_the_hold() {
+        let (backoff, errors) = probe_with_a_broken_site("probe-error", true);
+        assert_eq!(errors, ["the hub could not list the project"], "the site's sync fails on its own");
+        assert!(!backoff.limited(), "a probe cycle with no limit refusal ends the hold, whatever other errors it had");
+        assert_eq!(backoff.refusal(), None, "and the notice goes");
+    }
+
+    #[test]
+    fn a_probe_cycle_with_an_error_and_a_limit_refusal_keeps_the_hold_and_doubles_it() {
+        let (backoff, errors) = probe_with_a_broken_site("probe-error-refused", false);
+        assert_eq!(errors, ["the hub could not list the project"], "the site's sync fails on its own");
+        assert_eq!(backoff.limit.as_ref().map(|limit| limit.wait), Some(PUSH_HOLD_MIN * 2), "the app's refusal doubles the hold");
+        assert!(backoff.refusal().is_some_and(|refusal| refusal.starts_with(sync::LIMIT_REFUSAL)), "and the notice stays");
+    }
+
     #[test]
     fn a_hold_never_exceeds_ten_minutes_with_the_jitter_at_its_longest() {
         let (dir, file, machine, shared, _app) = refused_project("hold-cap");

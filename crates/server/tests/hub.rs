@@ -13575,6 +13575,65 @@ fn past_its_database_limit_the_hub_refuses_a_growing_push_and_takes_a_deletion()
     assert_eq!(sync_push(&mut ana, vec![synced_deletion("claude/memory/notes.md")]), Ok(Value::Null), "a deletion is always taken");
 }
 
+/// Makes the hub's own reads of `function` (a `pg_catalog` function or aggregate, as
+/// `pg_database_size(name)`) fail: a `public` one of the same name that raises goes first in the
+/// database's search path, and the hub's connections are closed so the ones it opens again read it.
+fn break_hub_read(hub: &TestHub, function: &str) {
+    let database = &hub.database;
+    admin_on(database, &format!("create function public.broken_read() returns bigint language plpgsql as $$ begin raise exception 'read broken by the test'; end $$; {function}"));
+    admin_on(
+        database,
+        &format!("alter database {database} set search_path = public, pg_catalog; select pg_terminate_backend(pid) from pg_stat_activity where datname = '{database}' and pid <> pg_backend_pid()"),
+    );
+    // Long enough for the hub to see its connections closed, so its next statement opens another.
+    std::thread::sleep(Duration::from_millis(500));
+}
+
+#[test]
+fn a_failed_read_of_the_database_size_still_refuses_a_push_past_the_total() {
+    let hub = TestHub::start_with_sync_limits("sync_db_read_fails", SyncLimits { account: None, total: 1 << 20, db: 2048 << 20 });
+    let (_, _, mut ana) = signed_in(&hub.url, "ana@example.test");
+    // 3000 bytes left under the 1 MB total.
+    store_synced(&hub, "ana@example.test", "claude/memory/notes.md", (1 << 20) - 3000);
+    break_hub_read(&hub, "create function public.pg_database_size(name) returns bigint language sql as $$ select public.broken_read() $$;");
+    let blob = json!({ "path": "claude/memory/more.md", "sha": sha256_hex(b"more"), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode([7u8; 4000]) });
+    assert_eq!(sync_push(&mut ana, vec![blob]), Err(HUB_FULL.to_owned()), "the sum was read, so the total holds");
+}
+
+#[test]
+fn a_failed_read_of_the_sum_still_refuses_a_push_past_the_database_limit() {
+    // The test database alone is several MB, past this 1 MB.
+    let hub = TestHub::start_with_sync_limits("sync_sum_read_fails", SyncLimits { account: None, total: 8192 << 20, db: 1 << 20 });
+    let (_, _, mut ana) = signed_in(&hub.url, "ana@example.test");
+    store_synced(&hub, "ana@example.test", "claude/memory/notes.md", 9);
+    break_hub_read(&hub, "create function public.broken_sum(bigint, integer) returns bigint language sql as $$ select public.broken_read() $$; create aggregate public.sum(integer) (sfunc = public.broken_sum, stype = bigint);");
+    assert_eq!(sync_push(&mut ana, vec![synced_note("claude/memory/more.md", "one more note")]), Err(HUB_FULL.to_owned()), "the database's size was read, so its limit holds");
+}
+
+#[test]
+fn a_reserved_push_refused_for_a_stale_base_gives_its_reservation_back() {
+    let hub = TestHub::start_with_sync_limits("sync_total_stale", SyncLimits { account: None, total: 1 << 20, db: 2048 << 20 });
+    let (_, _, mut ana) = signed_in(&hub.url, "ana@example.test");
+    // 3000 bytes left under the 1 MB total: a 10-byte history the push merges with, and the rest.
+    store_synced(&hub, "ana@example.test", "history.jsonl", 10);
+    store_synced(&hub, "ana@example.test", "claude/memory/notes.md", (1 << 20) - 3010);
+    let bytes = |path: &str, size: usize| json!({ "path": path, "sha": sha256_hex(path.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(vec![7u8; size]) });
+    let mut merged = bytes("history.jsonl", 2010);
+    merged["base"] = json!("stored");
+    // The push passes its check and reserves its 2000 bytes, then another machine's copy lands
+    // before its files are written.
+    let paused = hub.runtime.block_on(hub.hub().db.pause_sync_writes());
+    let stale = std::thread::scope(|scope| {
+        let push = scope.spawn(|| sync_push(&mut ana, vec![merged]));
+        std::thread::sleep(Duration::from_millis(1000));
+        admin_on(&hub.database, "update project_files set sha = 'another machine' where path = 'history.jsonl'");
+        drop(paused);
+        push.join().unwrap()
+    });
+    assert_eq!(stale, Err(sync::STALE_REFUSAL.to_owned()));
+    assert_eq!(sync_push(&mut ana, vec![bytes("claude/memory/more.md", 2000)]), Ok(Value::Null), "the refused push holds none of the 3000 bytes left");
+}
+
 /// An account with one machine, a plain session `ana.tab` that runs no workflow, and two workflows
 /// with no Linear column, so a stage of theirs that passes the hub's check moves nothing.
 struct Workflows {
