@@ -2210,12 +2210,12 @@ mod tests {
     /// `AccountHub`, except that listing the project `broken` fails, as a hub that cannot read it.
     struct BrokenList<'a> {
         hub: &'a AccountHub,
-        broken: &'a str,
+        broken: &'a [&'a str],
     }
 
     impl sync::Hub for BrokenList<'_> {
         fn list(&self, project: &str) -> Result<Vec<sync::Entry>, String> {
-            if project == self.broken {
+            if self.broken.contains(&project) {
                 return Err("the hub could not list the project".into());
             }
             self.hub.list(project)
@@ -2232,8 +2232,9 @@ mod tests {
     }
 
     /// The app and the site, the app refused at 0 s with draw 0.5, so the hold is `PUSH_HOLD_MIN`
-    /// and the cycle at 20 s is a probe. Returns the probe's errors, with the site's listing failing.
-    fn probe_with_a_broken_site(name: &str, room: bool) -> (PushBackoff, Vec<String>) {
+    /// and the cycle at 20 s is a probe. Returns the probe's errors, with the listing of each project
+    /// in `broken` failing.
+    fn probe_with_broken(name: &str, room: bool, broken: &[&str]) -> (PushBackoff, Vec<String>) {
         let (dir, app, app_notes) = project_checkout("github.com/acme/app", &format!("{name}-app"));
         let (site_dir, site, site_notes) = project_checkout("github.com/acme/site", &format!("{name}-site"));
         let hub = AccountHub::default();
@@ -2249,13 +2250,55 @@ mod tests {
 
         hub.room.set(room);
         std::fs::write(&app_notes, grown(20)).unwrap();
-        let broken = BrokenList { hub: &hub, broken: "github.com/acme/site" };
+        let broken = BrokenList { hub: &hub, broken };
         let probe = start + SYNC_EVERY;
         backoff.begin(probe);
         let errors = [&site, &app].into_iter().filter_map(|checkout| backoff.sync(&broken, &mut state, checkout, probe).err()).collect();
         backoff.finish();
         let _ = (std::fs::remove_dir_all(dir), std::fs::remove_dir_all(site_dir));
         (backoff, errors)
+    }
+
+    fn probe_with_a_broken_site(name: &str, room: bool) -> (PushBackoff, Vec<String>) {
+        probe_with_broken(name, room, &["github.com/acme/site"])
+    }
+
+    #[test]
+    fn a_probe_cycle_whose_every_sync_errors_keeps_the_hold_as_it_is() {
+        let (backoff, errors) = probe_with_broken("probe-all-error", true, &["github.com/acme/site", "github.com/acme/app"]);
+        assert_eq!(errors.len(), 2, "both syncs fail before they push");
+        assert!(backoff.limited(), "no sync reached the hub, so the probe says nothing of its room");
+        assert_eq!(backoff.limit.as_ref().map(|limit| limit.wait), Some(PUSH_HOLD_MIN), "the hold is neither reset nor doubled");
+        assert!(backoff.refusal().is_some(), "and the notice stays");
+        assert!(!backoff.shrinking(Instant::now() + SYNC_EVERY), "the wait is over, so the next cycle probes again");
+    }
+
+    #[test]
+    fn a_probe_cycle_that_skips_a_sync_keeps_the_hold() {
+        let (dir, app, app_notes) = project_checkout("github.com/acme/app", "probe-skipped");
+        let hub = AccountHub::default();
+        let mut backoff = PushBackoff::with_draw(|| 0.5);
+        let (mut state, start) = (sync::State::default(), Instant::now());
+        std::fs::write(&app_notes, grown(0)).unwrap();
+        backoff.begin(start);
+        backoff.sync(&hub, &mut state, &app, start).unwrap();
+        backoff.finish();
+        assert!(backoff.limited());
+
+        hub.room.set(true);
+        let probe = start + SYNC_EVERY;
+        backoff.begin(probe);
+        backoff.sync(&hub, &mut state, &app, probe).unwrap();
+        backoff.skipped();
+        backoff.finish();
+        assert!(backoff.limited(), "a sync that never ran, as when the link dropped, leaves the hold on");
+        assert_eq!(backoff.limit.as_ref().map(|limit| limit.wait), Some(PUSH_HOLD_MIN), "and does not double it");
+
+        backoff.begin(probe + SYNC_EVERY);
+        backoff.sync(&hub, &mut state, &app, probe + SYNC_EVERY).unwrap();
+        backoff.finish();
+        assert!(!backoff.limited(), "the next probe that runs whole ends it");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
