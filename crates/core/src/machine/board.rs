@@ -455,6 +455,46 @@ mod tests {
         assert!(nobody.is_err(), "{nobody:?}");
     }
 
+    fn cite_refused(why: &str) -> Result<String, String> {
+        Err(format!("a board note must cite a file inside your folder as path or path:line; {why}. Nothing was noted."))
+    }
+
+    #[test]
+    fn a_cite_with_a_control_format_or_fence_character_or_over_300_characters_is_refused() {
+        let t = team("cite-chars");
+        let src = t.dir.join("app/src");
+        let control = "line break or other control character";
+        let format = "invisible or direction-changing character";
+        let fence = "backtick or tilde";
+        let mut cases: Vec<(String, String)> = vec![];
+        for (name, kind) in [("a\nb.rs", control), ("a\tb.rs", control), ("a\u{2028}b.rs", control), ("a\u{202E}sr.b", format), ("a\u{200B}b.rs", format), ("a\u{FEFF}b.rs", format), ("a`b.rs", fence), ("a~b.rs", fence)] {
+            std::fs::write(src.join(name), "x\n").unwrap();
+            cases.push((format!("src/{name}"), format!("its cite holds a {kind}")));
+        }
+        cases.push(("src/login.rs\n".into(), format!("its cite holds a {control}")));
+        let deep = src.join("d".repeat(200));
+        std::fs::create_dir_all(&deep).unwrap();
+        for n in [92, 93] {
+            std::fs::write(deep.join(format!("{}.rs", "f".repeat(n))), "x\n").unwrap();
+        }
+        let longest = format!("src/{}/{}.rs", "d".repeat(200), "f".repeat(92));
+        let long = format!("src/{}/{}.rs", "d".repeat(200), "f".repeat(93));
+        assert_eq!((longest.chars().count(), long.chars().count()), (300, 301));
+        cases.push((long, "its cite is at most 300 characters, and this one has 301".into()));
+        for (file, why) in &cases {
+            assert_eq!(note(&t.m, &t.worker, file, "the token check moved"), cite_refused(why), "{file:?}");
+        }
+        let outside = t.dir.join("config-secret.txt");
+        std::fs::write(&outside, "secret\n").unwrap();
+        std::os::unix::fs::symlink(&outside, src.join("leak.rs")).unwrap();
+        assert_eq!(note(&t.m, &t.worker, "src/leak.rs", "the token check moved"), cite_refused("src/leak.rs is not a file there"), "a link out of the folder");
+        assert_eq!(t.m.board(&t.captain, Some(&t.root)).unwrap().notes, vec![], "nothing was noted");
+        noted(&t.m, &t.worker, &longest, "a 300-character cite is kept");
+        noted(&t.m, &t.worker, "  src/login.rs:7  ", "the cite is kept as checked");
+        let files: Vec<String> = t.m.board(&t.captain, Some(&t.root)).unwrap().notes.into_iter().map(|n| n.file).collect();
+        assert_eq!(files, [longest.as_str(), "src/login.rs:7"]);
+    }
+
     /// A second Captain (`cap-b`) in the same app, whose plan links one root task with one worker.
     fn foreign_captain(t: &Team) -> (String, String, String) {
         let project = t.dir.join("app");
