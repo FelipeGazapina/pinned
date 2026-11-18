@@ -1262,10 +1262,15 @@ impl<'c, 'a> Scan<'c, 'a> {
     }
 
     fn write_check(&mut self, raw: &str, shown: &str, path: Option<PathBuf>, unresolved: bool) {
-        if self_grant(&comps(raw)) || path.as_deref().is_some_and(|p| self_grant(&path_comps(p))) {
+        let grant = self_grant(&comps(raw)) || path.as_deref().is_some_and(|p| self_grant(&path_comps(p)));
+        if grant {
             self.hit(NeverItem::SelfGrant, format!("writes {}", short(shown)));
         }
-        if unresolved || path.as_deref().is_some_and(|p| self.outside(p)) {
+        // A self-grant is never approved ahead of time, and a write outside may be, so one in
+        // another checkout, such as the main one of this worktree, stops as a self-grant only.
+        // The account's own `~/.claude` stays a write outside, as the design's table has it.
+        let account_own = path.as_deref().is_some_and(|p| p.starts_with(self.ctx.home.join(".claude")));
+        if (unresolved || path.as_deref().is_some_and(|p| self.outside(p))) && (!grant || account_own) {
             self.hit(NeverItem::WriteOutside, format!("writes {}", short(shown)));
         }
     }
@@ -1745,7 +1750,7 @@ mod tests {
     /// A worktree with a project in it, a scratch dir, a home with an ssh key, and a folder outside all three.
     fn fx() -> Fx {
         let tmp = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
         let (work, scratch, home, elsewhere) = (base.join("work"), base.join("scratch"), base.join("home"), base.join("elsewhere"));
         for d in [work.join("crates/core/src"), work.join("node_modules/.bin"), scratch.clone(), home.join(".ssh"), home.join(".config/pinned/uploads"), elsewhere.clone()] {
             std::fs::create_dir_all(d).unwrap();
@@ -1755,8 +1760,10 @@ mod tests {
         Fx { _tmp: tmp, work, scratch, home, elsewhere }
     }
 
+    /// `s` with each `{name}` a path of the fixture, spelled with `/`: a shell reads `\` as an
+    /// escape, so `C:\…` in a command would lose its separators on Windows.
     fn sub(f: &Fx, s: &str) -> String {
-        let show = |p: &Path| p.display().to_string();
+        let show = |p: &Path| p.display().to_string().replace('\\', "/");
         s.replace("{work}", &show(&f.work)).replace("{scratch}", &show(&f.scratch)).replace("{home}", &show(&f.home)).replace("{elsewhere}", &show(&f.elsewhere))
     }
 
@@ -2096,6 +2103,13 @@ mod tests {
             ("chmod +x .git/hooks/pre-commit", Some(SelfGrant)),
             ("echo x > pinned-1/claude-settings.json", Some(SelfGrant)),
             ("cd .claude && echo x > settings.local.json", Some(SelfGrant)),
+            // The main checkout's approvals, which a session in one of its worktrees carries.
+            ("echo x > /home/u/client/.claude/settings.local.json", Some(SelfGrant)),
+            ("cd /home/u/client/.claude && echo x > settings.local.json", Some(SelfGrant)),
+            ("echo {} > /home/u/client/.mcp.json", Some(SelfGrant)),
+            ("echo x > {elsewhere}/.claude/settings.local.json", Some(SelfGrant)),
+            ("cd {elsewhere}/.claude && echo x > settings.local.json", Some(SelfGrant)),
+            ("echo {} > {elsewhere}/.mcp.json", Some(SelfGrant)),
             ("git config core.hooksPath x", Some(SelfGrant)),
             ("git config core.fsmonitor 'x'", Some(SelfGrant)),
             ("git config --global user.name x", Some(SelfGrant)),
@@ -2273,6 +2287,11 @@ mod tests {
             ("sub/.mcp.json", Some(SelfGrant)),
             ("pinned-1/claude-settings.json", Some(SelfGrant)),
             ("pinned-1/claude-mcp.json", Some(SelfGrant)),
+            ("/home/u/client/.claude/settings.local.json", Some(SelfGrant)),
+            ("/home/u/client/.mcp.json", Some(SelfGrant)),
+            ("{elsewhere}/.claude/settings.local.json", Some(SelfGrant)),
+            ("{elsewhere}/.mcp.json", Some(SelfGrant)),
+            ("../.claude/settings.local.json", Some(SelfGrant)),
             ("~/.claude/settings.json", Some(WriteOutside)),
             ("~/.ssh/config", Some(Secrets)),
             ("~/.aws/credentials", Some(Secrets)),

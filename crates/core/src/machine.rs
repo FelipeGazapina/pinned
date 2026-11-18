@@ -195,6 +195,31 @@ impl Launch {
         self.bins.get(&provider).cloned().unwrap_or_else(|| provider.spec().bin.into())
     }
 
+    /// The settings file every Claude Code session started with `env` loads. The global
+    /// orchestrator's own: no Bash, and its file tools held to its folders.
+    fn shared_settings(&self, env: &[(String, String)]) -> PathBuf {
+        if global::is_global(env) { self.settings.with_file_name(hooks::GLOBAL_SETTINGS) } else { self.settings.clone() }
+    }
+
+    /// The settings of its own an interactive Claude Code session in `cwd` loads: the shared ones
+    /// plus the project MCP servers the person approved, so their approval dialog does not show
+    /// again in a worktree or under an account that never trusted the main checkout. None when it
+    /// carries no name, and the session loads the shared file as before.
+    fn session_settings(&self, program: Program, account: &Account, cwd: &Path, args: &[String], env: &[(String, String)]) -> Option<mcp::SessionSettings> {
+        let interactive = !args.iter().any(|a| a == "-p" || a == "--print");
+        if program != Program::Agent || !account.provider.spec().harness || !interactive {
+            return None;
+        }
+        let names = mcp::carried_approvals(cwd);
+        match mcp::SessionSettings::write(&self.shared_settings(env), &names) {
+            Ok(settings) => settings,
+            Err(e) => {
+                eprintln!("pinned: a session in {} starts without its project's approved MCP servers: {e}", cwd.display());
+                None
+            }
+        }
+    }
+
     /// What a tab's session starts with: pinned's socket, its tab, the tutorial helper, then
     /// `env`, its account's and its kind's.
     pub(crate) fn child_env(&self, account: &Account, tab: &str, env: &[(String, String)]) -> ChildEnv<'static> {
@@ -209,7 +234,7 @@ impl Launch {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf], mcp: Option<&mcp::SessionFiles>) -> CommandBuilder {
+    fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf], mcp: Option<&mcp::SessionFiles>, settings: Option<&mcp::SessionSettings>) -> CommandBuilder {
         let provider = account.provider;
         let spec = provider.spec();
         let mut cmd = crate::process::pty_command(self.bin(provider));
@@ -223,8 +248,7 @@ impl Launch {
                         cmd.args(configs);
                     }
                     cmd.arg("--settings");
-                    // The global orchestrator's own: no Bash, and its file tools held to its folders.
-                    cmd.arg(if global::is_global(env) { self.settings.with_file_name(hooks::GLOBAL_SETTINGS) } else { self.settings.clone() });
+                    cmd.arg(settings.map_or_else(|| self.shared_settings(env), |own| own.file.clone()));
                     cmd.arg("--plugin-dir");
                     cmd.arg(&self.plugin_dir);
                     for dir in plugin_dirs {
@@ -691,6 +715,9 @@ struct Tab {
     session: Option<pty::Session>,
     /// The running session's own MCP config, removed when the session ends or is replaced.
     mcp: Option<mcp::SessionFiles>,
+    /// The running session's own settings, carrying its project's approved MCP servers; removed
+    /// as `mcp` is.
+    own_settings: Option<mcp::SessionSettings>,
     starting: bool,
     /// When the running claude started, so a subagent an earlier claude left mid-step reads as stopped.
     started: Option<SystemTime>,
@@ -2506,12 +2533,13 @@ impl Machine {
         let env = self.launch_env(&account, env);
         let plugin_dirs = self.shared_plugin_dirs(&account);
         let mcp = if program == Program::Agent { self.session_mcp(&account, &cwd) } else { None };
+        let own_settings = self.launch.session_settings(program, &account, &cwd, &args, &env);
         let first_run = program == Program::Agent && account.provider == Provider::Claude;
         if first_run {
             self.seed_first_run(&account, &cwd);
         }
-        let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs, mcp.as_ref());
-        if let Err(error) = self.spawn_with(tab, cmd, pty::size(cols, rows), mcp) {
+        let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs, mcp.as_ref(), own_settings.as_ref());
+        if let Err(error) = self.spawn_with(tab, cmd, pty::size(cols, rows), (mcp, own_settings)) {
             // The next start asks for the same again: with its arguments gone it would open a new
             // conversation in place of this one.
             let _ = self.tab(tab, |t| (t.starting, t.waking, t.launch, t.asleep) = (false, false, asked, slept));
@@ -2807,11 +2835,11 @@ impl Machine {
 
     #[cfg(test)]
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
-        self.spawn_with(tab, cmd, size, None)
+        self.spawn_with(tab, cmd, size, (None, None))
     }
 
-    /// `spawn`, keeping the session's own MCP config `mcp` until the session ends.
-    fn spawn_with(&self, tab: &str, cmd: CommandBuilder, size: PtySize, mcp: Option<mcp::SessionFiles>) -> Result<(), String> {
+    /// `spawn`, keeping the session's own MCP config and settings `own` until the session ends.
+    fn spawn_with(&self, tab: &str, cmd: CommandBuilder, size: PtySize, own: (Option<mcp::SessionFiles>, Option<mcp::SessionSettings>)) -> Result<(), String> {
         let (old, screen) = self.tab(tab, |t| (t.session.take(), t.screen.clone()))?;
         let session = {
             let mut screen = screen.lock().unwrap();
@@ -2835,7 +2863,7 @@ impl Machine {
         )?;
         self.tab(tab, |t| {
             t.session = Some(pty);
-            t.mcp = mcp;
+            (t.mcp, t.own_settings) = own;
             t.starting = false;
             t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
@@ -2896,7 +2924,7 @@ impl Machine {
             let mode = t.permission_mode.clone().filter(|mode| claude && t.mode_live && !t.bypass && !t.permission_unknown && matches!(mode.as_str(), "acceptEdits" | "auto" | "dontAsk" | "plan"));
             t.launch.extend(mode.into_iter().flat_map(|mode| ["--permission-mode".to_owned(), mode]));
             t.launch.extend(t.effort.clone().filter(|_| claude).into_iter().flat_map(|effort| ["--effort".to_owned(), effort]));
-            (t.asleep, t.mcp, t.started) = (true, None, None);
+            (t.asleep, t.mcp, t.own_settings, t.started) = (true, None, None, None);
             // The screen moves on before the tab is let go: the exit of the session dropped below
             // reaches no one, and a start that follows counts from here, so its output is its own.
             t.screen.lock().unwrap().session += 1;
@@ -6688,6 +6716,7 @@ impl Machine {
             program: Program::Agent,
             session: None,
             mcp: None,
+            own_settings: None,
             starting: false,
             started: None,
             launch,
@@ -6766,7 +6795,7 @@ impl Machine {
         let reason = stop_reason(task.and_then(|task| self.delegates.get(&task)).as_ref(), code);
         self.end_session(tab);
         let _ = self.tab(tab, |t| {
-            (t.session, t.background_wait, t.mcp) = (None, None, None);
+            (t.session, t.background_wait, t.mcp, t.own_settings) = (None, None, None, None);
             if !t.headless && matches!(t.status, Some(AgentStatus::Working | AgentStatus::NeedsInput)) {
                 (t.status, t.stopped) = (None, Some(reason));
             }
@@ -9815,7 +9844,7 @@ pub(crate) mod tests {
     fn claude_does_not_inherit_the_session_pinned_was_started_from() {
         std::env::set_var("CLAUDE_CODE_SESSION_ID", "outer-session");
         std::env::set_var("CLAUDECODE", "1");
-        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], &[], None);
+        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], &[], None, None);
         assert_eq!(cmd.get_env("CLAUDE_CODE_SESSION_ID"), None);
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
         assert_eq!(cmd.get_env("PINNED_TAB").and_then(|v| v.to_str()), Some("tab-1"));
@@ -9907,7 +9936,7 @@ pub(crate) mod tests {
     fn a_tab_command_starts_only_with_what_its_kind_sets() {
         let m = machine();
         let account = Account::builtin(Provider::Claude);
-        let cmd = parent::with(every_session_variable(), || m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None));
+        let cmd = parent::with(every_session_variable(), || m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None, None));
         let session: BTreeMap<&str, &str> = INHERITED_SESSION_ENV.iter().filter_map(|name| Some((*name, cmd.get_env(name)?.to_str()?))).collect();
         assert_eq!(session, BTreeMap::from([("PINNED_SOCK", "k"), ("PINNED_TAB", "tab-1"), ("PINNED_TUTORIAL_HELPER", "t"), ("PINNED_ACCOUNT", "claude")]));
     }
@@ -10009,13 +10038,13 @@ pub(crate) mod tests {
         assert_eq!(m.accounts.home(&account), own, "the home a resume and sync read");
         assert_eq!(m.find_transcript(&account, session), Some(transcript.clone()));
         assert_eq!(m.claude_config(&account), own.join(".claude.json"));
-        let cmd = m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None);
+        let cmd = m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None, None);
         assert_eq!(cmd.get_env("CLAUDE_CONFIG_DIR").and_then(|v| v.to_str()), own.to_str());
 
         let m = machine_started_with(root.path(), shell(&[("PINNED_ROLE", "worker")]));
         assert_eq!(m.accounts.home(&account), home().join(".claude"));
         assert_eq!(m.find_transcript(&account, session), None);
-        let cmd = m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None);
+        let cmd = m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None, None);
         assert_eq!(cmd.get_env("CLAUDE_CONFIG_DIR"), None);
     }
 
@@ -10120,7 +10149,7 @@ pub(crate) mod tests {
         let plugin = dir.join("toy@demo");
         std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
         std::fs::write(plugin.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#).unwrap();
-        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], std::slice::from_ref(&plugin), None);
+        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], std::slice::from_ref(&plugin), None, None);
         let args: Vec<String> = cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let flags: Vec<_> = args.windows(2).filter(|w| w[0] == "--plugin-dir").map(|w| w[1].as_str()).collect();
         assert_eq!(flags, vec!["p", plugin.to_str().unwrap()]);
@@ -10337,6 +10366,216 @@ pub(crate) mod tests {
         let config = claude_config_at(&root.join("config/home/.claude.json"));
         assert!(trusted(&config, &info.cwd), "the worktree pinned made is trusted before the session starts: {config}");
         assert!(!trusted(&config, &repo), "the repository the user opened is not: {config}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A fake `claude` that copies the settings file it was started with to `<root>/settings-got`,
+    /// then writes that file's path to `<root>/settings-path`.
+    #[cfg(unix)]
+    fn claude_keeping_settings(root: &Path) -> PathBuf {
+        let claude = root.join("claude");
+        let (got, path) = (root.join("settings-got"), root.join("settings-path"));
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = auth ] && [ \"$2\" = status ]; then echo '{{\"loggedIn\":true,\"email\":\"ana@acme.dev\"}}'; exit 0; fi\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = --settings ]; then cat \"$2\" > '{got}'; printf '%s' \"$2\" > '{path}.tmp'; mv '{path}.tmp' '{path}'; fi\n  shift\ndone\necho started\nsleep 30\n",
+            got = got.display(),
+            path = path.display()
+        );
+        std::fs::write(&claude, body).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    /// A machine whose sessions run `claude_keeping_settings`, and the shared settings file it
+    /// passes them, written as `Launch::prepare` writes it.
+    #[cfg(unix)]
+    fn carrying_machine(root: &Path) -> (Arc<Machine>, PathBuf) {
+        let shared = root.join("claude-settings.json");
+        hooks::write_settings(&shared, Path::new("/opt/pinned/bin/pinned")).unwrap();
+        let claude = claude_keeping_settings(root);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), settings: shared.clone(), ..launch() }, Some(root.join("config")), None, |_| {});
+        (m, shared)
+    }
+
+    fn mcp_json(names: &[&str]) -> String {
+        let servers: serde_json::Map<String, Value> = names.iter().map(|name| (name.to_string(), json!({ "command": "npx", "args": ["-y", name] }))).collect();
+        json!({ "mcpServers": servers }).to_string()
+    }
+
+    /// A repository whose commit has a `.mcp.json` listing `committed`. Its main checkout's own
+    /// `.mcp.json` then lists `main`, and its `.claude/settings.local.json` holds `local`.
+    #[cfg(unix)]
+    fn mcp_repo(root: &Path, committed: &[&str], main: &[&str], local: Option<Value>) -> PathBuf {
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".mcp.json"), mcp_json(committed)).unwrap();
+        git(&repo, &["add", ".mcp.json"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "-m", "first"]);
+        std::fs::write(repo.join(".mcp.json"), mcp_json(main)).unwrap();
+        if let Some(local) = local {
+            std::fs::create_dir_all(repo.join(".claude")).unwrap();
+            std::fs::write(repo.join(".claude/settings.local.json"), local.to_string()).unwrap();
+        }
+        repo
+    }
+
+    /// The path and content of the settings file the next session started with.
+    #[cfg(unix)]
+    fn started_settings(root: &Path) -> (PathBuf, Value) {
+        wait_for("the session's settings", || root.join("settings-path").exists());
+        let path = PathBuf::from(std::fs::read_to_string(root.join("settings-path")).unwrap());
+        let got = serde_json::from_slice(&std::fs::read(root.join("settings-got")).unwrap()).unwrap();
+        for file in ["settings-path", "settings-got"] {
+            std::fs::remove_file(root.join(file)).unwrap();
+        }
+        (path, got)
+    }
+
+    /// Starts a session of the built-in account in `folder`, a folder the user opened.
+    #[cfg(unix)]
+    fn start_in(m: &Machine, folder: &Path) -> TabId {
+        let tab = m.open_tab(Some(folder.display().to_string()), false).unwrap();
+        m.start_claude(&tab, 200, 24).unwrap();
+        tab
+    }
+
+    /// `got` is the shared settings plus `enabledMcpjsonServers: names`, every other key the same.
+    fn carries(got: &Value, shared: &Value, names: &[&str]) {
+        assert_eq!(got["enabledMcpjsonServers"], json!(names), "the approved names are carried");
+        let mut rest = got.as_object().unwrap().clone();
+        rest.remove("enabledMcpjsonServers");
+        assert_eq!(&Value::Object(rest), shared, "every key of the shared settings, unchanged");
+        assert!(got.get("enableAllProjectMcpServers").is_none(), "{got}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_in_a_worktree_pinned_made_carries_the_main_checkouts_approved_mcp_servers() {
+        let root = temp("mcp-carry-worktree");
+        let (m, shared) = carrying_machine(&root);
+        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        let repo = mcp_repo(&root, &["a", "b"], &["a", "b"], Some(json!({ "enabledMcpjsonServers": ["a"] })));
+        let task = delegate_from(&m, &repo, "worktree");
+        let (path, got) = started_settings(&root);
+        let cwd = m.delegates.get(&task).unwrap().cwd;
+        assert_ne!(dunce::canonicalize(&cwd).unwrap(), dunce::canonicalize(&repo).unwrap(), "the worker runs in a worktree of its own");
+        carries(&got, &shared_json, &["a"]);
+        assert_ne!(path, shared, "the session has a settings file of its own");
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&path).unwrap().permissions()) & 0o777, 0o600, "only its user reads it");
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(path.parent().unwrap()).unwrap().permissions()) & 0o777, 0o700, "in a folder only its user opens");
+        assert_eq!(std::fs::read(&shared).unwrap(), serde_json::to_vec_pretty(&shared_json).unwrap(), "the shared file is never written");
+        let config = claude_config_at(&root.join("config/home/.claude.json"));
+        assert!(!trusted(&config, &repo), "the main checkout is never trusted: {config}");
+        assert!(!config.to_string().contains("McpServers"), "nothing is approved in the account's config: {config}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_declined_server_is_never_carried() {
+        let root = temp("mcp-carry-declined");
+        let (m, shared) = carrying_machine(&root);
+        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        let repo = mcp_repo(&root, &["a", "b"], &["a", "b"], Some(json!({ "enabledMcpjsonServers": ["a", "b"], "disabledMcpjsonServers": ["a"] })));
+        delegate_from(&m, &repo, "worktree");
+        let (_, got) = started_settings(&root);
+        carries(&got, &shared_json, &["b"]);
+        let local = repo.join(".claude/settings.local.json");
+        std::fs::write(&local, json!({ "enabledMcpjsonServers": ["a"], "disabledMcpjsonServers": ["a"] }).to_string()).unwrap();
+        delegate_from(&m, &repo, "worktree");
+        let (path, got) = started_settings(&root);
+        assert_eq!((path, got), (shared, shared_json), "with every approved name declined, the session gets the shared settings");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn only_servers_in_the_opened_checkouts_mcp_json_are_carried() {
+        let root = temp("mcp-carry-listed");
+        let (m, shared) = carrying_machine(&root);
+        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        // The worktree has the committed `.mcp.json`, with `a` only; the main checkout's lists more.
+        let repo = mcp_repo(&root, &["a"], &["a", "b", "gone"], Some(json!({ "enabledMcpjsonServers": ["a", "gone", "b"] })));
+        delegate_from(&m, &repo, "worktree");
+        let (_, got) = started_settings(&root);
+        carries(&got, &shared_json, &["a"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn all_future_servers_carry_only_the_names_it_lists() {
+        let root = temp("mcp-carry-all-future");
+        let (m, shared) = carrying_machine(&root);
+        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        let repo = mcp_repo(&root, &["a", "b"], &["a", "b"], Some(json!({ "enableAllProjectMcpServers": true, "enabledMcpjsonServers": ["b"] })));
+        delegate_from(&m, &repo, "worktree");
+        let (_, got) = started_settings(&root);
+        carries(&got, &shared_json, &["b"]);
+        std::fs::write(repo.join(".claude/settings.local.json"), json!({ "enableAllProjectMcpServers": true, "enabledMcpjsonServers": [] }).to_string()).unwrap();
+        delegate_from(&m, &repo, "worktree");
+        let (path, got) = started_settings(&root);
+        assert!(got.get("enableAllProjectMcpServers").is_none(), "{got}");
+        assert_eq!((path, got), (shared, shared_json), "\"all future\" alone carries no name");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn without_a_mcp_json_or_approvals_a_session_gets_the_shared_settings() {
+        let root = temp("mcp-carry-none");
+        let (m, shared) = carrying_machine(&root);
+        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        let repo = mcp_repo(&root, &["a"], &["a"], Some(json!({ "enabledMcpjsonServers": ["a"] })));
+        start_in(&m, &repo);
+        let (_, got) = started_settings(&root);
+        carries(&got, &shared_json, &["a"]);
+        std::fs::remove_file(repo.join(".mcp.json")).unwrap();
+        start_in(&m, &repo);
+        assert_eq!(started_settings(&root), (shared.clone(), shared_json.clone()), "no .mcp.json in the opened folder");
+        std::fs::write(repo.join(".mcp.json"), mcp_json(&["a"])).unwrap();
+        std::fs::remove_file(repo.join(".claude/settings.local.json")).unwrap();
+        start_in(&m, &repo);
+        assert_eq!(started_settings(&root), (shared.clone(), shared_json.clone()), "no settings.local.json");
+        std::fs::write(repo.join(".claude/settings.local.json"), "not json").unwrap();
+        start_in(&m, &repo);
+        assert_eq!(started_settings(&root), (shared, shared_json), "an unreadable settings.local.json");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn carrying_approvals_never_writes_the_accounts_config() {
+        let root = temp("mcp-carry-config");
+        let (m, shared) = carrying_machine(&root);
+        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        let repo = mcp_repo(&root, &["a", "b"], &["a", "b"], Some(json!({ "enabledMcpjsonServers": ["a", "b"] })));
+        let config = root.join("config/home/.claude.json");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let before = serde_json::to_vec_pretty(&json!({ "hasCompletedOnboarding": true, "theme": "light", "numStartups": 3, "projects": { "/old": { "allowedTools": ["Bash"] } } })).unwrap();
+        std::fs::write(&config, &before).unwrap();
+        start_in(&m, &repo);
+        let (_, got) = started_settings(&root);
+        carries(&got, &shared_json, &["a", "b"]);
+        assert_eq!(std::fs::read(&config).unwrap(), before, "the account's config is byte-identical: nothing trusted, nothing approved");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_print_start_in_a_worktree_that_would_carry_gets_the_shared_settings() {
+        let root = temp("mcp-carry-print");
+        let (m, shared) = carrying_machine(&root);
+        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        let repo = mcp_repo(&root, &["a", "b"], &["a", "b"], Some(json!({ "enabledMcpjsonServers": ["a"] })));
+        let tree = root.join("tree");
+        git(&repo, &["worktree", "add", "-q", "-b", "tree", tree.to_str().unwrap()]);
+        start_in(&m, &tree);
+        let (_, got) = started_settings(&root);
+        carries(&got, &shared_json, &["a"]);
+        let tab = m.add_tab(tree.clone(), Account::builtin(Provider::Claude), vec!["-p".into(), "look".into()], vec![], false, None);
+        m.start_claude(&tab, 200, 24).unwrap();
+        assert_eq!(started_settings(&root), (shared, shared_json), "a -p start carries nothing and gets the shared file exactly");
         let _ = std::fs::remove_dir_all(root);
     }
 
