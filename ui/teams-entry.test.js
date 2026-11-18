@@ -55,14 +55,14 @@ function app({ answers = {}, projects = [], pages = [], stored = null, raw = nul
     navigator: { clipboard: { writeText: (t) => ((context.copied = t), Promise.resolve()) } },
     opened: [],
     closed: 0,
-    // The shell's openPage: records the page, makes it current and shows it.
+    // The shell's openPage: records the page, makes it current and shows it. Closing one hands the screen back to the thread.
     openPage: (name) => {
       context.opened.push(name);
       context.document.body.dataset.page = name;
       context.SHELL_PAGES[name]?.show?.();
     },
     shellPage: () => (context.document.body.dataset.page in context.SHELL_PAGES ? context.document.body.dataset.page : null),
-    closePage: () => context.closed++,
+    closePage: () => (context.closed++, delete context.document.body.dataset.page),
     // The bots UI's opener of the Create a bot page, a cross-file global.
     openTeamBotNew: () => context.opened.push("team-bot-new"),
     hub: {
@@ -138,6 +138,94 @@ test("a saved team is current at start, and refreshed from the list; one the per
   await b.context.teamsList();
   assert.equal(b.context.teamsCurrent(), null);
   assert.equal(b.events.length, 1);
+});
+
+// ---- A switch of team sets the main area: a team opens its home, the personal account closes a team page ----
+
+test("switching from the personal account to a team opens the team's Calls page, once", async () => {
+  const a = app({ answers: { list: [ACME, SOLO] }, pages: ["team-calls", "team-bot"] });
+  await a.context.teamsList();
+  assert.deepEqual(a.context.opened, [], "a list with nothing remembered opens nothing");
+  a.run("teamsSelect(teamsKnown[0])");
+  assert.equal(a.context.document.body.dataset.page, "team-calls");
+  assert.deepEqual(a.context.opened, ["team-calls"]);
+  assert.equal(a.context.closed, 0);
+});
+
+test("switching from one team to another opens the new team's Calls page once", async () => {
+  const a = app({ answers: { list: [ACME, SOLO] }, pages: ["team-calls", "team-bot"] });
+  await a.context.teamsList();
+  a.run("teamsSelect(teamsKnown[0])");
+  a.context.opened.length = 0;
+  a.run("teamsSelect(teamsKnown[1])");
+  assert.equal(a.context.teamsCurrent().id, "t2");
+  assert.deepEqual(a.context.opened, ["team-calls"]);
+  assert.equal(a.context.closed, 0);
+});
+
+test("switching from a team to the personal account closes an open team page and leaves a non-team page open", async () => {
+  const a = app({ answers: { list: [ACME] }, pages: ["team-calls", "team-bot", "settings"] });
+  await a.context.teamsList();
+  a.run("teamsSelect(teamsKnown[0])");
+  a.context.opened.length = 0;
+  a.context.document.body.dataset.page = "team-bot";
+  a.run("teamsSelect(null)");
+  assert.equal(a.context.teamsCurrent(), null);
+  assert.equal(a.context.closed, 1);
+  assert.deepEqual(a.context.opened, [], "the personal account opens no page of its own");
+  assert.equal(a.context.document.body.dataset.page, undefined, "no page is set, so the thread is what shows");
+
+  a.run("teamsSelect(teamsKnown[0])");
+  a.context.opened.length = 0;
+  a.context.document.body.dataset.page = "settings";
+  a.run("teamsSelect(null)");
+  assert.equal(a.context.closed, 1, "a non-team page is not closed");
+  assert.equal(a.context.document.body.dataset.page, "settings");
+});
+
+test("a teamsList refresh that keeps the same team opens and closes nothing", async () => {
+  const a = app({ answers: { list: [ACME] }, pages: ["team-calls", "team-bot"] });
+  await a.context.teamsList();
+  a.run("teamsSelect(teamsKnown[0])");
+  a.context.opened.length = 0;
+  a.context.document.body.dataset.page = "team-bot";
+  await a.context.teamsList();
+  assert.deepEqual(a.context.opened, []);
+  assert.equal(a.context.closed, 0);
+  assert.equal(a.context.document.body.dataset.page, "team-bot");
+});
+
+test("being dropped from the current team closes its open team page", async () => {
+  let teams = [ACME];
+  const a = app({ answers: { list: () => teams }, pages: ["team-calls", "team-bot"] });
+  await a.context.teamsList();
+  a.run("teamsSelect(teamsKnown[0])");
+  a.context.opened.length = 0;
+  a.context.document.body.dataset.page = "team-bot";
+  teams = [SOLO];
+  await a.context.teamsList();
+  assert.equal(a.context.teamsCurrent(), null);
+  assert.equal(a.context.closed, 1);
+  assert.deepEqual(a.context.opened, []);
+});
+
+test("start with a remembered team opens its Calls page once, at the first list from the hub, not at load", async () => {
+  const saved = { id: "t1", name: "North Studio", role: "owner", credential: ACME.credential };
+  const a = app({ answers: { list: [ACME] }, pages: ["team-calls"], stored: saved });
+  assert.deepEqual(a.context.opened, [], "nothing opens before the hub answers: the personal thread is shown first");
+  await a.context.teamsList();
+  assert.deepEqual(a.context.opened, ["team-calls"]);
+  assert.equal(a.context.document.body.dataset.page, "team-calls");
+  a.context.opened.length = 0;
+  await a.context.teamsList();
+  assert.deepEqual(a.context.opened, [], "a later refresh opens nothing");
+});
+
+test("start with a remembered team the person is no longer in opens nothing", async () => {
+  const a = app({ answers: { list: [SOLO] }, pages: ["team-calls"], stored: { id: "t1", name: "North Studio", role: "owner", credential: {} } });
+  await a.context.teamsList();
+  assert.equal(a.context.teamsCurrent(), null);
+  assert.deepEqual(a.context.opened, []);
 });
 
 test("teamsCurrent carries me: the owner's own account id from the wire's owner, null for a member", async () => {
@@ -782,6 +870,8 @@ async function atConnect(origin, { role = "owner", credential = KEYS_OFF } = {})
   const team = { ...ACME, role, credential };
   const a = app({ answers: { list: () => [team] }, stored: { id: "t1", name: "North Studio", role, credential }, pages: origin ? [origin, "team-calls"] : ["team-calls"] });
   await a.context.teamsList();
+  // The first read opens the stored team's home; what Connect opens is counted from here.
+  a.context.opened.length = 0;
   a.context.document.body.dataset.page = origin ?? "";
   a.run("openTeamConnect()");
   return a;

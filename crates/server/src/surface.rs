@@ -178,6 +178,12 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
         }
         let (id, held) = hub.db.hold_confirmation(account.id, caller.machine, caller.session.as_deref(), &asked).await?;
         end_turn(turn).await;
+        if held {
+            if let Some(ended) = extend_ended(hub, account, &admitted.call, id).await {
+                trail.write(AuditOutcome::Refused, &ended).await?;
+                return Err(ended);
+            }
+        }
         if !held {
             let earlier = hub.db.confirmation(account.id, id).await?.map(|held| held.confirmation);
             if let Some(Confirmation { decision: Some(decision), decided_at, .. }) = earlier {
@@ -325,6 +331,70 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
         return Err(format!("{name} starts work only on this session's own machine for now"));
     }
     Ok(Admitted { action, call, target, on_origin, turn })
+}
+
+/// Why the extend just stored as `id` can never run: its box ended between the ask's check and its
+/// store, after the end closed what waited. It closes the asks still waiting for the box, this one
+/// among them, whose session hears the refusal and no notice. None for any other act, or a box that runs.
+/// A database error here is logged, not answered: the ask is stored and waits as any ask does, so
+/// the act answers it pending as it would have. The error text is the database's generic one.
+async fn extend_ended(hub: &Hub, account: &Arc<Account>, call: &Parsed, id: Uuid) -> Option<String> {
+    let Parsed::Hub(HubCall::ExtendBox { machine, .. }) = call else { return None };
+    // `admit` parsed the machine already, so it parses here too.
+    let machine = Uuid::parse_str(machine).ok()?;
+    match ended_extend(hub, account, machine, id).await {
+        Ok(ended) => ended,
+        Err(e) => {
+            eprintln!("pinned-server: account {}'s extend {id} was stored, but its box could not be checked: {e}", account.id);
+            None
+        }
+    }
+}
+
+async fn ended_extend(hub: &Hub, account: &Arc<Account>, machine: Uuid, id: Uuid) -> Result<Option<String>, String> {
+    let Err(ended) = crate::boxes::still_open(hub.db.box_of(account.id, machine).await?) else { return Ok(None) };
+    let closed = hub.db.close_extends(account.id, machine).await?;
+    hub.db.notified(account.id, id).await?;
+    closed_extends(hub, account, closed, Some(id)).await;
+    Ok(Some(ended))
+}
+
+/// Tells the account's apps what waits now that a box's end closed the extend asks `closed`, and
+/// each asking session that its box ended. `asked` is the ask the act that found the end answers
+/// itself: its refusal is the act's, so it gets no notice, though the apps hear of the end all the
+/// same. A session no tab runs gets its notice once its machine connects (`deliver_notices`).
+pub async fn closed_extends(hub: &Hub, account: &Arc<Account>, closed: Vec<Uuid>, asked: Option<Uuid>) {
+    if closed.is_empty() {
+        return;
+    }
+    push_confirmations(hub, account).await;
+    let Some(hub) = hub.arc() else { return };
+    let account = account.clone();
+    tokio::spawn(async move {
+        for id in closed.into_iter().filter(|id| Some(*id) != asked) {
+            let told = match hub.db.confirmation(account.id, id).await {
+                Ok(Some(held)) => {
+                    if let Err(e) = closed_row(&hub, account.id, &held.confirmation).await {
+                        eprintln!("pinned-server: the extend {id} closed with its box has no denied row in account {}'s trail: {e}", account.id);
+                    }
+                    notify(&hub, &account, &held).await.map(drop)
+                }
+                Ok(None) => Ok(()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = told {
+                eprintln!("pinned-server: the session whose extend {id} closed with its box gets its notice later: {e}");
+            }
+        }
+    });
+}
+
+/// The trail row of an extend ask that the box's end closed: denied with the box's end, as the
+/// owner's decision writes a denied ask's row.
+async fn closed_row(hub: &Hub, account: Uuid, asked: &Confirmation) -> Result<(), String> {
+    let machine = Uuid::parse_str(&asked.machine).map_err(|e| e.to_string())?;
+    let trail = Trail { hub, account, machine, tab: &asked.tab, role: asked.role, action: &asked.action, args: surface::summary(&asked.args), request_id: asked.request_id.as_deref(), task: Default::default() };
+    trail.write(AuditOutcome::Denied, crate::db::EXTEND_BOX_ENDED).await
 }
 
 /// Whether the session already asked this act with its `request_id`, so the hold answers it.
