@@ -443,7 +443,7 @@ mod tests {
         let t = team("long");
         let long = "x".repeat(crate::board::NOTE_CHARS + 1);
         let answer = note(&t.m, &t.worker, "src/login.rs", &long);
-        assert!(answer.as_ref().is_err_and(|e| e.contains("200")), "{answer:?}");
+        assert_eq!(answer, Err("a board note is at most 200 characters, and this one has 201. Nothing was noted.".to_owned()));
         assert_eq!(t.m.board(&t.captain, Some(&t.root)).unwrap().notes, vec![]);
         let longest = "é".repeat(crate::board::NOTE_CHARS);
         assert!(note(&t.m, &t.worker, "src/login.rs", &longest).is_ok(), "the cap counts characters, not bytes");
@@ -483,17 +483,18 @@ mod tests {
         let t = team("apart");
         noted(&t.m, &t.worker, "src/login.rs", "the token check moved");
         let theirs = read(&t.m, None, Some(&t.other_worker), Some(&t.worker));
-        assert!(theirs.as_ref().is_err_and(|e| e.contains("board")), "{theirs:?}");
+        assert_eq!(theirs, Err(format!("task {} is not on your board. Nothing was read.", t.worker)));
         let own = read(&t.m, None, Some(&t.other_worker), None).unwrap();
         assert!(!own.contains("the token check moved"), "{own}");
         noted(&t.m, &t.other_worker, "src/login.rs", "signup reads it too");
         let view = t.m.board(&t.captain, Some(&t.root)).unwrap();
         assert_eq!(view.notes.iter().map(|n| n.text.as_str()).collect::<Vec<_>>(), ["the token check moved"], "the other worker's note went to its own board");
+        let no_board = Err(format!("task {} has no board: only work a Captain's plan step started keeps one. Nothing changed.", t.unplanned_worker));
         for answer in [note(&t.m, &t.unplanned_worker, "src/login.rs", "x"), read(&t.m, None, Some(&t.unplanned_worker), None)] {
-            assert!(answer.as_ref().is_err_and(|e| e.contains("no board")), "{answer:?}");
+            assert_eq!(answer, no_board);
         }
         let nobody = read(&t.m, Some("tab-none"), None, None);
-        assert!(nobody.is_err(), "{nobody:?}");
+        assert_eq!(nobody, Err("board_read is for a Captain or a worker of a planned task, and this session is neither. Nothing was read.".to_owned()));
         let (theirs, their_root, their_worker) = foreign_captain(&t);
         noted(&t.m, &their_worker, "src/login.rs", "billing reads the token");
         for (tab, of) in [(&theirs, &t.root), (&theirs, &t.worker), (&t.captain, &their_root)] {
@@ -555,9 +556,15 @@ mod tests {
         let format = "an invisible or direction-changing character";
         let fence = "a backtick or tilde";
         let mut cases: Vec<(String, String)> = vec![];
-        for (name, kind) in [("a\nb.rs", control), ("a\tb.rs", control), ("a\u{2028}b.rs", control), ("a\u{202E}sr.b", format), ("a\u{200B}b.rs", format), ("a\u{FEFF}b.rs", format), ("a`b.rs", fence), ("a~b.rs", fence)] {
+        for (name, kind) in [("a\u{2028}b.rs", control), ("a\u{202E}sr.b", format), ("a\u{200B}b.rs", format), ("a\u{FEFF}b.rs", format), ("a`b.rs", fence), ("a~b.rs", fence)] {
             std::fs::write(src.join(name), "x\n").unwrap();
             cases.push((format!("src/{name}"), format!("its cite holds {kind}")));
+        }
+        // Windows refuses a file name with a control character.
+        #[cfg(unix)]
+        for name in ["a\nb.rs", "a\tb.rs"] {
+            std::fs::write(src.join(name), "x\n").unwrap();
+            cases.push((format!("src/{name}"), format!("its cite holds {control}")));
         }
         cases.push(("src/login.rs\n".into(), format!("its cite holds {control}")));
         let deep = src.join("d".repeat(200));
@@ -572,10 +579,13 @@ mod tests {
         for (file, why) in &cases {
             assert_eq!(note(&t.m, &t.worker, file, "the token check moved"), cite_refused(why), "{file:?}");
         }
-        let outside = t.dir.join("config-secret.txt");
-        std::fs::write(&outside, "secret\n").unwrap();
-        std::os::unix::fs::symlink(&outside, src.join("leak.rs")).unwrap();
-        assert_eq!(note(&t.m, &t.worker, "src/leak.rs", "the token check moved"), cite_refused("src/leak.rs is not a file there"), "a link out of the folder");
+        #[cfg(unix)]
+        {
+            let outside = t.dir.join("config-secret.txt");
+            std::fs::write(&outside, "secret\n").unwrap();
+            std::os::unix::fs::symlink(&outside, src.join("leak.rs")).unwrap();
+            assert_eq!(note(&t.m, &t.worker, "src/leak.rs", "the token check moved"), cite_refused("src/leak.rs is not a file there"), "a link out of the folder");
+        }
         assert_eq!(t.m.board(&t.captain, Some(&t.root)).unwrap().notes, vec![], "nothing was noted");
         noted(&t.m, &t.worker, &longest, "a 300-character cite is kept");
         noted(&t.m, &t.worker, "  src/login.rs:7  ", "the cite is kept as checked");
@@ -706,5 +716,15 @@ mod tests {
         let whole = t.m.board(&theirs, None).unwrap();
         assert_eq!(whole.notes.iter().map(|n| n.text.as_str()).collect::<Vec<_>>(), ["billing reads the token"], "without task, unchanged: its own plans' boards");
         assert_eq!(t.m.board("tab-none", Some(&t.root)), Err(format!("task {} is not on a board of your plans. Nothing was read.", t.root)));
+    }
+
+    #[test]
+    fn a_captains_board_read_is_the_fixed_header_then_the_fence_then_the_note() {
+        let t = team("captain-fence");
+        noted(&t.m, &t.worker, "src/login.rs:3", "the token check moved");
+        let answer = read(&t.m, Some(&t.captain), None, None).unwrap();
+        assert_eq!(answer, format!("```text {HEADER}\n- {} on src/login.rs:3: the token check moved\n```", t.worker));
+        let empty = read(&t.m, Some(&t.captain), None, Some(&t.other_worker));
+        assert_eq!(empty, Err(format!("task {} is not on your board. Nothing was read.", t.other_worker)));
     }
 }
