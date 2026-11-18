@@ -569,6 +569,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_remote_worker_or_one_whose_folder_is_not_here_cannot_note() {
+        let t = team("remote");
+        let remote = task(&t.m, Parent::Task(t.root.clone()), "Test login on the mini", &t.dir.join("app"));
+        t.m.delegates.set_remote(&remote, crate::delegate::RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: None, waiting: None });
+        let elsewhere = task(&t.m, Parent::Task(t.root.clone()), "Test login in a folder not here", &t.dir.join("gone"));
+        let refused = Err("board notes work for workers on the Captain's machine only in this build. Nothing was noted.".to_owned());
+        for worker in [&remote, &elsewhere] {
+            assert_eq!(note(&t.m, worker, "src/login.rs", "the token check moved"), refused, "{worker}");
+        }
+        assert_eq!(t.m.board(&t.captain, Some(&t.root)).unwrap().notes, vec![], "nothing was noted");
+    }
+
     /// A second Captain (`cap-b`) in the same app, whose plan links one root task with one worker.
     fn foreign_captain(t: &Team) -> (String, String, String) {
         let project = t.dir.join("app");
