@@ -191,8 +191,12 @@ impl Launch {
         })
     }
 
+    /// The provider's CLI, as `new` found it. One left unset is its name, looked up on the PATH; in
+    /// this crate's tests it is a file that does not exist, so a test never runs the CLI installed
+    /// on the machine, which writes its login into the test's HOME.
     pub fn bin(&self, provider: Provider) -> PathBuf {
-        self.bins.get(&provider).cloned().unwrap_or_else(|| provider.spec().bin.into())
+        let bin = provider.spec().bin;
+        self.bins.get(&provider).cloned().unwrap_or_else(|| if cfg!(test) { Path::new("/nonexistent").join(bin) } else { bin.into() })
     }
 
     /// The settings file every Claude Code session started with `env` loads. The global
@@ -14028,10 +14032,16 @@ Have another model review a risky change before it goes ahead.";
     /// account. Returns the machine, its folder and the Captain's tab.
     #[cfg(unix)]
     fn limited_captain(name: &str, limits: TastePatch) -> (Arc<Machine>, PathBuf, String) {
+        limited_captain_on(name, limits, None)
+    }
+
+    /// `limited_captain` with the PATH its CLIs run on.
+    #[cfg(unix)]
+    fn limited_captain_on(name: &str, limits: TastePatch, path_env: Option<String>) -> (Arc<Machine>, PathBuf, String) {
         let dir = temp(name);
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), path_env, ..launch() }, Some(dir.join("config")), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         m.set_local_taste(&TasteScope::Captains, limits).unwrap();
         let path = m.open_project(project).display().to_string();
@@ -14491,7 +14501,12 @@ Have another model review a risky change before it goes ahead.";
     #[test]
     #[cfg(unix)]
     fn an_agent_makes_and_lists_projects_sets_their_account_and_keeps_their_scripts() {
-        let (m, dir, captain) = limited_captain("act-projects", TastePatch::default());
+        // A `gh` signed in nowhere, ahead of the real one, which keeps its state in HOME.
+        let bin = temp("act-projects-bin");
+        std::fs::write(bin.join("gh"), "#!/bin/sh\necho 'To get started with GitHub CLI, please run:  gh auth login' >&2\nexit 4\n").unwrap();
+        std::fs::set_permissions(bin.join("gh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let path_env = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap();
+        let (m, dir, captain) = limited_captain_on("act-projects", TastePatch::default(), Some(path_env.into_string().unwrap()));
         let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
         let session = m.open_tab(Some(path.clone()), false).unwrap();
         let act = |action: &str, args: Value| act_as(&m, &session, action, args);
@@ -14513,6 +14528,7 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(act("search_threads", json!({ "query": "no conversation says this" })), Ok(json!([])));
         assert_eq!(act("project_history", json!({ "path": path })).unwrap().as_array().map(Vec::len), Some(0));
         let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(bin);
     }
 
     #[test]
@@ -18765,7 +18781,13 @@ Have another model review a risky change before it goes ahead.";
             std::fs::set_permissions(bin.join(cli), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         }
         let path = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap();
-        let out = std::process::Command::new(std::env::current_exe().unwrap()).arg("--exact").args(names).env(HOME_ENV, &home).env("PATH", path).env_remove("XDG_CONFIG_HOME").output().unwrap();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.arg("--exact").args(names).env(HOME_ENV, &home).env("PATH", path).env_remove("XDG_CONFIG_HOME");
+        // Another test of this process may have set one.
+        for variable in session_variables() {
+            command.env_remove(variable);
+        }
+        let out = command.output().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(out.status.success() && stdout.contains(&format!("test result: ok. {} passed", names.len())), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
         // A probe a test started may still be running when the process ends.
@@ -18912,7 +18934,8 @@ Have another model review a risky change before it goes ahead.";
         let sock = dir.join("pinned.sock");
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
-        let m = Machine::new(Launch { sock: sock.clone(), bins: BTreeMap::from([(Provider::Claude, thread_claude(dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        // Its own Claude home: a rewind reads the transcripts under it.
+        let m = Machine::new(Launch { sock: sock.clone(), bins: BTreeMap::from([(Provider::Claude, thread_claude(dir))]), claude_home: Some(dir.join(".claude")), ..launch() }, Some(dir.join("config")), None, |_| {});
         m.listen(|_| Err("not the machine's".into())).unwrap();
         let path = m.open_project(project.clone()).display().to_string();
         let captain = m.open_orchestrator(&path).unwrap();
