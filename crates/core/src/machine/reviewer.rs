@@ -1025,6 +1025,22 @@ mod tests {
         }
 
         #[test]
+        fn a_tracked_submodule_is_named_as_not_read() {
+            let t = team("submodule", Switch::On, 6, SONNET);
+            let head = crate::process::command("git").arg("-C").arg(&t.app).args(["rev-parse", "HEAD"]).output().unwrap();
+            let head = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+            git(&t.app, &["update-index", "--add", "--cacheinfo", &format!("160000,{head},sub")]);
+            git(&t.app, &["commit", "-qm", "submodule"]);
+            t.m.note_base(&t.task, &t.work);
+            t.change(CHANGED, json!({ "findings": [] }));
+            std::fs::create_dir_all(t.app.join("sub")).unwrap();
+            std::fs::write(t.app.join("sub/inner.rs"), "fn inner_here() {}\n").unwrap();
+            t.end_turn();
+            let note = t.not_reviewed();
+            assert!(note.contains("not read: nested repository sub"), "{note}");
+        }
+
+        #[test]
         fn a_first_commit_on_an_unborn_head_is_reviewed() {
             let t = team_with("unborn", Switch::On, 6, SONNET, false, true, None);
             t.change(CHANGED, json!({ "findings": [] }));
