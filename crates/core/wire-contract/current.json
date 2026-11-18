@@ -1586,7 +1586,7 @@
                 ]
               },
               {
-                "description": "`null`. Types `text` into the session as one prompt and submits it.",
+                "description": "`null`. Types `text` into the session as one prompt and submits it. With `refuse_bypass`\nit types nothing into a session that skips its permission prompts, as the hub sends an\nexternal agent's message. A machine older than the field types it all the same.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -1598,6 +1598,9 @@
                   },
                   "text": {
                     "type": "string"
+                  },
+                  "refuse_bypass": {
+                    "type": "boolean"
                   }
                 },
                 "required": [
@@ -14107,7 +14110,7 @@
                 ]
               },
               {
-                "description": "`null`. Types `text` into the session as one prompt and submits it.",
+                "description": "`null`. Types `text` into the session as one prompt and submits it. With `refuse_bypass`\nit types nothing into a session that skips its permission prompts, as the hub sends an\nexternal agent's message. A machine older than the field types it all the same.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -14119,6 +14122,9 @@
                   },
                   "text": {
                     "type": "string"
+                  },
+                  "refuse_bypass": {
+                    "type": "boolean"
                   }
                 },
                 "required": [
@@ -75761,7 +75767,7 @@
                 ]
               },
               {
-                "description": "`null`. Types `text` into the session as one prompt and submits it.",
+                "description": "`null`. Types `text` into the session as one prompt and submits it. With `refuse_bypass`\nit types nothing into a session that skips its permission prompts, as the hub sends an\nexternal agent's message. A machine older than the field types it all the same.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -75773,6 +75779,9 @@
                   },
                   "text": {
                     "type": "string"
+                  },
+                  "refuse_bypass": {
+                    "type": "boolean"
                   }
                 },
                 "required": [
@@ -81355,7 +81364,7 @@
                 ]
               },
               {
-                "description": "`null`. Types `text` into the session as one prompt and submits it.",
+                "description": "`null`. Types `text` into the session as one prompt and submits it. With `refuse_bypass`\nit types nothing into a session that skips its permission prompts, as the hub sends an\nexternal agent's message. A machine older than the field types it all the same.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -81367,6 +81376,9 @@
                   },
                   "text": {
                     "type": "string"
+                  },
+                  "refuse_bypass": {
+                    "type": "boolean"
                   }
                 },
                 "required": [

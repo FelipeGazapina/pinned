@@ -1607,7 +1607,7 @@ impl Machine {
                 let views: Vec<crate::plan::PlanView> = kept.iter().filter(|p| plan.as_deref().is_none_or(|id| p.id == id)).map(|p| crate::plan::derive(p, &[])).collect();
                 Ok(json!(views))
             }
-            Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text).map_err(NotTyped::for_person)?),
+            Call::Prompt { tab, text, refuse_bypass } => json(self.type_prompt_unless_bypass(&tab, &text, refuse_bypass).map_err(NotTyped::for_person)?),
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
                 json(workspace::Workspace { scratch: cwd == self.scratch, ..workspace::of(&cwd) })
@@ -4006,11 +4006,11 @@ impl Machine {
         if let Call::RunNow { run, title } = call {
             return json(self.run_now(&run, &title, Some(caller))?);
         }
-        if let Call::Prompt { tab, text } = &call {
+        if let Call::Prompt { tab, text, refuse_bypass } = &call {
             self.may_prompt(caller, tab)?;
             // A caller that asks for its prompts, or one this machine does not know, reaches no
             // session that skips them, as with enqueue.
-            let asking = self.tab(caller, |t| t.child_access() != crate::delegate::Access::Full).unwrap_or(true);
+            let asking = *refuse_bypass || self.tab(caller, |t| t.child_access() != crate::delegate::Access::Full).unwrap_or(true);
             // Typed text from another agent says who sent it, as enqueue's does.
             return json(self.type_prompt_unless_bypass(tab, &format!("[{}] {}", self.sender_of(caller), pinned_lines::guard(text)), asking).map_err(|e| e.for_agent(tab))?);
         }
@@ -8012,7 +8012,7 @@ pub(crate) mod tests {
         m.stop_turn(&idle).unwrap();
         assert_eq!(m.tab(&idle, |t| t.session.is_some()), Ok(false), "Stop finds no turn in a session that sleeps and starts none");
 
-        assert_eq!(m.call(Call::Prompt { tab: idle.clone(), text: "Where were we?".into() }), Ok(json!(null)));
+        assert_eq!(m.call(Call::Prompt { tab: idle.clone(), text: "Where were we?".into(), refuse_bypass: false }), Ok(json!(null)));
         assert_eq!(started(&claude, &idle)[4..], ["--resume", "idle"], "the prompt is typed, not passed");
         wait_for("the prompt", || kept(&claude, "typed", &idle).contains("Where were we?"));
         assert_eq!(kept(&claude, "typed", &idle).matches("Where were we?").count(), 1);
@@ -8052,7 +8052,7 @@ pub(crate) mod tests {
             m.call(Call::Wake { tab: tab.clone(), cols: 80, rows: 24 }).unwrap();
         }
         let pids = [&looked, &used, &shown, &back].map(|tab| pid_of(&claude, tab));
-        m.call(Call::Prompt { tab: used.clone(), text: "Run the tests.".into() }).unwrap();
+        m.call(Call::Prompt { tab: used.clone(), text: "Run the tests.".into(), refuse_bypass: false }).unwrap();
         wait_for("the prompt", || kept(&claude, "typed", &used).contains("Run the tests."));
         m.record_event(AgentEvent { session: Some("used".into()), ..hook(&used, AgentStatus::Done) });
         m.call(Call::WatchThreads { tabs: vec![shown.clone()] }).unwrap();
@@ -8266,9 +8266,9 @@ pub(crate) mod tests {
         let (seen, sink) = viewer();
         m.attach(&tab, "test".into(), sink).unwrap();
 
-        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "typed early".into() }), Ok(json!(null)));
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "typed early".into(), refuse_bypass: false }), Ok(json!(null)));
         wait_for("the session to draw", || text(&seen).contains("drawn"));
-        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "typed after drawing".into() }), Ok(json!(null)));
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "typed after drawing".into(), refuse_bypass: false }), Ok(json!(null)));
         wait_for("stty", || text(&seen).contains("ready"));
         let expected: &[u8] = b"\x1b[200~typed early\x1b[201~\r\x1b[200~typed after drawing\x1b[201~\r";
         wait_for("cat to write", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
@@ -11637,10 +11637,10 @@ exec sleep 30
     fn the_users_own_prompt_goes_in_mid_turn_and_after_an_interrupt() {
         let (m, tab, file) = pty_file("prompt-mid-turn");
         m.record_event(AgentEvent { status: AgentStatus::Working, ..done_event(&tab) });
-        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "steer this".into() }), Ok(json!(null)));
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "steer this".into(), refuse_bypass: false }), Ok(json!(null)));
         wait_for("the prompt typed mid-turn", || read_pty(&file).contains("steer this"));
         m.write_input(&tab, b"\x1b").unwrap();
-        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "after esc".into() }), Ok(json!(null)));
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "after esc".into(), refuse_bypass: false }), Ok(json!(null)));
         wait_for("the prompt after an interrupt with no Done", || read_pty(&file).contains("after esc"));
         let _ = std::fs::remove_file(&file);
     }
@@ -15309,7 +15309,7 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(m.view(&child).unwrap().running, true, "the thread stays open");
         assert_eq!(m.state().workers, 0, "and makes room for the next once it sleeps");
 
-        assert_eq!(m.call(Call::Prompt { tab: child.clone(), text: "One more thing.".into() }), Ok(json!(null)));
+        assert_eq!(m.call(Call::Prompt { tab: child.clone(), text: "One more thing.".into(), refuse_bypass: false }), Ok(json!(null)));
         let args = started(&claude, &child);
         assert!(args.windows(6).any(|flags| flags == ["--resume", "s-child", "--permission-mode", "auto", "--effort", "high"]), "{args:?}");
         let _ = std::fs::remove_dir_all(dir);
@@ -15744,11 +15744,11 @@ Have another model review a risky change before it goes ahead.";
         let (m, dir, claude, tabs) = woken("guard-menu", &["s1"]);
         let tab = tabs[0].clone();
         show(&m, &tab, MENU);
-        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Run the tests.".into() }), Err(MENU_UP.into()));
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Run the tests.".into(), refuse_bypass: false }), Err(MENU_UP.into()));
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
         show(&m, &tab, ERASE);
-        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Run the tests.".into() }), Ok(json!(null)));
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Run the tests.".into(), refuse_bypass: false }), Ok(json!(null)));
         wait_for("the prompt", || kept(&claude, "typed", &tab).ends_with('\r'));
         assert_eq!(kept(&claude, "typed", &tab), pasted("Run the tests."));
         let _ = std::fs::remove_dir_all(dir);
@@ -15761,7 +15761,7 @@ Have another model review a risky change before it goes ahead.";
         let tab = tabs[0].clone();
         show(&m, &tab, MENU);
         show(&m, &tab, &prompt_box("\u{23fa} Bash(cargo build)\r\n  \u{23bf}  Interrupted \u{b7} What should Claude do instead?", "\u{276f} "));
-        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Build it in release.".into() }), Ok(json!(null)));
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Build it in release.".into(), refuse_bypass: false }), Ok(json!(null)));
         wait_for("the prompt", || kept(&claude, "typed", &tab).ends_with('\r'));
         assert_eq!(kept(&claude, "typed", &tab), pasted("Build it in release."));
         let _ = std::fs::remove_dir_all(dir);
@@ -15781,7 +15781,7 @@ Have another model review a risky change before it goes ahead.";
         for (n, screen) in screens.iter().enumerate() {
             show(&m, &tab, screen);
             let text = format!("prompt {n}");
-            assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: text.clone() }), Ok(json!(null)), "screen {n}");
+            assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: text.clone(), refuse_bypass: false }), Ok(json!(null)), "screen {n}");
             want += &pasted(&text);
             wait_for("the prompt", || kept(&claude, "typed", &tab).len() >= want.len());
         }
@@ -15795,7 +15795,7 @@ Have another model review a risky change before it goes ahead.";
         let (m, dir, claude, tabs) = woken("guard-dialog", &["s1"]);
         let tab = tabs[0].clone();
         show(&m, &tab, &dialog());
-        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Run the tests.".into() }), Err(DIALOG_UP.into()));
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Run the tests.".into(), refuse_bypass: false }), Err(DIALOG_UP.into()));
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
         let _ = std::fs::remove_dir_all(dir);
@@ -15899,7 +15899,7 @@ Have another model review a risky change before it goes ahead.";
         let (m, dir, claude, tabs) = restored_idle("guard-held", &["s1"]);
         let tab = tabs[0].clone();
         m.call(Call::Wake { tab: tab.clone(), cols: 80, rows: 24 }).unwrap();
-        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Where were we?".into() }), Ok(json!(null)));
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Where were we?".into(), refuse_bypass: false }), Ok(json!(null)));
         assert_eq!(m.tab(&tab, |t| t.held.clone()).unwrap(), ["Where were we?"], "held until the session takes the terminal");
         show(&m, &tab, MENU);
         wait_for("the terminal", || m.tab(&tab, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());

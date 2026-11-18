@@ -538,9 +538,10 @@ fn unknown_delivery(why: &str) -> Value {
     })
 }
 
-/// Types `text` into `tab` once, answering whether it arrived.
+/// Types `text` into `tab` once, answering whether it arrived. The machine types nothing into a
+/// session that skips its permission prompts, on the same read of the tab that types.
 async fn deliver(ctx: &Ctx<'_>, key: &str, machine: &str, tab: &str, text: String, extra: Value) -> Result<Value, String> {
-    match ctx.hub.call_machine(&ctx.account, machine, Call::Prompt { tab: tab.to_owned(), text }, CALL_WAIT).await {
+    match ctx.hub.call_machine(&ctx.account, machine, Call::Prompt { tab: tab.to_owned(), text, refuse_bypass: true }, CALL_WAIT).await {
         Ok(_) => {
             let mut answer = json!({ "delivered": true, "next": "read it in a while for the reply" });
             if let (Some(map), Some(extra)) = (answer.as_object_mut(), extra.as_object()) {

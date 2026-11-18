@@ -508,8 +508,15 @@ pub enum Call {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan: Option<String>,
     },
-    /// `null`. Types `text` into the session as one prompt and submits it.
-    Prompt { tab: TabId, text: String },
+    /// `null`. Types `text` into the session as one prompt and submits it. With `refuse_bypass`
+    /// it types nothing into a session that skips its permission prompts, as the hub sends an
+    /// external agent's message. A machine older than the field types it all the same.
+    Prompt {
+        tab: TabId,
+        text: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        refuse_bypass: bool,
+    },
     /// `workspace::Workspace` of the tab's folder.
     Workspace { tab: TabId },
     /// What `gh pr view` answers for `pr`, a number or URL, run in the tab's folder, plus `diff`.
