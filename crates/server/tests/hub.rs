@@ -3941,6 +3941,7 @@ fn node_with_a_transcript(name: &str) -> (TestHub, Client, String, PathBuf, Node
             model: None,
             permission_mode: None,
             spawned_by: None,
+            read_only: false,
         }],
     )
     .unwrap();
@@ -9586,7 +9587,7 @@ fn concurrent_extend_box_asks_for_one_box_wait_only_as_far_as_the_box_budget_goe
                 let ask = json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 1.5 }, "request_id": format!("r-{n}") });
                 tokio::spawn(async move {
                     loop {
-                        match pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await {
+                        match pinned_server::surface::act(&running, &account, &origin, false, serde_json::from_value(ask.clone()).unwrap()).await {
                             Err(busy) if busy == pinned_core::wire::HUB_BUSY => tokio::time::sleep(Duration::from_millis(10)).await,
                             answer => return answer,
                         }
@@ -9933,7 +9934,7 @@ fn concurrent_extend_box_asks_for_different_boxes_of_one_account_fill_its_cap_ex
             .map(|n| {
                 let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
                 let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": boxes[n % 3], "extra_usd": 0.1 } })).unwrap();
-                tokio::spawn(async move { pinned_server::surface::act(&running, &account, &origin, act).await })
+                tokio::spawn(async move { pinned_server::surface::act(&running, &account, &origin, false, act).await })
             })
             .collect();
         let mut answers = vec![];
@@ -10026,7 +10027,7 @@ fn extends_watched(hub: &TestHub, account: uuid::Uuid, ana: &Agent, asks: &[Valu
         .map(|ask| {
             let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
             let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": ask })).unwrap();
-            hub.runtime.spawn(async move { pinned_server::surface::act(&running, &account, &origin, act).await })
+            hub.runtime.spawn(async move { pinned_server::surface::act(&running, &account, &origin, false, act).await })
         })
         .collect();
     let mut most = 0;
@@ -10131,7 +10132,7 @@ fn a_flood_of_extend_box_asks_for_one_box_never_starves_the_owners_decision() {
                 tokio::time::sleep(Duration::from_millis(10 * n)).await;
                 let mut answers = vec![];
                 while !stop.load(Ordering::SeqCst) {
-                    answers.push(pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await);
+                    answers.push(pinned_server::surface::act(&running, &account, &origin, false, serde_json::from_value(ask.clone()).unwrap()).await);
                 }
                 answers
             })
@@ -10157,7 +10158,7 @@ fn timed_extend(hub: &TestHub, account: &Arc<pinned_server::hub::Account>, ana: 
     let act = serde_json::from_value(act).unwrap();
     hub.runtime.spawn(async move {
         let started = tokio::time::Instant::now();
-        let answer = pinned_server::surface::act(&running, &account, &origin, act).await;
+        let answer = pinned_server::surface::act(&running, &account, &origin, false, act).await;
         (answer, started.elapsed())
     })
 }
@@ -10209,7 +10210,7 @@ fn a_flood_of_extend_box_asks_for_one_box_keeps_another_box_waiting_behind_at_mo
                 tokio::time::sleep(Duration::from_millis(5 * n)).await;
                 let mut answers = vec![];
                 while !stop.load(Ordering::SeqCst) {
-                    let answer = pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await;
+                    let answer = pinned_server::surface::act(&running, &account, &origin, false, serde_json::from_value(ask.clone()).unwrap()).await;
                     // A client asks again a little after a busy answer, as one that asks at once would only load the hub.
                     if answer == Err(pinned_core::wire::HUB_BUSY.to_owned()) {
                         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -10279,7 +10280,7 @@ fn a_later_extend_box_ask_waits_2_s_from_its_own_start() {
         let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
         hub.runtime.spawn(async move {
             let started = tokio::time::Instant::now();
-            let answer = tokio::time::timeout(Duration::from_secs(6), pinned_server::surface::act(&running, &account, &origin, act)).await;
+            let answer = tokio::time::timeout(Duration::from_secs(6), pinned_server::surface::act(&running, &account, &origin, false, act)).await;
             (answer, started.elapsed())
         })
     };
@@ -10318,7 +10319,7 @@ fn an_extend_box_asks_reads_before_its_turn_count_in_its_2_s() {
     table_taken.recv().unwrap();
     let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
     let started = Instant::now();
-    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, false, act));
     let waited = started.elapsed();
     blocker.join().unwrap();
     lock.release();
@@ -10357,7 +10358,7 @@ fn an_extend_box_ask_with_a_request_id_answers_within_its_2_s_across_two_held_re
     let second = hold("agent_confirmations", Duration::from_millis(3000));
     let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 }, "request_id": "r-two-holds" })).unwrap();
     let started = Instant::now();
-    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, false, act));
     let waited = started.elapsed();
     first.join().unwrap();
     second.join().unwrap();
@@ -10396,7 +10397,7 @@ fn an_extend_box_ask_answers_within_its_2_s_when_its_box_read_and_the_confirmati
     let second = hold("agent_confirmations", Duration::from_millis(3000));
     let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
     let started = Instant::now();
-    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, false, act));
     let waited = started.elapsed();
     first.join().unwrap();
     second.join().unwrap();
@@ -10433,7 +10434,7 @@ fn an_extend_box_ask_answers_within_its_2_s_when_its_turn_lock_is_held() {
     table_taken.recv().unwrap();
     let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
     let started = Instant::now();
-    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, false, act));
     let waited = started.elapsed();
     blocker.join().unwrap();
     holder.join().unwrap();
@@ -10471,7 +10472,7 @@ fn an_extend_box_ask_answers_within_its_2_s_when_a_read_in_its_turn_is_held() {
         });
     });
     let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "request_id": "r-read-held", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
-    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, false, act));
     let waited = started.elapsed();
     blocker.join().unwrap();
     holder.join().unwrap();
@@ -13279,6 +13280,7 @@ mod teams_groups;
 mod teams_box_call;
 #[path = "hub/teams_calls.rs"] mod teams_calls;
 #[path = "hub/teams_runs.rs"] mod teams_runs;
+#[path = "hub/box_push_gate.rs"] mod box_push_gate;
 #[path = "hub/teams_go_ahead.rs"] mod teams_go_ahead;
 #[path = "hub/teams_separation_fixes.rs"] mod teams_separation_fixes;
 #[path = "hub/teams_hardening.rs"]
@@ -13775,4 +13777,98 @@ fn a_history_push_naming_a_base_the_hub_no_longer_holds_is_refused_and_one_namin
     assert_eq!(sha_of(&mut ana), Some(sha256_hex(two.as_bytes())));
     assert_eq!(push(&mut ana, vec![file(three)]), Ok(Value::Null), "an older app sends no base and replaces the copy as before");
     assert_eq!(sha_of(&mut ana), Some(sha256_hex(three.as_bytes())));
+}
+
+#[test]
+fn act_cannot_set_the_reviewer_or_worker_profiles_for_any_role_and_the_user_can() {
+    let hub = TestHub::start("team_user_only");
+    let (ana_token, _, mut ana) = signed_in(&hub.url, "ana@example.test");
+    let tab = |id: &str, extra: Value| {
+        let mut tab = json!({ "id": id, "cwd": "/a/app", "bypass": false, "running": true, "status": "working", "title": id, "message": null, "resume_at": null, "opened": 1, "session": format!("{id}-conv") });
+        tab.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        tab
+    };
+    let tabs = vec![
+        tab("tab-global", json!({ "orchestrator_global": true })),
+        tab("tab-captain", json!({ "role": "orchestrator" })),
+        tab("tab-worker", json!({ "role": "worker" })),
+        tab("tab-reviewer", json!({ "role": "reviewer" })),
+        tab("tab-chat", json!({ "taste_chat": true })),
+        tab("tab-workflow", json!({ "connector": "c1" })),
+        tab("tab-plain", json!({})),
+    ];
+    let roles: std::collections::BTreeSet<&str> = tabs.iter().map(|t| ActorRole::of(&serde_json::from_value(t.clone()).unwrap()).name()).collect();
+    assert_eq!(roles.len(), 6, "every ActorRole acts: {roles:?}");
+    let (machine, machine_token) = account::register_machine(&hub.url, &ana_token, "ana-mac", "linux").unwrap();
+    let raw = RawMachine::start_with(&hub.url, &machine_token, vec![json!({ "kind": "tabs", "tabs": tabs.clone() })], |_| RawReply::Ok(Value::Null));
+    ana.wait("ana-mac's tabs", |f| f["type"] == "event" && f["event"]["kind"] == "tabs");
+    let _ = machine;
+
+    let acts = [
+        ("set_reviewer", json!({ "patch": { "rounds": 5 } }), "set_reviewer is not open to agents: review rules and the reviewer's settings are the user's own"),
+        ("set_worker_profiles", json!({ "profiles": [{ "name": "scout" }] }), "set_worker_profiles is not open to agents: worker profiles are the user's own: propose one with profile_propose"),
+    ];
+    for t in &tabs {
+        for (action, args, refusal) in &acts {
+            let acted = raw.ask(json!({ "cmd": "act", "act": { "tab": t["id"], "action": action, "args": args } }));
+            assert_eq!(acted, Err(refusal.to_string()), "{} as {}", action, t["id"]);
+        }
+        let taste = raw.ask(json!({ "cmd": "act", "act": { "tab": t["id"], "action": "set_taste", "args": { "scope": { "kind": "captains" }, "patch": { "reviewer": { "rounds": 5 } } } } })).unwrap_err();
+        assert!(taste.contains("reviewer is the user's own"), "set_taste as {}: {taste}", t["id"]);
+    }
+    let tastes: Tastes = serde_json::from_value(ana.hub(json!({ "cmd": "get_tastes" })).unwrap()).unwrap();
+    assert_eq!((tastes.reviewer.rounds, tastes.worker_profiles.account.len()), (2, 0), "no agent changed them");
+
+    // A machine forwards neither as a plain hub call.
+    let plain = Err("a machine may only forward a workflow session's callbacks".to_owned());
+    assert_eq!(raw.ask(json!({ "cmd": "set_reviewer", "patch": { "rounds": 5 } })), plain);
+    assert_eq!(raw.ask(json!({ "cmd": "set_worker_profiles", "profiles": [{ "name": "scout" }] })), plain);
+    // A signed-out app's tastes, which a machine imports into an empty account, pass the same checks.
+    let import = |tastes: Value| raw.ask(json!({ "cmd": "import_tastes", "tastes": tastes }));
+    assert_eq!(import(json!({ "reviewer": { "rounds": 0 } })), Err("review rounds go from 1 to 5".into()));
+    assert_eq!(import(json!({ "reviewer": { "rules": [{ "id": "R1", "text": "Tests first." }] } })), Err(r#"the account's rule ids go A1, A2 and on, not "R1""#.into()));
+    assert_eq!(import(json!({ "worker_profiles": { "proposed": [{ "name": " " }] } })), Err("every profile needs a name".into()));
+    assert_eq!(import(json!({ "worker_profiles": { "projects": { "github.com/acme/app": [{ "name": "scout", "delivers": "a\nb" }] } } })), Err("what scout delivers fits one line".into()));
+    assert_eq!(ana.hub(json!({ "cmd": "get_tastes" })).unwrap(), serde_json::to_value(Tastes::default()).unwrap(), "a refused import stored nothing");
+    assert_eq!(import(json!({ "reviewer": { "rounds": 4 } })), Ok(json!(true)), "the account is still empty and takes a good one");
+
+    // The user's own app writes them, and reads them back.
+    let set = ana.hub(json!({ "cmd": "set_reviewer", "patch": { "rounds": 3, "rules": [{ "id": "A1", "text": "Tests first." }] } })).unwrap();
+    assert_eq!((&set["reviewer"]["rounds"], &set["reviewer"]["rules"][0]["id"]), (&json!(3), &json!("A1")));
+    ana.hub(json!({ "cmd": "set_worker_profiles", "project": "github.com/acme/app", "profiles": [{ "name": "scout", "access": "read_only" }] })).unwrap();
+    let tastes: Tastes = serde_json::from_value(ana.hub(json!({ "cmd": "get_tastes" })).unwrap()).unwrap();
+    assert_eq!((tastes.reviewer.rounds, tastes.worker_profiles.projects["github.com/acme/app"][0].name.as_str()), (3, "scout"));
+    assert_eq!(ana.hub(json!({ "cmd": "set_reviewer", "patch": { "rounds": 9 } })), Err("review rounds go from 1 to 5".into()));
+
+    // A Captain or the global orchestrator proposes a profile through its machine, into `proposed` alone.
+    let propose = |tab: &str, profile: Value| raw.ask(json!({ "cmd": "propose_worker_profile", "tab": tab, "profile": profile }));
+    let not_theirs = Err("only a Captain or the global orchestrator proposes a worker profile".to_owned());
+    for tab in ["tab-worker", "tab-reviewer", "tab-chat", "tab-workflow", "tab-plain", "tab-gone"] {
+        assert_eq!(propose(tab, json!({ "name": "tester" })), not_theirs, "{tab}");
+    }
+    assert_eq!(ana.hub(json!({ "cmd": "propose_worker_profile", "tab": "tab-captain", "profile": { "name": "tester" } })), not_theirs, "the user's app writes profiles with set_worker_profiles");
+    let before = ana.hub(json!({ "cmd": "get_tastes" })).unwrap();
+    assert_eq!(before["worker_profiles"]["proposed"], json!([]));
+    let mut proposed = propose("tab-captain", json!({ "name": "  tester ", "access": "read_only", "by": "user" })).unwrap();
+    assert_eq!(proposed["worker_profiles"]["proposed"], json!([{ "name": "tester", "skills": [], "tools": [], "access": "read_only", "delivers": "", "by": "orchestrator" }]), "the hub writes who proposed it");
+    proposed["worker_profiles"]["proposed"] = json!([]);
+    assert_eq!(proposed, before, "nothing outside proposed changed");
+    let replaced = propose("tab-global", json!({ "name": "Tester", "delivers": "A list." })).unwrap();
+    assert_eq!(replaced["worker_profiles"]["proposed"], json!([{ "name": "Tester", "skills": [], "tools": [], "access": "edit", "delivers": "A list.", "by": "orchestrator" }]), "a proposal of the same name is replaced");
+    assert_eq!(propose("tab-captain", json!({ "name": "x", "delivers": "a\nb" })), Err("what x delivers fits one line".into()));
+    for n in 2..=20 {
+        propose("tab-captain", json!({ "name": format!("p{n}") })).unwrap();
+    }
+    assert_eq!(propose("tab-captain", json!({ "name": "p21" })), Err("20 proposed profiles already wait for the user to take or drop; nothing changed".into()));
+    assert!(propose("tab-captain", json!({ "name": "p20", "delivers": "Again." })).is_ok(), "a full list still takes a new version of one it holds");
+
+    // Approving moves the row into a list and drops it from proposed in one write; discarding only drops it.
+    let names = |tastes: &Value| tastes["worker_profiles"]["proposed"].as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let scout = json!({ "name": "scout", "access": "read_only" });
+    let approved = ana.hub(json!({ "cmd": "set_worker_profiles", "project": "github.com/acme/app", "profiles": [scout, { "name": "Tester", "delivers": "A list.", "by": "orchestrator" }], "drop_proposed": ["tester"] })).unwrap();
+    assert_eq!(approved["worker_profiles"]["projects"]["github.com/acme/app"].as_array().unwrap().len(), 2);
+    assert_eq!(names(&approved), (2..=20).map(|n| format!("p{n}")).collect::<Vec<_>>(), "only the approved row left proposed");
+    let discarded = ana.hub(json!({ "cmd": "set_worker_profiles", "project": "github.com/acme/app", "profiles": approved["worker_profiles"]["projects"]["github.com/acme/app"], "drop_proposed": ["p2", "nobody"] })).unwrap();
+    assert_eq!(names(&discarded), (3..=20).map(|n| format!("p{n}")).collect::<Vec<_>>(), "only the named row was dropped");
+    assert_eq!(discarded["worker_profiles"]["projects"], approved["worker_profiles"]["projects"]);
 }

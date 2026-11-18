@@ -213,6 +213,18 @@ fn a_team_box_may_not_sync_a_projects_files() {
 }
 
 #[test]
+fn a_team_box_may_not_sync_the_accounts_plugins_or_pull_them() {
+    let (hub, team) = team_box("sepfix_box_plugins");
+    let call = json!({ "cmd": "sync_push", "project": "pinned:plugins", "files": [] });
+    assert_eq!(machine_result(&hub.url, TEAM_BOX_TOKEN, call), refused("sync_push"));
+    let call = json!({ "cmd": "sync_mark_executable", "project": "pinned:plugins", "repairs": [{ "path": "plugins/a/hooks/h.sh", "sha": "00" }] });
+    assert_eq!(machine_result(&hub.url, TEAM_BOX_TOKEN, call), refused("sync_mark_executable"));
+    let call = json!({ "cmd": "sync_pull", "project": "pinned:plugins", "paths": [] });
+    assert_eq!(machine_result(&hub.url, TEAM_BOX_TOKEN, call), refused("sync_pull"));
+    assert_eq!(sql_text(&hub, &format!("select count(*)::text from project_files where account = '{team}'")), "0");
+}
+
+#[test]
 fn a_team_box_may_not_load_mcp_secrets() {
     let (hub, _) = team_box("sepfix_box_mcp");
     assert_eq!(machine_result(&hub.url, TEAM_BOX_TOKEN, json!({ "cmd": "load_mcp_servers" })), refused("load_mcp_servers"));

@@ -157,6 +157,38 @@ pub fn permissions() -> Vec<String> {
         .collect()
 }
 
+/// pinned's own tools that only read. A read-only session calls these without asking and is
+/// refused every other tool of `permissions`, which act.
+const READ_TOOLS: [&str; 22] = [
+    LIST_TOOL,
+    CAPABILITIES_TOOL,
+    STATUS_TOOL,
+    STATS_TOOL,
+    "agents",
+    "work_cost",
+    "memory_search",
+    "actions",
+    "projects",
+    "read_captain",
+    "waiting",
+    "sessions",
+    "read_session",
+    "repo_overview",
+    "repo_read",
+    "repo_search",
+    "taste_get",
+    "convex_tables",
+    "convex_data",
+    "convex_query",
+    "convex_run",
+    "convex_logs",
+];
+
+/// `permissions` split into the tools that only read and the tools that act.
+pub fn read_and_acting_permissions() -> (Vec<String>, Vec<String>) {
+    permissions().into_iter().partition(|tool| READ_TOOLS.iter().any(|read| *tool == format!("mcp__{SERVER}__{read}")))
+}
+
 pub fn serve(reminders: bool) {
     let stdin = std::io::stdin();
     let _ = serve_io(reminders, stdin.lock(), std::io::stdout());
@@ -225,6 +257,8 @@ enum Seat {
     GlobalOrchestrator,
     Captain,
     TasteChat,
+    /// A worker or reviewer thread.
+    Worker,
     Other,
 }
 
@@ -235,6 +269,7 @@ impl Seat {
             Some(crate::global_orchestrator::ROLE) => Seat::GlobalOrchestrator,
             Some(crate::taste::CHAT_ROLE) => Seat::TasteChat,
             Some(role) if Role::parse(role) == Some(Role::Orchestrator) => Seat::Captain,
+            Some(role) if matches!(Role::parse(role), Some(Role::Worker | Role::Reviewer)) => Seat::Worker,
             _ => Seat::Other,
         }
     }
@@ -274,6 +309,7 @@ fn tool_definitions(reminders: bool, child: bool, seat: Seat) -> Value {
         tools.push(stats_tool());
     }
     tools.extend(project_tools().into_iter().filter(|(audience, _)| offered(*audience)).map(|(_, tool)| tool));
+    tools.extend(crate::team_tools::offered(&crate::team_tools::TeamSeat { captain: seat == Seat::Captain, worker: seat == Seat::Worker || child, child }));
     Value::Array(tools)
 }
 
@@ -286,7 +322,7 @@ fn convex_offer(child: bool) -> Option<convex::Offer> {
 }
 
 fn delegation_tools() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         json!({
             "name": CAPABILITIES_TOOL,
             "description": "Call this before the first delegate_task and pick providerInstanceId, model, and options from it. It lists the accounts this machine can run a child agent on, and the access this session inherits.",
@@ -399,7 +435,13 @@ fn delegation_tools() -> Vec<Value> {
                 "required": ["taskId", "verdict"],
             },
         }),
-    ]
+    ];
+    // The agent team's delegate_task arguments, each offered once its unit turns it on.
+    let delegate = tools.iter_mut().find(|tool| tool["name"] == DELEGATE_TOOL).expect("delegate_task is listed");
+    for (name, schema) in [crate::profiles::delegate_property(), crate::chain::delegate_property()].into_iter().flatten() {
+        delegate["inputSchema"]["properties"][name] = schema;
+    }
+    tools
 }
 
 fn stats_tool() -> Value {
@@ -831,6 +873,7 @@ fn call(params: &Value, reminders: bool, output: &Mutex<impl Write>) -> Value {
             reason: args["reason"].as_str().unwrap_or("the parent asked").to_owned(),
         }),
         "" => Err(format!("unknown tool {}", params["name"])),
+        name if crate::team_tools::named(name) => crate::team_tools::request(name, args).map(|tool| Message::Team { tab: session_var(TAB_ENV), task: session_var(TASK_ENV), tool }),
         name if name.starts_with("convex_") => match session_var(TASK_ENV) {
             Some(_) => Err("A delegated child reads no Convex data: ask the session that started you.".into()),
             None => convex::ask(name, args).and_then(|ask| in_tab(ProjectTool::Convex { ask }, std::env::var(TAB_ENV).ok())),
@@ -995,8 +1038,27 @@ mod tests {
     use super::*;
     use chrono::FixedOffset;
 
+    #[test]
+    fn every_read_tool_is_one_of_pinneds_and_the_rest_act() {
+        let (reads, acting) = read_and_acting_permissions();
+        assert_eq!(reads.len(), READ_TOOLS.len(), "a read tool pinned no longer has: {reads:?}");
+        assert_eq!(reads.len() + acting.len(), permissions().len());
+        for tool in ["memory_save", "memory_forget", "delegate_task", "act", "task_cancel", "remind_me", "taste_set", "send_to_captain", "plan_set"] {
+            assert!(acting.contains(&format!("mcp__{SERVER}__{tool}")), "{tool} {acting:?}");
+        }
+    }
+
     fn at_noon() -> DateTime<FixedOffset> {
         FixedOffset::west_opt(3 * 3600).unwrap().with_ymd_and_hms(2026, 10, 21, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn taste_set_refuses_a_patch_that_names_the_reviewer_or_the_worker_profiles() {
+        for field in ["reviewer", "worker_profiles"] {
+            let refused = project_request("taste_set", &json!({ "scope": "captains", "patch": { field: {} } }), Some("tab-1".into())).unwrap_err();
+            assert!(refused.starts_with(&format!("taste_set: {field} is the user's own, set only on the Way of working page; nothing changed")), "{refused}");
+        }
+        assert!(project_request("taste_set", &json!({ "scope": "captains", "patch": { "parallel": 2 } }), Some("tab-1".into())).is_ok());
     }
 
     #[test]
