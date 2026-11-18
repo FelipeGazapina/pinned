@@ -80,6 +80,13 @@ pub fn run() {
 /// payload it cannot read, or a call to a tool that writes without its fields, is denied. `ask`
 /// sends the node a message and returns the hub's answer.
 pub fn decide(payload: &str, env: &HookEnv, ask: impl FnOnce(Message) -> Result<String, String>) -> Option<String> {
+    // A fault the hook's process test forces, which no build but a test's reads.
+    #[cfg(test)]
+    match std::env::var("PINNED_HOOK_TEST_FAULT").as_deref() {
+        Ok("panic") => panic!("a fault the test forced"),
+        Ok("stall") => std::thread::sleep(std::time::Duration::from_secs(20)),
+        _ => {}
+    }
     let Ok(hook) = serde_json::from_str::<Value>(payload) else { return Some(deny(UNREADABLE)) };
     let Some(tool) = hook["tool_name"].as_str() else { return Some(deny(UNREADABLE)) };
     let input = &hook["tool_input"];
@@ -609,5 +616,50 @@ mod tests {
         }
         assert_eq!(team["hooks"]["Stop"], plain["hooks"]["Stop"]);
         assert_eq!(team["permissions"], plain["permissions"], "the hook loosens nothing");
+    }
+
+    /// Runs the hook as Claude Code does, in a process of its own (this test binary, running
+    /// `the_hook_process`) with `fault` forced inside `decide`: its stdout, stderr, exit code and time.
+    #[cfg(unix)]
+    fn hook_process(fault: &str) -> (String, String, Option<i32>, std::time::Duration) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let started = std::time::Instant::now();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "preauth::team_hook::tests::the_hook_process", "--ignored", "--nocapture", "--test-threads", "1"])
+            .env("PINNED_HOOK_TEST_FAULT", fault)
+            .env("PINNED_HOOK_TEST_WATCHDOG_MS", "1000")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(payload("Write", json!({ "file_path": "/work/site/notes.txt", "content": "hi" })).as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned(), out.status.code(), started.elapsed())
+    }
+
+    /// The hook's entry point as `pinned team-guard` runs it, exiting with its code.
+    #[test]
+    #[ignore = "the hook's own process, which a_hook_that_panics_or_stalls_denies_its_call_with_exit_code_2 starts"]
+    fn the_hook_process() {
+        run();
+        std::process::exit(0);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_hook_that_panics_or_stalls_denies_its_call_with_exit_code_2() {
+        let reason = "pinned could not check this tool call, so it did not run";
+        for fault in ["panic", "stall"] {
+            let (stdout, stderr, code, took) = hook_process(fault);
+            assert_eq!(code, Some(2), "a hook that hit a {fault} let the call run: {stdout} {stderr}");
+            assert!(stdout.contains(&deny(reason)), "{fault}: {stdout}");
+            assert!(stderr.contains(reason), "{fault}: {stderr}");
+            assert!(took < std::time::Duration::from_secs(10), "{fault} answered in {took:?}");
+        }
+        let (stdout, _, code, _) = hook_process("none");
+        assert_eq!(code, Some(0), "{stdout}");
+        assert!(!stdout.contains("permissionDecision"), "a call the hook has no rule for runs: {stdout}");
     }
 }
