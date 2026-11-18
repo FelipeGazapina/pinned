@@ -229,12 +229,15 @@ pub async fn admit(hub: &Arc<Hub>, team: &Arc<Account>, kind: &str, event: Event
 async fn decide(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, kind: &str, event: Event, workflow: &str) -> Result<Admitted, String> {
     let workflow = workflow.to_owned();
     bots::ready(hub, team, &workflow).await?;
-    // A read that found no run before the turn: its subject's run, reserved meanwhile by a read
-    // of the same event the turn let in first, holds it.
+    // A read that found no run before the turn: its subject's run, opened meanwhile by a read of
+    // the same event the turn let in first, takes it as before the turn: held while that run only
+    // holds its place, passed on (`Go`) once its session is open.
     if let Some(live) = db::live_run_for(&hub.db, team.id, &workflow, event.subject()).await? {
-        if db::is_reserved(&hub.db, team.id, Uuid::parse_str(&live.id).map_err(|e| e.to_string())?).await? {
-            return Ok(Admitted::Held);
-        }
+        let reserved = Uuid::parse_str(&live.id).map_err(|e| e.to_string())?;
+        return Ok(match db::is_reserved(&hub.db, team.id, reserved).await? {
+            true => Admitted::Held,
+            false => Admitted::Go,
+        });
     }
     // The same event read again (a post its machine could not confirm) waits in its line once.
     if db::waiting_event_for(&hub.db, team.id, &workflow, event.subject()).await?.is_some() {
