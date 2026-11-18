@@ -520,8 +520,7 @@ fn teams_a_reserved_subject_is_not_admitted_twice() {
     });
     let answers = std::thread::scope(|scope| {
         let reads = [scope.spawn(|| crew.admit(crew.labeled(&docs, 2))), scope.spawn(|| crew.admit(crew.labeled(&docs, 2)))];
-        // Well under the turn's 2 s wait, so a slow box does not refuse them as busy.
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(Duration::from_millis(500));
         assert!(reads.iter().all(|r| !r.is_finished()), "both reads wait for the team's turn");
         crew.hub.runtime.block_on(other.execute(&format!("select pg_advisory_unlock({})", teams::queue::TURN_KEY), &[&crew.team])).unwrap();
         reads.map(|r| r.join().unwrap())
