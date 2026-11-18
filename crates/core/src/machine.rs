@@ -22,8 +22,10 @@ use std::time::{Duration, Instant, SystemTime};
 // The agent team's machine side, one module per area, so each unit edits its own file.
 mod board;
 mod chain;
+mod delegate_started;
 mod feature_map;
 mod profiles;
+mod propose;
 mod reviewer;
 mod send_back;
 mod team;
@@ -5637,9 +5639,11 @@ impl Machine {
             }
             _ => None,
         };
-        let body = self.start_task(caller, tool, request)?;
-        let (Some((session, step, title)), Ok(mut started)) = (link, serde_json::from_str::<Value>(&body)) else { return Ok(body) };
+        let body = self.start_task(caller, tool, request.clone())?;
+        let Ok(mut started) = serde_json::from_str::<Value>(&body) else { return Ok(body) };
         let Some(task) = started["taskId"].as_str().map(str::to_owned) else { return Ok(body) };
+        self.delegate_started(&task, &request);
+        let Some((session, step, title)) = link else { return Ok(body) };
         let facts = self.plan_facts();
         let (linked, changed) = self
             .plans
@@ -5765,8 +5769,11 @@ impl Machine {
     /// Starts a worker here for a tab on another machine, which the hub sent as `Call::Delegate`.
     /// It works in this machine's checkout of `repo`, cloned with `token` when there is none, on
     /// the project's account unless the request names one.
-    fn start_for_origin(&self, origin: crate::delegate::Origin, mut request: crate::delegate::Request, repo: Option<String>, token: Option<String>) -> Result<String, String> {
+    fn start_for_origin(&self, origin: crate::delegate::Origin, request: crate::delegate::Request, repo: Option<String>, token: Option<String>) -> Result<String, String> {
         let key = origin.parent_key();
+        let caller = crate::delegate::Caller { tab: Some(key.clone()), task: None };
+        let request = self.profile_request(&caller, request)?;
+        let mut request = self.chain_request(&caller, request)?;
         if let Some(id) = self.delegates.for_origin(&key, &origin.task) {
             return self.delegates.started_json(&id).map(|value| value.to_string());
         }
@@ -5777,7 +5784,7 @@ impl Machine {
         let own = self.tastes().resolve(&captain_scope(&history::project_of(&cwd))).limits();
         let limits = origin.limits.narrow(own);
         (request.target.machine, request.target.boxed) = (None, None);
-        let caller_key = crate::delegate::Caller { tab: Some(key.clone()), task: None }.key();
+        let caller_key = caller.key();
         let side = ChildParent {
             parent: crate::delegate::Parent::Tab(key),
             caller_key,
@@ -5796,7 +5803,11 @@ impl Machine {
             origin: Some(origin),
             placed: None,
         };
-        self.launch_child(side, None, request)
+        let body = self.launch_child(side, None, request.clone())?;
+        if let Some(task) = serde_json::from_str::<Value>(&body).ok().and_then(|started| started["taskId"].as_str().map(str::to_owned)) {
+            self.delegate_started(&task, &request);
+        }
+        Ok(body)
     }
 
     /// What a machine that is full answers a worker another machine sent it.
@@ -13275,6 +13286,19 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(m.local_tastes(), before, "a refused call changed the way of working");
         let got: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_get","scope":"captains""#).unwrap()).unwrap();
         assert_eq!((&got["reviewer"]["rounds"], &got["worker_profiles"]["account"]), (&json!(4), &json!([])), "taste_get reads them");
+
+        // A signed-out app's tastes reach the hub through `ImportTastes`, which takes them only when
+        // `Tastes::check` passes: it checks the Reviewer and every list of profiles as their own writes do.
+        let tastes = |value: Value| serde_json::from_value::<Tastes>(value).unwrap().check();
+        assert_eq!(tastes(json!({ "reviewer": { "rounds": 0 } })), Err("review rounds go from 1 to 5".into()));
+        assert_eq!(tastes(json!({ "reviewer": { "rules": [{ "id": "R1", "text": "Tests first." }] } })), Err(r#"the account's rule ids go A1, A2 and on, not "R1""#.into()));
+        assert_eq!(tastes(json!({ "reviewer": { "projects": { "github.com/acme/site": { "rules": [{ "id": "P1", "text": " " }] } } } })), Err("rule P1 says nothing".into()));
+        assert_eq!(tastes(json!({ "worker_profiles": { "account": [{ "name": " " }] } })), Err("every profile needs a name".into()));
+        assert_eq!(tastes(json!({ "worker_profiles": { "projects": { "github.com/acme/site": [{ "name": "scout", "delivers": "a\nb" }] } } })), Err("what scout delivers fits one line".into()));
+        assert_eq!(tastes(json!({ "worker_profiles": { "proposed": [{ "name": "scout" }, { "name": "Scout" }] } })), Err("two profiles are named Scout".into()));
+        let many: Vec<Value> = (1..=21).map(|n| json!({ "name": format!("p{n}") })).collect();
+        assert_eq!(tastes(json!({ "worker_profiles": { "proposed": many } })), Err("20 proposed profiles already wait for the user to take or drop; nothing changed".into()));
+        assert_eq!(tastes(json!({ "reviewer": { "rounds": 5, "rules": [{ "id": "A1", "text": "Tests first." }] }, "worker_profiles": { "account": [{ "name": "scout" }], "proposed": [{ "name": "scout" }] } })), Ok(()), "the same name in two lists is fine");
         let _ = std::fs::remove_dir_all(dir);
     }
 

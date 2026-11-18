@@ -41,7 +41,17 @@ mod tests {
             let mut request = serde_json::to_value(crate::delegate::parse_request(&json!({ "task": "Fix it." })).unwrap()).unwrap();
             request.as_object_mut().unwrap().extend(args.as_object().unwrap().iter().filter(|(k, _)| *k != "task").map(|(k, v)| (k.clone(), v.clone())));
             let request: crate::delegate::Request = serde_json::from_value(request).unwrap();
-            assert_eq!(m.start_delegate(Some("tab-1".into()), None, None, request), Err(error.into()), "the machine refuses one that reached it");
+            assert_eq!(m.start_delegate(Some("tab-1".into()), None, None, request.clone()), Err(error.into()), "the machine refuses one that reached it");
+            let origin = crate::delegate::Origin {
+                machine: "m-mac".into(),
+                machine_name: "mac".into(),
+                tab: "tab-7".into(),
+                task: "task-mac".into(),
+                access: crate::delegate::Access::Auto,
+                delegator: Default::default(),
+                limits: Default::default(),
+            };
+            assert_eq!(m.start_for_origin(origin, request, None, None), Err(error.into()), "so does one another machine sent");
         }
         assert!(m.delegates.records().is_empty() && m.delegates.working_for("tab:tab-1") == 0, "a refused call started a task");
         assert_eq!(crate::delegate::parse_request(&json!({ "task": "Fix it.", "then": "tester" })), Err("then must be a list of profile names".into()));
