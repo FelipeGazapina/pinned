@@ -333,6 +333,34 @@ mod tests {
         assert!(long.len() < DIFF_BYTES + 1024 && long.contains("[cut here:"), "{}", long.len());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_workers_repo_config_runs_nothing_while_its_diff_is_read() {
+        let dir = std::env::temp_dir().join(format!("pinned-review-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| assert!(crate::process::command("git").arg("-C").arg(&dir).args(["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"]).args(args).status().unwrap().success(), "git {args:?}");
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "start"]);
+        let hook = dir.join("hook.sh");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch {}/ran.$$\ncat \"$1\" 2>/dev/null\n", dir.display())).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let hook = hook.display().to_string();
+        git(&["config", "core.fsmonitor", &hook]);
+        git(&["config", "diff.external", &hook]);
+        git(&["config", "diff.evil.textconv", &hook]);
+        std::fs::write(dir.join(".gitattributes"), "*.rs diff=evil\n").unwrap();
+        std::fs::write(dir.join("a.rs"), "fn a() { b() }\n").unwrap();
+        std::fs::write(dir.join("new.rs"), "fn new() {}\n").unwrap();
+        let diff = diff(&dir, None, None).unwrap();
+        assert!(diff.text.contains("fn a() { b() }") && diff.text.contains("fn new() {}"), "{}", diff.text);
+        let ran: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).filter(|entry| entry.file_name().to_string_lossy().starts_with("ran.")).collect();
+        assert!(ran.is_empty(), "the repo's config ran a program {} times", ran.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_reviewer_model_is_never_the_authors() {
         let ladder = [rung("haiku"), rung("sonnet"), rung("opus")];
