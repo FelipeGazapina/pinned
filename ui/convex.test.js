@@ -282,12 +282,12 @@ test("the panel shows the connection, Only these, and the picked tables ticked i
   assert.match(html, /<span class="chip convex-table" title="invoices">invoices<button type="button" data-action="convex-remove-table" data-table="invoices"/);
   assert.match(html, /data-convex-table="invoices" checked> <code>invoices<\/code>/);
   assert.match(html, /data-convex-table="customers"> <code>customers<\/code>/);
-  assert.match(html, /With a table list, queries and logs are off for this run\./);
+  assert.match(html, /With a table list, logs are off for this run\./);
   assert.deepEqual(calls, [], "known names are not fetched again");
   const all = context.graphNodePanel(editing(context, { step: step() }));
   assert.match(all, /class="chip active" data-action="convex-all-tables"/);
   assert.doesNotMatch(all, /convex-step-tables/);
-  assert.match(all, /<p class="hint">All tables also lets this run execute queries and read logs\. A query can read the deployment's environment variables by name\. A table list turns both off\.<\/p>/);
+  assert.match(all, /<p class="hint">All tables also lets this run read logs\. A table list turns that off\.<\/p>/);
   assert.doesNotMatch(html, /environment variables/);
 });
 
