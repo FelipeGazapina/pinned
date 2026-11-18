@@ -68,8 +68,10 @@ pub enum ProfileAuthor {
 
 impl Tastes {
     /// `HubCall::SetWorkerProfiles`: replaces the account's list, or `project`'s, or changes
-    /// nothing when a profile fails `WorkerProfile::check` or two share a name.
+    /// nothing when a profile fails `WorkerProfile::check` or two share a name. Every profile is
+    /// kept as the user's, its name trimmed, whoever the sender says wrote it.
     pub fn set_worker_profiles(&mut self, project: Option<&str>, profiles: Vec<WorkerProfile>) -> Result<(), String> {
+        let profiles: Vec<WorkerProfile> = profiles.into_iter().map(|p| WorkerProfile { name: p.name.trim().to_owned(), by: ProfileAuthor::User, ..p }).collect();
         let mut names = std::collections::BTreeSet::new();
         for profile in &profiles {
             profile.check()?;
