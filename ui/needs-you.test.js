@@ -46,6 +46,7 @@ function page(world) {
     machines: new Map(),
     agentConfirmations: world.agents ?? [],
     agentDeciding: new Set(),
+    agentWhy: world.why ?? new Map(),
     agentShown: world.shown ?? null,
     agentShownHtml: () => `<div class="agent-once"><b>Pairing command</b><div class="row"><code>pinned pair 123</code><button type="button" class="outline" data-agent="copy-code">Copy</button><button type="button" class="outline" data-agent="dismiss-code">Done</button></div></div>`,
     agentMachineName: (id) => ({ "box-1": "site" })[id] ?? id,
@@ -58,7 +59,7 @@ function page(world) {
     machineName: (id) => ({ mini: "mac-mini", book: "macbook", vps: "vps" })[id] ?? id,
   };
   vm.createContext(context);
-  vm.runInContext([line(chat, "const OFFER_SECS"), decl(chat, "function offerOf"), line(model, "const GLYPH_LOOKS"), line(model, "const glyphHtml"), line(model, "const runsInBox"), line(model, "const boxMarkHtml"), decl(agentSurface, "const AGENT_BOX_COPY"), line(agentSurface, "const AGENT_TITLE_ONLY"), `agentActionTitle = (action, args) => AGENT_BOX_COPY[action]?.(args) ?? ({ pair_code: "Pair a new machine" })[action] ?? action;`, read("gui-needs-you.js")].join("\n"), context);
+  vm.runInContext([line(chat, "const OFFER_SECS"), decl(chat, "function offerOf"), line(model, "const GLYPH_LOOKS"), line(model, "const glyphHtml"), line(model, "const runsInBox"), line(model, "const boxMarkHtml"), decl(agentSurface, "const AGENT_BOX_COPY"), decl(agentSurface, "function agentWhyField"), line(agentSurface, "const AGENT_TITLE_ONLY"), `agentActionTitle = (action, args) => AGENT_BOX_COPY[action]?.(args) ?? ({ pair_code: "Pair a new machine" })[action] ?? action;`, read("gui-needs-you.js")].join("\n"), context);
   return (code, args = {}) => {
     Object.assign(context, { args });
     return vm.runInContext(code, context);
@@ -206,6 +207,17 @@ test("an agent's request carries Deny and Approve for agent-surface.js; a thread
   assert.deepEqual([...once("needsYouCards().map((c) => c.kind)")], ["shown", "review"], "what an approval handed over to see once comes first");
   assert.match(once("needsYouCardHtml(needsYouCards()[0])"), /data-agent="copy-code">Copy<\/button><button[^>]*data-agent="dismiss-code">Done/);
   assert.equal(once("needsYouSummary(needsYouCards())"), "1 thread on 1 machine");
+});
+
+test("Deny on an agent request opens the Why field on the Needs you card, with Send and Cancel", () => {
+  const asked = { id: "c1", action: "pair_code", args: {}, machine: "mini", machine_name: "mac-mini", role: "worker", title: "Tidy the README.", at: S - 45 };
+  const closed = shown(page({ agents: [asked] }), "agent:c1");
+  assert.deepEqual(closed.buttons, ["deny Deny", "approve Approve"]);
+  assert.ok(!closed.html.includes("data-agent-why"));
+  const open = shown(page({ agents: [asked], why: new Map([["c1", ""]]) }), "agent:c1");
+  assert.deepEqual(open.buttons, ["why-send Send", "why-cancel Cancel"]);
+  assert.match(open.html, /Why\? \(optional\)<input type="text"[^>]* data-agent-why/);
+  assert.match(open.html, /data-confirmation="c1"/);
 });
 
 test("an extend_box request on the Needs you card reads as the amount and the box, and shows no raw arguments", () => {

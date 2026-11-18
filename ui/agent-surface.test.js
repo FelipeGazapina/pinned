@@ -175,13 +175,75 @@ test("Approve asks the hub to decide, holds both buttons while it waits, then te
   assert.equal(state("agentConfirmations.length"), 0);
 });
 
-test("Deny sends approve false and tells that it was denied", async () => {
+/** The "Why?" field of the card for `confirmation`, as a key or an input reaches the page. */
+function whyField(confirmation, value) {
+  const row = { dataset: { confirmation } };
+  const input = { value, matches: (selector) => selector === "[data-agent-why]", closest: () => row };
+  return input;
+}
+const type = (context, confirmation, value) => context.agentWhyInput({ target: whyField(confirmation, value) });
+const press = (context, confirmation, key, value = "") => context.agentWhyKey({ key, target: whyField(confirmation, value), preventDefault() {}, stopPropagation() {} });
+
+test("Deny opens a one-line Why field in place of the buttons and sends nothing yet", () => {
+  const { context, calls } = app();
+  context.onAgentConfirmations([createInvite]);
+  click(context, "deny", "c-2");
+  assert.equal(calls.length, 0);
+  const html = tight(context.asksHtml());
+  assert.match(html, /<label[^>]*>Why\? \(optional\)<input type="text"[^>]* data-agent-why[^>]*><\/label>/);
+  assert.match(html, /data-agent="why-send">Send<\/button><button type="button" class="outline" data-agent="why-cancel">Cancel<\/button>/);
+  assert.ok(!html.includes('data-agent="approve"') && !html.includes('data-agent="deny"'), html);
+});
+
+test("Deny, a reason and Enter send it with the denial, and the card tells that it was denied", async () => {
   const { context, calls, told } = app({ answer: async () => ({ decision: "denied", outcome: "denied", result: null }) });
   context.onAgentConfirmations([createInvite]);
   click(context, "deny", "c-2");
+  type(context, "c-2", "use the staging DB instead");
+  press(context, "c-2", "Enter", "  use the staging DB instead ");
   await flush();
-  assert.deepEqual(here(calls), [{ cmd: "decide_confirmation", id: "c-2", approve: false }]);
+  assert.deepEqual(here(calls), [{ cmd: "decide_confirmation", id: "c-2", approve: false, reason: "use the staging DB instead" }]);
   assert.deepEqual(told, ["Denied create_invite"]);
+});
+
+test("Send on the button sends what was typed", async () => {
+  const { context, calls } = app({ answer: async () => ({ decision: "denied", outcome: "denied", result: null }) });
+  context.onAgentConfirmations([createInvite]);
+  click(context, "deny", "c-2");
+  type(context, "c-2", "not now");
+  click(context, "why-send", "c-2");
+  await flush();
+  assert.deepEqual(here(calls), [{ cmd: "decide_confirmation", id: "c-2", approve: false, reason: "not now" }]);
+});
+
+test("an empty Why field denies with no reason at all", async () => {
+  const { context, calls } = app({ answer: async () => ({ decision: "denied", outcome: "denied", result: null }) });
+  context.onAgentConfirmations([createInvite, removeImac]);
+  click(context, "deny", "c-2");
+  press(context, "c-2", "Enter", "");
+  click(context, "deny", "c-1");
+  type(context, "c-1", "   ");
+  click(context, "why-send", "c-1");
+  await flush();
+  assert.deepEqual(here(calls), [
+    { cmd: "decide_confirmation", id: "c-2", approve: false },
+    { cmd: "decide_confirmation", id: "c-1", approve: false },
+  ]);
+});
+
+test("Escape and Cancel put Approve and Deny back and send nothing", async () => {
+  const { context, calls } = app();
+  context.onAgentConfirmations([createInvite]);
+  click(context, "deny", "c-2");
+  type(context, "c-2", "half a thought");
+  press(context, "c-2", "Escape", "half a thought");
+  assert.match(context.asksHtml(), /data-agent="approve">Approve<\/button><button type="button" class="outline" data-agent="deny">Deny/);
+  click(context, "deny", "c-2");
+  click(context, "why-cancel", "c-2");
+  await flush();
+  assert.match(context.asksHtml(), /data-agent="deny">Deny/);
+  assert.equal(context.agentWhyText ? context.agentWhyText("c-2") : "", "", "what was typed is forgotten");
+  assert.equal(calls.length, 0);
 });
 
 test("a decision the hub refuses tells why and gives the buttons back", async () => {
