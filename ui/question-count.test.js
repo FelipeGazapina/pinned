@@ -33,9 +33,10 @@ test("a questionnaire of three reads Question 1 of 3 on the desktop card, then 2
 });
 
 test("one question, and the review of the answers, add no count", () => {
-  assert.doesNotMatch(drawn(null), / of /);
-  assert.doesNotMatch(drawn({ headers: ["Color"], answered: [false], at: 0 }).replace(/\s+/g, " "), /Question \d+ of/);
-  assert.doesNotMatch(text(drawn({ ...three, at: 3 })), /Question \d+ of/);
+  const counted = (html) => html.includes("q-count");
+  assert.equal(counted(drawn(null)), false);
+  assert.equal(counted(drawn({ headers: ["Color"], answered: [false], at: 0 })), false);
+  assert.equal(counted(drawn({ ...three, at: 3 })), false);
 });
 
 function sheet(tabs) {
@@ -61,6 +62,7 @@ function sheet(tabs) {
 
 test("the phone sheet's header says Question 1 of 3 for a questionnaire, and 1 of 1 stays the thread count of a single question", () => {
   assert.match(text(sheet(three)), /Color Question 1 of 3/);
-  const single = text(sheet(null));
-  assert.doesNotMatch(single, /Question \d+ of/);
+  assert.doesNotMatch(sheet(null), /ask-count">Question/);
+  assert.doesNotMatch(sheet({ headers: ["Color"], answered: [false], at: 0 }), /ask-count">Question/);
+  assert.match(text(sheet(null)), /1 of 1/, "the thread count is as it was");
 });

@@ -559,7 +559,7 @@ function renderQuestion(tab, menu, tabs, lines) {
   const multi = multiSelect(menu);
   const collapsed = t.collapsed === header;
   approval.toggleAttribute("data-collapsed", collapsed);
-  const count = tabs && !review ? `<span class="q-count">${tabs.at + 1}/${tabs.headers.length}</span>` : "";
+  const count = tabs && !review && tabs.headers.length > 1 ? `<span class="q-count">Question ${tabs.at + 1} of ${tabs.headers.length}</span>` : "";
   const options = menu.options.map((o) => {
     const on = t.picking === o.n || ticked(o);
     const label = o.head.replace(/^\[[ ✔]\]\s*/, "").replace(/\s✔$/, "");

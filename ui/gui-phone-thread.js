@@ -407,7 +407,7 @@ function askSheetHtml(tab) {
   const step = steps
     ? `<div class="ask-answers">${tabs?.at > 0 ? `<button type="button" class="outline" data-q="previous">Previous</button>` : ""}<button type="button" class="primary" data-q="${last ? "submit" : "next"}">${last ? "Submit" : "Next question"}</button></div>`
     : "";
-  return `<div class="ask-head">${icon("message-circle-question", "lead")}<h2>${esc(header)}</h2>${tabs && !review ? `<span class="ask-count">${tabs.at + 1} of ${tabs.headers.length}</span>` : count}</div>
+  return `<div class="ask-head">${icon("message-circle-question", "lead")}<h2>${esc(header)}</h2>${tabs && !review && tabs.headers.length > 1 ? `<span class="ask-count">Question ${tabs.at + 1} of ${tabs.headers.length}</span>` : count}</div>
     ${question ? `<p class="ask-question">${esc(question)}</p>` : ""}${multi ? `<p class="ask-about">Select one or more options.</p>` : ""}
     <div class="ask-options">${menu.options.filter((o) => o !== free).map(options).join("")}</div>${step}
     <div class="ask-rows">${free ? row(`data-ask="type"`, "Type your own answer", "mic") : ""}${row(`data-ask="cancel"`, "Dismiss without answering")}${terminal}</div>`;

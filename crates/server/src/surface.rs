@@ -686,7 +686,7 @@ async fn notify(hub: &Hub, account: &Account, held: &Held) -> Result<bool, Strin
     let asked = &held.confirmation;
     let mut text = surface::notice_text(asked, &held.result);
     if let (Some(Decision::Denied), Some(reason)) = (asked.decision, &held.reason) {
-        text.push_str(&format!(" The user said: \"{reason}\""));
+        text = format!("{text} The user said: \"{reason}\"");
     }
     let call = Call::Notice { tab: asked.tab.clone(), session: held.session.clone(), text, id: asked.id.clone() };
     let queued = hub.call_machine(account, &asked.machine, call, NOTICE_WAIT).await.map_err(String::from)?;
