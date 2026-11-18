@@ -13275,6 +13275,19 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(m.local_tastes(), before, "a refused call changed the way of working");
         let got: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_get","scope":"captains""#).unwrap()).unwrap();
         assert_eq!((&got["reviewer"]["rounds"], &got["worker_profiles"]["account"]), (&json!(4), &json!([])), "taste_get reads them");
+
+        // A signed-out app's tastes reach the hub through `ImportTastes`, which takes them only when
+        // `Tastes::check` passes: it checks the Reviewer and every list of profiles as their own writes do.
+        let tastes = |value: Value| serde_json::from_value::<Tastes>(value).unwrap().check();
+        assert_eq!(tastes(json!({ "reviewer": { "rounds": 0 } })), Err("review rounds go from 1 to 5".into()));
+        assert_eq!(tastes(json!({ "reviewer": { "rules": [{ "id": "R1", "text": "Tests first." }] } })), Err(r#"the account's rule ids go A1, A2 and on, not "R1""#.into()));
+        assert_eq!(tastes(json!({ "reviewer": { "projects": { "github.com/acme/site": { "rules": [{ "id": "P1", "text": " " }] } } } })), Err("rule P1 says nothing".into()));
+        assert_eq!(tastes(json!({ "worker_profiles": { "account": [{ "name": " " }] } })), Err("every profile needs a name".into()));
+        assert_eq!(tastes(json!({ "worker_profiles": { "projects": { "github.com/acme/site": [{ "name": "scout", "delivers": "a\nb" }] } } })), Err("what scout delivers fits one line".into()));
+        assert_eq!(tastes(json!({ "worker_profiles": { "proposed": [{ "name": "scout" }, { "name": "Scout" }] } })), Err("two profiles are named Scout".into()));
+        let many: Vec<Value> = (1..=21).map(|n| json!({ "name": format!("p{n}") })).collect();
+        assert_eq!(tastes(json!({ "worker_profiles": { "proposed": many } })), Err("20 proposed profiles already wait for the user to take or drop; nothing changed".into()));
+        assert_eq!(tastes(json!({ "reviewer": { "rounds": 5, "rules": [{ "id": "A1", "text": "Tests first." }] }, "worker_profiles": { "account": [{ "name": "scout" }], "proposed": [{ "name": "scout" }] } })), Ok(()), "the same name in two lists is fine");
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -493,6 +493,10 @@ mod tests {
             json!({ "cmd": "delegate", "tab": "tab-1", "task": "t1", "request": request, "access": "auto" }),
             json!({ "cmd": "team", "op": { "op": "list" } }),
             json!({ "cmd": "team", "team": "t", "op": { "op": "hub", "call": { "cmd": "get_settings" } } }),
+            // The Reviewer and worker profiles are a person's own way of working.
+            json!({ "cmd": "set_reviewer", "patch": { "rounds": 3 } }),
+            json!({ "cmd": "set_worker_profiles", "profiles": [], "drop_proposed": ["scout"] }),
+            json!({ "cmd": "propose_worker_profile", "tab": "tab-1", "profile": { "name": "scout" } }),
         ];
         for call in never {
             for role in [Role::Owner, Role::Member] {

@@ -1107,6 +1107,9 @@ mod tests {
             assert_eq!((action.side, action.class, action.wired, action.starts_work), (Side::Hub, Excluded, false, false), "{name}");
         }
         assert!(find("set_reviewer").unwrap().about.contains("the user's own"));
+        // An orchestrator proposes a profile only with its machine's profile_propose tool.
+        let propose = find("propose_worker_profile").expect("no action propose_worker_profile");
+        assert_eq!((propose.side, propose.class, propose.wired, propose.starts_work), (Side::Hub, Excluded, false, false));
         assert_eq!(find("board").map(|a| (a.side, a.class, a.wired)), Some((Side::Node, Read, true)));
     }
 
