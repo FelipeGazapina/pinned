@@ -533,6 +533,9 @@ pub struct Task {
     pub reviews: Vec<crate::reviewer::ReviewRound>,
     /// The worker profile it runs as.
     pub profile: Option<String>,
+    /// That profile's block (`profiles::block`) as it stood when the task started, which its
+    /// worker gets at every start, even once the profile changed or went.
+    pub profile_block: Option<String>,
     /// Where it stands in a handoff chain.
     pub chain: Option<crate::chain::ChainLink>,
 }
@@ -1970,7 +1973,7 @@ grok-4.7-high - Grok 4.7  High
         let saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         assert_eq!((&saved["tasks"][0]["reviews"][1]["state"], &saved["tasks"][0]["profile"], &saved["tasks"][0]["chain"]["root"]), (&json!("passed"), &json!("fixer"), &json!("task-0ld0")), "{saved}");
         assert_eq!(saved["tasks"][0]["reviews"].as_array().unwrap().len(), 2, "a round put again replaces itself");
-        delegates.set_profile("task-0ld0", None);
+        delegates.set_profile("task-0ld0", None, None);
         delegates.set_chain("task-0ld0", None);
         let saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         assert!(saved["tasks"][0].get("profile").is_none() && saved["tasks"][0].get("chain").is_none(), "{saved}");

@@ -9,9 +9,10 @@ impl Machine {
     /// runs) and before its worker is spawned, so a worker that ends at once ends with what this
     /// writes. A replayed request answers the task it started and never gets here, so a retry with
     /// another `profile` or `then` changes nothing on it. U6 calls `Delegates::set_profile` here
-    /// with the profile `profile_request` resolved, and U12 `Delegates::set_chain` with the
+    /// with the profile `profile_request` resolved and its block, which every start of the worker
+    /// uses from then on, and U12 `Delegates::set_chain` with the
     /// request's `then`.
     pub(super) fn delegate_started(&self, task: &str, request: &Request) {
-        self.delegates.set_profile(task, request.profile.clone());
+        self.delegates.set_profile(task, request.profile.clone(), self.admitted_block(task, request));
     }
 }

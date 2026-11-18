@@ -664,6 +664,23 @@ enum Sent {
 }
 
 /// Why a session ended mid-turn: how the task it ran was cancelled, or how its process exited.
+/// Adds `tools` to the one `--disallowedTools` list of a Claude launch's `args`: into the list a
+/// read-only start already has, else as a new list. A second flag would leave Claude two lists.
+fn refuse_tools(args: &mut Vec<String>, tools: &[&str]) {
+    if tools.is_empty() {
+        return;
+    }
+    match args.iter().position(|a| a == "--disallowedTools").map(|at| at + 1).filter(|at| *at < args.len()) {
+        Some(at) => {
+            let mut list: Vec<String> = args[at].split(',').filter(|t| !t.is_empty()).map(str::to_owned).collect();
+            list.extend(tools.iter().filter(|tool| !list.iter().any(|t| t == *tool)).map(|tool| (*tool).to_owned()).collect::<Vec<_>>());
+            args[at] = list.join(",");
+        }
+        // The prompt's flag after it keeps the list from swallowing the rest.
+        None => args.extend(["--disallowedTools".to_owned(), tools.join(",")]),
+    }
+}
+
 fn stop_reason(task: Option<&crate::delegate::Task>, code: Option<u32>) -> String {
     let Some(task) = task.filter(|task| task.state == crate::delegate::WorkState::Cancelled) else {
         return code.map_or_else(|| "crashed".to_owned(), |code| format!("exited with code {code}"));
@@ -2525,7 +2542,7 @@ impl Machine {
             let asked = args.clone();
             t.bare = t.claude_session.as_deref().is_some_and(|session| args == crate::delegate::resume_args(t.account.provider, session));
             // Every start of a read-only worker refuses its tools, whatever path asked for it. A
-            // role's own --disallowedTools comes after this.
+            // role's own refused tools join this list.
             if t.read_only && t.account.provider == Provider::Claude {
                 crate::delegate::keep_read_only(&mut args);
             }
@@ -2552,11 +2569,7 @@ impl Machine {
             prompt.extend(tastes.as_ref().map(|t| t.resolve(&TasteScope::Orchestrator).brief()));
         }
         if let Some(role) = role {
-            if !role.disallowed_tools().is_empty() {
-                // --disallowedTools takes any number of values, so the prompt's flag after it keeps it from swallowing the rest.
-                args.push("--disallowedTools".to_owned());
-                args.extend(role.disallowed_tools().iter().map(|t| t.to_string()));
-            }
+            refuse_tools(&mut args, role.disallowed_tools());
             prompt.push(role.prompt().to_owned());
             if role == Role::Orchestrator {
                 let scoped = tastes.as_ref().map(|t| t.resolve(&captain_scope(&cwd)));
@@ -2565,12 +2578,7 @@ impl Machine {
                 prompt.push(global::captain_prompt(&settings.name, settings.reports));
             }
         }
-        let (refused, profile) = self.profile_launch(tab);
-        if !refused.is_empty() {
-            args.push("--disallowedTools".to_owned());
-            args.extend(refused);
-        }
-        prompt.extend(profile);
+        prompt.extend(self.profile_launch(tab));
         if !prompt.is_empty() {
             args.extend(["--append-system-prompt".to_owned(), prompt.join("\n\n")]);
         }
@@ -5707,11 +5715,15 @@ impl Machine {
     /// new task is linked to the step or list it names once the task exists.
     fn start_delegate(&self, tab: Option<String>, parent_task: Option<String>, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
         let caller = Self::require_caller(tab, parent_task)?;
+        // A replayed request answers with the task it started, which is already linked, before its
+        // profile is resolved again: a profile gone since refuses nothing it already started.
+        if let Some(id) = self.delegates.requested(&caller.key(), request.client_request_id.as_deref()) {
+            return self.remote_started(&id);
+        }
         let request = self.profile_request(&caller, None, request)?;
         let request = self.chain_request(&caller, request)?;
-        // A replayed request answers with the task it started, which is already linked.
         let link = match request.plan_step.clone() {
-            Some(step) if self.delegates.requested(&caller.key(), request.client_request_id.as_deref()).is_none() => {
+            Some(step) => {
                 let session = self.plan_session(&caller)?;
                 let facts = self.plan_facts();
                 let mut plans = self.plans.lock().unwrap().get(&session).cloned().unwrap_or_default();
@@ -5855,11 +5867,12 @@ impl Machine {
     fn start_for_origin(&self, origin: crate::delegate::Origin, request: crate::delegate::Request, repo: Option<String>, token: Option<String>) -> Result<String, String> {
         let key = origin.parent_key();
         let caller = crate::delegate::Caller { tab: Some(key.clone()), task: None };
-        let request = self.profile_request(&caller, repo.as_deref(), request)?;
-        let mut request = self.chain_request(&caller, request)?;
+        // A retry answers the task it started before its profile is resolved again.
         if let Some(id) = self.delegates.for_origin(&key, &origin.task) {
             return self.delegates.started_json(&id).map(|value| value.to_string());
         }
+        let request = self.profile_request(&caller, repo.as_deref(), request)?;
+        let mut request = self.chain_request(&caller, request)?;
         let repo = repo.ok_or("the thread that asked works in a folder with no git origin, so this machine can't find its project")?;
         let cwd = self.find_folder("", Some(&repo), token.as_deref())?;
         let account = self.account_for(None, &cwd)?;
@@ -11518,6 +11531,20 @@ echo '{"type":"result","result":"ok"}'
     /// The comma-separated tools that follow `flag`.
     fn tools_after(args: &[String], flag: &str) -> Vec<String> {
         args.windows(2).filter(|w| w[0] == flag).flat_map(|w| w[1].split(',').map(str::to_owned)).collect()
+    }
+
+    #[test]
+    fn a_role_that_refuses_tools_joins_the_read_only_list_and_adds_no_second_one() {
+        let mut args = crate::delegate::claude_read_only_args();
+        let before = args.clone();
+        refuse_tools(&mut args, Role::Reviewer.disallowed_tools());
+        assert_eq!(args, before, "the read-only list already refuses the Reviewer's tools");
+        refuse_tools(&mut args, &["WebFetch"]);
+        assert_eq!(args.iter().filter(|a| *a == "--disallowedTools").count(), 1, "{args:?}");
+        assert!(args[3].ends_with(",WebFetch"), "{args:?}");
+        let mut plain = vec!["--resume".to_owned(), "s1".to_owned()];
+        refuse_tools(&mut plain, Role::Reviewer.disallowed_tools());
+        assert_eq!(plain[2..], ["--disallowedTools", "Edit,Write,NotebookEdit,Bash"]);
     }
 
     #[test]

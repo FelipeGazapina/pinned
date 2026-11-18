@@ -62,30 +62,27 @@ impl Machine {
         self.delegates.lineage(caller.task.as_deref()?).map(|task| task.cwd)
     }
 
-    /// The profile task `task` runs as, resolved now as `profile_request` resolved it, in the
-    /// project of the folder the task runs in. None for a task without one.
-    fn task_profile(&self, task: &str) -> Option<WorkerProfile> {
-        let record = self.delegates.get(task)?;
-        let project = super::git_remote(&record.cwd).and_then(|url| super::repo_key(&url));
-        crate::profiles::resolve(&self.tastes(), project.as_deref(), record.profile.as_deref()?).ok()
+    /// The block of the profile new task `task` was admitted with (`request.profile`, which
+    /// `profile_request` resolved a moment before), in the project of the folder the task runs in,
+    /// for `delegate_started` to keep on its record. None for a task without one.
+    pub(super) fn admitted_block(&self, task: &str, request: &Request) -> Option<String> {
+        let name = request.profile.as_deref()?;
+        let project = self.delegates.get(task).and_then(|record| super::git_remote(&record.cwd)).and_then(|url| super::repo_key(&url));
+        crate::profiles::resolve(&self.tastes(), project.as_deref(), name).ok().map(|profile| crate::profiles::block(&profile))
     }
 
-    /// What a headless worker's driver gets of task `task`'s profile: its block.
+    /// What a worker of task `task` gets of its profile: the block its record kept when it started,
+    /// never the profile as it stands now. A read-only profile stays read-only through the record's
+    /// access, as every read-only task does, whatever became of the profile.
     pub(super) fn profile_block(&self, task: &str) -> Option<String> {
-        self.task_profile(task).map(|profile| crate::profiles::block(&profile))
+        self.delegates.get(task)?.profile_block
     }
 
-    /// What the Claude session of worker thread `tab` adds for its task's profile: the tools a
-    /// read-only task refuses, and the block for `--append-system-prompt`. The refusals follow the
-    /// task's record, so a profile that changed or went since still runs read-only.
-    pub(super) fn profile_launch(&self, tab: &str) -> (Vec<String>, Option<String>) {
-        let Some(task) = self.tab(tab, |t| t.task.clone()).ok().flatten() else { return (vec![], None) };
-        let Some(record) = self.delegates.get(&task).filter(|record| record.profile.is_some()) else { return (vec![], None) };
-        let refused = match record.access {
-            crate::delegate::Access::ReadOnly => crate::profiles::READ_ONLY_REFUSED.iter().map(|tool| (*tool).to_owned()).collect(),
-            _ => vec![],
-        };
-        (refused, self.profile_block(&task))
+    /// What the Claude session of worker thread `tab` adds for its task's profile: the block for
+    /// `--append-system-prompt`.
+    pub(super) fn profile_launch(&self, tab: &str) -> Option<String> {
+        let task = self.tab(tab, |t| t.task.clone()).ok().flatten()?;
+        self.profile_block(&task)
     }
 
     /// Why a task with a profile stays on this machine rather than go to `machine` (an id or a
@@ -513,6 +510,8 @@ mod tests {
         let project = acme_app(dir.path());
         let claude = thread_claude(dir.path());
         let m = machine_with(dir.path(), std::collections::BTreeMap::from([(Provider::Claude, claude.clone())]));
+        // Another machine's worker finds this checkout among the projects, and clones nothing.
+        let project = m.open_project(project);
         let tab = m.add_tab(project, Account::builtin(Provider::Claude), vec![], vec![], false, None);
         let first = task_of(&start(&m, &tab, json!({ "task": "Map it.", "profile": "Explorer", "clientRequestId": "r1" })).unwrap());
         let again = start(&m, &tab, json!({ "task": "Map it.", "profile": "ghost", "clientRequestId": "r1" }));

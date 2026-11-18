@@ -70,12 +70,8 @@ fn claude_args(spec: &SpawnSpec) -> Vec<String> {
         Access::Auto => args.extend(["--permission-mode".into(), "auto".into()]),
         Access::ReadOnly => args.extend(super::claude_read_only_args()),
     }
+    // A read-only profile is read-only through its access, above, as every read-only task is.
     if let Some(block) = spec.profile {
-        // --disallowedTools takes any number of values, so the prompt's flag after it ends the list.
-        if spec.access == Access::ReadOnly {
-            args.push("--disallowedTools".into());
-            args.extend(crate::profiles::READ_ONLY_REFUSED.iter().map(|tool| (*tool).to_owned()));
-        }
         args.extend(["--append-system-prompt".into(), block.to_owned()]);
     }
     let configs: Vec<String> = spec.mcp_config.into_iter().chain(spec.session_mcp.map(|files| files.file.as_path())).map(|config| config.display().to_string()).collect();

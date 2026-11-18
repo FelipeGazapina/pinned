@@ -120,6 +120,17 @@ impl WorkerProfile {
         if name.chars().count() > MAX_NAME {
             return Err(format!("a profile's name is at most {MAX_NAME} characters"));
         }
+        // The name, tools and skills go into the worker's prompt, so none may start a line of its own.
+        let unbroken = |text: &str| !text.trim().chars().any(char::is_control);
+        if !unbroken(name) {
+            return Err("a profile's name holds no line break or control character".into());
+        }
+        if !self.tools.iter().all(|tool| unbroken(tool)) {
+            return Err("a profile's tool holds no line break or control character".into());
+        }
+        if !self.skills.iter().all(|skill| unbroken(&skill.name)) {
+            return Err("a profile's skill holds no line break or control character".into());
+        }
         if self.delivers.contains('\n') {
             return Err(format!("what {name} delivers fits one line"));
         }
@@ -271,9 +282,6 @@ pub fn delegate_property() -> Option<(&'static str, serde_json::Value)> {
     Some(("profile", serde_json::json!({ "type": "string", "description": about })))
 }
 
-/// The tools a read-only profile's Claude worker is refused outright, on top of plan mode.
-pub const READ_ONLY_REFUSED: [&str; 5] = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"];
-
 /// The first pinned that applies a profile. An older machine takes `profile` as an unknown field
 /// and would run the worker without it, so a profile task never goes to one.
 pub const FIRST_VERSION: &str = "0.18.7";
@@ -294,8 +302,8 @@ pub fn applies_profiles(version: &str) -> bool {
     }
 }
 
-/// `request` as `profile` sets it up: the profile's tools are the grant, a read-only profile runs
-/// in plan, its model and effort apply when the call names none, and its name is the task's role.
+/// `request` as `profile` sets it up: the profile's tools are the grant, a read-only profile asks
+/// for plan, which `resolve_access` turns into read-only access, its model and effort apply when the call names none, and its name is the task's role.
 pub fn apply(profile: &WorkerProfile, mut request: Request) -> Request {
     if !profile.tools.is_empty() {
         // The grant line leads the brief outside the fence, so a name that could break out of it is left out.
@@ -319,7 +327,7 @@ pub fn apply(profile: &WorkerProfile, mut request: Request) -> Request {
 pub fn block(profile: &WorkerProfile) -> String {
     let mut lines = vec![format!("Worker profile, set by the user: {}", profile.name.trim())];
     lines.push(match profile.access {
-        ProfileAccess::ReadOnly => format!("Access: read-only. You change no file and run no shell: {} are refused.", READ_ONLY_REFUSED.join(", ")),
+        ProfileAccess::ReadOnly => format!("Access: read-only. You change no file and run no shell: {} are refused.", crate::delegate::READ_ONLY_REFUSED.join(", ")),
         ProfileAccess::Edit => "Access: you may edit.".to_owned(),
     });
     if !profile.tools.is_empty() {

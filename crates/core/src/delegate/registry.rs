@@ -209,10 +209,10 @@ impl Delegates {
         }
     }
 
-    /// Notes the worker profile task `id` runs as (U6).
-    pub fn set_profile(&self, id: &str, profile: Option<String>) {
+    /// Notes the worker profile task `id` runs as, and its block as it stands now (U6).
+    pub fn set_profile(&self, id: &str, profile: Option<String>, block: Option<String>) {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
-            task.profile = profile;
+            (task.profile, task.profile_block) = (profile, block);
         }
         self.persist();
     }
@@ -2058,6 +2058,7 @@ fn fresh(new: NewTask) -> Task {
         placement: None,
         reviews: vec![],
         profile: None,
+        profile_block: None,
         chain: None,
     }
 }
@@ -2210,6 +2211,8 @@ struct SavedTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile_block: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     chain: Option<crate::chain::ChainLink>,
     /// The milliseconds a working task had counted toward its time limit when this was written.
     /// A restart counts on from there, so the time pinned was down does not count.
@@ -2311,6 +2314,7 @@ impl SavedTask {
             placement: task.placement.clone(),
             reviews: task.reviews.clone(),
             profile: task.profile.clone(),
+            profile_block: task.profile_block.clone(),
             chain: task.chain.clone(),
             counted_ms: (!task.state.terminal()).then(|| task.run.counted(Instant::now())),
         }
@@ -2368,6 +2372,7 @@ impl SavedTask {
             placement: self.placement,
             reviews: self.reviews,
             profile: self.profile,
+            profile_block: self.profile_block,
             chain: self.chain,
         }
     }
