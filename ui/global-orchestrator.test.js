@@ -346,6 +346,39 @@ test("the projects page leaves out the workers whose turn ended, as projects() d
   assert.match(html, /data-project="site" data-machine="mm">Mac mini<span class="gp-captain working">Working<\/span><span class="gp-count">3 workers<\/span><\/button>/);
 });
 
+// `running` on the wire means the tab takes input: a session runs it or it sleeps. After a restart a
+// finished worker comes back asleep with no status, and the page must not count it as running.
+test("the projects page counts a worker only while its turn runs or its session starts", () => {
+  const { context, pages } = projectsPage();
+  const sliceOf = (name, start, end) => {
+    const src = readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
+    return src.slice(src.indexOf(start), src.indexOf(end, src.indexOf(start)));
+  };
+  const worker = (view) => ({ machine: "mm", view: { role: "worker", running: true, ...view } });
+  const tabs = [
+    { machine: "mm", view: { id: "cap-1", role: "orchestrator", running: true, status: "done" } },
+    worker({ asleep: true, session: "s-1" }),
+    worker({ asleep: true, session: "s-2" }),
+    worker({ session: "s-3" }),
+    worker({}),
+    worker({ status: "working", session: "s-4" }),
+  ];
+  Object.assign(context, { statusOf: (tab) => tab.view.status ?? "idle", busyUnder: () => 0, unseenDone: () => false });
+  vm.runInContext(
+    [
+      sliceOf("global-chat.js", "function waitingKindOf", "/** What a thread blocked"),
+      sliceOf("gui.js", "function hookPhase", "const turnLive"),
+      sliceOf("redesign-model.js", "function threadState", "const answerChoice"),
+    ].join("\n"),
+    context,
+  );
+  context.projectGroups = () => [{ name: "site", tabs, checkouts: [] }];
+  context.renderGlobalProjectsPage();
+  const html = pages.at(-1);
+  assert.match(html, /<span class="gp-workers">2 workers<\/span>/);
+  assert.match(html, /data-project="site" data-machine="mm">Mac mini<span class="gp-captain working">Working<\/span><span class="gp-count">2 workers<\/span><\/button>/);
+});
+
 test("a project's machine opens its Captain tab when one is open", () => {
   const { context, activated, captain, click } = projectsPage();
   context.renderGlobalProjectsPage();
