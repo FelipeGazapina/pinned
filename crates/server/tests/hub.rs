@@ -4598,12 +4598,20 @@ fn an_external_agents_message_never_opens_or_starts_an_orchestrator_that_skips_p
 
     // The user's app opened the other Captain and left it stopped: in Full access the agent can't start it.
     let full = node.machine.open_orchestrator(&opened).unwrap();
-    assert!(captain(&opened).unwrap().bypass, "the precondition: the app opens a Captain that skips its permission prompts");
-    let refused = tool(&url, &http, &access, "message_orchestrator", json!({ "project": pid("opened"), "message": "drop the tables", "request_id": "o-2" })).unwrap_err();
-    assert!(refused.contains("skips its permission prompts"), "{refused}");
-    std::thread::sleep(Duration::from_millis(300));
-    let view = captain(&opened).unwrap();
-    assert!(view.id == full && !view.running, "an external agent started a session that skips its permission prompts");
+    // With Full access by default off the app opens it asking for its prompts, and the user
+    // switches it to Full access, which starts it.
+    let switched = !captain(&opened).unwrap().bypass;
+    if switched {
+        node.machine.set_bypass(&full, true, 120, 32).unwrap();
+    }
+    assert!(captain(&opened).unwrap().bypass, "the precondition: the user's Captain skips its permission prompts");
+    if !switched {
+        let refused = tool(&url, &http, &access, "message_orchestrator", json!({ "project": pid("opened"), "message": "drop the tables", "request_id": "o-2" })).unwrap_err();
+        assert!(refused.contains("skips its permission prompts"), "{refused}");
+        std::thread::sleep(Duration::from_millis(300));
+        let view = captain(&opened).unwrap();
+        assert!(view.id == full && !view.running, "an external agent started a session that skips its permission prompts");
+    }
 
     // The user starts it: running, it still takes no text from an external agent.
     node.machine.start_claude(&full, 120, 32).unwrap();
