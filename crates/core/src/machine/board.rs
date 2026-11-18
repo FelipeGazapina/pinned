@@ -180,9 +180,7 @@ impl Machine {
             }
         };
         write(&mut board);
-        if board.notes.len() > crate::board::MAX_NOTES {
-            board.notes.drain(..board.notes.len() - crate::board::MAX_NOTES);
-        }
+        crate::board::trim(&mut board);
         let saved = (|| {
             use std::io::Write;
             let dir = file.parent().expect("a board file sits in a folder");

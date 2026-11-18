@@ -113,10 +113,27 @@ pub fn format_char(c: char) -> bool {
 }
 
 /// The most notes one task keeps on a board; its own older ones go first.
-pub const NOTES_BY: usize = 1_000;
+pub const NOTES_BY: usize = 20;
 
 /// The most notes one board keeps; older ones go first.
 pub const MAX_NOTES: usize = 200;
+
+/// `board` cut to its caps after a write: each task's newest `NOTES_BY` notes, then the board's
+/// newest `MAX_NOTES`.
+pub fn trim(board: &mut BoardView) {
+    let mut by = std::collections::HashMap::new();
+    let mut keep = vec![true; board.notes.len()];
+    for (i, note) in board.notes.iter().enumerate().rev() {
+        let seen = by.entry(note.by.as_str()).or_insert(0usize);
+        *seen += 1;
+        keep[i] = *seen <= NOTES_BY;
+    }
+    let mut keep = keep.into_iter();
+    board.notes.retain(|_| keep.next().unwrap_or(true));
+    if board.notes.len() > MAX_NOTES {
+        board.notes.drain(..board.notes.len() - MAX_NOTES);
+    }
+}
 
 /// A note's text as it is kept: one line, not empty, at most `NOTE_CHARS` characters.
 pub fn note_text(text: &str) -> Result<String, String> {
