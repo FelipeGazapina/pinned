@@ -271,6 +271,46 @@ mod tests {
         assert!(tastes.worker_profiles.projects.is_empty());
     }
 
+    #[test]
+    fn every_cap_takes_its_limit_and_refuses_one_past_it() {
+        let set = |profiles: Vec<WorkerProfile>| Tastes::default().set_worker_profiles(None, profiles);
+        let many = |n: usize| (0..n).map(|i| format!("t{i}")).collect::<Vec<String>>();
+        let skills = |n: usize| (0..n).map(|i| SkillRef { name: format!("s{i}"), enabled: true }).collect::<Vec<_>>();
+        for (at, past, refused) in [
+            (profile(&"n".repeat(60)), profile(&"n".repeat(61)), "a profile's name is at most 60 characters"),
+            (profile(&format!("  {}  ", "é".repeat(60))), profile(&"é".repeat(61)), "a profile's name is at most 60 characters"),
+            (WorkerProfile { delivers: "d".repeat(300), ..profile("x") }, WorkerProfile { delivers: "d".repeat(301), ..profile("x") }, "what x delivers is at most 300 characters"),
+            (WorkerProfile { tools: many(40), ..profile("x") }, WorkerProfile { tools: many(41), ..profile("x") }, "x names at most 40 tools"),
+            (WorkerProfile { skills: skills(40), ..profile("x") }, WorkerProfile { skills: skills(41), ..profile("x") }, "x names at most 40 skills"),
+        ] {
+            assert_eq!(set(vec![at]), Ok(()), "{refused}");
+            assert_eq!(set(vec![past]), Err(refused.into()));
+        }
+        let list = |n: usize| (0..n).map(|i| profile(&format!("p{i}"))).collect::<Vec<_>>();
+        assert_eq!(set(list(30)), Ok(()));
+        assert_eq!(set(list(31)), Err("a list holds at most 30 profiles".into()));
+        let mut tastes = Tastes::default();
+        assert_eq!(tastes.set_worker_profiles(Some("github.com/acme/site"), list(31)), Err("a list holds at most 30 profiles".into()));
+        for i in 0..200 {
+            tastes.set_worker_profiles(Some(&format!("github.com/acme/p{i}")), list(1)).unwrap();
+        }
+        let before = tastes.clone();
+        assert_eq!(tastes.set_worker_profiles(Some("github.com/acme/p200"), list(1)), Err("at most 200 projects have their own profiles".into()));
+        assert_eq!(tastes, before, "a refused list changed nothing");
+        tastes.set_worker_profiles(Some("github.com/acme/p0"), list(30)).unwrap();
+        // Tastes::check, which ImportTastes runs, refuses what the user's own write refuses.
+        assert_eq!(tastes.check(), Ok(()));
+        let mut imported = tastes.clone();
+        imported.worker_profiles.projects.insert("github.com/acme/p200".into(), list(1));
+        assert_eq!(imported.check(), Err("at most 200 projects have their own profiles".into()));
+        let mut imported = tastes.clone();
+        imported.worker_profiles.account = list(31);
+        assert_eq!(imported.check(), Err("a list holds at most 30 profiles".into()));
+        let mut imported = tastes;
+        imported.worker_profiles.account = vec![WorkerProfile { tools: many(41), ..profile("x") }];
+        assert_eq!(imported.check(), Err("x names at most 40 tools".into()));
+    }
+
     fn names(profiles: &[WorkerProfile]) -> Vec<&str> {
         profiles.iter().map(|p| p.name.as_str()).collect()
     }
