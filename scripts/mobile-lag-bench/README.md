@@ -42,7 +42,7 @@ PLAYWRIGHT=<dir>/node_modules/playwright node scripts/mobile-lag-bench/run.js --
 | `--runs 3` | Runs per throttle. |
 | `--port 55140` | Port of the page and the fake hub. |
 | `--profile` | Writes a V8 CPU profile of the measured window and its top functions (`*.profile-top.json`). Profiling slows the page: do not report numbers from these runs. |
-| `--trace` | Writes a Chrome trace with the stacks that forced style and layout. Read it with `node scripts/mobile-lag-bench/trace-top.js <trace.json>`. Not for reported numbers either. |
+| `--trace` | Writes a Chrome trace with the stacks that forced style and layout. Read it with `node scripts/mobile-lag-bench/trace-top.js <trace.json>`. With `INVALIDATIONS=1` in the environment it also records what invalidated style, which makes the trace about 300 MB. Not for reported numbers either. |
 | `--count fnA,fnB` | Counts calls and inclusive time of these global functions. Not for reported numbers. |
 | `--shots` | Screenshots of the Orchestrator, list, thread and Needs you screens of the first run. |
 
@@ -58,4 +58,8 @@ Each run writes `<load>-x<throttle>-run<n>.json`, and the command writes `summar
 - `received`: the frames and bytes the hub sent per second, by kind.
 - `sidebarAnimations`: CSS animations running in the sidebar while the Orchestrator screen hides it (`hidden`) and while the thread list shows it (`shown`).
 
-Compare two `ui/` folders by alternating them, one run each per round, since the machine's load drifts between runs.
+Compare two `ui/` folders by alternating them, one run each per round, since the machine's load drifts between runs. `compare.js` prints the median and range of each metric per side:
+
+```
+node scripts/mobile-lag-bench/compare.js before=<out1>,<out3> after=<out2>,<out4>
+```
