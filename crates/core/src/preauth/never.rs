@@ -1791,9 +1791,9 @@ mod tests {
     /// A worktree with a project in it, a scratch dir, a home with an ssh key, and a folder outside all three.
     fn fx() -> Fx {
         let tmp = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let base = dunce::canonicalize(tmp.path()).unwrap();
         let (work, scratch, home, elsewhere) = (base.join("work"), base.join("scratch"), base.join("home"), base.join("elsewhere"));
-        let claude = home.join("cfg/accounts/work");
+        let claude = home.join("cfg").join("accounts").join("work");
         for d in [work.join("crates/core/src"), work.join("node_modules/.bin"), scratch.clone(), home.join(".ssh"), home.join(".config/pinned/uploads"), elsewhere.clone(), claude.clone()] {
             std::fs::create_dir_all(d).unwrap();
         }
@@ -1802,8 +1802,10 @@ mod tests {
         Fx { _tmp: tmp, work, scratch, home, elsewhere, claude }
     }
 
+    /// `s` with each `{name}` a path of the fixture, spelled with `/`: a shell reads `\` as an
+    /// escape, so `C:\…` in a command would lose its separators on Windows.
     fn sub(f: &Fx, s: &str) -> String {
-        let show = |p: &Path| p.display().to_string();
+        let show = |p: &Path| p.display().to_string().replace('\\', "/");
         s.replace("{work}", &show(&f.work)).replace("{scratch}", &show(&f.scratch)).replace("{home}", &show(&f.home)).replace("{elsewhere}", &show(&f.elsewhere)).replace("{claude}", &show(&f.claude))
     }
 
