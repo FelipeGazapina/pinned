@@ -17,7 +17,7 @@ const openTabs = ["m-mini/tab-7"];
 
 /** The page in a vm: `answer(cmd, args)` plays the backend, and each control is found in the HTML
  * the page last drew, so a click only reaches what a user could see. */
-function page({ answer = () => tastesWith(), projects = {}, machineViews = null, skills = {}, chat = async () => "tab-1", stats = () => noStats(7) } = {}) {
+function page({ answer = () => tastesWith(), projects = {}, machineViews = null, skills = {}, chat = async () => "tab-1", stats = () => noStats(7), hub = null } = {}) {
   const listeners = {};
   const threads = [];
   const drawn = [];
@@ -32,6 +32,7 @@ function page({ answer = () => tastesWith(), projects = {}, machineViews = null,
     headHtml: (title, rest = "") => `<header><h1>${title}</h1>${rest}</header>`,
     icon: (name) => `<svg data-icon="${name}"></svg>`,
     esc,
+    hub,
     connectorCall: async (cmd, args = {}) => {
       if (cmd === "delegation_stats") return stats(args.days);
       calls.push([cmd, JSON.parse(JSON.stringify(args))]);
@@ -835,6 +836,74 @@ test("a failed Save shows the hub's refusal and keeps the draft", async () => {
   assert.match(html, /two profiles are named scout/);
   assert.match(html, /data-act="wpsave"/);
 });
+
+/** `drop_proposed` is the hub's key and `dropProposed` the Tauri command's: connectorCall sends the
+ * same object either way, so the page names the key by the transport (`hub` set means the hub). */
+for (const [transport, hub, key] of [["hub", {}, "drop_proposed"], ["Tauri", null, "dropProposed"]]) {
+  const scoutOf = () => wp({ name: "scout", by: "orchestrator", delivers: "Maps the code." });
+  const dropping = (before, after) => (cmd) => tastesWith({ worker_profiles: cmd === "set_worker_profiles" ? after : before });
+  const dismissed = (p) => vm.runInContext("typeof profilesUi.dismissed === 'undefined' ? 0 : profilesUi.dismissed.size", p.context);
+
+  test(`${transport}: Approve sends the list with the row and ${key} naming it, and the card goes with the reply`, async () => {
+    const scout = scoutOf();
+    const before = profilesOf({ account: [wp({ name: "fixer" })], proposed: [scout] });
+    const p = page({ hub, answer: dropping(before, profilesOf({ account: [wp({ name: "fixer" }), scout], proposed: [] })) });
+    await p.show();
+    await p.click(/data-act="wpapprove"/);
+    assert.deepEqual(sent(p), [["set_worker_profiles", { project: null, profiles: [wp({ name: "fixer" }), scout], [key]: ["scout"] }]]);
+    assert.doesNotMatch(section(p.html(), "Profiles"), /data-act="wpapprove"|Created by the Orchestrator/);
+    assert.equal(dismissed(p), 0);
+  });
+
+  test(`${transport}: Discard sends the scope's list unchanged with ${key} naming the proposal`, async () => {
+    const before = profilesOf({ account: [wp({ name: "fixer" })], proposed: [scoutOf()] });
+    const p = page({ hub, answer: dropping(before, profilesOf({ account: [wp({ name: "fixer" })], proposed: [] })) });
+    await p.show();
+    await p.click(/data-act="wpdismiss"/);
+    assert.deepEqual(sent(p), [["set_worker_profiles", { project: null, profiles: [wp({ name: "fixer" })], [key]: ["scout"] }]]);
+    assert.ok(!sent(p).some(([cmd]) => cmd === "set_taste"));
+  });
+
+  test(`${transport}: after Discard the card is drawn from the reply, not from a page-side set`, async () => {
+    const before = profilesOf({ proposed: [scoutOf(), wp({ name: "other", by: "orchestrator" })] });
+    const p = page({ hub, answer: dropping(before, profilesOf({ proposed: [wp({ name: "other", by: "orchestrator" })] })) });
+    await p.show();
+    await p.click(/data-act="wpdismiss" data-index="0"/);
+    const html = section(p.html(), "Profiles");
+    assert.doesNotMatch(html, />scout</);
+    assert.match(html, />other</);
+    assert.equal(dismissed(p), 0, "nothing is hidden in memory");
+  });
+
+  test(`${transport}: a reply that still holds the proposal keeps its card`, async () => {
+    const before = profilesOf({ proposed: [scoutOf()] });
+    const p = page({ hub, answer: dropping(before, before) });
+    await p.show();
+    await p.click(/data-act="wpdismiss"/);
+    assert.match(section(p.html(), "Profiles"), /data-act="wpapprove"/);
+  });
+
+  test(`${transport}: a failed Discard keeps the proposal and shows the error`, async () => {
+    const before = profilesOf({ proposed: [scoutOf()] });
+    const p = page({ hub, answer: (cmd) => (cmd === "set_worker_profiles" ? Promise.reject(new Error("the hub is away")) : tastesWith({ worker_profiles: before })) });
+    await p.show();
+    await p.click(/data-act="wpdismiss"/);
+    const html = section(p.html(), "Profiles");
+    assert.match(html, /the hub is away/);
+    assert.match(html, /data-act="wpapprove"/);
+    assert.match(html, />scout</);
+  });
+
+  test(`${transport}: a failed Approve keeps the proposal and shows the error`, async () => {
+    const before = profilesOf({ proposed: [scoutOf()] });
+    const p = page({ hub, answer: (cmd) => (cmd === "set_worker_profiles" ? Promise.reject(new Error("the hub is away")) : tastesWith({ worker_profiles: before })) });
+    await p.show();
+    await p.click(/data-act="wpapprove"/);
+    const html = section(p.html(), "Profiles");
+    assert.match(html, /the hub is away/);
+    assert.match(html, />scout</);
+  });
+}
 
 test("a rule id is escaped in the Reviewer section", async () => {
   const bad = "A<b>1";
