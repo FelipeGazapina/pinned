@@ -246,6 +246,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_cannot_be_read_stays_where_it_is() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp("unreadable");
+        save(&dir, &login()).unwrap();
+        let file = dir.join(FILE);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&file).is_ok() {
+            // root reads anything, so there is no read error to test
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
+        let answer = load(&dir);
+        assert_eq!(answer, Err("the feature map could not be read: permission denied".into()));
+        assert!(file.exists(), "the file stays");
+        assert!(corrupt_files(&dir).is_empty(), "nothing was set aside");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(load(&dir), Ok(login()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_truncated_file_is_kept_aside_and_never_saved_over() {
         let dir = temp("truncated");
