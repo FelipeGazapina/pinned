@@ -164,22 +164,33 @@ fn git_run(dir: &Path, path: Option<&str>, args: &[&str]) -> Result<(bool, Strin
     Ok((out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned()))
 }
 
-/// The findings in the reviewer's answer, only the ones naming a rule in `rules`. None when the
-/// answer holds no findings list at all.
-pub fn findings(answer: &str, rules: &[Rule]) -> Option<Vec<Finding>> {
+/// The findings in the reviewer's answer that name a rule in `rules`, and the ids it named that
+/// pinned did not send, such as one a planted line in the diff asked for. None unless the answer
+/// is the `{"findings": [...]}` object: a bare list or prose is no answer.
+pub fn findings(answer: &str, rules: &[Rule]) -> Option<(Vec<Finding>, Vec<String>)> {
     let value = json_in(answer)?;
-    let list = match &value {
-        Value::Array(list) => list,
-        Value::Object(object) => object.get("findings")?.as_array()?,
-        _ => return None,
-    };
-    let read: Vec<Finding> = list.iter().filter_map(finding).collect();
-    Some(known_rules_only(read, rules).into_iter().take(MOST_FINDINGS).collect())
+    let list = value.as_object()?.get("findings")?.as_array()?;
+    let (known, unknown): (Vec<Finding>, Vec<Finding>) = list.iter().filter_map(finding).partition(|finding| rules.iter().any(|rule| rule.id == finding.rule));
+    let mut named: Vec<String> = vec![];
+    for finding in unknown {
+        if !named.contains(&finding.rule) {
+            named.push(finding.rule);
+        }
+    }
+    Some((known.into_iter().take(MOST_FINDINGS).collect(), named))
 }
 
-/// Drops each finding that names no rule pinned sent, such as one a planted line in the diff asked for.
-fn known_rules_only(findings: Vec<Finding>, rules: &[Rule]) -> Vec<Finding> {
-    findings.into_iter().filter(|finding| rules.iter().any(|rule| rule.id == finding.rule)).collect()
+/// Ids a reviewer named, on one line of at most 200 characters.
+pub fn clipped_ids(ids: &[String]) -> String {
+    clip_chars(&one_line(&ids.join(", ")), 200)
+}
+
+/// `text` cut to `most` characters, with an ellipsis when cut.
+pub fn clip_chars(text: &str, most: usize) -> String {
+    match text.char_indices().nth(most) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_owned(),
+    }
 }
 
 fn finding(value: &Value) -> Option<Finding> {
@@ -200,17 +211,14 @@ fn finding(value: &Value) -> Option<Finding> {
     Some(Finding { rule, file: value["file"].as_str().unwrap_or_default().trim().to_owned(), lines, what })
 }
 
-/// The JSON in an answer: all of it, or the span from its first bracket to its last, as when
-/// the model wrapped it in a code fence.
+/// The JSON object in an answer: all of it, or the span from its first brace to its last, as
+/// when the model wrapped it in a code fence.
 fn json_in(answer: &str) -> Option<Value> {
     if let Ok(value) = serde_json::from_str(answer.trim()) {
         return Some(value);
     }
-    ['{', '['].into_iter().find_map(|open| {
-        let close = if open == '{' { '}' } else { ']' };
-        let (start, end) = (answer.find(open)?, answer.rfind(close)?);
-        (start < end).then(|| serde_json::from_str(&answer[start..=end]).ok()).flatten()
-    })
+    let (start, end) = (answer.find('{')?, answer.rfind('}')?);
+    (start < end).then(|| serde_json::from_str(&answer[start..=end]).ok()).flatten()
 }
 
 #[cfg(test)]
@@ -281,7 +289,8 @@ mod tests {
                 { "rule": "A1", "what": "" },
             ] })
         );
-        let found = findings(&answer, &rules).unwrap();
+        let (found, unknown) = findings(&answer, &rules).unwrap();
+        assert_eq!(unknown, ["P9"]);
         assert_eq!(found.iter().map(|f| f.rule.as_str()).collect::<Vec<_>>(), ["A1", "P1"]);
         assert_eq!(found[0].what.chars().count(), FINDING_CHARS);
         assert_eq!((found[1].lines.clone(), found[1].what.as_str()), (vec![7], "no test for this"));

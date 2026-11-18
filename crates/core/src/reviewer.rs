@@ -118,6 +118,9 @@ pub enum ReviewState {
     Sent,
     /// The rounds ran out with findings left, and the Captain heard.
     Limit,
+    /// The review did not run, or its answer could not judge the change; `note` says why. Never
+    /// a pass.
+    NotReviewed,
 }
 
 /// One thing a review found, against one rule.
@@ -250,7 +253,7 @@ mod tests {
         let value = serde_json::to_value(&round).unwrap();
         assert_eq!(value["state"], "sent");
         assert_eq!(serde_json::from_value::<ReviewRound>(value).unwrap(), round);
-        for (state, name) in [(ReviewState::Passed, "passed"), (ReviewState::Sent, "sent"), (ReviewState::Limit, "limit")] {
+        for (state, name) in [(ReviewState::Passed, "passed"), (ReviewState::Sent, "sent"), (ReviewState::Limit, "limit"), (ReviewState::NotReviewed, "not_reviewed")] {
             assert_eq!(serde_json::to_value(state).unwrap(), json!(name));
         }
         for (by, name) in [(SendBackBy::Captain, "captain"), (SendBackBy::Chain, "chain")] {

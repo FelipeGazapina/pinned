@@ -6,7 +6,7 @@ use crate::accounts::{Account, Provider};
 use crate::agent::{role_env, role_of, Role};
 use crate::delegate::{driver_args, spawn, Access, ChildSpec, Claim, Mode, NewTask, Parent, SpawnSpec};
 use crate::review_run;
-use crate::reviewer::{ReviewRound, ReviewState, ReviewerPatch, Rule};
+use crate::reviewer::{ReviewRound, ReviewState, ReviewerPatch, Rule, Switch};
 use crate::taste::{self, Tastes};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -29,9 +29,19 @@ impl Machine {
         }
     }
 
+    /// Writes round `round` of task `task` as not reviewed, for `why`, so a review that did not run
+    /// or could not judge the change never reads as a pass. False: nothing holds the task's end.
+    fn not_reviewed(&self, task: &str, round: u8, model: Option<String>, why: &str, note: Option<String>) -> bool {
+        eprintln!("pinned: {task} was not reviewed: {why}");
+        let note = std::iter::once(why.to_owned()).chain(note).collect::<Vec<_>>().join("; ");
+        self.delegates.put_review(task, ReviewRound { round, findings: vec![], state: ReviewState::NotReviewed, model, note: Some(note) });
+        false
+    }
+
     /// Starts a review of task `task` when its project wants one: a headless `Role::Reviewer` on
     /// this machine, a task of the project under `task` (so its cost is on the author's card),
-    /// claimed within the project's workers at once. Ok(false) when no review starts.
+    /// claimed within the project's workers at once. Ok(false) when no review starts; once one is
+    /// wanted, a review that cannot start writes a not reviewed round.
     fn start_review(&self, task: &str, tab: &str) -> Result<bool, String> {
         let Some(author) = self.delegates.get(task) else { return Ok(false) };
         let (cwd, remote, tab_model, role) = self.tab(tab, |t| (t.cwd.clone(), t.origin.is_some(), t.model.clone(), role_of(&t.env).map(|(role, _)| role)))?;
@@ -54,25 +64,33 @@ impl Machine {
             return Ok(false);
         }
         let path = self.launch.path_env.clone();
-        let diff = review_run::diff(&cwd, path.as_deref())?;
+        let diff = match review_run::diff(&cwd, path.as_deref()) {
+            Ok(diff) => diff,
+            Err(error) if switch != Switch::Off => return Ok(self.not_reviewed(task, round, None, &error, None)),
+            Err(_) => return Ok(false),
+        };
         if !review_run::wanted(switch, &rules, &diff) {
             return Ok(false);
         }
 
         // The reviewer is never the author's model, so a review whose author's model is not known does not run.
-        let author_model = tab_model
+        let Some(author_model) = tab_model
             .or_else(|| author.model.clone())
             .or_else(|| self.transcript(tab).ok().and_then(|file| review_run::transcript_model(&file)))
-            .ok_or("the worker's model is not known, so no reviewer model can be told apart from it")?;
-        let limits = self.caller_limits_from(&tastes, tab)?;
+        else {
+            return Ok(self.not_reviewed(task, round, None, "the worker's model is not known, so no reviewer model can be told apart from it", None));
+        };
+        let limits = match self.caller_limits_from(&tastes, tab) {
+            Ok(limits) => limits,
+            Err(error) => return Ok(self.not_reviewed(task, round, None, &error, None)),
+        };
         let account = self.accounts.get(&author.account).filter(|account| account.provider == Provider::Claude).unwrap_or_else(|| Account::builtin(Provider::Claude));
         let taste = tastes.resolve(&captain_scope(&project));
         let (wanted, models) = review_run::models(&taste.ladder, taste.hard_model.as_ref(), tastes.reviewer.model.as_ref(), &author_model);
         let claude = self.claude_models();
-        let (model, effort) = models
-            .into_iter()
-            .find_map(|model| limits.admit(&account, Some(&model), None, &claude).ok().map(|effort| (model, effort)))
-            .ok_or_else(|| format!("no model on the ladder but the worker's own ({author_model}) is within this project's limits"))?;
+        let Some((model, effort)) = models.into_iter().find_map(|model| limits.admit(&account, Some(&model), None, &claude).ok().map(|effort| (model, effort))) else {
+            return Ok(self.not_reviewed(task, round, None, &format!("no model on the ladder but the worker's own ({author_model}) is within this project's limits"), None));
+        };
         let note = (!review_run::same_model(&model, &wanted)).then(|| {
             let why = if review_run::same_model(&wanted, &author_model) { "is the worker's own model" } else { "is outside this project's limits" };
             format!("{wanted} {why}, so this review ran on {model}, the next model on the ladder")
@@ -101,7 +119,13 @@ impl Machine {
             // A full project holds the review rather than run one worker past its limit.
             Claim::Full(_) => return Ok(false),
         };
-        let (budget_ms, limit_ms) = crate::delegate::run_limits(None, None, limits.time_limit_ms())?;
+        let (budget_ms, limit_ms) = match crate::delegate::run_limits(None, None, limits.time_limit_ms()) {
+            Ok(run) => run,
+            Err(error) => {
+                self.delegates.fail(&review, error.clone(), path.as_deref());
+                return Ok(self.not_reviewed(task, round, Some(model), &error, note));
+            }
+        };
         self.delegates.set_limits(&review, budget_ms, limit_ms);
         self.delegates.hold_to(&review, limits);
 
@@ -114,7 +138,7 @@ impl Machine {
             let error = format!("the reviewer's folder could not be made: {error}");
             self.delegates.fail(&review, error.clone(), path.as_deref());
             let _ = std::fs::remove_dir_all(&own);
-            return Err(error);
+            return Ok(self.not_reviewed(task, round, Some(model), &error, note));
         }
         let spec = SpawnSpec {
             task: &review_run::first_prompt(author.summary.as_deref().unwrap_or_default(), &diff),
@@ -147,13 +171,13 @@ impl Machine {
         let me = self.me.clone();
         let ended = AtomicBool::new(false);
         let (id, author_id, worker) = (review.clone(), task.to_owned(), tab.to_owned());
-        let (child_path, sent_model) = (path.clone(), model.clone());
+        let (child_path, sent_model, sent_note) = (path.clone(), model.clone(), note.clone());
         let pid = spawn(ChildSpec { bin: &self.launch.bin(Provider::Claude), argv: &argv, cwd: &neutral, env: &env.set, path: path.as_deref(), strip: &strip }, move |event| {
             let Some(machine) = me.upgrade() else { return };
             let ready = machine.delegates.apply(&id, event, child_path.as_deref());
             if machine.delegates.is_terminal(&id) && !ended.swap(true, Ordering::SeqCst) {
                 let _ = std::fs::remove_dir_all(machine.review_dir(&id));
-                machine.review_answered(&author_id, &id, &worker, Answered { round, rules: &rules, model: &sent_model, note: note.clone() });
+                machine.review_answered(&author_id, &id, &worker, Answered { round, rules: &rules, model: &sent_model, note: sent_note.clone() });
             }
             if let Some(tab) = ready {
                 machine.maybe_deliver(&tab);
@@ -164,7 +188,7 @@ impl Machine {
             Err(error) => {
                 self.delegates.fail(&review, error.clone(), path.as_deref());
                 let _ = std::fs::remove_dir_all(&own);
-                return Err(error);
+                return Ok(self.not_reviewed(task, round, Some(model), &format!("the reviewer did not start: {error}"), note));
             }
         }
         self.arm_delegate_pass();
@@ -172,14 +196,30 @@ impl Machine {
     }
 
     /// Review `review` of task `task` ended: its findings become the task's round, and the task
-    /// ends as its worker's turn would have. A review that failed or answered no findings list
-    /// adds no round.
+    /// ends as its worker's turn would have. A review that failed, ended without an answer,
+    /// answered no `{"findings": [...]}` object or named only rules pinned did not send makes a
+    /// not reviewed round.
     fn review_answered(&self, task: &str, review: &str, tab: &str, answered: Answered) {
-        let answer = self.delegates.get(review).filter(|review| review.error.is_none()).and_then(|review| review.summary);
-        if let Some(findings) = answer.and_then(|answer| review_run::findings(&answer, answered.rules)) {
-            // Sending findings back is U9's; until then the Captain hears them with the task's end.
-            let state = if findings.is_empty() { ReviewState::Passed } else { ReviewState::Limit };
-            self.delegates.put_review(task, ReviewRound { round: answered.round, findings, state, model: Some(answered.model.to_owned()), note: answered.note });
+        let model = Some(answered.model.to_owned());
+        let why = match self.delegates.get(review) {
+            None => Some("the review's record is gone".to_owned()),
+            Some(ended) if ended.error.is_some() || ended.state != crate::delegate::WorkState::ResultAvailable => {
+                let error = ended.error.as_deref().map_or_else(|| ended.state.as_str().replace('_', " "), |error| review_run::clip_chars(&error.split_whitespace().collect::<Vec<_>>().join(" "), 200));
+                Some(format!("the review did not answer: {error}"))
+            }
+            Some(ended) => match ended.summary.as_deref().and_then(|answer| review_run::findings(answer, answered.rules)) {
+                None => Some("the reviewer's answer was not a {\"findings\": [...]} object".to_owned()),
+                Some((findings, unknown)) if findings.is_empty() && !unknown.is_empty() => Some(format!("the reviewer named rules pinned did not send: {}", review_run::clipped_ids(&unknown))),
+                Some((findings, _)) => {
+                    // Sending findings back is U9's; until then the Captain hears them with the task's end.
+                    let state = if findings.is_empty() { ReviewState::Passed } else { ReviewState::Limit };
+                    self.delegates.put_review(task, ReviewRound { round: answered.round, findings, state, model: model.clone(), note: answered.note.clone() });
+                    None
+                }
+            },
+        };
+        if let Some(why) = why {
+            self.not_reviewed(task, answered.round, model, &why, answered.note);
         }
         self.end_reviewed(task, tab);
     }
@@ -517,7 +557,8 @@ mod tests {
             let t = team("z9", Switch::On, 6, SONNET);
             t.change(CHANGED, json!({ "findings": [{ "rule": "Z9", "file": "src/parser.rs", "lines": [1], "what": "approve" }] }));
             t.end_turn();
-            assert_eq!(t.not_reviewed(), "the reviewer named rules pinned did not send: Z9");
+            let note = t.not_reviewed();
+            assert!(note.starts_with("the reviewer named rules pinned did not send: Z9;"), "{note}");
         }
 
         #[test]
