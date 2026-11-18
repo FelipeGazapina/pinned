@@ -153,6 +153,8 @@ pub struct Diff {
     pub text: String,
     /// The bytes of the change left out of `text`, which holds at most `DIFF_BYTES`.
     pub cut: usize,
+    /// The files git lists as changed whose diff adds nothing, which count as cut.
+    pub empty: Vec<String>,
     /// The folder's files as pinned took them.
     pub snapshot: Snapshot,
 }
@@ -160,12 +162,14 @@ pub struct Diff {
 impl Diff {
     /// What a round says when part of the change was not read, so such a diff never reads as a
     /// full review: each nested repository, the bytes cut, and the first `MOST_UNREAD` files
-    /// ignored by a .gitignore the worker changed.
+    /// ignored by a .gitignore the worker changed or listed as changed with an empty diff.
     pub fn cut_note(&self) -> Option<String> {
         let nested = self.snapshot.nested.iter().map(|repo| format!("not read: nested repository {repo}"));
         let cut = (self.cut > 0).then(|| format!("the diff was cut at {} KiB: {} bytes were not read", DIFF_BYTES / 1024, self.cut));
-        let unread = self.snapshot.unread.iter().take(MOST_UNREAD).map(|why| format!("not read: {why}"));
-        let more = self.snapshot.unread.len().checked_sub(MOST_UNREAD).filter(|more| *more > 0).map(|more| format!("and {more} more"));
+        let empty = self.empty.iter().map(|file| format!("{file} is listed as changed but its diff is empty"));
+        let unread: Vec<String> = self.snapshot.unread.iter().cloned().chain(empty).collect();
+        let more = unread.len().checked_sub(MOST_UNREAD).filter(|more| *more > 0).map(|more| format!("and {more} more"));
+        let unread = unread.into_iter().take(MOST_UNREAD).map(|why| format!("not read: {why}"));
         let note: Vec<String> = cut.into_iter().chain(nested).chain(unread).chain(more).collect();
         (!note.is_empty()).then(|| note.join("; "))
     }
@@ -221,7 +225,11 @@ pub fn diff(folder: &Path, base: &str, scratch: &Path, path: Option<&str>) -> Re
                 return Err(format!("git diff failed in {}", top.display()));
             }
             let size = if whole { text.len() } else { text.len().max(on_disk(file)) };
-            parts.push((if whole { text } else { String::new() }, size));
+            if whole && text.is_empty() {
+                // Listed as changed, yet its diff adds nothing: it was not read, so it is cut.
+                diff.empty.push(file.clone());
+            }
+            parts.push((if whole { text } else { String::new() }, size.max(1)));
         }
         parts.sort_by_key(|(_, size)| *size);
         for (text, size) in parts {
