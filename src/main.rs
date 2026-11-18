@@ -296,10 +296,11 @@ fn set_taste(machine: State<Arc<Machine>>, scope: TasteScope, patch: TastePatch)
 }
 
 /// A signed-out app's worker profiles: the account's list, or `project`'s, as the hub's
-/// `set_worker_profiles` stores a signed-in one's.
+/// `set_worker_profiles` stores a signed-in one's. Approve and Discard name the proposal in
+/// `drop_proposed`, which goes in the same write.
 #[tauri::command]
-fn set_worker_profiles(machine: State<Arc<Machine>>, project: Option<String>, profiles: Vec<pinned_core::profiles::WorkerProfile>) -> Result<Tastes, String> {
-    machine.set_local_worker_profiles(project.as_deref(), profiles)
+fn set_worker_profiles(machine: State<Arc<Machine>>, project: Option<String>, profiles: Vec<pinned_core::profiles::WorkerProfile>, drop_proposed: Option<Vec<String>>) -> Result<Tastes, String> {
+    machine.set_local_worker_profiles(project.as_deref(), profiles, &drop_proposed.unwrap_or_default())
 }
 
 #[tauri::command]

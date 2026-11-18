@@ -9,10 +9,15 @@ use crate::taste::{self, Tastes};
 use crate::team_tools::ProfilePropose;
 
 impl Machine {
-    /// `Tastes::set_worker_profiles` on this machine's own tastes, for a signed-out app.
-    pub fn set_local_worker_profiles(&self, project: Option<&str>, profiles: Vec<WorkerProfile>) -> Result<Tastes, String> {
+    /// `Tastes::set_worker_profiles` on this machine's own tastes, for a signed-out app, then
+    /// `Tastes::drop_proposed` in the same write, as the hub's `SetWorkerProfiles` does.
+    pub fn set_local_worker_profiles(&self, project: Option<&str>, profiles: Vec<WorkerProfile>, drop_proposed: &[String]) -> Result<Tastes, String> {
         self.check_skills(&profiles)?;
-        taste::change(self.orchestration_dir.as_deref(), |tastes| tastes.set_worker_profiles(project, profiles))
+        taste::change(self.orchestration_dir.as_deref(), |tastes| {
+            tastes.set_worker_profiles(project, profiles)?;
+            tastes.drop_proposed(drop_proposed);
+            Ok(())
+        })
     }
 
     /// Whether every skill `profiles` name is installed here, as the `skills` action lists them.
