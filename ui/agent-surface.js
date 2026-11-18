@@ -5,6 +5,8 @@
 let agentConfirmations = [];
 /** Confirmation ids whose Approve or Deny is on its way to the hub. */
 const agentDeciding = new Set();
+/** Confirmation ids whose Deny opened its "Why? (optional)" field, with what is typed in it so far. */
+const agentWhy = new Map();
 /** What an approved action handed the user to see once, `{ action, result }`, as `create_invite`'s
  * `NewInvite` or `pair_code`'s `PairCode`. It shows nowhere else, so it stays until the user closes it. */
 let agentShown = null;
@@ -161,6 +163,11 @@ function agentActionTitle(action, args, machine) {
 /** The asking thread's title in curly quotes, trailing punctuation dropped, so any title reads cleanly. */
 const agentQuoted = (c) => `\u201c${(c.title || c.tab).replace(/[\s.!?,;:\u2026]+$/, "")}\u201d`;
 
+/** The one-line field Deny opens, for the confirmation `id`; the page puts what was typed back in it. */
+function agentWhyField(id) {
+  return `<label class="agent-why">Why? (optional)<input type="text" id="agent-why-${esc(id)}" data-agent-why maxlength="300" autocomplete="off" enterkeyhint="send"></label>`;
+}
+
 function agentConfirmationHtml(c) {
   const busy = agentDeciding.has(c.id) ? " disabled" : "";
   const who = `Asked by ${agentQuoted(c)} · ${agentWords(c.role)} on ${c.machine_name || "removed machine"} · ${agentSince(c.at)}`;
@@ -170,7 +177,11 @@ function agentConfirmationHtml(c) {
       <b class="title" title="${esc(c.about)}">${esc(agentActionTitle(c.action, c.args, c.machine))}${c.target ? ` on ${esc(agentMachineName(c.target) || c.target)}` : ""}</b>
       ${Object.keys(c.args ?? {}).length && !AGENT_TITLE_ONLY.has(c.action) ? `<pre class="args">${esc(JSON.stringify(c.args, null, 2))}</pre>` : ""}
       <span class="who">${esc(who)}</span>
-      <div class="actions start"><button type="button" class="primary" data-agent="approve"${busy}>Approve</button><button type="button" class="outline" data-agent="deny"${busy}>Deny</button></div>
+      ${
+        agentWhy.has(c.id)
+          ? `<div class="actions start">${agentWhyField(c.id)}<button type="button" class="primary" data-agent="why-send"${busy}>Send</button><button type="button" class="outline" data-agent="why-cancel">Cancel</button></div>`
+          : `<div class="actions start"><button type="button" class="primary" data-agent="approve"${busy}>Approve</button><button type="button" class="outline" data-agent="deny"${busy}>Deny</button></div>`
+      }
     </div>
   </div>`;
 }
@@ -287,8 +298,9 @@ function askOwnerPassword(error) {
 }
 
 /** Approve or Deny. `entered` is what the user typed in a credential action's form, and its failure
- * is thrown for that form to show, while the confirmation keeps waiting. */
-async function decideAgentConfirmation(id, approve, entered) {
+ * is thrown for that form to show, while the confirmation keeps waiting. `reason` is why the user
+ * denied, when they said. */
+async function decideAgentConfirmation(id, approve, entered, reason) {
   const asked = agentConfirmations.find((c) => c.id === id);
   if (!asked || agentDeciding.has(id)) {
     if (entered) throw asked ? "It is being approved already." : "The agent's request no longer waits.";
@@ -297,7 +309,7 @@ async function decideAgentConfirmation(id, approve, entered) {
   agentDeciding.add(id);
   agentSurfaceChanged();
   try {
-    const decided = await hub.hub({ cmd: "decide_confirmation", id, approve, ...(entered ? { entered } : {}) });
+    const decided = await hub.hub({ cmd: "decide_confirmation", id, approve, ...(entered ? { entered } : {}), ...(reason ? { reason } : {}) });
     agentConfirmations = agentConfirmations.filter((c) => c.id !== id);
     if (agentApproving?.id === id) forgetAgentApproval();
     if (decided.decision === "approved" && AGENT_SHOWN_ONCE[asked.action] && decided.result) agentShown = { action: asked.action, result: decided.result };
@@ -341,9 +353,54 @@ function approveAgentConfirmation(id) {
   return asked && AGENT_FORMS[asked.action] ? openAgentForm(asked) : decideAgentConfirmation(id, true);
 }
 
+/** Deny: the Why field opens in the card, and nothing is sent until Send or Enter. */
+function openAgentWhy(id) {
+  agentWhy.set(id, agentWhy.get(id) ?? "");
+  agentSurfaceChanged();
+  document.getElementById(`agent-why-${id}`)?.focus?.();
+}
+
+function closeAgentWhy(id) {
+  agentWhy.delete(id);
+  agentSurfaceChanged();
+}
+
+/** Sends the denial with what was typed, or with no reason when it is blank. */
+function sendAgentWhy(id, typed) {
+  agentWhy.delete(id);
+  return decideAgentConfirmation(id, false, undefined, (typed ?? "").trim());
+}
+
+const agentWhyOf = (el) => (el.matches?.("[data-agent-why]") ? el.closest("[data-confirmation]")?.dataset.confirmation : undefined);
+
+/** Keeps what is typed in a Why field, so a repaint puts it back. */
+function agentWhyInput(e) {
+  const id = agentWhyOf(e.target);
+  if (id !== undefined && agentWhy.has(id)) agentWhy.set(id, e.target.value);
+}
+
+/** Enter in a Why field sends the denial; Escape closes the field and sends nothing. */
+function agentWhyKey(e) {
+  const id = agentWhyOf(e.target);
+  if (id === undefined || e.isComposing) return;
+  if (e.key === "Enter") {
+    e.preventDefault();
+    sendAgentWhy(id, e.target.value);
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation();
+    closeAgentWhy(id);
+  }
+}
+
 const AGENT_CLICKS = {
   approve: (button) => approveAgentConfirmation(button.closest("[data-confirmation]").dataset.confirmation),
-  deny: (button) => decideAgentConfirmation(button.closest("[data-confirmation]").dataset.confirmation, false),
+  deny: (button) => openAgentWhy(button.closest("[data-confirmation]").dataset.confirmation),
+  "why-send": (button) => {
+    const id = button.closest("[data-confirmation]").dataset.confirmation;
+    sendAgentWhy(id, agentWhy.get(id));
+  },
+  "why-cancel": (button) => closeAgentWhy(button.closest("[data-confirmation]").dataset.confirmation),
   more: () => loadAgentAudit(agentActivity.rows.at(-1)?.at),
   "copy-code": (button) =>
     navigator.clipboard.writeText(agentShown.result[AGENT_SHOWN_ONCE[agentShown.action].show]).then(
@@ -378,6 +435,7 @@ function drawAgentActivity() {
     return;
   }
   const { rows, more, loading, notice } = agentActivity;
+  const typing = document.activeElement?.id;
   const trail = rows.length ? `<div class="agent-audit">${rows.map(agentAuditRowHtml).join("")}</div>` : `<p class="hint">${loading ? "Loading…" : "No agent has acted as you yet."}</p>`;
   settingsPage.innerHTML = `<h2>Agent activity</h2><section id="agent-activity">
     <p class="hint">Every action an agent took as you, newest first. Actions that need your approval wait in Needs you.</p>
@@ -388,7 +446,16 @@ function drawAgentActivity() {
     ${trail}
     ${more ? `<div class="actions start"><button type="button" class="secondary" data-agent="more"${loading ? " disabled" : ""}>${loading ? "Loading…" : "Show more"}</button></div>` : ""}
   </section>`;
-  document.getElementById("agent-activity").onclick = agentSurfaceClick;
+  const section = document.getElementById("agent-activity");
+  section.onclick = agentSurfaceClick;
+  section.onkeydown = agentWhyKey;
+  section.oninput = agentWhyInput;
+  for (const [id, typed] of agentWhy) {
+    const field = document.getElementById(`agent-why-${id}`);
+    if (!field) continue;
+    field.value = typed;
+    if (typing === field.id) field.focus();
+  }
 }
 
 settingsSection({ page: "agent-activity", label: "Agent activity", icon: "shield", show: () => showAgentActivity(), search: [{ title: "Agent activity", terms: ["audit agent actions approvals confirmations trail approve deny"] }] });

@@ -105,6 +105,7 @@ function needsYouActionsHtml(card) {
   switch (card.kind) {
     case "agent": {
       const busy = agentDeciding.has(card.confirmation.id) ? " disabled" : "";
+      if (agentWhy.has(card.confirmation.id)) return `<div class="ny-why">${agentWhyField(card.confirmation.id)}${row(`${nyButton("why-cancel", "Cancel", "ny-secondary", ` data-agent="why-cancel"`)}${nyButton("why-send", "Send", "ny-primary", ` data-agent="why-send"${busy}`)}`)}</div>`;
       return row(`${nyButton("deny", "Deny", "ny-secondary", ` data-agent="deny"${busy}`)}${nyButton("approve", "Approve", "ny-primary", ` data-agent="approve"${busy}`)}`);
     }
     case "approval":
@@ -195,8 +196,8 @@ function drawNeedsYou() {
     holder.innerHTML = html;
     const el = holder.content.firstElementChild;
     needsYouDrawn.set(el, html);
-    const field = el.querySelector("[data-ny-form] input");
-    if (field) field.value = needsYouTyped.get(card.key) ?? "";
+    const field = el.querySelector("[data-ny-form] input") ?? el.querySelector("[data-agent-why]");
+    if (field) field.value = field.matches("[data-agent-why]") ? agentWhy.get(card.confirmation.id) ?? "" : needsYouTyped.get(card.key) ?? "";
     if (old?.contains(focused)) {
       const same = focused.matches("input") ? field : el.querySelector(`[data-ny="${focused.dataset?.ny}"]${focused.dataset?.option ? `[data-option="${focused.dataset.option}"]` : ""}`);
       queueMicrotask(() => (same ?? el.querySelector("button:not(:disabled), input"))?.focus());
@@ -270,7 +271,11 @@ pageView.addEventListener("click", (e) => {
   const card = button && needsYouShown.get(button.closest("[data-key]")?.dataset.key);
   if (card && !button.matches(":disabled")) NEEDS_YOU_ACTS[button.dataset.ny](card, button);
 });
+pageView.addEventListener("keydown", (e) => {
+  if (shellPage() === "needs-you") agentWhyKey(e);
+});
 pageView.addEventListener("input", (e) => {
+  if (shellPage() === "needs-you") agentWhyInput(e);
   const form = e.target.closest?.("[data-ny-form]");
   if (form && shellPage() === "needs-you") needsYouTyped.set(form.closest("[data-key]").dataset.key, e.target.value);
 });

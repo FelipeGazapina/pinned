@@ -232,7 +232,7 @@ test("an empty Why field denies with no reason at all", async () => {
 });
 
 test("Escape and Cancel put Approve and Deny back and send nothing", async () => {
-  const { context, calls } = app();
+  const { context, calls, state } = app();
   context.onAgentConfirmations([createInvite]);
   click(context, "deny", "c-2");
   type(context, "c-2", "half a thought");
@@ -242,7 +242,7 @@ test("Escape and Cancel put Approve and Deny back and send nothing", async () =>
   click(context, "why-cancel", "c-2");
   await flush();
   assert.match(context.asksHtml(), /data-agent="deny">Deny/);
-  assert.equal(context.agentWhyText ? context.agentWhyText("c-2") : "", "", "what was typed is forgotten");
+  assert.equal(state("agentWhy.size"), 0, "what was typed is forgotten");
   assert.equal(calls.length, 0);
 });
 

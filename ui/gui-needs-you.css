@@ -61,6 +61,9 @@ body[data-page="needs-you"] #page-view .page-head .range { display: block; }
 .ny-typed input:focus::placeholder { color: var(--g-side-muted); }
 .ny-send { flex: none; height: 44px; padding: 0 14px; border: 0; border-radius: 12px; background: var(--g-primary); color: var(--g-on-primary); font-weight: 600; }
 .ny-typed:has(input:placeholder-shown) .ny-send { display: none; }
+.ny-why { display: flex; flex-direction: column; gap: 6px; }
+.agent-why { display: flex; flex-direction: column; gap: 4px; flex: 1 1 100%; font-size: 13px; color: var(--g-side-muted); }
+.ny-why .agent-why input { height: 44px; padding: 0 12px; border: 1px solid rgb(var(--g-ink-rgb) / 0.14); border-radius: 12px; outline: 0; background: transparent; color: var(--g-fg); font: inherit; font-size: 15px; }
 .ny-card :focus-visible { outline: 2px solid var(--ny-link); outline-offset: 2px; }
 
 @media (max-width: 767px) {

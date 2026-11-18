@@ -215,7 +215,7 @@ test("Deny on an agent request opens the Why field on the Needs you card, with S
   assert.deepEqual(closed.buttons, ["deny Deny", "approve Approve"]);
   assert.ok(!closed.html.includes("data-agent-why"));
   const open = shown(page({ agents: [asked], why: new Map([["c1", ""]]) }), "agent:c1");
-  assert.deepEqual(open.buttons, ["why-send Send", "why-cancel Cancel"]);
+  assert.deepEqual(open.buttons, ["why-cancel Cancel", "why-send Send"]);
   assert.match(open.html, /Why\? \(optional\)<input type="text"[^>]* data-agent-why/);
   assert.match(open.html, /data-confirmation="c1"/);
 });
