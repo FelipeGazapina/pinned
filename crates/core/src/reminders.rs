@@ -1381,7 +1381,7 @@ fn restore_var(name: &str, value: Option<String>) {
         let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats"];
         let memory = ["memory_search", "memory_save", "memory_forget", "actions", "act"];
         assert_eq!(names(false), [&reminders[..], &delegation, &["agents", "work_cost"], &memory].concat());
-        assert_eq!(names(true), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat());
+        assert_eq!(names(true), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory, &["feature_map_read"]].concat());
         let on_a_node = tool_definitions(false, false, Seat::Other).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         assert_eq!(on_a_node, [&delegation[..], &["agents", "work_cost"], &memory].concat());
         assert_eq!(
@@ -1560,8 +1560,9 @@ fn restore_var(name: &str, value: Option<String>) {
         assert!(!plain.contains(&"delegate".to_owned()), "delegate_task is the one delegation tool: {plain:?}");
         let empty_task = offered(None, Some(""));
         assert!(empty_task.contains(&"delegate_task".to_owned()), "{empty_task:?}");
-        assert_eq!(offered(Some("orchestrator"), None), [&plain[..], &CAPTAIN_TOOLS.map(String::from)].concat());
-        assert_eq!(offered(Some("worker"), None), plain, "a worker starts workers the way a plain thread does");
+        let feature_map = ["feature_map_read", "feature_map_set"].map(String::from);
+        assert_eq!(offered(Some("orchestrator"), None), [&plain[..], &CAPTAIN_TOOLS.map(String::from), &feature_map].concat());
+        assert_eq!(offered(Some("worker"), None), [&plain[..], &feature_map[..1]].concat(), "a worker starts workers the way a plain thread does, and reads the feature map");
         let child = offered(None, Some("task-1"));
         assert!(!child.contains(&"delegate_task".to_owned()), "{child:?}");
         assert!(!child.contains(&"delegate".to_owned()), "{child:?}");
@@ -1577,12 +1578,12 @@ fn restore_var(name: &str, value: Option<String>) {
         let memory = ["memory_search", "memory_save", "memory_forget", "actions", "act"];
         let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats", "agents", "work_cost"], &memory].concat();
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
-        assert_eq!(offered(Some("worker"), None), today);
-        assert_eq!(offered(Some("orchestrator"), None), [&today[..], &CAPTAIN_TOOLS].concat());
+        assert_eq!(offered(Some("worker"), None), [&today[..], &["feature_map_read"]].concat());
+        assert_eq!(offered(Some("orchestrator"), None), [&today[..], &CAPTAIN_TOOLS, &["feature_map_read", "feature_map_set"]].concat());
         assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &["delegation_stats"], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session", "repo_overview", "repo_read", "repo_search"]].concat());
         assert_eq!(offered(Some("taste-chat"), None), [&today[..], &["taste_get", "taste_set", "taste_reset"]].concat(), "only a taste chat may change the way of working");
-        assert_eq!(offered(Some("taste-chat"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a taste chat's delegated child can't");
-        assert_eq!(offered(Some("global-orchestrator"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a delegated child plays no role");
+        assert_eq!(offered(Some("taste-chat"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory, &["feature_map_read"]].concat(), "a taste chat's delegated child can't");
+        assert_eq!(offered(Some("global-orchestrator"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory, &["feature_map_read"]].concat(), "a delegated child plays no role");
 
         let ask = |name, args| project_request(name, &args, Some("tab-9".into())).map(|m| serde_json::to_string(&m).unwrap());
         assert_eq!(
