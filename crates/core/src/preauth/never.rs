@@ -1417,10 +1417,11 @@ impl<'c, 'a> Scan<'c, 'a> {
                     self.owners_into(cwd, c);
                 }
             }
-            // It writes .mcp.json in project scope, and ~/.claude.json in user or local scope.
+            // It writes .mcp.json in project scope, and ~/.claude.json in user or local scope; with
+            // no scope, `add` takes local (`claude mcp add --help`).
             "claude" if sub == "mcp" && pos.get(1).is_some_and(|w| w.text.starts_with("add") || w.text == "remove") => {
-                let home = c.value('s', "scope").is_some_and(|w| matches!(w.text.as_str(), "user" | "local"));
-                self.owners.get_or_insert(if home { "~/.claude.json" } else { OWNERS_FILES[0] });
+                let project = c.value('s', "scope").is_some_and(|w| w.text == "project");
+                self.owners.get_or_insert(if project { OWNERS_FILES[0] } else { "~/.claude.json" });
             }
             "npm" | "pnpm" | "yarn" | "bun" | "npx" | "bunx" | "cargo" | "pip" | "pip3" | "pip2" | "pipx" | "python" | "python3" | "python2" | "uv" | "uvx" | "poetry" | "brew" | "apt" | "apt-get" | "aptitude"
             | "dnf" | "yum" | "apk" | "zypper" | "pacman" | "gem" | "go" | "conda" | "mamba" | "micromamba" | "rustup" | "volta" | "asdf" | "mise" | "composer" | "bundle" | "dotnet" => {
