@@ -14158,6 +14158,51 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn a_guarded_prompt_reads_whether_the_session_skips_its_prompts_where_it_types() {
+        let (m, dir, captain) = limited_captain("guarded-same-read", TastePatch::default());
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let file = dir.join("asks.bin");
+        let asks = cat_tab(&m, &path, false, &file);
+        // The screen lock held keeps the prompt between its first look at the tab and the one that
+        // types: the tab switches to Full access in between.
+        let screen = m.tab(&asks, |t| t.screen.clone()).unwrap();
+        let held = screen.lock().unwrap();
+        let typing = {
+            let (m, asks) = (m.clone(), asks.clone());
+            std::thread::spawn(move || m.call(Call::Prompt { tab: asks, text: "Drop the tables.".into(), refuse_bypass: true }))
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        m.tab(&asks, |t| t.bypass = true).unwrap();
+        drop(held);
+        assert_eq!(typing.join().unwrap(), Err("this session skips its permission prompts, so a message from an agent that asks for them can't reach it; the user can switch it to ask for permissions".into()));
+        assert_eq!(m.call(Call::Prompt { tab: asks.clone(), text: "Go on.".into(), refuse_bypass: false }), Ok(Value::Null));
+        let went_on = b"\x1b[200~Go on.\x1b[201~\r";
+        assert_eq!(typed(&file, went_on), went_on, "the guarded prompt reached a session that skips its prompts");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_global_orchestrator_set_to_ask_opens_a_captain_that_asks_with_the_switch_on() {
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(true)));
+        let dir = temp("global-asks-opens");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let claude = recording_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let path = m.open_project(project).display().to_string();
+        let global = m.open_global_orchestrator().unwrap();
+        m.tab(&global, |t| t.bypass = false).unwrap();
+        let sent = m.send_to_captain(&global, &path, None, "Ship it.", "r-1").unwrap();
+        assert!(matches!(sent, Handoff::Started { .. }), "the project had no Captain: {sent:?}");
+        assert!(!m.view(sent.tab()).unwrap().bypass, "an Orchestrator that asks for its prompts opened a Captain that skips them");
+        assert!(!started(&claude, sent.tab()).iter().any(|a| a == "--dangerously-skip-permissions"), "the Captain started on its text skips its prompts");
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn an_agents_prompt_reaches_another_running_session_and_never_itself_a_captain_or_the_global_tab() {
         let (m, dir, captain) = limited_captain("act-prompt", TastePatch::default());
         let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
