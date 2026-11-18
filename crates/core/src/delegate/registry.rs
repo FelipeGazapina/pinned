@@ -1483,8 +1483,17 @@ impl Delegates {
             .collect()
     }
 
-    pub fn review_cards(&self, _tab: &str) -> Vec<crate::wire::TaskReviews> {
-        vec![]
+    /// The review rounds `tab` shows: its own worker's (no `tab` on the line), and each child its
+    /// Captain tab started, with the worker's tab for the line to link to.
+    pub fn review_cards(&self, tab: &str) -> Vec<crate::wire::TaskReviews> {
+        let tasks = self.tasks.lock().unwrap();
+        let line = |task: &Task, tab: Option<String>| crate::wire::TaskReviews { task: task.id.clone(), name: task.title.clone(), tab, reviews: task.reviews.clone() };
+        let reviewed = |task: &&Task| !task.reviews.is_empty() && task.remote.is_none();
+        let own = |task: &Task| task.thread.as_ref().is_some_and(|thread| thread.runs && thread.tab == tab);
+        let mut cards: Vec<_> = tasks.iter().filter(reviewed).filter(|task| own(task)).map(|task| line(task, None)).collect();
+        let children = tasks.iter().filter(reviewed).filter(|task| !own(task) && root_tab(&tasks, task.parent.clone()).as_deref() == Some(tab));
+        cards.extend(children.map(|task| line(task, task.thread.as_ref().map(|thread| thread.tab.clone()))));
+        cards
     }
 
     pub fn steps_for(&self, tab: &str, tool: &str) -> Option<Vec<Item>> {
