@@ -106,6 +106,11 @@ const REMOTE_CHECK: Duration = Duration::from_secs(60);
 const HOLD_CLEAR: Duration = Duration::from_secs(5);
 /// An idle notice this soon after a submit may have been on its way before it: the submit still counts.
 const IDLE_NOTICE_GRACE: Duration = Duration::from_secs(10);
+/// Claude Code's built-in commands that run at its prompt and start no turn, so no hook answers
+/// them. An unknown command, a skill or a custom command included, waits for Done like a prompt.
+const LOCAL_COMMANDS: [&str; 25] = [
+    "effort", "model", "config", "status", "cost", "usage", "help", "context", "permissions", "hooks", "mcp", "doctor", "theme", "vim", "output-style", "privacy-settings", "terminal-setup", "agents", "plugin", "release-notes", "export", "add-dir", "ide", "todos", "fast",
+];
 /// How long a compaction's mark holds when no end comes for it: the tab then reads as it did before.
 const COMPACT_WAIT: Duration = Duration::from_secs(600);
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
@@ -811,6 +816,9 @@ struct Tab {
     seen: Option<SystemTime>,
     /// When the latest submit went in. Cleared by Done, Failed, and a new session.
     turn_pending: Option<Instant>,
+    /// When the user last submitted one of `LOCAL_COMMANDS`, such as `/effort`, which starts no turn
+    /// and fires no hook. Cleared by any hook but a question, by pinned's own prompt, and by a new session.
+    typed_at: Option<Instant>,
     /// When Claude Code's PreCompact hook last marked the session compacting.
     compacting_since: Option<Instant>,
     /// Set while a worker's turn has ended with background work it started still pending: Claude
@@ -981,8 +989,24 @@ impl Tab {
         self.bare && self.status.is_none() && self.session.as_ref().is_some_and(pty::Session::untouched)
     }
 
+    /// A submit waits for its turn, unless it is a local command the user sent to Claude Code that
+    /// no hook answered within `IDLE_NOTICE_GRACE`, with no compaction running: no Stop hook would end it.
+    fn submit_pending(&self) -> bool {
+        self.turn_pending.is_some_and(|at| !(self.typed_local() && self.account.provider == Provider::Claude && at.elapsed() >= IDLE_NOTICE_GRACE && !self.compacting()))
+    }
+
+    /// The pending submit is the user's local command: no submit went in after it.
+    fn typed_local(&self) -> bool {
+        self.turn_pending.is_some_and(|at| self.typed_at.is_some_and(|typed| typed >= at))
+    }
+
+    /// A prompt, pinned's or the user's, waits for its turn: a line sent now goes into that turn.
+    fn prompt_pending(&self) -> bool {
+        self.turn_pending.is_some() && !self.typed_local()
+    }
+
     fn notice_idle(&self) -> bool {
-        if self.session.is_none() || self.turn_pending.is_some() || !self.draft.empty() {
+        if self.session.is_none() || self.submit_pending() || !self.draft.empty() {
             return false;
         }
         if self.account.provider == Provider::Cursor {
@@ -998,8 +1022,13 @@ impl Tab {
         }
     }
 
-    fn note_submit(&mut self) {
-        self.turn_pending = Some(Instant::now());
+    /// The user submitted a line, `local` when it was one of `LOCAL_COMMANDS`. Typed while a prompt
+    /// still waits for its turn, the line goes into that turn and leaves its marks as they are.
+    fn note_submit(&mut self, local: bool) {
+        if !self.prompt_pending() {
+            let now = Instant::now();
+            (self.turn_pending, self.typed_at) = (Some(now), local.then_some(now));
+        }
         self.stopped = None;
     }
 
@@ -1644,7 +1673,7 @@ impl Machine {
                 Ok(json!(views))
             }
             Call::Board { tab, task } => json(self.board(&tab, task.as_deref())?),
-            Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text).map_err(NotTyped::for_person)?),
+            Call::Prompt { tab, text } => json(self.type_line(&tab, &text, true).map_err(NotTyped::for_person)?),
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
                 json(workspace::Workspace { scratch: cwd == self.scratch, ..workspace::of(&cwd) })
@@ -2910,7 +2939,7 @@ impl Machine {
             t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
             (t.headless, t.stopped) = (false, None);
-            t.turn_pending = None;
+            (t.turn_pending, t.typed_at) = (None, None);
             t.shells_left = false;
             t.draft = Draft::default();
         })?;
@@ -3031,7 +3060,7 @@ impl Machine {
                     let mut wrote = false;
                     for text in std::mem::take(&mut t.held) {
                         if s.write(&paste(&text)).is_ok() {
-                            t.turn_pending = Some(Instant::now());
+                            (t.turn_pending, t.typed_at) = (Some(Instant::now()), None);
                             wrote = true;
                         }
                     }
@@ -3095,7 +3124,7 @@ impl Machine {
             // The terminal's own replies to the screen start with an escape and are not the user.
             cleared = !data.starts_with(b"\x1b") && t.cut_by_sleep.take().is_some();
             if submitted {
-                t.note_submit();
+                t.note_submit(t.draft.sent_local);
             }
             let mode_unknown = t.account.provider.spec().harness && !t.permission_unknown && data.windows(3).any(|window| window == b"\x1b[Z");
             if mode_unknown {
@@ -4788,6 +4817,11 @@ impl Machine {
     /// see a prompt.
     /// Nothing is typed while the screen shows a menu or dialog, held prompts included.
     fn type_prompt(&self, tab: &str, text: &str) -> Result<(), NotTyped> {
+        self.type_line(tab, text, false)
+    }
+
+    /// `type_prompt`, of the user's own `text` when `user`.
+    fn type_line(&self, tab: &str, text: &str, user: bool) -> Result<(), NotTyped> {
         self.awake(tab).map_err(NotTyped::Failed)?;
         // Read under the screen lock alone: held across the write, a paste larger than the pty's
         // free input would block it, and the reader thread would wait on the lock for good.
@@ -4803,10 +4837,13 @@ impl Machine {
                 }
                 for held in std::mem::take(&mut t.held) {
                     s.write(&paste(&held)).map_err(failed)?;
-                    t.turn_pending = Some(Instant::now());
+                    (t.turn_pending, t.typed_at) = (Some(Instant::now()), None);
                 }
                 s.write(&paste(text)).map_err(failed)?;
-                t.turn_pending = Some(Instant::now());
+                // The user's local command from the app starts no turn, as one typed in the terminal.
+                let local = user && local_command(text) && !t.prompt_pending();
+                let now = Instant::now();
+                (t.turn_pending, t.typed_at) = (Some(now), local.then_some(now));
                 Ok(true)
             }
             Some(_) => {
@@ -5022,7 +5059,7 @@ impl Machine {
                     // A Stop hook that hands news over continues the turn: nothing is typed over it.
                     if let Some(taken) = taken.as_mut().filter(|_| event.status == AgentStatus::Done) {
                         let at = Instant::now();
-                        taken.pending = machine.tab(&taken.tab, |t| t.turn_pending = Some(at)).ok().map(|_| at);
+                        taken.pending = machine.tab(&taken.tab, |t| (t.turn_pending, t.typed_at) = (Some(at), None)).ok().map(|_| at);
                     }
                     let reply = Ok(merge_context(&machine.recall(&event), &notices));
                     let Some(taken) = taken else { return reply.into() };
@@ -6460,7 +6497,7 @@ impl Machine {
             match t.session.as_mut() {
                 Some(s) if s.raw() => {
                     s.write(&paste(text)).map_err(|e| e.to_string())?;
-                    t.turn_pending = Some(Instant::now());
+                    (t.turn_pending, t.typed_at) = (Some(Instant::now()), None);
                     Ok(true)
                 }
                 Some(_) => Ok(false),
@@ -6837,6 +6874,7 @@ impl Machine {
             keys: vec![],
             seen: None,
             turn_pending: None,
+            typed_at: None,
             compacting_since: None,
             background_wait: None,
             draft: Draft::default(),
@@ -7070,6 +7108,10 @@ impl Machine {
             }
             if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) {
                 t.turn_pending = None;
+            }
+            // A turn started or ended since the user's submit: it was no local command.
+            if event.status != AgentStatus::NeedsInput {
+                t.typed_at = None;
             }
             // A turn's start or end settles any compaction the hooks marked; a question does not.
             if event.status != AgentStatus::NeedsInput {
@@ -7624,18 +7666,107 @@ struct Draft {
     chars: usize,
     /// Up or down put an earlier prompt in the line. Its length is unknown, so backspace cannot empty it.
     recalled: bool,
+    /// How far the line's first word matches `LOCAL_COMMANDS`.
+    head: Head,
+    /// The line the last Enter submitted was one of `LOCAL_COMMANDS`.
+    sent_local: bool,
+    /// A local command's panel, such as `/model`'s picker, may be open: its Enters, with only arrow
+    /// keys between, start no turn either. A printable key, Backspace, Ctrl-C and Ctrl-U end it.
+    panel: bool,
 }
 
 impl Draft {
     fn empty(&self) -> bool {
         self.chars == 0 && !self.recalled
     }
+
+    fn push(&mut self, byte: u8) {
+        self.chars += 1;
+        self.panel = false;
+        self.head = self.head.push(byte, self.chars);
+    }
+
+    fn back(&mut self) {
+        self.chars = self.chars.saturating_sub(1);
+        self.panel = false;
+        self.head = self.head.back(self.chars);
+    }
+
+    fn clear(&mut self) {
+        *self = Draft { sent_local: self.sent_local, panel: self.panel, ..Draft::default() };
+    }
+
+    /// A key that edits the line in a way the head cannot follow, which an empty line has nothing to lose to.
+    fn edit(&mut self) {
+        if !self.empty() {
+            self.head = Head::Other;
+        }
+    }
+}
+
+/// The line's first word, followed key by key against `LOCAL_COMMANDS` without keeping the text.
+#[derive(Clone, Copy, Debug, Default)]
+enum Head {
+    /// Nothing yet.
+    #[default]
+    Blank,
+    /// A slash and `len` characters, with which the commands set in `could_be` begin.
+    Command { could_be: u32, len: usize },
+    /// A local command and a space, which the line holds while it keeps `chars` characters.
+    Local { chars: usize },
+    /// Anything else, or a line edited in a way the keys cannot follow.
+    Other,
+}
+
+impl Head {
+    /// The head once `byte` is added and the line has `chars` characters.
+    fn push(self, byte: u8, chars: usize) -> Head {
+        match (self, byte) {
+            (Head::Blank, b'/') => Head::Command { could_be: (1 << LOCAL_COMMANDS.len()) - 1, len: 0 },
+            (Head::Command { could_be, len }, b' ') if whole_command(could_be, len) => Head::Local { chars },
+            (Head::Command { could_be, len }, _) if byte != b' ' => {
+                let could_be = LOCAL_COMMANDS.iter().enumerate().filter(|(i, command)| could_be & 1 << i != 0 && command.as_bytes().get(len) == Some(&byte)).fold(0, |bits, (i, _)| bits | 1 << i);
+                if could_be == 0 { Head::Other } else { Head::Command { could_be, len: len + 1 } }
+            }
+            (Head::Local { .. }, _) => self,
+            _ => Head::Other,
+        }
+    }
+
+    /// The head once a backspace leaves the line `chars` characters. A removed letter cannot be known.
+    fn back(self, chars: usize) -> Head {
+        match self {
+            _ if chars == 0 => Head::Blank,
+            Head::Blank => Head::Blank,
+            Head::Local { chars: kept } if chars >= kept => self,
+            _ => Head::Other,
+        }
+    }
+
+    fn local(self) -> bool {
+        match self {
+            Head::Command { could_be, len } => whole_command(could_be, len),
+            Head::Local { .. } => true,
+            Head::Blank | Head::Other => false,
+        }
+    }
+}
+
+/// One of the commands set in `could_be` is `len` characters long.
+fn whole_command(could_be: u32, len: usize) -> bool {
+    LOCAL_COMMANDS.iter().enumerate().any(|(i, command)| could_be & 1 << i != 0 && command.len() == len)
+}
+
+/// `text`'s first word is a slash and one of `LOCAL_COMMANDS`.
+fn local_command(text: &str) -> bool {
+    text.bytes().enumerate().fold(Head::Blank, |head, (i, byte)| head.push(byte, i + 1)).local()
 }
 
 /// Follows the terminal's input line. Printable text adds a character, including newlines inside
 /// a bracketed paste. Backspace removes one, floored at 0. Ctrl-C, Ctrl-U, and Enter clear the line.
 /// Enter on a non-empty line is a submit. Up and down recall a prompt, so the line stays occupied
 /// until Enter, Ctrl-U, or Ctrl-C. Other escape sequences, such as focus reports, are ignored.
+/// A key that moves the cursor or edits the line another way leaves its first word unknown.
 fn note_draft(draft: &mut Draft, data: &[u8]) -> bool {
     let mut submitted = false;
     let mut pasting = false;
@@ -7648,20 +7779,29 @@ fn note_draft(draft: &mut Draft, data: &[u8]) -> bool {
                     b"[200~" => pasting = true,
                     b"[201~" => pasting = false,
                     b"[A" | b"[B" | b"OA" | b"OB" => draft.recalled = true,
+                    // Arrows, Home, End, Delete, and Alt with a key.
+                    [b'[' | b'O', .., b'C' | b'D' | b'H' | b'F' | b'~'] | [_] => draft.edit(),
                     _ => {}
                 }
                 i += len;
             }
-            b'\r' | b'\n' if pasting => draft.chars += 1,
+            byte @ (b'\r' | b'\n') if pasting => draft.push(byte),
             b'\r' => {
-                submitted |= !draft.empty();
-                *draft = Draft::default();
+                if !draft.empty() {
+                    submitted = true;
+                    draft.sent_local = (!draft.recalled && draft.head.local()) || draft.panel;
+                    draft.panel = draft.sent_local;
+                }
+                draft.clear();
             }
-            0x03 | 0x15 => *draft = Draft::default(),
-            0x08 | 0x7f => draft.chars = draft.chars.saturating_sub(1),
+            0x03 | 0x15 => {
+                draft.clear();
+                draft.panel = false;
+            }
+            0x08 | 0x7f => draft.back(),
             0x80..=0xbf => {}
-            byte if byte >= 0x20 => draft.chars += 1,
-            _ => {}
+            byte if byte >= 0x20 => draft.push(byte),
+            _ => draft.edit(),
         }
         i += 1;
     }
@@ -12306,6 +12446,33 @@ exec sleep 30
     }
 
     #[test]
+    fn a_submit_is_local_only_when_its_first_word_is_a_built_in_local_command() {
+        let lines = [
+            (&b"/effort\r"[..], true),
+            (b"  /model opus\r", false),
+            (b"/model opus\x7f\x7f\r", true),
+            (b"\x1b[C/effort\r", true),
+            (b"\x1b[200~/effort\x1b[201~\r", true),
+            (b"/models\r", false),
+            (b"/mod\r", false),
+            (b"/review\r", false),
+            (b"/compact\r", false),
+            (b"Fix /effort\r", false),
+            (b"/efforts\x7f\r", false),
+            (b"/effort\x1b[H\x1b[DFix \r", false),
+            (b"/eff\t\r", false),
+            (b"\x1b[A\r", false),
+        ];
+        for (keys, local) in lines {
+            let mut draft = Draft::default();
+            assert!(note_draft(&mut draft, keys), "{keys:?} is a submit");
+            assert_eq!(draft.sent_local, local, "{keys:?}");
+        }
+        assert!(local_command("/model opus") && !local_command(" /effort"));
+        assert!(!local_command("/models") && !local_command("/effort\nand more") && !local_command("Run /effort"));
+    }
+
+    #[test]
     #[cfg(unix)]
     fn a_codex_tab_gets_a_second_notice_only_after_the_done_that_follows_the_first() {
         let (m, tab, file) = pty_file("notice-second");
@@ -12402,6 +12569,32 @@ exec sleep 30
             assert!(!read_pty(&file).contains("[pinned]"), "{name} typed the notice before Done: {}", read_pty(&file));
             m.record_event(done_event(&tab));
             let needle = format!("[pinned] Delegated task {id} \"Slash\"");
+            wait_for("the notice after Done", || read_pty(&file).contains(&needle));
+            let _ = std::fs::remove_file(file);
+        }
+    }
+
+    /// Codex and Cursor know no local command that starts no turn: a submit typed there holds the
+    /// notice until Done however long ago it went in.
+    #[test]
+    #[cfg(unix)]
+    fn a_codex_or_cursor_typed_submit_still_waits_for_done() {
+        for (name, account) in [("typed-codex", Account::builtin(Provider::Codex)), ("typed-cursor", Account::builtin(Provider::Cursor))] {
+            let (m, tab, file) = pty_file(name);
+            m.tab(&tab, |t| {
+                t.account = account;
+                t.status = Some(AgentStatus::Done);
+            })
+            .unwrap();
+            m.write_input(&tab, b"/model\r").unwrap();
+            let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Typed");
+            m.tab(&tab, |t| t.turn_pending = Some(Instant::now() - Duration::from_secs(11))).unwrap();
+            assert!(!m.tab(&tab, |t| t.notice_idle()).unwrap(), "{name} reads idle with its submit unanswered");
+            m.maybe_deliver(&tab);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(!read_pty(&file).contains("[pinned]"), "{name} typed the notice before Done: {}", read_pty(&file));
+            m.record_event(done_event(&tab));
+            let needle = format!("[pinned] Delegated task {id} \"Typed\"");
             wait_for("the notice after Done", || read_pty(&file).contains(&needle));
             let _ = std::fs::remove_file(file);
         }
@@ -12663,6 +12856,339 @@ while True:
         assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "a repeat after the drain still answers the first outcome and types nothing");
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(std::fs::read(&file).unwrap(), both);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A local command the user types, such as `/effort`, starts no turn and fires no hook. Once
+    /// `IDLE_NOTICE_GRACE` has passed its submit no longer holds the Capitão's queue.
+    #[test]
+    #[cfg(unix)]
+    fn a_typed_local_command_does_not_hold_the_captains_queue() {
+        let dir = temp("enqueue-typed-command");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.write_input(&tab, b"/effort\r").unwrap();
+        m.tab(&tab, |t| t.turn_pending = Some(Instant::now() - Duration::from_secs(11))).unwrap();
+        assert!(m.tab(&tab, |t| t.notice_idle()).unwrap(), "a typed submit no hook answered still holds the Capitão");
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
+        let both = b"/effort\r\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r";
+        assert_eq!(typed(&file, both), both);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A typed prompt that Claude Code took as a turn holds the queue until that turn ends, however long it runs.
+    #[test]
+    #[cfg(unix)]
+    fn a_typed_prompt_that_started_a_turn_still_holds_the_queue() {
+        let dir = temp("enqueue-typed-turn");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.write_input(&tab, b"Fix the footer.\r").unwrap();
+        m.record_event(hook(&tab, AgentStatus::Working));
+        m.tab(&tab, |t| t.turn_pending = Some(Instant::now() - Duration::from_secs(11))).unwrap();
+        assert!(!m.tab(&tab, |t| t.notice_idle()).unwrap(), "the turn the typed prompt started reads idle");
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(std::fs::read(&file).unwrap(), b"Fix the footer.\r", "a queued message was typed into the turn");
+
+        m.record_event(hook(&tab, AgentStatus::Done));
+        let both = b"Fix the footer.\r\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r";
+        assert_eq!(typed(&file, both), both);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A prompt pinned typed itself is a real one: it holds the queue until its hook comes, past the grace too.
+    #[test]
+    #[cfg(unix)]
+    fn a_prompt_pinned_types_still_waits_for_its_hook() {
+        let dir = temp("enqueue-own-prompt");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
+        let first = b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r";
+        assert_eq!(typed(&file, first), first);
+        m.tab(&tab, |t| t.turn_pending = Some(Instant::now() - Duration::from_secs(11))).unwrap();
+        assert!(!m.tab(&tab, |t| t.notice_idle()).unwrap(), "pinned's own prompt reads idle before its hook");
+        assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(std::fs::read(&file).unwrap(), first, "a queued message was typed over pinned's own prompt");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Moves the tab's pending submit and typed mark `secs` into the past, as if that long went by.
+    fn backdate(m: &Machine, tab: &str, secs: u64) {
+        let ago = |at: Option<Instant>| at.map(|at| at - Duration::from_secs(secs));
+        m.tab(tab, |t| (t.turn_pending, t.typed_at) = (ago(t.turn_pending), ago(t.typed_at))).unwrap();
+    }
+
+    /// A message a Stop hook handed over continues the Capitão's turn, which no Working hook marks. A
+    /// line the user types into that turn, a local command too, leaves pinned's submit pending.
+    #[test]
+    #[cfg(unix)]
+    fn a_typed_line_during_pinneds_handed_over_turn_does_not_release_the_queue() {
+        let dir = temp("enqueue-steer");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let sock = dir.join("pinned.sock");
+        let file = dir.join("typed.bin");
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+        m.record_event(hook(&tab, AgentStatus::Working));
+        assert_eq!(enqueue(&m, &path, "Check the build.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        let done = serde_json::to_string(&Message::Agent(AgentEvent { hook_feedback: true, ..hook(&tab, AgentStatus::Done) })).unwrap();
+        assert_eq!(ask(&sock, &done), Ok("[Orchestrator] Check the build.".into()));
+
+        m.write_input(&tab, b"steer\r").unwrap();
+        m.write_input(&tab, b"/effort\r").unwrap();
+        backdate(&m, &tab, 11);
+        assert!(!m.tab(&tab, |t| t.notice_idle()).unwrap(), "the handed-over turn reads idle once the user typed into it");
+        assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(std::fs::read(&file).unwrap(), b"steer\r/effort\r", "a queued message was typed into the handed-over turn");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The user types `line` into an idle Capitão and no hook comes: the queue waits for Done however
+    /// long that takes, and the message goes in after it.
+    #[cfg(unix)]
+    fn a_typed_line_holds_the_queue_until_done(name: &str, line: &[u8]) {
+        let dir = temp(name);
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.write_input(&tab, line).unwrap();
+        backdate(&m, &tab, 11);
+        assert!(!m.tab(&tab, |t| t.notice_idle()).unwrap(), "{line:?} reads idle with its turn not begun");
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(std::fs::read(&file).unwrap(), line, "a queued message was typed after {line:?}");
+
+        m.record_event(hook(&tab, AgentStatus::Done));
+        let both = [line, b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r"].concat();
+        assert_eq!(typed(&file, &both), both);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A prompt's UserPromptSubmit hook may wait on slow SessionStart hooks: only a built-in local
+    /// command is let go without one.
+    #[test]
+    #[cfg(unix)]
+    fn a_typed_prompt_that_is_not_a_local_command_waits_for_done() {
+        a_typed_line_holds_the_queue_until_done("enqueue-typed-prompt", b"Fix the footer.\r");
+    }
+
+    /// A skill or custom command may start a turn: a slash command not in `LOCAL_COMMANDS` waits for Done.
+    #[test]
+    #[cfg(unix)]
+    fn a_typed_unknown_slash_command_waits_for_done() {
+        a_typed_line_holds_the_queue_until_done("enqueue-typed-skill", b"/review\r");
+    }
+
+    /// `/statusline` asks the model to launch an agent, so it starts a turn: it waits for Done.
+    #[test]
+    #[cfg(unix)]
+    fn a_typed_statusline_waits_for_done() {
+        a_typed_line_holds_the_queue_until_done("enqueue-typed-statusline", b"/statusline\r");
+    }
+
+    /// Claude Code takes a line with leading spaces as a prompt, not a command.
+    #[test]
+    #[cfg(unix)]
+    fn a_typed_line_with_leading_spaces_waits_for_done() {
+        a_typed_line_holds_the_queue_until_done("enqueue-typed-spaces", b"  /model opus\r");
+    }
+
+    /// `/model` opens a picker that Up, Down and Enter drive: those Enters start no turn either.
+    #[test]
+    #[cfg(unix)]
+    fn a_local_commands_picker_does_not_hold_the_captains_queue() {
+        let dir = temp("enqueue-picker");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.write_input(&tab, b"/model\r").unwrap();
+        m.write_input(&tab, b"\x1b[B").unwrap();
+        m.write_input(&tab, b"\r").unwrap();
+        backdate(&m, &tab, 11);
+        assert!(m.tab(&tab, |t| t.notice_idle()).unwrap(), "the picker's Enter held the queue for a Done that never comes");
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
+        let both = b"/model\r\x1b[B\r\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r";
+        assert_eq!(typed(&file, both), both);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A prompt typed after a local command is a turn: the picker's allowance ends at the first printable key.
+    #[test]
+    #[cfg(unix)]
+    fn a_prompt_typed_after_a_local_command_waits_for_done() {
+        let dir = temp("enqueue-after-local");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.write_input(&tab, b"/model\r").unwrap();
+        m.write_input(&tab, b"hi\r").unwrap();
+        backdate(&m, &tab, 11);
+        assert!(!m.tab(&tab, |t| t.notice_idle()).unwrap(), "a prompt typed after a local command reads idle");
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(std::fs::read(&file).unwrap(), b"/model\rhi\r");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// No typed line, a local command included, lets the queue in while claude compacts.
+    #[test]
+    #[cfg(unix)]
+    fn a_typed_compact_holds_the_queue_while_compacting() {
+        for line in [&b"/compact\r"[..], b"/effort\r"] {
+            let dir = temp("enqueue-typed-compact");
+            let project = dir.join("site");
+            std::fs::create_dir_all(&project).unwrap();
+            let file = dir.join("typed.bin");
+            let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+            let path = project.display().to_string();
+            let tab = idle_captain(&m, &path, &file);
+
+            m.write_input(&tab, line).unwrap();
+            m.record_compacting(&tab, true);
+            backdate(&m, &tab, 11);
+            assert!(!m.tab(&tab, |t| t.notice_idle()).unwrap(), "{line:?} reads idle while compacting");
+            assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(std::fs::read(&file).unwrap(), line, "a queued message was typed into the compaction after {line:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// `/effort` sent from the app's composer is the user's local command as much as one typed in the terminal.
+    #[test]
+    #[cfg(unix)]
+    fn effort_sent_from_the_app_does_not_hold_the_captains_queue() {
+        let dir = temp("enqueue-app-effort");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.call(Call::Prompt { tab: tab.clone(), text: "/effort".into() }).unwrap();
+        let effort = b"\x1b[200~/effort\x1b[201~\r";
+        assert_eq!(typed(&file, effort), effort);
+        backdate(&m, &tab, 11);
+        assert!(m.tab(&tab, |t| t.notice_idle()).unwrap(), "/effort from the app still holds the Capitão");
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
+        let both = b"\x1b[200~/effort\x1b[201~\r\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r";
+        assert_eq!(typed(&file, both), both);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A typed mark older than pinned's own prompt belongs to no pending submit: the grace never lets pinned's go.
+    #[test]
+    #[cfg(unix)]
+    fn the_typed_mark_must_be_newer_than_pinneds_prompt() {
+        let dir = temp("enqueue-typed-order");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
+        let first = b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r";
+        assert_eq!(typed(&file, first), first);
+        m.write_input(&tab, b"/effort\r").unwrap();
+        let now = Instant::now();
+        m.tab(&tab, |t| (t.typed_at, t.turn_pending) = (Some(now - Duration::from_secs(12)), Some(now - Duration::from_secs(11)))).unwrap();
+        assert!(!m.tab(&tab, |t| t.notice_idle()).unwrap(), "an older typed mark let pinned's prompt go");
+        assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A question asked after a typed local command is no turn of its own: the command's grace still runs.
+    #[test]
+    #[cfg(unix)]
+    fn needs_input_keeps_the_typed_mark() {
+        let dir = temp("enqueue-typed-question");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.write_input(&tab, b"/effort\r").unwrap();
+        m.record_event(hook(&tab, AgentStatus::NeedsInput));
+        assert!(m.tab(&tab, |t| t.typed_at.is_some()).unwrap(), "a question cleared the typed mark");
+        backdate(&m, &tab, 11);
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_new_session_clears_the_typed_mark() {
+        let dir = temp("enqueue-typed-respawn");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.write_input(&tab, b"/effort\r").unwrap();
+        assert!(m.tab(&tab, |t| t.typed_at.is_some()).unwrap(), "a typed /effort left no mark");
+        m.spawn(&tab, sh("exec cat > /dev/null"), pty::size(80, 24)).unwrap();
+        assert_eq!(m.tab(&tab, |t| (t.turn_pending, t.typed_at)).unwrap(), (None, None));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// With no live session there is no prompt a local command ran in: the grace does not make the tab archivable.
+    #[test]
+    #[cfg(unix)]
+    fn a_session_gone_after_a_typed_submit_is_not_archivable_by_the_grace() {
+        let dir = temp("archive-typed");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.write_input(&tab, b"/effort\r").unwrap();
+        backdate(&m, &tab, 11);
+        let gone = m.tab(&tab, |t| t.session.take()).unwrap();
+        assert!(!m.tab(&tab, |t| t.idle_for_archive()).unwrap(), "a session gone 10 s after a typed submit reads archivable");
+        drop(gone);
         let _ = std::fs::remove_dir_all(dir);
     }
 
