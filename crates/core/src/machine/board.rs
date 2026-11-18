@@ -15,7 +15,9 @@ static WRITING: Mutex<()> = Mutex::new(());
 
 impl Machine {
     /// `Call::Board`: the stored board of `task`'s root task, or only `task`'s part when it is a
-    /// worker under it; without `task`, every board the plans of the Captain of `tab` link.
+    /// worker under it; without `task`, every board the plans of the Captain of `tab` link. A
+    /// `task` whose root no plan of that Captain links is refused: agents read boards only with
+    /// the fenced `board_read`, and this answer is raw.
     pub(super) fn board(&self, tab: &str, task: Option<&str>) -> Result<BoardView, String> {
         let Some(task) = task else {
             let mut whole = BoardView::default();
@@ -30,6 +32,9 @@ impl Machine {
             return Ok(whole);
         };
         let root = self.root_of(task);
+        if !self.captain_roots(tab).contains(&root) {
+            return Err(format!("task {task} is not on a board of your plans. Nothing was read."));
+        }
         Ok(self.board_view(&root, (root != task).then_some(task)))
     }
 
