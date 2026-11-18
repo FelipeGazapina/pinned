@@ -540,6 +540,21 @@ mod tests {
         assert_eq!(notes, ["signup reads it too"], "the new board holds the note");
     }
 
+    #[test]
+    fn one_worker_keeps_at_most_20_notes_and_never_evicts_another_authors() {
+        let t = team("per-author");
+        let second = task(&t.m, Parent::Task(t.root.clone()), "Review login", &t.dir.join("app"));
+        noted(&t.m, &second, "src/login.rs", "the second worker's note");
+        for n in 1..=25 {
+            noted(&t.m, &t.worker, "src/login.rs", &format!("note {n}"));
+        }
+        let notes = t.m.board(&t.captain, Some(&t.root)).unwrap().notes;
+        assert_eq!(notes.iter().filter(|n| n.by == second).map(|n| n.text.as_str()).collect::<Vec<_>>(), ["the second worker's note"], "its note stays");
+        let mine: Vec<String> = notes.iter().filter(|n| n.by == t.worker).map(|n| n.text.clone()).collect();
+        assert_eq!(mine, (6..=25).map(|n| format!("note {n}")).collect::<Vec<_>>(), "the worker's oldest went");
+        assert_eq!(crate::board::NOTES_BY, 20);
+    }
+
     /// A second Captain (`cap-b`) in the same app, whose plan links one root task with one worker.
     fn foreign_captain(t: &Team) -> (String, String, String) {
         let project = t.dir.join("app");
