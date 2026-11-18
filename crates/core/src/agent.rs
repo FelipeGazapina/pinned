@@ -58,7 +58,7 @@ impl Role {
         match self {
             Role::Orchestrator => &[],
             Role::Worker => &[],
-            Role::Reviewer => &["Edit", "Write", "NotebookEdit", "Bash"],
+            Role::Reviewer => &["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "WebFetch", "WebSearch", "Task", "Agent"],
         }
     }
 }

@@ -88,7 +88,7 @@ impl Machine {
                 model: Some(model.clone()),
                 cwd: cwd.clone(),
                 mode: Mode::Async,
-                access: Access::Auto,
+                access: Access::ReadOnly,
                 isolated: false,
                 caller_key: key,
                 client_request_id: Some(request),
@@ -105,12 +105,21 @@ impl Machine {
         self.delegates.set_limits(&review, budget_ms, limit_ms);
         self.delegates.hold_to(&review, limits);
 
+        // The reviewer's own folder, which holds its empty MCP config and is removed once it ends.
+        let own = self.review_dir(&review);
+        let mcp = own.join("mcp.json");
+        if let Err(error) = std::fs::create_dir_all(&own).and_then(|()| std::fs::write(&mcp, "{\"mcpServers\":{}}\n")) {
+            let error = format!("the reviewer's folder could not be made: {error}");
+            self.delegates.fail(&review, error.clone(), path.as_deref());
+            let _ = std::fs::remove_dir_all(&own);
+            return Err(error);
+        }
         let spec = SpawnSpec {
             task: &review_run::first_prompt(author.summary.as_deref().unwrap_or_default(), &diff),
             model: Some(&model),
             effort: effort.as_deref(),
-            access: Access::Auto,
-            mcp_config: None,
+            access: Access::ReadOnly,
+            mcp_config: Some(&mcp),
             session_mcp: None,
             exe: &self.launch.exe,
             sock: &self.launch.sock,
@@ -118,7 +127,11 @@ impl Machine {
             reminders: false,
         };
         let mut argv = driver_args(Provider::Claude, &spec);
-        // --disallowedTools takes any number of values, so the flag after it ends them.
+        // Only the MCP config above, which names no server. The tool lists take any number of
+        // values, so the flag after each ends it.
+        argv.push("--strict-mcp-config".to_owned());
+        argv.push("--allowedTools".to_owned());
+        argv.extend(REVIEWER_TOOLS.iter().map(|tool| tool.to_string()));
         argv.push("--disallowedTools".to_owned());
         argv.extend(Role::Reviewer.disallowed_tools().iter().map(|tool| tool.to_string()));
         argv.extend(["--append-system-prompt".to_owned(), review_run::system_prompt(&rules)]);
@@ -133,6 +146,7 @@ impl Machine {
             let Some(machine) = me.upgrade() else { return };
             let ready = machine.delegates.apply(&id, event, child_path.as_deref());
             if machine.delegates.is_terminal(&id) && !ended.swap(true, Ordering::SeqCst) {
+                let _ = std::fs::remove_dir_all(machine.review_dir(&id));
                 machine.review_answered(&author_id, &id, &worker, Answered { round, rules: &rules, model: &sent_model, note: note.clone() });
             }
             if let Some(tab) = ready {
@@ -143,6 +157,7 @@ impl Machine {
             Ok(pid) => self.delegates.remember_pid(&review, pid),
             Err(error) => {
                 self.delegates.fail(&review, error.clone(), path.as_deref());
+                let _ = std::fs::remove_dir_all(&own);
                 return Err(error);
             }
         }
@@ -163,6 +178,12 @@ impl Machine {
         self.end_reviewed(task, tab);
     }
 
+    /// The folder review `review` owns while it runs: under this machine's config, else the temp folder.
+    fn review_dir(&self, review: &str) -> std::path::PathBuf {
+        let base = self.orchestration_dir.clone().unwrap_or_else(|| std::env::temp_dir().join(format!("pinned-{}", std::process::id())));
+        base.join("reviews").join(review)
+    }
+
     /// Ends the task a review held, as `settle_thread_task` ends a worker's: with its latest reply.
     fn end_reviewed(&self, task: &str, tab: &str) {
         let Some(info) = self.delegates.get(task) else { return };
@@ -177,6 +198,9 @@ impl Machine {
         }
     }
 }
+
+/// All the reviewer may use: it reads the change and the files around it.
+const REVIEWER_TOOLS: [&str; 3] = ["Read", "Grep", "Glob"];
 
 /// What a review's end needs to make its round.
 struct Answered<'a> {
