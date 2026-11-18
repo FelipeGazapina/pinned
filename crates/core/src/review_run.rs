@@ -210,20 +210,48 @@ fn git_read(dir: &Path, path: Option<&str>, args: &[&str], most: usize) -> Resul
     git_capped(dir, path, args, most).map(|(_, out, whole)| (out, whole))
 }
 
+/// How long one git call of a review may take.
+const GIT_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Runs git, reading at most `most` bytes of what it prints: whether it succeeded, what it
-/// printed, and whether that was all of it. Git stops on a closed pipe past `most`.
+/// printed, and whether that was all of it. Git stops on a closed pipe past `most`. The worker
+/// can write its repo's config, so nothing there runs: no fsmonitor, external diff or textconv.
+/// Git killed after `GIT_WAIT` is "git did not answer".
 fn git_capped(dir: &Path, path: Option<&str>, args: &[&str], most: usize) -> Result<(bool, String, bool), String> {
     use std::io::Read;
     let mut cmd = crate::process::command("git");
-    cmd.arg("-C").arg(dir).args(["-c", "core.quotepath=off"]).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    cmd.arg("-C").arg(dir).args(["-c", "core.quotepath=off", "-c", "core.fsmonitor=false", "-c", "diff.external="]);
+    match args.split_first() {
+        Some((&"diff", rest)) => cmd.args(["diff", "--no-textconv"]).args(rest),
+        _ => cmd.args(args),
+    };
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     if let Some(path) = path {
         cmd.env("PATH", path);
     }
     let mut child = cmd.spawn().map_err(|error| format!("git: {error}"))?;
-    let mut out = vec![];
-    let read = child.stdout.take().map(|stdout| stdout.take(u64::try_from(most).unwrap_or(u64::MAX)).read_to_end(&mut out));
-    let status = child.wait().map_err(|error| format!("git: {error}"))?;
-    read.transpose().map_err(|error| format!("git: {error}"))?;
+    let stdout = child.stdout.take();
+    let (sent, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = vec![];
+        if let Some(stdout) = stdout {
+            let _ = stdout.take(u64::try_from(most).unwrap_or(u64::MAX)).read_to_end(&mut out);
+        }
+        let _ = sent.send(out);
+    });
+    let deadline = std::time::Instant::now() + GIT_WAIT;
+    let status = loop {
+        match child.try_wait().map_err(|error| format!("git: {error}"))? {
+            Some(status) => break status,
+            None if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(5)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("git did not answer".to_owned());
+            }
+        }
+    };
+    let out = read.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()).max(std::time::Duration::from_secs(1))).map_err(|_| "git did not answer".to_owned())?;
     let whole = out.len() < most;
     Ok((status.success(), String::from_utf8_lossy(&out).into_owned(), whole))
 }
