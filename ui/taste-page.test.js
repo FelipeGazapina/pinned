@@ -747,7 +747,7 @@ test("Approve moves a proposed profile into the shown list with one set_worker_p
   assert.match(html, /data-act="wpapprove"/);
   assert.match(html, /data-act="wpdismiss"/);
   await p.click(/data-act="wpapprove"/);
-  assert.deepEqual(sent(p), [["set_worker_profiles", { project: null, profiles: [wp(), proposed] }]]);
+  assert.deepEqual(sent(p), [["set_worker_profiles", { project: null, profiles: [wp(), proposed], dropProposed: ["tester"] }]]);
   html = section(p.html(), "Profiles");
   assert.doesNotMatch(html, /data-act="wpapprove"|Created by the Orchestrator/, "the row left the proposed ones");
   assert.match(html, /tester/);
@@ -761,12 +761,12 @@ test("Approve on a project tab fills that project's list", async () => {
   await p.show();
   await p.click(new RegExp(`data-act="wpscope" data-repo="${SITE}"`));
   await p.click(/data-act="wpapprove"/);
-  assert.deepEqual(sent(p), [["set_worker_profiles", { project: SITE, profiles: [proposed] }]]);
+  assert.deepEqual(sent(p), [["set_worker_profiles", { project: SITE, profiles: [proposed], dropProposed: ["tester"] }]]);
 });
 
 test("Discard drops a proposed profile from the page and sends no set_taste", async () => {
   const before = profilesOf({ proposed: [wp({ name: "tester", by: "orchestrator" })] });
-  const p = page({ answer: profilesHub(before) });
+  const p = page({ answer: profilesHub(before, profilesOf()) });
   await p.show();
   await p.click(/data-act="wpdismiss"/);
   const html = section(p.html(), "Profiles");
@@ -904,6 +904,18 @@ for (const [transport, hub, key] of [["hub", {}, "drop_proposed"], ["Tauri", nul
     assert.match(html, />scout</);
   });
 }
+
+test("Discard with an unsaved draft sends the saved list, keeps the draft and drops the card from it", async () => {
+  const saved = profilesOf({ account: [wp()], proposed: [wp({ name: "tester", by: "orchestrator" })] });
+  const p = page({ answer: profilesHub(saved, profilesOf({ account: [wp()] })) });
+  await p.show();
+  await p.click(/data-act="wpdrop" data-index="0"/);
+  await p.click(/data-act="wpdismiss"/);
+  assert.deepEqual(sent(p), [["set_worker_profiles", { project: null, profiles: [wp()], dropProposed: ["tester"] }]]);
+  const html = section(p.html(), "Profiles");
+  assert.match(html, /data-act="wpsave"/, "the draft is still waiting for Save");
+  assert.doesNotMatch(html, /data-act="wpapprove"/);
+});
 
 test("a rule id is escaped in the Reviewer section", async () => {
   const bad = "A<b>1";

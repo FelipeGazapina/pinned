@@ -7,9 +7,9 @@
  *
  * `scope` is "" for the account or a project's repo. `draft` is the edited worker_profiles, null
  * until an edit. `form` is the profile being added or edited: `index` is its place in the shown
- * list, -1 for a new one, and `tools` is the text in the tools field. `dismissed` holds the
- * proposed rows the user dropped, as JSON: the hub has no call that drops one, so the page hides it. */
-const profilesUi = { scope: "", draft: null, form: null, dismissed: new Set(), error: null, saving: false };
+ * list, -1 for a new one, and `tools` is the text in the tools field. Approve and Discard name the
+ * proposal in the call's drop list, so it leaves the stored tastes and the page draws it from the reply. */
+const profilesUi = { scope: "", draft: null, form: null, error: null, saving: false };
 
 const PROFILE_ACCESS = [
   { id: "edit", label: "Can edit", about: "Reads and changes files." },
@@ -90,11 +90,21 @@ function profilesEdit(next) {
   tasteRender();
 }
 
+/** The key the drop list goes under: the hub takes the wire's `drop_proposed`, the signed-out Tauri
+ * command its camelCase `dropProposed`. `hub` is set exactly when `connectorCall` goes to the hub. */
+const profilesDropKey = () => (typeof hub !== "undefined" && hub ? "drop_proposed" : "dropProposed");
+
 /** Sends the changes that turn the saved lists into `next`, in order. Each answer is the account's
  * tastes, kept as the saved ones with the page's draft following, so the page's own Save sees only
- * the taste edits. A failure part way keeps what went through. Resolves true when all went. */
-async function profilesSend(next) {
+ * the taste edits. A failure part way keeps what went through. Resolves true when all went.
+ * `drop` names a proposal that goes in the same write as `scope`'s list (a call is added when that
+ * list did not change). `keepDraft` leaves the page's draft standing, less the dropped proposal. */
+async function profilesSend(next, { drop = null, scope = "", keepDraft = false } = {}) {
   const calls = profilesCalls(profilesSaved(), next);
+  if (drop) {
+    const own = calls.find((c) => (c.project ?? "") === scope) ?? calls[calls.push({ project: scope || null, profiles: profilesListOf(next, scope) }) - 1];
+    own[profilesDropKey()] = [drop];
+  }
   profilesUi.saving = true;
   profilesUi.error = null;
   tasteRender();
@@ -104,7 +114,8 @@ async function profilesSend(next) {
       tasteUi.saved = await connectorCall("set_worker_profiles", args);
       tasteUi.draft = { ...tasteUi.draft, worker_profiles: tasteUi.saved.worker_profiles };
     }
-    profilesUi.draft = null;
+    const held = profilesUi.draft;
+    profilesUi.draft = keepDraft && held ? { ...held, proposed: held.proposed.filter((r) => !profilesSameName(r.name, drop)) } : null;
     tasteUi.toast = true;
   } catch (e) {
     profilesUi.error = tasteErrorText(e);
@@ -121,10 +132,16 @@ async function profilesApprove(b) {
   const w = profilesShown();
   const repo = profilesUi.scope;
   const before = profilesUi.draft;
-  if (await profilesSend(profilesWithList(w, repo, [...profilesListOf(w, repo), row]))) {
-    profilesUi.dismissed.add(JSON.stringify(row));
-    tasteRender();
-  } else profilesUi.draft = before;
+  if (!(await profilesSend(profilesWithList(w, repo, [...profilesListOf(w, repo), row]), { drop: row.name, scope: repo }))) profilesUi.draft = before;
+}
+
+/** Discard: the saved list of the scope goes unchanged with the proposal's name to drop. A draft in
+ * progress is left as it is, less that proposal. */
+function profilesDiscard(b) {
+  const row = profilesSaved().proposed[Number(b.dataset.index)];
+  if (!row) return;
+  const repo = profilesUi.scope;
+  return profilesSend(profilesSaved(), { drop: row.name, scope: repo, keepDraft: true });
 }
 
 const profilesBlank = () => ({ name: "", skills: [], access: "edit", delivers: "", by: "user" });
@@ -238,11 +255,11 @@ function profileRowHtml({ profile, from, index, replaced }, repo, names) {
 }
 
 function profileProposedHtml(w, names, where) {
-  const rows = w.proposed.map((profile, index) => ({ profile, index })).filter(({ profile }) => !profilesUi.dismissed.has(JSON.stringify(profile)));
+  const rows = w.proposed.map((profile, index) => ({ profile, index }));
   if (!rows.length) return "";
   const busy = profilesUi.saving ? " disabled" : "";
   const items = rows.map(({ profile, index }) => `<li><span class="taste-profile-text"><span class="taste-skill-name"><b>${esc(profile.name)}</b><span class="taste-chip">Created by the Orchestrator</span></span>${profile.delivers ? `<span class="taste-skill-about">${esc(profile.delivers)}</span>` : ""}</span>
-    <button type="button" class="outline" data-act="wpdismiss" data-index="${index}">Discard</button><button type="button" class="primary" data-act="wpapprove" data-index="${index}"${busy}>Approve for ${esc(where)}</button></li>`).join("");
+    <button type="button" class="outline" data-act="wpdismiss" data-index="${index}"${busy}>Discard</button><button type="button" class="primary" data-act="wpapprove" data-index="${index}"${busy}>Approve for ${esc(where)}</button></li>`).join("");
   return `<div class="taste-field"><div class="taste-label"><span>Proposed</span></div><ul class="taste-rules taste-profiles-list" aria-label="Proposed profiles">${items}</ul></div>`;
 }
 
@@ -308,11 +325,7 @@ const TASTE_PROFILE_ACTS = {
     tasteRender();
   },
   wpapprove: (b) => profilesApprove(b),
-  wpdismiss: (b) => {
-    const row = profilesSaved().proposed[Number(b.dataset.index)];
-    if (row) profilesUi.dismissed.add(JSON.stringify(row));
-    tasteRender();
-  },
+  wpdismiss: (b) => profilesDiscard(b),
   wpdiscard: () => {
     profilesUi.draft = null;
     profilesUi.form = null;
