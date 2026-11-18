@@ -207,8 +207,12 @@ impl Launch {
         })
     }
 
+    /// The provider's CLI, as `new` found it. One left unset is its name, looked up on the PATH; in
+    /// this crate's tests it is a file that does not exist, so a test never runs the CLI installed
+    /// on the machine, which writes its login into the test's HOME.
     pub fn bin(&self, provider: Provider) -> PathBuf {
-        self.bins.get(&provider).cloned().unwrap_or_else(|| provider.spec().bin.into())
+        let bin = provider.spec().bin;
+        self.bins.get(&provider).cloned().unwrap_or_else(|| if cfg!(test) { Path::new("/nonexistent").join(bin) } else { bin.into() })
     }
 
     /// The settings file every Claude Code session started with `env` loads. The global
@@ -14613,10 +14617,16 @@ Have another model review a risky change before it goes ahead.";
     /// account. Returns the machine, its folder and the Captain's tab.
     #[cfg(unix)]
     fn limited_captain(name: &str, limits: TastePatch) -> (Arc<Machine>, PathBuf, String) {
+        limited_captain_on(name, limits, None)
+    }
+
+    /// `limited_captain` with the PATH its CLIs run on.
+    #[cfg(unix)]
+    fn limited_captain_on(name: &str, limits: TastePatch, path_env: Option<String>) -> (Arc<Machine>, PathBuf, String) {
         let dir = temp(name);
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), path_env, ..launch() }, Some(dir.join("config")), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         m.set_local_taste(&TasteScope::Captains, limits).unwrap();
         let path = m.open_project(project).display().to_string();
@@ -15076,7 +15086,12 @@ Have another model review a risky change before it goes ahead.";
     #[test]
     #[cfg(unix)]
     fn an_agent_makes_and_lists_projects_sets_their_account_and_keeps_their_scripts() {
-        let (m, dir, captain) = limited_captain("act-projects", TastePatch::default());
+        // A `gh` signed in nowhere, ahead of the real one, which keeps its state in HOME.
+        let bin = temp("act-projects-bin");
+        std::fs::write(bin.join("gh"), "#!/bin/sh\necho 'To get started with GitHub CLI, please run:  gh auth login' >&2\nexit 4\n").unwrap();
+        std::fs::set_permissions(bin.join("gh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let path_env = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap();
+        let (m, dir, captain) = limited_captain_on("act-projects", TastePatch::default(), Some(path_env.into_string().unwrap()));
         let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
         let session = m.open_tab(Some(path.clone()), false).unwrap();
         let act = |action: &str, args: Value| act_as(&m, &session, action, args);
@@ -15098,6 +15113,7 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(act("search_threads", json!({ "query": "no conversation says this" })), Ok(json!([])));
         assert_eq!(act("project_history", json!({ "path": path })).unwrap().as_array().map(Vec::len), Some(0));
         let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(bin);
     }
 
     #[test]
@@ -19313,6 +19329,59 @@ Have another model review a risky change before it goes ahead.";
         assert_refused_in_a_real_home("accounts::tests::status_is_what_each_cli_reports_for_the_accounts_home");
     }
 
+    /// Tests that reach an account's CLI, `gh` or a Claude home leave the test HOME as they found
+    /// it. The CLIs on the PATH here write into whatever HOME they get, as a real `claude` writes
+    /// `.claude.json`; the guard runs once per process, so only the next test binary would see it.
+    #[cfg(unix)]
+    #[test]
+    fn tests_that_reach_a_cli_or_a_claude_home_leave_home_as_they_found_it() {
+        let names = [
+            "link::tests::a_hello_between_two_runs_of_4001_starts_the_wait_over_through_run",
+            "link::tests::a_link_stopped_inside_a_cycle_saves_the_checkout_in_hand_and_lets_go",
+            "machine::tests::a_429_on_a_worker_limits_its_account_and_the_next_delegate_task_moves_up_the_ladder",
+            "machine::tests::a_captain_keeps_its_plans_when_clear_rewind_or_a_fresh_start_give_it_a_new_session",
+            "machine::tests::a_child_that_ends_on_a_429_headless_marks_its_account_too",
+            "machine::tests::a_go_accounts_weekly_window_at_100_percent_limits_it_until_the_reset_with_no_session_open",
+            "machine::tests::a_limit_with_a_reset_time_lifts_when_that_time_passes",
+            "machine::tests::a_machine_reports_its_accounts_workers_and_workers_at_once_and_never_a_token_or_email",
+            "machine::tests::a_model_claudes_menu_adds_reaches_the_picker_and_delegate_task_and_outlives_a_restart",
+            "machine::tests::a_restored_session_with_no_work_left_has_no_process_until_a_prompt_starts_it",
+            "machine::tests::a_run_that_succeeds_after_the_mark_clears_it_and_one_that_began_before_does_not",
+            "machine::tests::a_state_asked_for_directly_reads_the_cli_live_while_the_report_keeps_the_cached_one",
+            "machine::tests::a_workers_session_ends_once_its_task_is_over_and_resumes_in_its_mode_and_at_its_effort_on_the_next_prompt",
+            "machine::tests::an_agent_makes_and_lists_projects_sets_their_account_and_keeps_their_scripts",
+            "machine::tests::capabilities_for_a_task_use_that_task_not_builtin_claude",
+            "machine::tests::capabilities_list_this_machine_under_machines_while_no_hub_answers",
+            "machine::tests::delegate_calls_without_a_tab_or_task_are_refused",
+            "machine::tests::the_20_second_report_runs_each_accounts_status_cli_once_however_many_reports_go_out",
+            "machine::tests::warming_before_the_first_report_lists_every_account_and_a_second_warm_asks_nobody",
+        ];
+        let root = temp("home-untouched");
+        let (home, bin) = (root.join("home"), root.join("bin"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        // Each CLI a test could find on the PATH, as one that writes into its HOME.
+        for cli in ["claude", "codex", "cursor-agent", "gh"] {
+            std::fs::write(bin.join(cli), format!("#!/bin/sh\nmkdir -p \"$HOME/.{cli}\"\nexit 1\n")).unwrap();
+            std::fs::set_permissions(bin.join(cli), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.arg("--exact").args(names).env(HOME_ENV, &home).env("PATH", path).env_remove("XDG_CONFIG_HOME");
+        // Another test of this process may have set one.
+        for variable in session_variables() {
+            command.env_remove(variable);
+        }
+        let out = command.output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success() && stdout.contains(&format!("test result: ok. {} passed", names.len())), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+        // A probe a test started may still be running when the process ends.
+        std::thread::sleep(Duration::from_millis(500));
+        let left: Vec<String> = std::fs::read_dir(&home).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(left, Vec::<String>::new(), "these tests wrote into HOME");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_step_reads_waiting_while_its_worker_asks_and_running_again_once_the_user_answers() {
@@ -19450,7 +19519,8 @@ Have another model review a risky change before it goes ahead.";
         let sock = dir.join("pinned.sock");
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
-        let m = Machine::new(Launch { sock: sock.clone(), bins: BTreeMap::from([(Provider::Claude, thread_claude(dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        // Its own Claude home: a rewind reads the transcripts under it.
+        let m = Machine::new(Launch { sock: sock.clone(), bins: BTreeMap::from([(Provider::Claude, thread_claude(dir))]), claude_home: Some(dir.join(".claude")), ..launch() }, Some(dir.join("config")), None, |_| {});
         m.listen(|_| Err("not the machine's".into())).unwrap();
         let path = m.open_project(project.clone()).display().to_string();
         let captain = m.open_orchestrator(&path).unwrap();
