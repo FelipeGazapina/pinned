@@ -239,7 +239,7 @@ mod tests {
         let tastes: Tastes = serde_json::from_value(json!({ "captains": {} })).unwrap();
         assert_eq!(tastes.worker_profiles, WorkerProfiles::default());
         let bare: WorkerProfile = serde_json::from_value(json!({ "name": "scout" })).unwrap();
-        assert_eq!((bare.access, bare.by, bare.delivers.as_str()), (ProfileAccess::Edit, ProfileAuthor::User, ""));
+        assert_eq!((bare.access, bare.by, bare.delivers.as_str()), (ProfileAccess::ReadOnly, ProfileAuthor::User, ""), "a profile that names no access is read-only");
     }
 
     #[test]
