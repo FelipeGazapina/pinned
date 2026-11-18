@@ -49,7 +49,7 @@ impl PlanStore {
     /// Runs `write` on the plans of `session` and saves them when it succeeds and changed them;
     /// the answer says whether it did. A failed write keeps the plans as they were, since the
     /// `plan` functions only commit what passes.
-    pub fn write(&mut self, session: &str, write: impl FnOnce(&mut CaptainPlans) -> Result<String, String>) -> Result<(String, bool), String> {
+    pub fn write<T>(&mut self, session: &str, write: impl FnOnce(&mut CaptainPlans) -> Result<T, String>) -> Result<(T, bool), String> {
         let before = self.by_session.get(session);
         let mut plans = before.cloned().unwrap_or_default();
         let answer = write(&mut plans)?;
@@ -59,6 +59,20 @@ impl PlanStore {
             self.save();
         }
         Ok((answer, changed))
+    }
+
+    /// Every task the plans of every session link to, for the facts that settle and read them.
+    pub fn linked_tasks(&self) -> Vec<String> {
+        self.by_session.values().flat_map(crate::plan::linked_task_ids).collect()
+    }
+
+    /// Settles every session's plans against `facts`, saving them when one changed. True when a plan changed.
+    pub fn settle_all(&mut self, facts: &[crate::plan::TaskFacts], now: u64) -> bool {
+        let changed = self.by_session.values_mut().fold(false, |changed, plans| crate::plan::settle(plans, facts, now) || changed);
+        if changed {
+            self.save();
+        }
+        changed
     }
 
     /// Gives `to` the plans of `from` unless it has its own, and drops them from `from` unless

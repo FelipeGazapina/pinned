@@ -18,7 +18,7 @@ use std::future::Future;
 use std::path::Path;
 
 /// The environment variable that tells a node it runs in a worker box.
-pub const BOX_ENV: &str = pinned_core::agent::BOX_ENV;
+pub use pinned_core::agent::BOX_ENV;
 
 /// Whether this process's environment says it runs in a worker box.
 pub fn in_box() -> bool {

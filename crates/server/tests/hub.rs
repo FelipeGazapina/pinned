@@ -108,6 +108,7 @@ impl TestHub {
 
     #[allow(clippy::too_many_arguments)]
     fn start_every(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str, team_policy: pinned_core::teams::TeamPolicy, reports: Option<pinned_server::reports::Config>, sync_limits: SyncLimits) -> TestHub {
+        pinned_core::machine::refuse_real_home();
         let _ = rustls::crypto::ring::default_provider().install_default();
         let database = format!("pinned_test_{name}_{}", std::process::id());
         admin(&format!("drop database if exists {database} with (force)"));
@@ -422,6 +423,7 @@ fn launched(dir: &Path) -> Arc<Machine> {
 
 /// A machine that tells `events` what it reports.
 fn launched_with(dir: &Path, events: impl Fn(MachineEvent) + Send + Sync + 'static) -> Arc<Machine> {
+    pinned_core::machine::refuse_real_home();
     let claude = dir.join("claude");
     std::fs::write(&claude, "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
     std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -7790,13 +7792,89 @@ fn an_agent_holding_what_its_machine_keeps_readable_cannot_approve_or_run_a_conf
 
 const BIN: &str = env!("CARGO_BIN_EXE_pinned-server");
 
-/// A node or login started by a test must never reach the real app's socket, tab or account, nor
-/// run its built-in accounts on a CLI home the developer exported.
+/// A node or login started by a test must never reach the real app's socket, tab or account, nor a
+/// Claude or GitHub login, nor run its built-in accounts on a CLI home the developer exported.
 fn without_app_env(command: &mut std::process::Command) -> &mut std::process::Command {
-    for name in pinned_core::machine::INHERITED_SESSION_ENV {
+    for name in pinned_core::machine::session_variables() {
         command.env_remove(name);
     }
     command
+}
+
+#[test]
+fn a_spawned_node_carries_no_claude_or_github_login() {
+    use pinned_core::agent::{CONNECTOR_ENV, ISSUE_ENV, PROJECT_ENV, ROLE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV};
+    let session = [PROJECT_ENV, ROLE_ENV, pinned_core::accounts::ACCOUNT_ENV, pinned_core::plugin::HELPER_ENV, CONNECTOR_ENV, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV, pinned_core::team_call::TEAM_BOX_ENV, pinned_server::box_exit::BOX_ENV];
+    let logins: Vec<&str> = pinned_core::machine::REAL_HOME_VARIABLES.into_iter().chain(session).collect();
+    let mut command = std::process::Command::new("env");
+    for name in &logins {
+        command.env(name, "fake-value-xyz");
+    }
+    let spawned = without_app_env(&mut command).output().unwrap();
+    assert!(spawned.status.success());
+    let env = String::from_utf8_lossy(&spawned.stdout);
+    for name in logins {
+        assert!(!env.lines().any(|line| line.starts_with(&format!("{name}="))), "the node got {name}");
+    }
+}
+
+/// A machine a test node runs answers from the stand-in CLIs `launched` writes, never one found on the PATH.
+#[test]
+fn a_test_nodes_machine_answers_from_its_stand_in_clis() {
+    let dir = temp("launched");
+    let machine = launched(&dir);
+    let signed_in: Vec<(Provider, bool)> = machine.list_accounts().into_iter().map(|view| (view.account.provider, view.status.signed_in)).collect();
+    assert!(signed_in.contains(&(Provider::Claude, true)), "{signed_in:?}");
+    assert!(signed_in.iter().all(|(provider, signed_in)| *provider == Provider::Claude || !signed_in), "{signed_in:?}");
+    machine.quit();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Each place that calls the guard stops a real test run in a real home.
+#[test]
+fn a_hub_started_in_a_real_home_stops_the_test_process() {
+    pinned_core::machine::assert_refused_in_a_real_home("a_node_keeps_only_its_machine_token_and_ends_a_login_an_older_pinned_kept");
+}
+
+#[test]
+fn a_node_machine_launched_in_a_real_home_stops_the_test_process() {
+    pinned_core::machine::assert_refused_in_a_real_home("a_test_nodes_machine_answers_from_its_stand_in_clis");
+}
+
+/// The guard on its own. `a_test_run_in_a_real_home_stops_at_once_with_one_line` runs it in a child.
+#[test]
+fn the_real_home_guard() {
+    pinned_core::machine::refuse_real_home();
+}
+
+#[test]
+fn a_test_run_in_a_real_home_stops_at_once_with_one_line() {
+    let guard = |home: &Path| {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "the_real_home_guard"]).env("HOME", home).env_remove("XDG_CONFIG_HOME");
+        for name in pinned_core::machine::REAL_HOME_VARIABLES {
+            command.env_remove(name);
+        }
+        command
+    };
+    let real = temp("real-home");
+    std::fs::create_dir_all(real.join(".claude")).unwrap();
+    std::fs::write(real.join(".claude.json"), "{}").unwrap();
+    let refused = guard(&real).env("GH_TOKEN", "fake-value-xyz").output().unwrap();
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(2), "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        ["pinned tests refuse to run in a real home: found a Claude config file in HOME, a Claude folder in HOME, GH_TOKEN; run them with a temporary HOME and without these variables"]
+    );
+    assert!(!String::from_utf8_lossy(&refused.stdout).contains("test result"), "it stopped before any test ran");
+
+    let clean = temp("clean-home");
+    let started = guard(&clean).output().unwrap();
+    assert!(started.status.success(), "{}", String::from_utf8_lossy(&started.stderr));
+    assert!(String::from_utf8_lossy(&started.stdout).contains("1 passed"), "{}", String::from_utf8_lossy(&started.stdout));
+    let _ = std::fs::remove_dir_all(real);
+    let _ = std::fs::remove_dir_all(clean);
 }
 
 #[test]

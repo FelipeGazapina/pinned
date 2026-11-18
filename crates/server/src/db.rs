@@ -1645,10 +1645,10 @@ impl Db {
 
     /// Adds to the row's budget, kept in its spec beside the run. Only a box that still runs takes
     /// it: one that moved to ending since its extend was checked keeps its budget, and reads so.
+    /// An id with no row of this account, as another account's, changes nothing.
     pub async fn set_box_budget(&self, account: Uuid, id: &str, budget: f64) -> Result<(), String> {
-        let written = self
-            .client()
-            .await?
+        let client = self.client().await?;
+        let written = client
             .execute(
                 "update boxes set spec = spec || jsonb_build_object('budget_usd', $2::float8) where id = $1 and account = $3 and phase in ('creating', 'booting', 'running')",
                 &[&id, &budget, &account],
@@ -1656,7 +1656,11 @@ impl Db {
             .await
             .map_err(err)?;
         if written == 0 {
-            return Err("this box is already ending".into());
+            // The update passed over this account's row only when it no longer runs: it is ending.
+            let ending = client.query_opt("select 1 from boxes where id = $1 and account = $2", &[&id, &account]).await.map_err(err)?;
+            if ending.is_some() {
+                return Err("this box is already ending".into());
+            }
         }
         Ok(())
     }
