@@ -159,27 +159,34 @@ pub struct Diff {
 
 impl Diff {
     /// What a round says when part of the change was not read, so such a diff never reads as a
-    /// full review: each nested repository, and the bytes cut.
+    /// full review: each nested repository, the bytes cut, and the first `MOST_UNREAD` files
+    /// ignored by a .gitignore the worker changed.
     pub fn cut_note(&self) -> Option<String> {
         let nested = self.snapshot.nested.iter().map(|repo| format!("not read: nested repository {repo}"));
         let cut = (self.cut > 0).then(|| format!("the diff was cut at {} KiB: {} bytes were not read", DIFF_BYTES / 1024, self.cut));
-        let note: Vec<String> = cut.into_iter().chain(nested).collect();
+        let unread = self.snapshot.unread.iter().take(MOST_UNREAD).map(|why| format!("not read: {why}"));
+        let more = self.snapshot.unread.len().checked_sub(MOST_UNREAD).filter(|more| *more > 0).map(|more| format!("and {more} more"));
+        let note: Vec<String> = cut.into_iter().chain(nested).chain(unread).chain(more).collect();
         (!note.is_empty()).then(|| note.join("; "))
     }
 
     /// Whether the change holds nothing at all to read.
     pub fn is_empty(&self) -> bool {
-        self.text.trim().is_empty() && self.cut == 0 && self.snapshot.nested.is_empty()
+        self.text.trim().is_empty() && self.cut == 0 && self.snapshot.nested.is_empty() && self.snapshot.unread.is_empty()
     }
 }
 
-/// The folder's files as pinned took them: the tree they make, and the nested repositories
-/// it did not read. Two snapshots of the same files are equal.
+/// The folder's files as pinned took them: the tree they make, the nested repositories it did
+/// not read, and the files it did not read, each with why. Two snapshots of the same files are equal.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub tree: String,
     pub nested: Vec<String>,
+    pub unread: Vec<String>,
 }
+
+/// The most unread files a round's note names; the rest it counts.
+const MOST_UNREAD: usize = 20;
 
 /// The base of a task whose folder had no commit when it started: the empty tree, so the first
 /// commit is reviewed.
@@ -266,7 +273,10 @@ fn in_neutral<T>(folder: &Path, base: &str, scratch: &Path, path: Option<&str>, 
             }
         }
         // A new .gitignore that ignores itself.
-        add.extend(listed(git.run(&["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"])?).into_iter().filter(|file| Path::new(file).file_name().is_some_and(|name| name == ".gitignore")));
+        let ignored = listed(git.run(&["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"])?);
+        add.extend(ignored.iter().filter(|file| Path::new(file).file_name().is_some_and(|name| name == ".gitignore")).cloned());
+        let ignored: Vec<String> = ignored.into_iter().filter(|file| !add.contains(file)).collect();
+        let unread = ignored_unread(&git, &top, base, ignored)?;
         add.retain(|file| !nested.iter().any(|repo| file.starts_with(repo.as_str())));
         if !add.is_empty() {
             let list = scratch.join("add");
@@ -275,10 +285,52 @@ fn in_neutral<T>(folder: &Path, base: &str, scratch: &Path, path: Option<&str>, 
         }
         let tree = git.run(&["write-tree"])?.trim().to_owned();
         let nested = nested.into_iter().map(|repo| repo.trim_end_matches('/').to_owned()).collect();
-        read(&git, &top, Snapshot { tree, nested })
+        read(&git, &top, Snapshot { tree, nested, unread })
     })();
     let _ = std::fs::remove_dir_all(scratch);
     taken
+}
+
+/// Of the files and folders the folder's .gitignore files leave out, the ones not ignored as at
+/// `base`: the deciding rule is in a .gitignore that is new or not byte-equal to the base's at its
+/// path, or no rule decides (git lists a folder whose every file is ignored as the folder). One
+/// ignored by a .gitignore the base has as it is, such as build output, stays out unnamed. The
+/// neutral repository has no `info/exclude` and, with no global config and its own `HOME`, no
+/// `core.excludesFile` or user ignore file, so every rule comes from a .gitignore in the folder;
+/// a rule from anywhere else still counts as changed.
+fn ignored_unread(git: &Git, top: &Path, base: &str, ignored: Vec<String>) -> Result<Vec<String>, String> {
+    if ignored.is_empty() {
+        return Ok(vec![]);
+    }
+    // check-ignore takes no pathspec magic, so it runs without GIT_LITERAL_PATHSPECS; `./` keeps
+    // a name that starts with `:` from reading as magic, and it reads `*` as itself.
+    let input: String = ignored.iter().map(|file| format!("./{file}\0")).collect();
+    let (_, out, _) = git.capped_in(&["check-ignore", "--verbose", "--non-matching", "--no-index", "-z", "--stdin"], usize::MAX, Some(input.as_bytes()))?;
+    let fields: Vec<&str> = out.split('\0').collect();
+    let records: Vec<&[&str]> = fields.chunks_exact(4).collect();
+    if records.len() != ignored.len() {
+        return Err(format!("git check-ignore failed in {}", top.display()));
+    }
+    let mut as_at_base: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
+    let mut unread: Vec<String> = vec![];
+    for (record, file) in records.into_iter().zip(&ignored) {
+        let source = record[0];
+        if unread.iter().any(|folder| folder.ends_with('/') && file.starts_with(folder.as_str())) {
+            continue;
+        }
+        let in_tree = !source.is_empty() && Path::new(source).is_relative() && Path::new(source).file_name().is_some_and(|name| name == ".gitignore") && Path::new(source).components().all(|part| matches!(part, std::path::Component::Normal(_)));
+        let same = in_tree
+            && *as_at_base.entry(source.to_owned()).or_insert_with(|| {
+                // The blob ids, which are the bytes' hashes: equal ids are equal bytes.
+                let at_base = git.run(&["rev-parse", "--verify", "-q", &format!("{base}:{source}")]).ok();
+                let now = git.run(&["hash-object", "--no-filters", "--", source]).ok();
+                at_base.is_some_and(|at_base| now.is_some_and(|now| at_base.trim() == now.trim() && !now.trim().is_empty()))
+            });
+        if !same {
+            unread.push(file.clone());
+        }
+    }
+    Ok(unread.into_iter().map(|file| format!("ignored by a changed .gitignore: {file}")).collect())
 }
 
 /// The repository `folder` is in, read from its files, not by git: the folder that holds `.git`,
@@ -338,7 +390,12 @@ impl Git<'_> {
     /// printed, and whether that was all of it. Git stops on a closed pipe past `most`. Git
     /// killed after `GIT_WAIT` is "git did not answer".
     fn capped(&self, args: &[&str], most: usize) -> Result<(bool, String, bool), String> {
-        use std::io::Read;
+        self.capped_in(args, most, None)
+    }
+
+    /// `capped`, with `input` on git's standard input.
+    fn capped_in(&self, args: &[&str], most: usize, input: Option<&[u8]>) -> Result<(bool, String, bool), String> {
+        use std::io::{Read, Write};
         let mut cmd = crate::process::command("git");
         for (name, _) in std::env::vars_os() {
             if name.to_string_lossy().starts_with("GIT_") {
@@ -350,17 +407,26 @@ impl Git<'_> {
             cmd.env("GIT_WORK_TREE", work).current_dir(work);
         }
         for (name, value) in [("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_ATTR_NOSYSTEM", "1"), ("GIT_NO_REPLACE_OBJECTS", "1"), ("GIT_OPTIONAL_LOCKS", "0"), ("GIT_LITERAL_PATHSPECS", "1"), ("GIT_TERMINAL_PROMPT", "0")] {
-            cmd.env(name, value);
+            // check-ignore refuses every pathspec magic, literal too.
+            if !(name == "GIT_LITERAL_PATHSPECS" && args.first() == Some(&"check-ignore")) {
+                cmd.env(name, value);
+            }
         }
         cmd.env("HOME", self.home).env("XDG_CONFIG_HOME", self.home);
         for setting in ["core.quotepath=off", "core.fsmonitor=false", "diff.external=", "core.autocrlf=false", "core.safecrlf=false", "core.untrackedCache=false", "core.splitIndex=false", "gc.auto=0", "maintenance.auto=false"] {
             cmd.args(["-c", setting]);
         }
-        cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+        cmd.args(args).stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::null());
         if let Some(path) = self.path {
             cmd.env("PATH", path);
         }
         let mut child = cmd.spawn().map_err(|error| format!("git: {error}"))?;
+        if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
+            let input = input.to_vec();
+            std::thread::spawn(move || {
+                let _ = stdin.write_all(&input);
+            });
+        }
         let stdout = child.stdout.take();
         let (sent, read) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -525,6 +591,16 @@ mod tests {
         let ran: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).filter(|entry| entry.file_name().to_string_lossy().starts_with("ran.")).collect();
         assert!(ran.is_empty(), "the repo's config ran a program {} times", ran.len());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_unread_files_a_note_names_stop_at_twenty() {
+        let unread = (0..22).map(|at| format!("ignored by a changed .gitignore: f{at}.rs")).collect();
+        let diff = Diff { snapshot: Snapshot { unread, ..Snapshot::default() }, ..Diff::default() };
+        let note = diff.cut_note().unwrap();
+        assert!(!diff.is_empty());
+        assert!(note.starts_with("not read: ignored by a changed .gitignore: f0.rs; "), "{note}");
+        assert!(note.ends_with("not read: ignored by a changed .gitignore: f19.rs; and 2 more"), "{note}");
     }
 
     #[test]

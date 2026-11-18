@@ -978,6 +978,7 @@ mod tests {
             t.reads("src/hide/.gitignore");
             let note = t.not_reviewed();
             assert!(note.contains("not read: ignored by a changed .gitignore: src/hide/"), "{note}");
+            assert!(!note.contains("src/hide/x.rs"), "the folder is named once, not each file in it: {note}");
         }
 
         #[test]
