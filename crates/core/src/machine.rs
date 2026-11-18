@@ -16130,6 +16130,177 @@ Have another model review a risky change before it goes ahead.";
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// What pinned tells the user in a tab's thread when a message from `sender` is dropped there.
+    fn dropped_for_user(sender: &str) -> String {
+        format!("A message from {sender} was not delivered: this session switched to Full access and the sender asks for permissions. Send it yourself if you want it here.")
+    }
+
+    /// What pinned tells the sender of a message dropped in `captain`'s tab.
+    fn dropped_for_sender(captain: &str) -> String {
+        format!("Your message to {captain} was not delivered: the user switched it to Full access and your session asks for permissions. The user can send it from that tab.")
+    }
+
+    /// An empty transcript for the tab's conversation, where pinned writes its own lines for the user.
+    fn notes_file(m: &Machine, tab: &str) -> PathBuf {
+        let (account, session) = m.tab(tab, |t| (t.account.clone(), t.claude_session.clone().unwrap())).unwrap();
+        let file = m.accounts.home(&account).join("projects").join("-pinned-notes").join(format!("{session}.jsonl"));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "").unwrap();
+        file
+    }
+
+    /// pinned's own lines in a thread, as its page shows them.
+    fn notes(file: &Path) -> Vec<String> {
+        thread::read(file, 0).unwrap().items.into_iter().filter_map(|item| if let thread::Item::Note { text, .. } = item { Some(text) } else { None }).collect()
+    }
+
+    /// The news that reached the tab `tab`, queued or typed, once `line` is in it.
+    #[cfg(unix)]
+    fn heard(m: &Machine, claude: &Path, tab: &str, line: &str) -> String {
+        let news = std::sync::Mutex::new(String::new());
+        let start = Instant::now();
+        loop {
+            if let Some((text, ids, claim)) = m.delegates.claim_news(tab) {
+                news.lock().unwrap().push_str(&text);
+                m.delegates.confirm_notice(&ids);
+                m.delegates.confirm_claim(claim);
+            }
+            let all = format!("{}{}", news.lock().unwrap(), kept(claude, "typed", tab));
+            if all.contains(line) || start.elapsed() > Duration::from_secs(15) {
+                return all;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Three sessions an asking session sends to, held as each starts: one switched to Full, one
+    /// flipped with no restart for the held prompts' own typing, one flushed by the user's next prompt.
+    #[cfg(unix)]
+    fn held_from_an_asking_session(name: &str) -> (Arc<Machine>, PathBuf, PathBuf, TabId, [TabId; 3]) {
+        let pid = std::process::id();
+        let ids: Vec<String> = ["sender", "switched", "flipped", "flushed"].iter().map(|n| format!("{name}-{n}-{pid}")).collect();
+        let (m, dir, claude, tabs) = restored_idle(name, &ids.iter().map(String::as_str).collect::<Vec<_>>());
+        let sender = tabs[0].clone();
+        m.tab(&sender, |t| t.title = Some("Ops".into())).unwrap();
+        let targets = [tabs[1].clone(), tabs[2].clone(), tabs[3].clone()];
+        for (tab, title) in targets.iter().zip(["Site", "Docs", "Api"]) {
+            assert!(!m.view(tab).unwrap().bypass, "the precondition: the session asks for its permission prompts");
+            m.tab(tab, |t| t.title = Some(title.into())).unwrap();
+            m.call(Call::Wake { tab: tab.clone(), cols: 80, rows: 24 }).unwrap();
+            assert_eq!(act_as(&m, &sender, "prompt", json!({ "tab": tab, "text": "Drop the tables." })), Ok(Value::Null));
+        }
+        (m, dir, claude, sender, targets)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_held_asking_prompt_dropped_by_the_switch_to_full_tells_the_user_and_the_sender() {
+        let (m, dir, claude, sender, [switched, _, _]) = held_from_an_asking_session("drop-told-switch");
+        let file = notes_file(&m, &switched);
+        m.set_bypass(&switched, true, 80, 24).unwrap();
+        assert_eq!(notes(&file), [dropped_for_user("Ops")], "the user sees one line in the thread");
+        let news = heard(&m, &claude, &sender, &dropped_for_sender("Site"));
+        assert_eq!(news.matches(&dropped_for_sender("Site")).count(), 1, "the sender is told once: {news:?}");
+        assert!(!news.contains("Drop the tables.") && !notes(&file).concat().contains("Drop the tables."), "a notice quoted the message");
+        let _ = std::fs::remove_file(file);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_held_asking_prompt_dropped_where_the_held_prompts_are_typed_tells_the_user_and_the_sender() {
+        let (m, dir, claude, sender, [_, flipped, _]) = held_from_an_asking_session("drop-told-held");
+        let file = notes_file(&m, &flipped);
+        m.tab(&flipped, |t| t.bypass = true).unwrap();
+        wait_for("the held prompts to go", || m.tab(&flipped, |t| t.held.is_empty()).unwrap());
+        let news = heard(&m, &claude, &sender, &dropped_for_sender("Docs"));
+        assert_eq!(news.matches(&dropped_for_sender("Docs")).count(), 1, "the sender is told once: {news:?}");
+        assert_eq!(notes(&file), [dropped_for_user("Ops")], "the user sees one line in the thread");
+        assert_eq!(kept(&claude, "typed", &flipped), "", "the asking prompt reached a session that skips its prompts");
+        let _ = std::fs::remove_file(file);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_held_asking_prompt_dropped_as_the_users_next_prompt_types_tells_the_user_and_the_sender() {
+        let (m, dir, claude, sender, [_, _, flushed]) = held_from_an_asking_session("drop-told-flush");
+        let file = notes_file(&m, &flushed);
+        m.tab(&flushed, |t| t.bypass = true).unwrap();
+        wait_for("the terminal", || m.tab(&flushed, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
+        assert_eq!(m.call(Call::Prompt { tab: flushed.clone(), text: "Go on.".into(), refuse_bypass: false }), Ok(json!(null)));
+        wait_for("the user's prompt", || kept(&claude, "typed", &flushed).ends_with('\r'));
+        assert_eq!(kept(&claude, "typed", &flushed), pasted("Go on."), "the asking prompt went in with the user's next one");
+        let news = heard(&m, &claude, &sender, &dropped_for_sender("Api"));
+        assert_eq!(news.matches(&dropped_for_sender("Api")).count(), 1, "the sender is told once: {news:?}");
+        assert_eq!(notes(&file), [dropped_for_user("Ops")], "the user sees one line in the thread");
+        let _ = std::fs::remove_file(file);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A Capitão that asks for its permission prompts, busy in a turn, and an asking global
+    /// Orchestrator whose message to it waits in its queue, with Full access by default on.
+    #[cfg(unix)]
+    fn queued_from_an_asking_orchestrator(name: &str) -> (Arc<Machine>, PathBuf, PathBuf, TabId, TabId) {
+        let session = format!("{name}-{}", std::process::id());
+        let (m, dir, claude, tabs) = restored_idle_with(name, &[&session], |app| role_env(Role::Orchestrator, app));
+        let captain = tabs[0].clone();
+        m.tab(&captain, |t| {
+            t.bypass = false;
+            t.title = Some("Site".into());
+        })
+        .unwrap();
+        m.call(Call::Wake { tab: captain.clone(), cols: 80, rows: 24 }).unwrap();
+        wait_for("the terminal", || m.tab(&captain, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
+        m.record_event(AgentEvent { session: Some(session.clone()), ..hook(&captain, AgentStatus::Working) });
+        let global = m.open_global_orchestrator().unwrap();
+        m.tab(&global, |t| {
+            t.bypass = false;
+            t.title = Some("Ops".into());
+        })
+        .unwrap();
+        let path = m.open_project(m.tab(&captain, |t| t.cwd.clone()).unwrap()).display().to_string();
+        let sent = m.send_to_captain(&global, &path, None, "Drop the tables.", "r-1").unwrap();
+        assert!(matches!(sent, Handoff::Queued { .. }), "the busy Capitão queues it: {sent:?}");
+        (m, dir, claude, captain, global)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_asking_message_queued_for_a_busy_captain_is_never_typed_once_the_user_switches_it_to_full() {
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(true)));
+        let (m, dir, claude, captain, _) = queued_from_an_asking_orchestrator("queued-then-full");
+        let session = m.tab(&captain, |t| t.claude_session.clone()).unwrap();
+        m.set_bypass(&captain, true, 80, 24).unwrap();
+        wait_for("the terminal", || m.tab(&captain, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
+        m.record_event(AgentEvent { session: session.clone(), ..hook(&captain, AgentStatus::Done) });
+        wait_for("the queue to empty", || m.delegates.queued().get(&captain).is_none());
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!kept(&claude, "typed", &captain).contains("Drop the tables."), "the asking message reached the Capitão switched to Full: {:?}", kept(&claude, "typed", &captain));
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_asking_message_dropped_from_the_queue_tells_the_user_and_the_sender() {
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(true)));
+        let (m, dir, claude, captain, global) = queued_from_an_asking_orchestrator("queued-told");
+        let file = notes_file(&m, &captain);
+        let session = m.tab(&captain, |t| t.claude_session.clone()).unwrap();
+        m.set_bypass(&captain, true, 80, 24).unwrap();
+        wait_for("the terminal", || m.tab(&captain, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
+        m.record_event(AgentEvent { session: session.clone(), ..hook(&captain, AgentStatus::Done) });
+        wait_for("the queue to empty", || m.delegates.queued().get(&captain).is_none());
+        let news = heard(&m, &claude, &global, &dropped_for_sender("Site"));
+        assert_eq!(news.matches(&dropped_for_sender("Site")).count(), 1, "the sender is told once: {news:?}");
+        assert_eq!(notes(&file), [dropped_for_user("Ops")], "the user sees one line in the thread");
+        assert!(!kept(&claude, "typed", &captain).contains("was not delivered"), "the user's notice was typed into the session");
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
+        let _ = std::fs::remove_file(file);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     #[cfg(unix)]
     fn held_prompts_wait_out_a_startup_menu() {
