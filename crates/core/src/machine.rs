@@ -11848,6 +11848,8 @@ while True:
 
     #[test]
     fn a_new_captain_and_the_global_orchestrator_open_in_full_access_and_their_workers_stay_capped() {
+        // This test asserts what Full access by default on opens; it holds the switch there.
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(true)));
         use crate::delegate::{parse_request, resolve_access, Access};
         let dir = temp("full-by-default");
         let project = dir.join("app");
@@ -11868,6 +11870,7 @@ while True:
         let ceiling = m.tab(&captain, |t| t.child_access()).unwrap();
         assert!(resolve_access(ceiling, &parse_request(&json!({ "task": "look", "runtimeMode": "full-access" })).unwrap()).is_err(), "a child is never wider than its parent");
         let _ = std::fs::remove_dir_all(dir);
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
     }
 
     #[test]
@@ -12130,6 +12133,8 @@ while True:
     #[test]
     #[cfg(unix)]
     fn a_stopped_capitao_starts_on_the_message_and_one_without_a_conversation_restarts_on_it() {
+        // This test asserts what Full access by default on opens; it holds the switch there.
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(true)));
         let dir = temp("enqueue-start");
         let (project, config) = (dir.join("site"), dir.join("config"));
         std::fs::create_dir_all(&project).unwrap();
@@ -12153,6 +12158,7 @@ while True:
         assert_eq!(enqueue(&m, &api_path, "- Fix the README.", "r-3"), Ok(json!({ "outcome": "iniciado", "tab": fresh })));
         assert_eq!(started(&claude, &fresh)[8..10], ["[Orchestrator] - Fix the README.", "--append-system-prompt"]);
         let _ = std::fs::remove_dir_all(dir);
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
     }
 
     #[test]
@@ -12198,6 +12204,8 @@ while True:
     #[test]
     #[cfg(unix)]
     fn the_global_orchestrator_opens_once_in_its_own_folder_which_is_no_project_but_keeps_memory() {
+        // This test asserts what Full access by default on opens; it holds the switch there.
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(true)));
         let dir = temp("global-tab");
         let project = dir.join("site");
         std::fs::create_dir_all(&project).unwrap();
@@ -12221,6 +12229,8 @@ while True:
         assert_eq!(found.as_array().unwrap().iter().map(|m| m["title"].clone()).collect::<Vec<_>>(), [json!("Machines")]);
         assert_eq!(m.list_projects().len(), 1);
 
+        // The Captain opens on this thread, where the switch holds; the socket's thread reads the constant.
+        m.open_orchestrator(&path).unwrap();
         let send = format!(r#""name":"send_to_captain","project":"{path}","message":"Ship the form.","request_id":"r-1""#);
         let sent: Value = serde_json::from_str(&tool(&global, &send).unwrap()).unwrap();
         assert_eq!(sent["outcome"], json!("iniciado"));
@@ -12235,11 +12245,14 @@ while True:
         let capitao = sent["tab"].as_str().unwrap();
         assert_eq!(tool(capitao, r#""name":"tell_orchestrator","text":"Halfway.""#), Err("this machine is not linked to a hub".into()), "a machine that hosts no orchestrator reports through the hub");
         let _ = std::fs::remove_dir_all(dir);
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
     }
 
     #[test]
     #[cfg(unix)]
     fn send_to_captain_relays_a_project_on_another_machine_and_keeps_one_named_by_this_machines_id_here() {
+        // This test asserts what Full access by default on opens; it holds the switch there.
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(true)));
         let dir = temp("global-relay");
         let project = dir.join("site");
         std::fs::create_dir_all(&project).unwrap();
@@ -12293,6 +12306,7 @@ while True:
         let to = |machine: &str, path: &str| (json!(machine), json!(path));
         assert_eq!(targets, [to("m-book", "/w/site"), to("m-air", "/w/site"), to("m-book", "/w/site"), to("m-air", "/w/site"), to("m-old", "/w/new"), to("m-book", "/w/site")]);
         let _ = std::fs::remove_dir_all(dir);
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
     }
 
     #[test]
@@ -12329,6 +12343,8 @@ while True:
     #[test]
     #[cfg(unix)]
     fn a_report_starts_the_global_orchestrator_on_its_line_once() {
+        // This test asserts what Full access by default on opens; it holds the switch there.
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(true)));
         let dir = temp("global-report");
         let claude = recording_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
@@ -12341,6 +12357,7 @@ while True:
         assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", hooks::GLOBAL_SETTINGS, "--plugin-dir", "p", "--dangerously-skip-permissions", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open.", "--append-system-prompt", &format!("{}\n\n{}", global::prompt("Orchestrator", &crate::account::hostname()), taste::Taste::default().brief())]);
         assert_eq!(call(), Ok(first), "a repeated report answers the first outcome");
         let _ = std::fs::remove_dir_all(dir);
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
     }
 
     /// A machine whose projects' sessions run under the `work` account, so their transcripts live
@@ -12367,6 +12384,8 @@ while True:
     #[test]
     #[cfg(unix)]
     fn a_message_from_the_global_orchestrator_comes_back_as_the_capitaos_report_when_its_turn_ends() {
+        // This test asserts what Full access by default on opens; it holds the switch there.
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(true)));
         let dir = temp("global-e2e");
         let project = dir.join("site");
         std::fs::create_dir_all(&project).unwrap();
@@ -12388,6 +12407,8 @@ while True:
         };
         let overview = || serde_json::from_str::<Value>(&tool(r#""name":"projects""#).unwrap()).unwrap();
 
+        // The Captain opens on this thread, where the switch holds; the socket's thread reads the constant.
+        m.open_orchestrator(&path).unwrap();
         let sent: Value = serde_json::from_str(&tool(&format!(r#""name":"send_to_captain","project":"{path}","message":"Ship the form.","request_id":"r-1""#)).unwrap()).unwrap();
         let capitao = sent["tab"].as_str().unwrap().to_owned();
         assert_eq!(sent, json!({ "outcome": "iniciado", "tab": capitao }));
@@ -12419,6 +12440,7 @@ while True:
         m.start_claude(&plain, 80, 24).unwrap();
         assert_eq!(started(&claude, &plain), [&path, "", "", "--settings", "s", "--plugin-dir", "p"], "a plain thread got a system prompt");
         let _ = std::fs::remove_dir_all(dir);
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
     }
 
     #[test]
@@ -13047,6 +13069,8 @@ while True:
     #[test]
     #[cfg(unix)]
     fn an_orchestrator_cannot_edit_and_starts_with_one_prompt() {
+        // This test asserts what Full access by default on opens; it holds the switch there.
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(true)));
         let dir = temp("orchestrator-args");
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
@@ -13065,11 +13089,14 @@ while True:
         m.record_event(AgentEvent { status: AgentStatus::Working, cwd: Some(review), message: None, tab: Some(tab.clone()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None });
         assert_eq!(m.view(&tab).unwrap().cwd, path, "reviewing a worker's worktree moved the orchestrator into it");
         let _ = std::fs::remove_dir_all(dir);
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
     }
 
     #[test]
     #[cfg(unix)]
     fn a_capitao_starts_with_its_projects_taste_and_the_global_orchestrator_with_its_own() {
+        // This test asserts what Full access by default on opens; it holds the switch there.
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(true)));
         let dir = temp("taste-brief");
         let (site, config) = (dir.join("site"), dir.join("config"));
         std::fs::create_dir_all(&site).unwrap();
@@ -13120,6 +13147,7 @@ Have another model review a risky change before it goes ahead.";
         let global_prompt = format!("{}\n\n{orchestrator_brief}", global::prompt("Orchestrator", &crate::account::hostname()));
         assert_eq!(started(&claude, &global_tab).last(), Some(&global_prompt));
         let _ = std::fs::remove_dir_all(dir);
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
     }
 
     #[test]
@@ -13789,6 +13817,8 @@ Have another model review a risky change before it goes ahead.";
     #[test]
     #[cfg(unix)]
     fn an_agents_enqueue_never_opens_a_captain_wider_than_the_agent() {
+        // This test asserts what Full access by default on opens; it holds the switch there.
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(true)));
         let dir = temp("act-enqueue-ceiling");
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
@@ -13829,6 +13859,7 @@ Have another model review a risky change before it goes ahead.";
         assert!(act_as(&m, "", "enqueue", json!({ "path": stopped, "text": "Ship it.", "request_id": "r-6" })).is_err(), "an agent from another machine started it");
         assert_eq!(enqueue(&full, &stopped, "r-7"), users, "a Full agent starts it");
         let _ = std::fs::remove_dir_all(dir);
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
     }
 
     #[test]
@@ -15180,6 +15211,8 @@ Have another model review a risky change before it goes ahead.";
     #[test]
     #[cfg(unix)]
     fn a_captains_delegate_task_is_a_worker_thread_on_the_account_model_and_effort_it_names() {
+        // This test asserts what Full access by default on opens; it holds the switch there.
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(true)));
         let dir = temp("child-thread");
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
@@ -15259,6 +15292,7 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(m.view(&child).unwrap().running, true, "the thread stays open after its task ends");
         assert_eq!(m.delegates.working_cwds(), Vec::<PathBuf>::new(), "an ended task no longer counts toward workers at once");
         let _ = std::fs::remove_dir_all(dir);
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
     }
 
     /// A Captain's thread child on the `work` account, with its transcript file and its folder.
@@ -16239,6 +16273,8 @@ Have another model review a risky change before it goes ahead.";
     #[test]
     #[cfg(unix)]
     fn a_global_orchestrators_name_with_brackets_and_a_line_break_leads_each_captain_line_cleaned() {
+        // This test asserts what Full access by default on opens; it holds the switch there.
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(true)));
         let dir = temp("orchestrator-name-prompt");
         let (project, config) = (dir.join("site"), dir.join("config"));
         std::fs::create_dir_all(&project).unwrap();
@@ -16255,6 +16291,7 @@ Have another model review a risky change before it goes ahead.";
         assert!(prompt.contains("\"[Head pinned office] \""), "{prompt}");
         assert!(!prompt.lines().any(|line| line.trim_start().to_ascii_lowercase().starts_with("[pinned]")), "{prompt}");
         let _ = std::fs::remove_dir_all(dir);
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
     }
 
     #[test]
