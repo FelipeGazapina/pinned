@@ -13924,6 +13924,38 @@ Have another model review a risky change before it goes ahead.";
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A tab of `path` whose session is a pty running cat in raw mode, which writes what it is
+    /// typed to `file`.
+    #[cfg(unix)]
+    fn cat_tab(m: &Machine, path: &str, bypass: bool, file: &Path) -> TabId {
+        let tab = m.open_tab(Some(path.to_owned()), bypass).unwrap();
+        let (seen, sink) = viewer();
+        m.spawn(&tab, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", file.display())), pty::size(80, 24)).unwrap();
+        m.attach(&tab, "test".into(), sink).unwrap();
+        wait_for("stty", || text(&seen).contains("ready"));
+        tab
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_that_asks_for_its_prompts_types_nothing_into_a_full_worker() {
+        let (m, dir, captain) = limited_captain("act-prompt-full", TastePatch::default());
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let (asking, full) = (m.open_tab(Some(path.clone()), false).unwrap(), m.open_tab(Some(path.clone()), true).unwrap());
+        let file = dir.join("typed.bin");
+        let worker = cat_tab(&m, &path, true, &file);
+        assert!(m.view(&worker).unwrap().bypass, "the precondition: the worker skips its permission prompts");
+        for from in [asking.as_str(), ""] {
+            let refused = act_as(&m, from, "prompt", json!({ "tab": worker, "text": "Drop the tables." }));
+            assert_eq!(refused, Err(format!("{worker} skips its permission prompts and your session asks for them, so your message can't reach it; the user can switch it to ask for permissions")), "from {from:?}");
+        }
+        assert_eq!(act_as(&m, &full, "prompt", json!({ "tab": worker, "text": "Ship it." })), Ok(Value::Null), "a Full agent's prompt reaches it");
+        let shipped = b"\x1b[200~[Session] Ship it.\x1b[201~\r";
+        assert_eq!(typed(&file, shipped), shipped, "only the Full agent's prompt reached the terminal");
+        assert!(m.tab(&worker, |t| t.held.is_empty()).unwrap(), "nothing waits to be typed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     #[cfg(unix)]
     fn an_agents_prompt_reaches_another_running_session_and_never_itself_a_captain_or_the_global_tab() {
