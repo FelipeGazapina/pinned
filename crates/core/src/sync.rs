@@ -256,7 +256,7 @@ pub struct Synced {
 /// What became of the files a sync had to send.
 #[derive(Debug, Default, PartialEq)]
 pub enum Push {
-    /// The hub took them all, or there were none.
+    /// The hub refused nothing this sync sent; a shrinking sync may have kept files back.
     #[default]
     Done,
     /// The hub refused a batch, so it and the ones after it wait for a later sync. Their agreed

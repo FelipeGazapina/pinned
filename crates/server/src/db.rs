@@ -328,7 +328,7 @@ struct Counted {
     writing: i64,
     /// `pg_database_size` at the last read.
     db: Option<i64>,
-    /// When the sum and the database's size were last read together, or the read failed.
+    /// When the sum and the database's size were last read, each on its own, or a read failed.
     read_at: Option<Instant>,
 }
 
@@ -991,26 +991,30 @@ impl Db {
         Ok(row.get(0))
     }
 
+    async fn read_db_size(&self) -> Result<i64, String> {
+        let row = self.client().await?.query_one("select pg_database_size(current_database())", &[]).await.map_err(err)?;
+        Ok(row.get(0))
+    }
+
     /// Reserves `growth` bytes for a push about to write its files, or refuses it with `hub_full`.
     /// What synced projects take is read on the first push, again every `SYNC_READ_EVERY`, and
     /// again before a refusal for the total once `SYNC_FRESH_READ_EVERY` passed since the last
-    /// read, so deletions that landed open the hub at once. A failed read refuses nothing.
+    /// read, so deletions that landed open the hub at once. A failed read refuses nothing for its
+    /// own limit, and leaves the other read's limit in force.
     async fn reserve_sync(&self, growth: i64) -> Result<SyncReserved, String> {
         let space = &self.sync_space;
         let mut counted = space.counted.lock().await;
         let now = Instant::now();
         if Counted::due(counted.read_at, SYNC_READ_EVERY, now) {
             counted.read_at = Some(now);
-            let read = async {
-                let row = self.client().await?.query_one("select pg_database_size(current_database())", &[]).await.map_err(err)?;
-                Ok::<_, String>((self.read_sync_sum().await?, row.get::<_, i64>(0)))
-            };
-            match read.await {
-                Ok((sum, db)) => {
-                    counted.read_sum(sum, now);
-                    counted.db = Some(db);
-                }
+            // Read apart, so a failure of one leaves the other's limit in force.
+            match self.read_sync_sum().await {
+                Ok(sum) => counted.read_sum(sum, now),
                 Err(e) => eprintln!("pinned-server: could not read what synced projects take: {e}"),
+            }
+            match self.read_db_size().await {
+                Ok(db) => counted.db = Some(db),
+                Err(e) => eprintln!("pinned-server: could not read the database's size: {e}"),
             }
         }
         if counted.full(&space.limits, growth) && Counted::due(counted.sum_at, SYNC_FRESH_READ_EVERY, now) {

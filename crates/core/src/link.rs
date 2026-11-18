@@ -290,9 +290,10 @@ struct Syncer {
 /// one; either way the hub refuses a push that grows past it whichever project sends it, so one
 /// hold covers every project and plugin share. Until it ends, a sync sends only what does not grow
 /// the hub's copy (see `sync::sync_shrinking`); when the wait is over, the next cycle is a probe
-/// that sends everything. A probe cycle in which every sync is `Ok` and none is refused ends the
-/// hold; one in which any is refused doubles it, whatever the other projects did. The hold is not
-/// restarted when the files to send change. The project lists and pulls every cycle all the same.
+/// that sends everything. A probe cycle in which no sync is refused at the limit ends the hold,
+/// whatever other errors its syncs had; one in which any is refused doubles it, whatever the other
+/// projects did. The hold is not restarted when the files to send change. The project lists and
+/// pulls every cycle all the same.
 ///
 /// A cycle runs `begin`, then a sync of each project and plugin share, then `finish`.
 struct PushBackoff {
@@ -309,7 +310,7 @@ struct Round {
     /// The hold is on, and its wait is not over: this cycle only shrinks.
     held: bool,
     refused: bool,
-    /// A sync of the cycle failed or never ran, so the cycle says nothing of the hub's room.
+    /// A sync of the cycle never ran, so the cycle says nothing of the hub's room.
     unclean: bool,
 }
 
@@ -342,7 +343,9 @@ impl PushBackoff {
         self.round = Round { probe: on && !shrinking, held: on && shrinking, ..Round::default() };
     }
 
-    /// Ends the cycle: the hold ends when a probe cycle was clean.
+    /// Ends the cycle: the hold ends when a probe cycle ran every sync and none was refused at the
+    /// limit. A sync that failed for another reason says nothing of the hub's room, so it does not
+    /// keep the hold.
     fn finish(&mut self) {
         let round = std::mem::take(&mut self.round);
         if round.probe && !round.refused && !round.unclean {
@@ -387,8 +390,7 @@ impl PushBackoff {
                     self.limit = Some(Limit { wait, until: now + jittered(wait, (self.draw)()).min(PUSH_HOLD_MAX), refusal: error.clone() });
                 }
             }
-            Ok(_) => {}
-            Err(_) => self.round.unclean = true,
+            _ => {}
         }
         done
     }
