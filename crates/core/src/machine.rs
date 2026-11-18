@@ -13975,6 +13975,32 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn a_guarded_prompt_types_nothing_into_a_session_that_skips_its_prompts() {
+        let (m, dir, captain) = limited_captain("guarded-prompt", TastePatch::default());
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let (skips_file, asks_file) = (dir.join("skips.bin"), dir.join("asks.bin"));
+        let (skips, asks) = (cat_tab(&m, &path, true, &skips_file), cat_tab(&m, &path, false, &asks_file));
+        // As the hub's MCP sends it for an external agent, and as an app before it sends it bare.
+        let prompt = |tab: &str, text: &str, guarded: bool| {
+            let mut call = json!({ "cmd": "prompt", "tab": tab, "text": text });
+            if guarded {
+                call["refuse_bypass"] = json!(true);
+            }
+            m.call(serde_json::from_value(call).unwrap())
+        };
+        assert_eq!(prompt(&skips, "Drop the tables.", true), Err("this session skips its permission prompts, so a message from an agent that asks for them can't reach it; the user can switch it to ask for permissions".into()));
+        assert_eq!(prompt(&asks, "Ship it.", true), Ok(Value::Null), "a guarded prompt reaches a session that asks for its prompts");
+        let shipped = b"\x1b[200~Ship it.\x1b[201~\r";
+        assert_eq!(typed(&asks_file, shipped), shipped);
+        assert_eq!(prompt(&skips, "Go on.", false), Ok(Value::Null), "the user's own prompt still reaches it");
+        let went_on = b"\x1b[200~Go on.\x1b[201~\r";
+        assert_eq!(typed(&skips_file, went_on), went_on, "the guarded prompt never reached the terminal");
+        assert!(m.tab(&skips, |t| t.held.is_empty()).unwrap(), "nothing waits to be typed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn an_agents_prompt_reaches_another_running_session_and_never_itself_a_captain_or_the_global_tab() {
         let (m, dir, captain) = limited_captain("act-prompt", TastePatch::default());
         let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
