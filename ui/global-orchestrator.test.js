@@ -142,6 +142,7 @@ function page({ settings = {}, older = false, offline = false } = {}) {
     viewListeners: [],
     visibleInterval: () => 0,
     threadState: () => "idle",
+    atWork: (tab) => !!tab.view.running,
     shellPage: () => "global-projects",
     setPage: (html) => pages.push(html),
     headHtml: (title, rest = "") => `<h1>${title}</h1>${rest}`,
