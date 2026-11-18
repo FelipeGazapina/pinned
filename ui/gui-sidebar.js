@@ -306,7 +306,10 @@ function noteReturns() {
   for (const key of workingKeys) if (!now.has(key)) returnedAt.set(key, nowS());
   workingKeys = now;
 }
-const rowTabs = () => [...threadList.querySelectorAll(".thread-row")].map((r) => tabByKey(r.dataset.tab)).filter(Boolean);
+function rowTabs() {
+  if (threadListStale) drawThreadList();
+  return [...threadList.querySelectorAll(".thread-row")].map((r) => tabByKey(r.dataset.tab)).filter(Boolean);
+}
 
 function markThreadSeen(tab) {
   if (!tab || !guiOn() || document.hidden) return;
@@ -509,6 +512,25 @@ function renderSidebar() {
   const scope = projectGroups().find((g) => g.key === ui.project);
   // A render that drew without projects keeps the filter, to be checked by the render the loader sends.
   if (!scope && !projectsWaiting && !projectListsPending()) ui.project = "";
+  for (const id of machines.keys()) noteThreadsSeen(id, tabs.filter((t) => t.machine === id).length);
+  if (threadListShown()) drawThreadList(scope);
+  else threadListStale = true;
+  renderSyncAlert();
+  drawSidebarToggle();
+  tickDurations();
+  scheduleWake();
+  modelChanged();
+}
+
+/** The thread list is on screen: the phone's Threads screen, or the open sidebar on a wider one. A
+ * hidden sidebar keeps its layout box, so drawing it there costs what drawing it in view does. */
+const threadListShown = () => (document.body.dataset.phoneScreen ? document.body.dataset.phoneScreen === "threads" : ui.sidebarOpen);
+/** A render left the list as it was, since it was off screen; it is drawn when it comes back or a row is read. */
+let threadListStale = false;
+new MutationObserver(() => threadListStale && threadListShown() && drawThreadList()).observe(document.body, { attributeFilter: ["data-phone-screen", "data-sidebar"] });
+
+function drawThreadList(scope = projectGroups().find((g) => g.key === ui.project)) {
+  threadListStale = false;
   const where = scope ? projectWhere(PinnedProjects.sessionOn(scope.checkouts, machineDirectory())) : "";
   const trigger = `<span class="lead">Threads in</span>${projectNameMark(scope?.name ?? "All projects")}${where}${icon("chevron-down")}`;
   if (projectFilter.innerHTML !== trigger) projectFilter.innerHTML = trigger;
@@ -517,17 +539,11 @@ function renderSidebar() {
   const needle = ui.search.trim().toLowerCase();
   document.getElementById("search-clear").hidden = !ui.search;
   const list = needle ? searchRows(inScope, needle) : shelfRows(inScope);
-  for (const id of machines.keys()) noteThreadsSeen(id, tabs.filter((t) => t.machine === id).length);
   const away = offlineMachines(machines, { local: LOCAL, threadsSeen, seen: lastSeen, name: machineName });
   threadList.replaceChildren(...away.map(machineNote), ...list);
   if (!list.length) threadList.insertAdjacentHTML("beforeend", `<p class="empty" role="status">${tabs.length ? "No threads found" : emptyListText(away.length > 0)}</p>`);
   threadList.querySelectorAll(".thread-row").forEach((row, i) => i < 9 && (row.dataset.jump = `${MOD_LABEL}${i + 1}`));
   document.getElementById("new-thread").dataset.tipSub = projectCount() > 1 ? `New thread in current project: Shift+click (${MOD_LABEL}⇧N)` : "";
-  renderSyncAlert();
-  drawSidebarToggle();
-  tickDurations();
-  scheduleWake();
-  modelChanged();
 }
 
 /** What the closed sidebar holds: how many things wait on you (agents' approvals and blocked

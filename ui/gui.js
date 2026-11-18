@@ -440,7 +440,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 function stepThread(step) {
-  const order = [...threadList.querySelectorAll(".thread-row")].map((r) => tabByKey(r.dataset.tab));
+  const order = rowTabs();
   const i = order.indexOf(active);
   if (order.length > 1) activate(order[(i + step + order.length) % order.length]);
 }
