@@ -209,6 +209,14 @@ impl Delegates {
         }
     }
 
+    /// Notes the commit task `id`'s folder stood at when it started (U8).
+    pub fn set_base(&self, id: &str, base: Option<String>) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.base = base;
+        }
+        self.persist();
+    }
+
     /// Notes the worker profile task `id` runs as (U6).
     pub fn set_profile(&self, id: &str, profile: Option<String>) {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
@@ -2059,6 +2067,7 @@ fn fresh(new: NewTask) -> Task {
         reviews: vec![],
         profile: None,
         chain: None,
+        base: None,
     }
 }
 
@@ -2211,6 +2220,8 @@ struct SavedTask {
     profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     chain: Option<crate::chain::ChainLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base: Option<String>,
     /// The milliseconds a working task had counted toward its time limit when this was written.
     /// A restart counts on from there, so the time pinned was down does not count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2312,6 +2323,7 @@ impl SavedTask {
             reviews: task.reviews.clone(),
             profile: task.profile.clone(),
             chain: task.chain.clone(),
+            base: task.base.clone(),
             counted_ms: (!task.state.terminal()).then(|| task.run.counted(Instant::now())),
         }
     }
@@ -2369,6 +2381,7 @@ impl SavedTask {
             reviews: self.reviews,
             profile: self.profile,
             chain: self.chain,
+            base: self.base,
         }
     }
 }

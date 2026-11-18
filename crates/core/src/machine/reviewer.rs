@@ -16,6 +16,13 @@ impl Machine {
         taste::change(self.orchestration_dir.as_deref(), |tastes| tastes.set_reviewer(patch))
     }
 
+    /// Keeps the commit task `task`'s folder `cwd` stands at as it starts: the checkout's HEAD for
+    /// a shared worker, its worktree's start commit for an isolated one. Its review diffs against
+    /// it, so a worker that commits, or a checkout moved to the worker's branch, cannot empty it.
+    pub(super) fn note_base(&self, task: &str, cwd: &std::path::Path) {
+        self.delegates.set_base(task, review_run::head(cwd, self.launch.path_env.as_deref()));
+    }
+
     /// U8's hook: the worker thread in `tab` running task `task` finished a turn that the task
     /// would end with. True when a review now holds the task's end; the worker's notice then waits
     /// for the review, which ends the task once it has answered.
@@ -64,7 +71,7 @@ impl Machine {
             return Ok(false);
         }
         let path = self.launch.path_env.clone();
-        let diff = match review_run::diff(&cwd, None, path.as_deref()) {
+        let diff = match review_run::diff(&cwd, author.base.as_deref(), path.as_deref()) {
             Ok(diff) => diff,
             Err(error) if switch != Switch::Off => return Ok(self.not_reviewed(task, round, None, &error, None)),
             Err(_) => return Ok(false),

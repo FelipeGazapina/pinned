@@ -496,6 +496,9 @@ pub struct Task {
     pub profile: Option<String>,
     /// Where it stands in a handoff chain.
     pub chain: Option<crate::chain::ChainLink>,
+    /// The commit its worker's folder stood at when the task started, which its review diffs
+    /// against (U8). None for a task from before it was kept.
+    pub base: Option<String>,
 }
 
 /// A task that a usage limit moved: what the request asked for, and why it ran elsewhere.

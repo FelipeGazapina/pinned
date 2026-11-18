@@ -195,6 +195,11 @@ pub fn diff(cwd: &Path, base: Option<&str>, path: Option<&str>) -> Result<Diff, 
     Ok(diff)
 }
 
+/// The commit `dir` stands at, which a task's review later diffs against.
+pub fn head(dir: &Path, path: Option<&str>) -> Option<String> {
+    git(dir, path, &["rev-parse", "--verify", "-q", "HEAD"]).ok().map(|head| head.trim().to_owned()).filter(|head| !head.is_empty())
+}
+
 fn git(dir: &Path, path: Option<&str>, args: &[&str]) -> Result<String, String> {
     let (ok, out, _) = git_capped(dir, path, args, usize::MAX)?;
     ok.then_some(out).ok_or_else(|| format!("git {} failed in {}", args.first().copied().unwrap_or_default(), dir.display()))

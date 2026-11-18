@@ -4124,6 +4124,7 @@ impl Machine {
                 t.launch.extend(["--effort".to_owned(), effort.clone()]);
             }
         });
+        self.note_base(&task.id, &cwd);
         self.delegates.link_thread(&task.id, Thread { tab: tab.to_owned(), runs: true });
         let folder = match self.start_claude(tab, cols, rows) {
             Ok(folder) => folder,
@@ -6032,6 +6033,7 @@ impl Machine {
                 t.permission_mode = Some("plan".into());
             }
         });
+        self.note_base(child.task, child.cwd);
         self.delegates.link_thread(child.task, crate::delegate::Thread { tab: id.clone(), runs: true });
         if let Err(error) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
             self.delegates.fail(child.task, error.clone(), self.launch.path_env.as_deref());
