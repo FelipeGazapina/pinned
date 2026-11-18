@@ -828,6 +828,12 @@ impl Tab {
         })
     }
 
+    /// Makes the tab a read-only worker. Read-only wins over bypass: the tab never holds both, so
+    /// its launch, its save and its restore all go without the flag that skips every prompt.
+    fn make_read_only(&mut self) {
+        (self.permission_mode, self.read_only, self.bypass) = (Some(crate::delegate::READ_ONLY_MODE.into()), true, false);
+    }
+
     /// What a child of this tab may do. Shift+Tab leaves the mode unknown until a hook reports it,
     /// and an unknown mode is read-only.
     fn child_access(&self) -> crate::delegate::Access {
@@ -1875,7 +1881,7 @@ impl Machine {
         let new = self.fork_session(tab, thread::Cut::Through(through), true)?.ok_or("there is nothing to fork before this message")?;
         let id = self.add_tab(cwd, account, vec!["--resume".into(), new.clone()], env, bypass, Some(new));
         if read_only {
-            let _ = self.tab(&id, |t| (t.permission_mode, t.read_only) = (Some(crate::delegate::READ_ONLY_MODE.into()), true));
+            let _ = self.tab(&id, Tab::make_read_only);
         }
         self.emit_tabs();
         Ok(id)
@@ -4783,7 +4789,12 @@ impl Machine {
                 let read_only = s.read_only;
                 let mode = if read_only { Some(crate::delegate::READ_ONLY_MODE.to_owned()) } else { s.permission_mode };
                 let id = self.add_tab(s.cwd, account, launch, s.env, s.bypass, Some(s.session));
-                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model, t.permission_mode, t.read_only, t.asleep, t.cut_by_sleep) = (s.interrupted, resume_at, s.held, s.model, mode, read_only, !s.interrupted, s.cut_by_sleep));
+                let _ = self.tab(&id, |t| {
+                    (t.interrupted, t.resume_at, t.held_at_limit, t.model, t.permission_mode, t.asleep, t.cut_by_sleep) = (s.interrupted, resume_at, s.held, s.model, mode, !s.interrupted, s.cut_by_sleep);
+                    if read_only {
+                        t.make_read_only();
+                    }
+                });
                 Some((id, s.spawned_by))
             })
             .collect();
@@ -5987,7 +5998,7 @@ impl Machine {
         let _ = self.tab(&id, |t| {
             t.made = child.made.clone();
             if access == Access::ReadOnly {
-                (t.permission_mode, t.read_only) = (Some(crate::delegate::READ_ONLY_MODE.into()), true);
+                t.make_read_only();
             }
         });
         self.delegates.link_thread(child.task, crate::delegate::Thread { tab: id.clone(), runs: true });
@@ -6251,7 +6262,7 @@ impl Machine {
                 t.launch = launch;
                 t.made = made;
                 if read_only {
-                    (t.permission_mode, t.read_only) = (Some(crate::delegate::READ_ONLY_MODE.into()), true);
+                    t.make_read_only();
                 }
             });
             changed = true;
@@ -6584,7 +6595,7 @@ impl Machine {
         let id = self.add_tab(info.cwd.clone(), account, launch, vec![], bypass, session);
         let _ = self.tab(&id, |t| t.spawned_by = Some(tab.to_owned()));
         if read_only {
-            let _ = self.tab(&id, |t| (t.permission_mode, t.read_only) = (Some(crate::delegate::READ_ONLY_MODE.into()), true));
+            let _ = self.tab(&id, Tab::make_read_only);
         }
         if info.isolated {
             let _ = self.tab(&id, |t| t.made = Some(info.cwd));
@@ -11350,7 +11361,7 @@ echo '{"type":"result","result":"ok"}'
         assert!(!lines.iter().any(|arg| arg == "--dangerously-skip-permissions"), "{lines:?}");
         let resumed = resumed_read_only("read-session");
         assert!(lines.windows(resumed.len()).any(|flags| flags == resumed), "{lines:?}");
-        assert!(!m.tab(&thread, |t| t.saved().unwrap().bypass).unwrap(), "the save carries the cleared bypass");
+        assert!(!m.view(&thread).unwrap().bypass, "the tab shows no bypass");
         m.quit();
         let _ = std::fs::remove_dir_all(root);
     }
