@@ -13787,6 +13787,7 @@ fn act_cannot_set_the_reviewer_or_worker_profiles_for_any_role_and_the_user_can(
     let scout = json!({ "name": "scout", "access": "read_only" });
     let approved = ana.hub(json!({ "cmd": "set_worker_profiles", "project": "github.com/acme/app", "profiles": [scout, { "name": "Tester", "delivers": "A list.", "by": "orchestrator" }], "drop_proposed": ["tester"] })).unwrap();
     assert_eq!(approved["worker_profiles"]["projects"]["github.com/acme/app"].as_array().unwrap().len(), 2);
+    assert_eq!(approved["worker_profiles"]["projects"]["github.com/acme/app"][1]["by"], "user", "the user's list is the user's, whoever proposed the row");
     assert_eq!(names(&approved), (2..=20).map(|n| format!("p{n}")).collect::<Vec<_>>(), "only the approved row left proposed");
     let discarded = ana.hub(json!({ "cmd": "set_worker_profiles", "project": "github.com/acme/app", "profiles": approved["worker_profiles"]["projects"]["github.com/acme/app"], "drop_proposed": ["p2", "nobody"] })).unwrap();
     assert_eq!(names(&discarded), (3..=20).map(|n| format!("p{n}")).collect::<Vec<_>>(), "only the named row was dropped");

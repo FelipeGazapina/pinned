@@ -82,6 +82,24 @@ mod tests {
     }
 
     #[test]
+    fn a_signed_out_approve_or_discard_drops_the_proposal_in_the_same_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = Machine::new(launch(), Some(dir.path().into()), None, |_| {});
+        let global = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], crate::global_orchestrator::env(), false, None);
+        for name in ["scout", "fixer"] {
+            m.profile_propose(Some(&global), None, proposal(name)).unwrap();
+        }
+        let approved = m.set_local_worker_profiles(None, vec![proposal("Scout").profile], &["scout".into()]).unwrap();
+        assert_eq!(approved.worker_profiles.account.iter().map(|p| (p.name.as_str(), p.by)).collect::<Vec<_>>(), [("Scout", ProfileAuthor::User)]);
+        assert_eq!(approved.worker_profiles.proposed.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["fixer"]);
+        let discarded = m.set_local_worker_profiles(None, approved.worker_profiles.account.clone(), &["fixer".into()]).unwrap();
+        assert_eq!((discarded.worker_profiles.account, discarded.worker_profiles.proposed), (approved.worker_profiles.account, vec![]));
+        let before = m.local_tastes();
+        assert!(m.set_local_worker_profiles(None, vec![proposal(" ").profile], &["scout".into()]).is_err());
+        assert_eq!(m.local_tastes(), before, "a refused list drops nothing");
+    }
+
+    #[test]
     fn a_linked_machine_sends_the_orchestrators_proposal_to_the_hub_and_nobody_elses() {
         use std::sync::{Arc, Mutex};
         let dir = tempfile::tempdir().unwrap();
