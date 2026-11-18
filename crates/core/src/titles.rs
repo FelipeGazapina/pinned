@@ -58,10 +58,7 @@ pub fn regenerate(claude: &Path, headless: &crate::machine::Headless<'_>, cwd: &
         .arg(prompt(previous, thread))
         .current_dir(cwd)
         .stdin(Stdio::null());
-    for key in crate::machine::INHERITED_SESSION_ENV.iter().chain(headless.strip) {
-        command.env_remove(key);
-    }
-    command.envs(headless.env.iter().cloned());
+    headless.child_env().apply(&mut command);
     if let Some(path) = path {
         command.env("PATH", path);
     }

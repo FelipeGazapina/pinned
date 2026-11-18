@@ -26,6 +26,9 @@ static CALLS: Mutex<Vec<Call>> = Mutex::new(Vec::new());
 /// that is still thinking when its hub stops.
 pub(crate) static THINKING: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// When the move the `tf_change` keys' Linear answers was made (RFC 3339).
+pub(crate) static CHANGE_AT: OnceLock<String> = OnceLock::new();
+
 /// The tests whose Linear polls get no answer while they are listed here, so a check of the
 /// team's triggers claims no granted event meanwhile.
 pub(crate) static POLLS_HELD: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -36,7 +39,7 @@ pub(crate) static AGAIN_THINKING: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Starts the Linear and model stand-ins once, and the Slack one. Each test names its own keys,
 /// so they share the servers.
-fn standins() {
+pub(crate) fn standins() {
     static SERVER: OnceLock<()> = OnceLock::new();
     SERVER.get_or_init(|| {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -85,6 +88,17 @@ fn answer(mut stream: TcpStream) {
         _ => ("200 OK", None),
     };
     let answer = special.unwrap_or_else(|| match (service, path.as_str()) {
+        // A person's Linear change trigger (`trigger_fires`): the key's owner, and one move into
+        // Ready to Dev at `CHANGE_AT`.
+        ("linear", _) if key.ends_with("tf_change") && body.contains("viewer { id }") => json!({ "data": { "viewer": { "id": "u-me" } } }),
+        ("linear", _) if key.ends_with("tf_change") && body.contains("issues(") => {
+            let at = CHANGE_AT.get().cloned().unwrap_or_default();
+            json!({ "data": { "issues": { "pageInfo": { "endCursor": "c-1" }, "nodes": [{
+                "id": "i-tf", "identifier": "ENG-1", "title": "Export 500s", "description": null, "url": "https://linear.example.test/ENG-1",
+                "updatedAt": at, "team": { "key": "ENG", "name": "Engineering" }, "project": null,
+                "history": { "nodes": [{ "id": "h-tf", "createdAt": at, "actor": { "id": "u-ana", "name": "Ana" },
+                    "fromState": { "name": "Backlog" }, "toState": { "name": "Ready to Dev" }, "fromAssignee": null, "toAssignee": null }] } }] } } })
+        }
         ("linear", _) if body.contains("viewer") => json!({ "data": { "viewer": { "name": "Acme bot", "email": "", "organization": { "name": "Acme" } } } }),
         ("linear", _) if body.contains("issues(") => json!({ "data": { "issues": { "nodes": [] } } }),
         ("linear", _) if body.contains("issueUpdate") => json!({ "data": { "issueUpdate": { "success": true } } }),
@@ -253,6 +267,7 @@ impl Crew {
             title: format!("Fix page {n}"),
             description: None,
             url: format!("https://linear.example.test/acme/issue/ENG-{n}"),
+            change: None,
         };
         Event::Graph { connector: id.to_owned(), subject: super::issue(&format!("eng-{n}")), input, at: "2026-11-16T10:00:00Z".into() }
     }

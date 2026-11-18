@@ -5,7 +5,7 @@
 //! never read or copied.
 
 use crate::accounts::AccountId;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, PtySize};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
@@ -30,20 +30,20 @@ struct Running {
 #[derive(Default)]
 pub struct SetupTokens(Mutex<HashMap<AccountId, Running>>);
 
+/// What `setup-token` starts with: the account's env, with no token or key a parent left.
+pub(crate) fn child_env(env: &[(String, String)]) -> crate::machine::ChildEnv<'static> {
+    crate::machine::ChildEnv::new(&["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"], env.to_vec())
+}
+
 impl SetupTokens {
     /// Runs `bin setup-token` with `env` for `account`, and answers the token it prints once it
     /// exits. Past `wait`, or once cancelled, it kills the process it started, and only that one.
     pub fn run(&self, account: &str, bin: &Path, env: &[(String, String)], wait: Duration) -> Result<String, String> {
         let pair = native_pty_system().openpty(PtySize { rows: 50, cols: COLS, pixel_width: 0, pixel_height: 0 }).map_err(|e| e.to_string())?;
-        let mut cmd = CommandBuilder::new(bin);
+        let mut cmd = crate::process::pty_command(bin);
         cmd.arg("setup-token");
         cmd.cwd(std::env::temp_dir());
-        for key in crate::machine::INHERITED_SESSION_ENV.iter().chain(&["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]) {
-            cmd.env_remove(key);
-        }
-        for (key, value) in env {
-            cmd.env(key, value);
-        }
+        child_env(env).apply(&mut cmd);
         crate::process::fix_pty_env(&mut cmd);
         let mut child = {
             let mut running = self.0.lock().unwrap();
@@ -204,6 +204,15 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         panic!("the fake claude never started");
+    }
+
+    #[test]
+    fn setup_token_starts_only_with_its_accounts_env() {
+        let env = [("CLAUDE_CONFIG_DIR".to_owned(), "/accounts/bloom".to_owned()), ("PINNED_ACCOUNT".to_owned(), "bloom".to_owned())];
+        let child = super::child_env(&env);
+        crate::machine::tests::assert_starts_with_only(&child, &[("CLAUDE_CONFIG_DIR", "/accounts/bloom"), ("PINNED_ACCOUNT", "bloom")]);
+        let parent = [("CLAUDE_CODE_OAUTH_TOKEN".to_owned(), "inherited-xyz".to_owned()), ("ANTHROPIC_API_KEY".to_owned(), "inherited-xyz".to_owned())];
+        assert!(child.of(&parent).iter().all(|(_, v)| v != "inherited-xyz"));
     }
 
     #[test]

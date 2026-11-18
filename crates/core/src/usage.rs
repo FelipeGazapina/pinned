@@ -478,7 +478,8 @@ const LIMITS_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Asks a `claude` that never gets a prompt for its account and plan limits over the SDK's control
 /// protocol, as T3 Code's capability probe does, without hooks, MCP servers or a saved session.
-pub fn limits(claude: &Path, home: &Path, path: Option<&str>) -> Result<Limits, String> {
+/// `env` is all it starts with: the built-in account's home, when the user exported one.
+pub fn limits(claude: &Path, home: &Path, env: &[(String, String)], path: Option<&str>) -> Result<Limits, String> {
     use std::io::Write;
     use std::process::Stdio;
     let mut command = crate::process::command(claude);
@@ -492,9 +493,7 @@ pub fn limits(claude: &Path, home: &Path, path: Option<&str>) -> Result<Limits, 
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    for key in crate::machine::INHERITED_SESSION_ENV {
-        command.env_remove(key);
-    }
+    crate::machine::ChildEnv::new(&[], env.to_vec()).apply(&mut command);
     if let Some(path) = path {
         command.env("PATH", path);
     }
