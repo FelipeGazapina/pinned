@@ -663,7 +663,6 @@ enum Sent {
     Refused(String),
 }
 
-/// Why a session ended mid-turn: how the task it ran was cancelled, or how its process exited.
 /// Adds `tools` to the one `--disallowedTools` list of a Claude launch's `args`: into the list a
 /// read-only start already has, else as a new list. A second flag would leave Claude two lists.
 fn refuse_tools(args: &mut Vec<String>, tools: &[&str]) {
@@ -681,6 +680,7 @@ fn refuse_tools(args: &mut Vec<String>, tools: &[&str]) {
     }
 }
 
+/// Why a session ended mid-turn: how the task it ran was cancelled, or how its process exited.
 fn stop_reason(task: Option<&crate::delegate::Task>, code: Option<u32>) -> String {
     let Some(task) = task.filter(|task| task.state == crate::delegate::WorkState::Cancelled) else {
         return code.map_or_else(|| "crashed".to_owned(), |code| format!("exited with code {code}"));

@@ -121,7 +121,8 @@ impl WorkerProfile {
             return Err(format!("a profile's name is at most {MAX_NAME} characters"));
         }
         // The name, tools and skills go into the worker's prompt, so none may start a line of its own.
-        let unbroken = |text: &str| !text.trim().chars().any(char::is_control);
+        // Tested as stored: `block` renders tools and skills untrimmed, so an edge line break counts.
+        let unbroken = |text: &str| !text.chars().any(char::is_control);
         if !unbroken(name) {
             return Err("a profile's name holds no line break or control character".into());
         }
@@ -131,7 +132,7 @@ impl WorkerProfile {
         if !self.skills.iter().all(|skill| unbroken(&skill.name)) {
             return Err("a profile's skill holds no line break or control character".into());
         }
-        if self.delivers.contains('\n') {
+        if self.delivers.chars().any(char::is_control) {
             return Err(format!("what {name} delivers fits one line"));
         }
         if self.delivers.chars().count() > MAX_DELIVERS {
