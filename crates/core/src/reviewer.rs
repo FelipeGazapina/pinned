@@ -17,6 +17,12 @@ pub const DEFAULT_ROUNDS: u8 = 2;
 pub const MAX_ROUNDS: u8 = 5;
 /// The longest `Finding::what`, in characters.
 pub const FINDING_CHARS: usize = 300;
+/// The most rules the account, or one project, may have.
+pub const MAX_RULES: usize = 30;
+/// The longest rule text, in characters once trimmed.
+pub const RULE_CHARS: usize = 500;
+/// The most projects with their own review settings.
+pub const MAX_PROJECTS: usize = 200;
 
 /// The account's review settings, kept in `Tastes::reviewer`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
@@ -147,6 +153,7 @@ impl Tastes {
     /// when the result fails `Reviewer::check`.
     pub fn set_reviewer(&mut self, patch: ReviewerPatch) -> Result<(), String> {
         let mut changed = self.reviewer.clone();
+        let rules = patch.rules.map(|rules| rules.into_iter().map(|rule| Rule { text: rule.text.trim().to_owned(), ..rule }).collect());
         if let Some(model) = patch.model {
             changed.model = model;
         }
@@ -160,7 +167,7 @@ impl Tastes {
                 if let Some(switch) = patch.switch {
                     project.switch = switch;
                 }
-                if let Some(rules) = patch.rules {
+                if let Some(rules) = rules {
                     project.rules = rules;
                 }
                 if *project == ProjectReview::default() {
@@ -169,7 +176,7 @@ impl Tastes {
             }
             None if patch.switch.is_some() => return Err("the review switch belongs to a project: name it in project".into()),
             None => {
-                if let Some(rules) = patch.rules {
+                if let Some(rules) = rules {
                     changed.rules = rules;
                 }
             }
@@ -181,10 +188,12 @@ impl Tastes {
 }
 
 impl Reviewer {
-    /// The rules a review in `repo`'s project reads: the account's, then the project's.
+    /// The rules a review in `repo`'s project reads: the account's, less those a project rule
+    /// replaces, then the project's.
     pub fn resolved(&self, repo: &str) -> Vec<&Rule> {
         let project = self.projects.get(repo).map_or(&[][..], |p| &p.rules[..]);
-        self.rules.iter().chain(project).collect()
+        let replaced = |id: &str| project.iter().any(|rule| rule.replaces.as_deref() == Some(id));
+        self.rules.iter().filter(|rule| !replaced(&rule.id)).chain(project).collect()
     }
 
     /// Whether `repo`'s workers get a review: the project's switch, or Auto when it has none.
@@ -199,12 +208,30 @@ impl Reviewer {
         if self.model.as_ref().is_some_and(|m| m.model.trim().is_empty()) {
             return Err("the reviewer's model needs a name".into());
         }
+        if self.projects.len() > MAX_PROJECTS {
+            return Err(format!("review settings cover up to {MAX_PROJECTS} projects, not {}", self.projects.len()));
+        }
         check_rules(&self.rules, 'A', "the account's")?;
-        self.projects.iter().try_for_each(|(repo, project)| check_rules(&project.rules, 'P', &format!("{repo}'s")))
+        if let Some(rule) = self.rules.iter().find(|rule| rule.replaces.is_some()) {
+            return Err(format!("rule {} is an account rule: only a project rule replaces one", rule.id));
+        }
+        for (repo, project) in &self.projects {
+            let whose = format!("{repo}'s");
+            check_rules(&project.rules, 'P', &whose)?;
+            for rule in &project.rules {
+                if let Some(replaces) = rule.replaces.as_deref().filter(|id| !self.rules.iter().any(|a| a.id == *id)) {
+                    return Err(format!("{whose} rule {} replaces {replaces}, which is no account rule", rule.id));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
 fn check_rules(rules: &[Rule], prefix: char, whose: &str) -> Result<(), String> {
+    if rules.len() > MAX_RULES {
+        return Err(format!("{whose} rules go up to {MAX_RULES}, not {}", rules.len()));
+    }
     let mut seen = std::collections::BTreeSet::new();
     for rule in rules {
         let numbered = rule.id.strip_prefix(prefix).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
@@ -214,8 +241,12 @@ fn check_rules(rules: &[Rule], prefix: char, whose: &str) -> Result<(), String> 
         if !seen.insert(rule.id.as_str()) {
             return Err(format!("{whose} rules name {} twice", rule.id));
         }
-        if rule.text.trim().is_empty() {
+        let text = rule.text.trim();
+        if text.is_empty() {
             return Err(format!("rule {} says nothing", rule.id));
+        }
+        if text.chars().count() > RULE_CHARS {
+            return Err(format!("rule {} runs past {RULE_CHARS} characters", rule.id));
         }
     }
     Ok(())
