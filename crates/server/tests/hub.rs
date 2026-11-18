@@ -13776,6 +13776,7 @@ fn act_cannot_set_the_reviewer_or_worker_profiles_for_any_role_and_the_user_can(
     let replaced = propose("tab-global", json!({ "name": "Tester", "delivers": "A list." })).unwrap();
     assert_eq!(replaced["worker_profiles"]["proposed"], json!([{ "name": "Tester", "skills": [], "tools": [], "access": "read_only", "delivers": "A list.", "by": "orchestrator" }]), "a proposal of the same name is replaced");
     assert_eq!(propose("tab-captain", json!({ "name": "x", "delivers": "a\nb" })), Err("what x delivers fits one line".into()));
+    assert_eq!(propose("tab-global", json!({ "name": " reviewer " })), Err("the Reviewer is set in its own section, so no profile takes its name".into()), "the Reviewer is never a proposal");
     for n in 2..=20 {
         propose("tab-captain", json!({ "name": format!("p{n}") })).unwrap();
     }

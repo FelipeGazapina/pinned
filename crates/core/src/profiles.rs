@@ -444,6 +444,7 @@ mod tests {
         assert_eq!((tastes.worker_profiles.account.len(), tastes.worker_profiles.projects.len()), (0, 0));
         let before = tastes.clone();
         assert_eq!(tastes.propose_worker_profile(profile(" ")), Err("every profile needs a name".into()));
+        assert_eq!(tastes.propose_worker_profile(profile("Reviewer")), Err("the Reviewer is set in its own section, so no profile takes its name".into()));
         assert_eq!(tastes, before);
     }
 
