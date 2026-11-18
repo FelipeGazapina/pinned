@@ -870,6 +870,7 @@ impl Tastes {
         profile.name = profile.name.trim().to_owned();
         profile.by = ProfileAuthor::Orchestrator;
         profile.check()?;
+        crate::profiles::not_the_reviewer(&profile)?;
         let proposed = &mut self.worker_profiles.proposed;
         match proposed.iter().position(|p| same_name(&p.name, &profile.name)) {
             Some(at) => proposed[at] = profile,

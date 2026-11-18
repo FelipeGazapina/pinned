@@ -165,7 +165,7 @@ fn same_name(a: &str, b: &str) -> bool {
     a.trim().to_lowercase() == b.trim().to_lowercase()
 }
 
-fn not_the_reviewer(profile: &WorkerProfile) -> Result<(), String> {
+pub(crate) fn not_the_reviewer(profile: &WorkerProfile) -> Result<(), String> {
     match same_name(&profile.name, REVIEWER) {
         true => Err("the Reviewer is set in its own section, so no profile takes its name".into()),
         false => Ok(()),
