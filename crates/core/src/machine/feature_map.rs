@@ -13,6 +13,8 @@ static WRITING: Mutex<()> = Mutex::new(());
 const CAPTAIN_ONLY: &str = "only the project's Captain writes the feature map";
 const REMOTE: &str = "the feature map works for workers on the Captain's machine only in this build";
 
+const GONE: &str = "this worker's folder is gone, so it has no project to read";
+
 impl Machine {
     /// The folder the machine keeps its settings in, which holds `plans.json` too.
     fn feature_map_dir(&self) -> Result<&Path, String> {
@@ -36,8 +38,11 @@ impl Machine {
         let mut first = true;
         for _ in 0..32 {
             let task = self.delegates.get(&id).ok_or_else(|| format!("no task {id} here"))?;
-            if first && (task.remote.is_some() || !task.cwd.exists()) {
+            if first && task.remote.is_some() {
                 return Err(REMOTE.into());
+            }
+            if first && !task.cwd.exists() {
+                return Err(GONE.into());
             }
             first = false;
             match task.parent {
