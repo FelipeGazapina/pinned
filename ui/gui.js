@@ -212,7 +212,7 @@ async function fetchThread(tab) {
     }
   } finally {
     t.fetching = false;
-    if (tab !== active) lightenThreads();
+    if (tab !== active && !followed(tab)) lightenThreads();
   }
 }
 

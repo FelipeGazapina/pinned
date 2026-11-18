@@ -309,6 +309,37 @@ test("the threads shown last stay whole only while together they hold 16 MB of t
   assert.deepEqual(tabs.map((tab) => again.sandbox.threadOf(tab).items.length), [4, 4, 7, 7, 4], "6 MB and 3 MB fit, and 9 MB more would not");
 });
 
+test("a read of a thread whose turn runs leaves the other threads as they are, and a thread's read once its turn ended drops what it no longer needs", async () => {
+  const { sandbox, state } = threads();
+  const gui = source("gui.js");
+  Object.assign(sandbox, {
+    performance,
+    setTimeout,
+    THREAD_READ_GAP_MS: 0,
+    THREAD_PAGE: 300,
+    guiOn: () => false,
+    callOn: async () => ({ session: "s", items: [], next: 7, reset: false }),
+    settlePending() {},
+    takeAgents() {},
+    fetchHistory() {},
+  });
+  vm.runInContext(`const drawnOf = ${slice(gui, "const drawnOf = ", "\n").slice("const drawnOf = ".length)}\n${slice(gui, "async function fetchThread(", "/** Threads that keep their whole")}`, sandbox);
+  const tabs = Array.from({ length: 8 }, (_, i) => ({ key: `t${i}`, machine: "m", view: { id: `t${i}` } }));
+  state.tabs.push(...tabs);
+  for (const tab of tabs) {
+    Object.assign(sandbox.threadOf(tab), { items: transcript(), loaded: true, session: "s", next: 7 });
+    sandbox.show(tab);
+  }
+  state.active = tabs[7];
+  state.live.add(tabs[0]);
+  const kept = () => tabs.slice(0, 2).map((tab) => sandbox.threadOf(tab).items.length);
+  await sandbox.fetchThread(tabs[0]);
+  assert.deepEqual(kept(), [7, 7], "the working thread's read leaves the idle one shown before the last six as it was");
+  state.live.delete(tabs[0]);
+  await sandbox.fetchThread(tabs[0]);
+  assert.deepEqual(kept(), [4, 4], "its read once the turn ended drops tool calls, results and reasoning from both");
+});
+
 test("the tab on screen is named to its machine when it comes on screen and every minute it stays, and a stopped tab or a sign-in is not", () => {
   const calls = [];
   const timers = [];
