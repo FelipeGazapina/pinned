@@ -267,7 +267,13 @@ fn in_neutral<T>(folder: &Path, base: &str, scratch: &Path, path: Option<&str>, 
         // The files in the base, every file the folder's own .gitignore files leave in, and the
         // nested repositories, which git lists as a folder.
         let mut add = listed(git.run(&["ls-files", "--cached", "-z"])?);
-        let (nested, untracked): (Vec<String>, Vec<String>) = listed(git.run(&["ls-files", "--others", "--exclude-standard", "-z"])?).into_iter().partition(|file| file.ends_with('/'));
+        let (mut nested, untracked): (Vec<String>, Vec<String>) = listed(git.run(&["ls-files", "--others", "--exclude-standard", "-z"])?).into_iter().partition(|file| file.ends_with('/'));
+        // A submodule the base tracks (a 160000 entry) is a nested repository too: git reads
+        // nothing in its folder.
+        let submodules = |git: &Git| -> Result<Vec<String>, String> {
+            Ok(listed(git.run(&["ls-files", "--stage", "-z"])?).into_iter().filter_map(|entry| entry.split_once('\t').filter(|(info, _)| info.starts_with("160000 ")).map(|(_, file)| format!("{file}/"))).collect())
+        };
+        nested.extend(submodules(&git)?);
         add.extend(untracked);
         // A file the worker force-added and committed while it is ignored.
         let head = Git { dir: &gitdir, work: None, ..git }.run(&["rev-parse", "--verify", "-q", "HEAD^{commit}"]).ok().map(|head| head.trim().to_owned()).filter(|head| !head.is_empty());
@@ -285,14 +291,16 @@ fn in_neutral<T>(folder: &Path, base: &str, scratch: &Path, path: Option<&str>, 
         add.extend(ignored.iter().filter(|file| Path::new(file).file_name().is_some_and(|name| name == ".gitignore")).cloned());
         let ignored: Vec<String> = ignored.into_iter().filter(|file| !add.contains(file)).collect();
         let unread = ignored_unread(&git, &top, base, ignored)?;
-        add.retain(|file| !nested.iter().any(|repo| file.starts_with(repo.as_str())));
+        add.retain(|file| !nested.iter().any(|repo| file.starts_with(repo.as_str()) || repo.strip_suffix('/') == Some(file.as_str())));
         if !add.is_empty() {
             let list = scratch.join("add");
             std::fs::write(&list, add.join("\0")).map_err(|error| format!("the review's file list could not be written: {error}"))?;
             git.run(&["add", "-A", "-f", &format!("--pathspec-from-file={}", list.display()), "--pathspec-file-nul"])?;
         }
         let tree = git.run(&["write-tree"])?.trim().to_owned();
-        let nested = nested.into_iter().map(|repo| repo.trim_end_matches('/').to_owned()).collect();
+        nested.extend(submodules(&git)?);
+        let mut named = BTreeSet::new();
+        let nested = nested.into_iter().map(|repo| repo.trim_end_matches('/').to_owned()).filter(|repo| named.insert(repo.clone())).collect();
         read(&git, &top, Snapshot { tree, nested, unread })
     })();
     let _ = std::fs::remove_dir_all(scratch);
