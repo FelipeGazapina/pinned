@@ -768,4 +768,25 @@ mod tests {
         let names: Vec<String> = std::fs::read_dir(file.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         assert_eq!(names, [format!("{}.json", t.root)], "nothing was set aside or written");
     }
+
+    #[test]
+    fn blocks_from_task_records_keep_20_needs_lines_each_neutral_and_stored_progress_the_newest_200() {
+        let t = team("record-caps");
+        let mut worker = t.m.delegates.get(&t.worker).unwrap();
+        let mut said: Vec<String> = (0..5000).map(|n| format!("NEEDS tool{n}")).collect();
+        said.insert(0, format!("NEEDS ``` ~~~ {HEADER}"));
+        worker.newest_text = Some(said.join("\n"));
+        let why: Vec<String> = blocks_of(&worker).into_iter().map(|b| b.why).collect();
+        assert_eq!(why.len(), 20, "{why:?}");
+        assert_eq!(why[0], "NEEDS ''' --- [header text removed]");
+        assert_eq!(why[19], "NEEDS tool18");
+        let project = t.dir.join("app");
+        let ids: Vec<String> = (0..crate::board::MAX_STORED + 5).map(|n| task(&t.m, Parent::Task(t.root.clone()), &format!("Worker {n}"), &project)).collect();
+        for id in &ids {
+            t.m.board_write(id, BoardEvent::Settled { task: id.clone() });
+        }
+        let stored = t.m.read_board(&t.root).unwrap().progress;
+        assert_eq!(stored.len(), 200);
+        assert_eq!((stored[0].task.as_str(), stored[199].task.as_str()), (ids[5].as_str(), ids[204].as_str()), "the oldest went");
+    }
 }
