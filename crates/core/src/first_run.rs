@@ -1,6 +1,6 @@
-//! Claude Code's first-run screens: the theme picker, the login picker, the folder-trust prompt
-//! and the bypass-permissions warning. Each one holds a session in "starting" until someone
-//! answers it, and a session no one watches never gets answered.
+//! Claude Code's first-run screens: the theme picker, the login picker, the folder-trust prompt,
+//! the bypass-permissions warning and the project MCP approval dialog. Each one holds a session in
+//! "starting" until someone answers it, and a session no one watches never gets answered.
 //!
 //! Pinned prevents them by seeding the launching account's config before the session starts, and
 //! falls back to reading the session's screen when one shows anyway.
@@ -100,15 +100,19 @@ pub enum Screen {
     Login,
     Trust,
     Bypass,
+    McpApproval,
 }
 
 /// Words only each screen shows, as `flat` spells them, in Claude Code 2.1. The keys `answer`
 /// types follow that version's menus, where "No, exit" comes first.
-const SCREENS: [(Screen, &[&str]); 4] = [
+const SCREENS: [(Screen, &[&str]); 6] = [
     (Screen::Theme, &["choosethetextstylethatlooksbestwithyourterminal"]),
     (Screen::Login, &["selectloginmethod"]),
     (Screen::Trust, &["yesitrustthisfolder"]),
     (Screen::Bypass, &["bypasspermissionsmode", "yesiaccept"]),
+    // One new server, then several: the two titles.
+    (Screen::McpApproval, &["mcpserverfoundinthisproject"]),
+    (Screen::McpApproval, &["mcpserversfoundinthisproject"]),
 ];
 
 /// The banner of the session's own screen, "Claude Code v2.1.322", which follows every first-run
@@ -141,6 +145,7 @@ pub fn answer(screen: Screen, folder: &Path, made: bool, bypass: bool) -> Result
         Screen::Trust => Err(format!("Claude Code is waiting on its folder-trust prompt in {}; open the session to answer it", folder.display())),
         Screen::Bypass => Err("Claude Code is waiting on its bypass-permissions warning; open the session to answer it".into()),
         Screen::Login => Err("Claude Code is not signed in for this account; sign in under Settings > Accounts, then start the session again".into()),
+        Screen::McpApproval => Err(format!("Claude Code is waiting for approval of this project's MCP servers in {}; open the session to answer it", folder.display())),
     }
 }
 
@@ -261,5 +266,29 @@ mod tests {
         assert!(answer(Screen::Bypass, folder, true, false).is_err(), "a session started without bypass never accepts the warning");
         assert_eq!(answer(Screen::Bypass, folder, false, true), Ok(&["\u{1b}[B", "\r"][..]));
         assert!(answer(Screen::Login, folder, true, true).is_err());
+    }
+
+    /// The project MCP approval dialog, as Claude Code 2.1 draws it: one new server, then several.
+    #[test]
+    fn the_project_mcp_approval_dialog_is_a_screen_of_its_own() {
+        let one = " New MCP server found\u{1b}[1Cin this project: fs\u{1b}[2;1H MCP servers may execute code or access system resources. All tool calls require approval. Learn more in the MCP documentation.\u{1b}[3;1H❯ 1. Use this MCP server\r\n 2. Use this and all future MCP servers in this project\r\n 3. Continue without using this MCP server\r\n Enter confirm / Esc cancel";
+        let several = " 3 new MCP servers found\u{1b}[1Cin this project\r\n Select any you wish to enable.\u{1b}[2;1H MCP servers may execute code or access system resources.\r\n ❯ [x] fs\r\n [x] git\r\n [ ] db\r\n Enable selected\r\n Enter confirm / Esc cancel";
+        assert_eq!(showing(one), Some(Screen::McpApproval));
+        assert_eq!(showing(several), Some(Screen::McpApproval));
+    }
+
+    #[test]
+    fn the_mcp_approval_dialog_drawn_last_is_the_one_showing() {
+        let trust = " Quick safety check: Is this a project you created or one you trust?\u{1b}[3;1H❯ No, exit\r\n Yes, I\u{1b}[1Ctrust this folder";
+        let mcp = " New MCP server found\u{1b}[1Cin this project: fs\u{1b}[3;1H❯ 1. Use this MCP server\r\n Enter confirm / Esc cancel";
+        assert_eq!(showing(&format!("{trust}{mcp}")), Some(Screen::McpApproval));
+    }
+
+    #[test]
+    fn the_project_mcp_approval_is_never_answered() {
+        let folder = Path::new("/w/app");
+        let reason: Result<&[&str], String> = Err("Claude Code is waiting for approval of this project's MCP servers in /w/app; open the session to answer it".into());
+        assert_eq!(answer(Screen::McpApproval, folder, true, true), reason, "approving a server is the person's decision, even with trust and bypass");
+        assert_eq!(answer(Screen::McpApproval, folder, false, false), reason);
     }
 }

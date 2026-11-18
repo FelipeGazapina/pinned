@@ -645,8 +645,6 @@ fn project_tools() -> [(Audience, serde_json::Value); 24] {
                             "hard_model": model,
                             "parallel": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Workers at once in a project; delegate_task refuses one more." },
                             "autonomy": { "type": "string", "enum": ["ask_first", "decide_and_tell", "report_at_end"] },
-                            "review_diffs": { "type": "boolean", "description": "Review each worker's diff before accepting it." },
-                            "second_opinion": { "type": "boolean", "description": "Another model reviews a risky change." },
                             "skills": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "enabled": { "type": "boolean" } }, "required": ["name", "enabled"] }, "description": "Skills the sessions follow; the whole list." },
                             "context": { "type": "array", "items": { "type": "string" }, "description": "Notes every turn carries; the whole list." },
                             "tier": { "type": "string", "enum": ["low", "mid", "high"], "description": "The costliest model tier a worker may run on, as orchestrator_capabilities lists it. It covers the worker's own model, not the models it picks for its subagents." },
@@ -669,7 +667,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 24] {
                 "type": "object",
                 "properties": {
                     "scope": scope,
-                    "field": { "type": "string", "enum": ["strategy", "ladder", "hard_model", "parallel", "autonomy", "review_diffs", "second_opinion", "skills", "context", "tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"] },
+                    "field": { "type": "string", "enum": ["strategy", "ladder", "hard_model", "parallel", "autonomy", "skills", "context", "tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"] },
                 },
                 "required": ["scope", "field"],
             },
@@ -1415,6 +1413,18 @@ fn restore_var(name: &str, value: Option<String>) {
         );
         assert_eq!(ask("actions", serde_json::Value::Null, Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"actions"}}"#.into()));
         assert_eq!(ask("act", serde_json::json!({}), Some("tab-2")), Err("act: missing field `action`".into()));
+    }
+
+    #[test]
+    fn the_taste_tools_offer_no_review_setting() {
+        let taste = |name: &str| project_tools().into_iter().find(|(audience, tool)| *audience == Audience::TasteChat && tool["name"] == name).unwrap().1;
+        let set = taste("taste_set");
+        let patch = set["inputSchema"]["properties"]["patch"]["properties"].as_object().unwrap();
+        assert!(!patch.contains_key("review_diffs") && !patch.contains_key("second_opinion"), "taste_set still offers a review setting: {set}");
+        let reset = taste("taste_reset");
+        let fields: Vec<&str> = reset["inputSchema"]["properties"]["field"]["enum"].as_array().unwrap().iter().filter_map(serde_json::Value::as_str).collect();
+        assert!(!fields.contains(&"review_diffs") && !fields.contains(&"second_opinion"), "taste_reset still offers a review setting: {fields:?}");
+        assert!(fields.contains(&"parallel"), "the other fields stay offered: {fields:?}");
     }
 
     #[cfg(unix)]

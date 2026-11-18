@@ -62800,6 +62800,17 @@
               "github": false,
               "slack": false
             }
+          },
+          "line_held": {
+            "description": "Set for the team's owner while its waiting line is held; absent otherwise.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LineHeld"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -62845,6 +62856,30 @@
               "github",
               "slack"
             ]
+          },
+          "LineHeld": {
+            "description": "The team's waiting line is held: no waiting run or event of its bots starts, since `since`\n(unix seconds), for `why`.\n\n`{\"since\":1763300000,\"why\":\"settings_unread\"}`",
+            "type": "object",
+            "properties": {
+              "since": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "why": {
+                "$ref": "#/$defs/HeldWhy"
+              }
+            },
+            "required": [
+              "since",
+              "why"
+            ]
+          },
+          "HeldWhy": {
+            "description": "Why a team's waiting line is held: `\"settings_unread\"` (the team's workflows, keys or settings\ncould not be read).",
+            "type": "string",
+            "enum": [
+              "settings_unread"
+            ]
           }
         }
       },
@@ -62875,6 +62910,17 @@
               "github": false,
               "slack": false
             }
+          },
+          "line_held": {
+            "description": "Set for the team's owner while its waiting line is held; absent otherwise.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LineHeld"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -62913,6 +62959,30 @@
                 "default": false
               }
             }
+          },
+          "LineHeld": {
+            "description": "The team's waiting line is held: no waiting run or event of its bots starts, since `since`\n(unix seconds), for `why`.\n\n`{\"since\":1763300000,\"why\":\"settings_unread\"}`",
+            "type": "object",
+            "properties": {
+              "since": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "why": {
+                "$ref": "#/$defs/HeldWhy"
+              }
+            },
+            "required": [
+              "since",
+              "why"
+            ]
+          },
+          "HeldWhy": {
+            "description": "Why a team's waiting line is held: `\"settings_unread\"` (the team's workflows, keys or settings\ncould not be read).",
+            "type": "string",
+            "enum": [
+              "settings_unread"
+            ]
           }
         }
       }

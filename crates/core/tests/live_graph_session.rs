@@ -6,6 +6,8 @@
 //!
 //! Build `pinned-server` first. Hooks call that binary. Set `PINNED_SERVER` when it is not
 //! `$CARGO_TARGET_DIR/debug/pinned-server`.
+//!
+//! Evidence goes to `pinned-live-graph-evidence` in the temp dir. `PINNED_LIVE_EVIDENCE` names another folder.
 
 use pinned_core::agent::{AgentStatus, Subject};
 use pinned_core::connectors::{
@@ -25,8 +27,14 @@ const MACHINE: &str = "local";
 const ALPHA: &str = "ALPHA";
 const BETA: &str = "BETA";
 const BOGUS: &str = "00000000-0000-4000-8000-000000000099";
-const EVIDENCE: &str = "/Users/felipe/projetos/personal-harness/.audit/n8n-graph/swarm/w8-evidence";
 const TURN: Duration = Duration::from_secs(180);
+
+fn evidence() -> PathBuf {
+    match std::env::var("PINNED_LIVE_EVIDENCE") {
+        Ok(path) if !path.is_empty() => PathBuf::from(path),
+        _ => std::env::temp_dir().join("pinned-live-graph-evidence"),
+    }
+}
 
 enum Proof {
     SameTab,
@@ -349,6 +357,7 @@ fn trigger(id: &str) -> TriggerInput {
         title: "Live session check".into(),
         description: Some("Reply to the talks. Do not change the repository.".into()),
         url: "https://example.test/W8-1".into(),
+        change: None,
     }
 }
 
@@ -405,7 +414,7 @@ struct Kept {
 
 impl Kept {
     fn new(name: &str) -> Self {
-        let root = PathBuf::from(EVIDENCE);
+        let root = evidence();
         fs::create_dir_all(&root).expect("evidence");
         let store_dir = root.join(format!("{name}-store"));
         let machine_dir = root.join(format!("{name}-machine"));
@@ -476,7 +485,7 @@ impl Drop for Kept {
         if let Some(machine) = &self.machine {
             machine.quit();
         }
-        let root = PathBuf::from(EVIDENCE);
+        let root = evidence();
         let _ = fs::create_dir_all(&root);
         let name = &self.name;
         let _ = fs::write(root.join(format!("{name}-work.txt")), self.log_text());
@@ -489,7 +498,7 @@ impl Drop for Kept {
         for (label, value) in threads.iter() {
             let _ = fs::write(root.join(format!("{name}-thread-{label}.json")), serde_json::to_string_pretty(value).unwrap_or_default());
         }
-        eprintln!("LIVE {name}: evidence in {EVIDENCE} passed {}", self.passed);
+        eprintln!("LIVE {name}: evidence in {} passed {}", evidence().display(), self.passed);
     }
 }
 

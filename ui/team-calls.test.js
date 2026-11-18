@@ -60,10 +60,11 @@ function page(world = {}) {
     // The bots UI's openers, cross-file globals.
     openTeamBot: (id) => ops.push({ bot: id }),
     openTeamGroup: (handle) => ops.push({ group: handle }),
+    openTeamConnect: () => ops.push({ connect: true }),
     openTeamBotNew: () => ops.push({ botNew: true }),
     account: { email: world.email ?? "bruno.lima@north.example" },
     document: { addEventListener: (type, fn) => (listeners[type] ??= []).push(fn), body: { dataset: {} }, getElementById: () => ({ before() {} }), createElement: () => ({ remove() {}, setAttribute() {}, dataset: {}, querySelector: () => null, querySelectorAll: () => [] }) },
-    teamsCurrent: () => (world.team === null ? null : { id: "team-1", name: "North Studio", role: world.role ?? "member", credential: {} }),
+    teamsCurrent: () => (world.team === null ? null : { id: "team-1", name: "North Studio", role: world.role ?? "member", credential: {}, ...(world.held ? { line_held: world.held } : {}) }),
     teamCall: async (op) => {
       ops.push(op);
       const reply = world.reply?.(op);
@@ -713,4 +714,33 @@ test("the limit question and its choices reach the page as text", () => {
   const evil = `<img src=x onerror="window.pwned=1">`;
   const html = runPage({ state: "waiting" }, [LIMIT_CALL({ question: evil, choices: [evil, "Stop it"] })]).eval("tcRunPageHtml()");
   assert.ok(!html.includes("<img"), html);
+});
+
+test("Connect AI account is in the owner's nav only, and opens the connect step", () => {
+  const owner = page({ role: "owner", email: "ana.souza@north.example" });
+  const html = owner.eval("tcNavHtml(tcCurrent(), 'team-calls')");
+  assert.match(html, /<div class="tc-head">AI account<\/div><button type="button" class="nav-row tc-row" data-tc-nav="team-connect"><span class="label">Connect AI account<\/span><\/button>/);
+  assert.ok(!/Connect AI account/.test(page().eval("tcNavHtml(tcCurrent(), 'team-calls')")), "a member has no such row");
+  owner.eval(`tcNavOpen({ dataset: { tcNav: "team-connect" } })`);
+  assert.deepEqual(owner.ops.at(-1), { connect: true });
+});
+
+test("the team's owner sees one line under the team while its waiting line is held; a member does not", () => {
+  const held = { since: at(14, 5), why: "settings_unread" };
+  const line = (html) => [...html.matchAll(/<div class="tc-none" role="status" data-line-held>([^<]*)<\/div>/g)].map((m) => text(m[1]));
+  const owner = page({ role: "owner", email: "ana.souza@north.example", held }).eval("tcNavHtml(tcCurrent(), 'team-calls')");
+  assert.deepEqual(line(owner), ["Bots are waiting: the team's settings could not be read since 2:05 PM."]);
+  assert.ok(owner.indexOf("data-line-held") > owner.indexOf("tc-team-name") && owner.indexOf("data-line-held") < owner.indexOf(">Bots<"), "between the team's name and its bots");
+  assert.deepEqual(line(page({ held }).eval("tcNavHtml(tcCurrent(), 'team-calls')")), [], "a member does not see it");
+  const plain = page({ role: "owner", email: "ana.souza@north.example" }).eval("tcNavHtml(tcCurrent(), 'team-calls')");
+  assert.ok(!plain.includes("data-line-held") && !text(plain).includes("Bots are waiting"), "nothing while the line is not held");
+});
+
+test("the held line names the day when it was held before today, and is drawn only for a reason it knows", () => {
+  const line = (html) => [...html.matchAll(/<div class="tc-none" role="status" data-line-held>([^<]*)<\/div>/g)].map((m) => text(m[1]));
+  const nav = (held) => page({ role: "owner", email: "ana.souza@north.example", held }).eval("tcNavHtml(tcCurrent(), 'team-calls')");
+  assert.deepEqual(line(nav({ since: at(14, 5) - 86400, why: "settings_unread" })), ["Bots are waiting: the team's settings could not be read since Nov 15, 2:05 PM."]);
+  assert.deepEqual(line(nav({ since: at(0, 0), why: "settings_unread" })), ["Bots are waiting: the team's settings could not be read since 12:00 AM."], "today's midnight is today");
+  const other = nav({ since: at(14, 5), why: "something_else" });
+  assert.ok(!other.includes("data-line-held") && !text(other).includes("Bots are waiting"), "no line for a reason it does not know");
 });

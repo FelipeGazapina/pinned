@@ -8,6 +8,7 @@ use pinned_core::convex::client::Replay;
 use pinned_core::global_orchestrator::{CaptainReport, RelayTo};
 use pinned_core::link::{self, Link};
 use pinned_core::machine::{Launch, Machine};
+use pinned_core::surface::{ActorRole, Confirmation};
 use pinned_core::sync;
 use pinned_core::taste::{TastePatch, TasteScope, Tastes};
 use pinned_core::upstash::{BoxId, Exec, Listed, NewBox};
@@ -1086,6 +1087,166 @@ fn a_taste_chat_changes_its_own_accounts_taste_live_and_never_another_accounts()
     assert_eq!((&reset["own"], &reset["effective"]["parallel"]), (&json!({}), &json!(5)));
     assert_eq!(session_tool(&ana_dir, &chat, read), Ok(after), "bob's reset changed ana's taste");
     assert_eq!(ana.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 2 } }));
+}
+
+#[test]
+fn a_taste_chat_cannot_change_the_review_settings_through_the_hub() {
+    let hub = TestHub::start("taste_review");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = Client::connect(&url, &token);
+    ana.wait("hello", |f| f["type"] == "hello");
+    let dir = temp("taste-chat-review");
+    let (machine, machine_token) = account::register_machine(&url, &token, "ana-mac", "macos").unwrap();
+    let creds = Credentials { hub: url.clone(), email: account.email, user_token: token, machine_id: machine.id, machine_token };
+    creds.save(&dir).unwrap();
+    let node = Node::start(&dir, creds);
+    node.machine.listen(|_| Err("unexpected".into())).unwrap();
+    ana.wait_machines(&[("ana-mac", true)]);
+    let site = TasteScope::Project { repo: "github.com/acme/site".into() };
+    let tab = node.machine.call(Call::OpenTasteChat { scope: site, path: None }).unwrap().as_str().unwrap().to_owned();
+    ana.wait("the chat's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == tab && t["taste_chat"] == true));
+
+    let read = json!({ "name": "taste_get", "scope": "project:github.com/acme/site" });
+    let before = session_tool(&dir, &tab, read.clone()).unwrap();
+    let one = "review_diffs is changed only by the user, on the Way of working page; nothing changed";
+    let other = "second_opinion is changed only by the user, on the Way of working page; nothing changed";
+    let set = |patch: Value| json!({ "name": "taste_set", "scope": "project:github.com/acme/site", "patch": patch });
+    assert_eq!(session_tool(&dir, &tab, set(json!({ "parallel": 2, "review_diffs": false }))), Err(one.into()), "a mixed patch is refused whole");
+    assert_eq!(session_tool(&dir, &tab, set(json!({ "second_opinion": true }))), Err(other.into()));
+    assert_eq!(session_tool(&dir, &tab, json!({ "name": "taste_reset", "scope": "project:github.com/acme/site", "field": "review_diffs" })), Err(one.into()));
+    assert_eq!(session_tool(&dir, &tab, read), Ok(before), "a refused call changed the taste the session reads");
+    assert_eq!(ana.hub(json!({ "cmd": "get_tastes" })).unwrap()["projects"], json!({}), "the hub stored a refused change");
+}
+
+#[test]
+fn a_machine_forwarding_a_taste_chat_cannot_change_the_review_settings_at_the_hub() {
+    let hub = TestHub::start("forward_review");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = Client::connect(&url, &token);
+    ana.wait("hello", |f| f["type"] == "hello");
+    let (_, machine_token) = account::register_machine(&url, &token, "ana-old-mac", "macos").unwrap();
+    // An app from before the refusal: its taste chat still offers both review settings, and it forwards them as it always did.
+    let chat = json!({ "kind": "tabs", "tabs": [{ "id": "tab-chat", "cwd": "/w/site", "bypass": false, "running": false, "status": null, "title": "Way of working", "message": null, "resume_at": null, "opened": 1, "session": "conv-chat", "taste_chat": true }] });
+    let raw = RawMachine::start_with(&url, &machine_token, vec![chat], |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("ana-old-mac", true)]);
+    ana.wait("the chat's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == "tab-chat" && t["taste_chat"] == true));
+
+    let site = json!({ "kind": "project", "repo": "github.com/acme/site" });
+    let stored = |client: &mut Client| client.hub(json!({ "cmd": "get_tastes" })).unwrap()["projects"].clone();
+    let one = "review_diffs is changed only by the user, on the Way of working page; nothing changed";
+    let other = "second_opinion is changed only by the user, on the Way of working page; nothing changed";
+    let set = |patch: Value| json!({ "cmd": "set_taste", "scope": site, "patch": patch });
+    assert_eq!(raw.ask(set(json!({ "review_diffs": false }))), Err(one.into()), "a forwarded set of review_diffs is refused");
+    assert_eq!(raw.ask(set(json!({ "second_opinion": true }))), Err(other.into()), "a forwarded set of second_opinion is refused");
+    assert_eq!(raw.ask(json!({ "cmd": "reset_taste_field", "scope": site, "field": "review_diffs" })), Err(one.into()), "a forwarded reset of review_diffs is refused");
+    assert_eq!(raw.ask(json!({ "cmd": "reset_taste_field", "scope": site, "field": "second_opinion" })), Err(other.into()), "a forwarded reset of second_opinion is refused");
+    assert_eq!(raw.ask(set(json!({ "parallel": 2, "review_diffs": false }))), Err(one.into()), "a forwarded mixed patch is refused whole");
+    assert_eq!(stored(&mut ana), json!({}), "a refused forward changed the way of working");
+
+    assert!(raw.ask(set(json!({ "parallel": 2 }))).is_ok(), "a forwarded allowed field alone still works");
+    assert_eq!(stored(&mut ana), json!({ "github.com/acme/site": { "parallel": 2 } }), "only the allowed field landed");
+}
+
+#[test]
+fn an_agents_act_refuses_a_review_setting_before_any_ask_is_held() {
+    let hub = TestHub::start("act_review");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "act-review-mac");
+    let site = json!({ "kind": "project", "repo": "github.com/acme/site" });
+    let stored = |client: &mut Client| client.hub(json!({ "cmd": "get_tastes" })).unwrap()["projects"].clone();
+    let asks = |client: &mut Client| client.hub(json!({ "cmd": "confirmations" })).unwrap();
+    let one = "review_diffs is changed only by the user, on the Way of working page; nothing changed";
+    let other = "second_opinion is changed only by the user, on the Way of working page; nothing changed";
+
+    assert_eq!(act(&ana.dir, &ana.tab, "set_taste", json!({ "scope": site, "patch": { "review_diffs": false } })), Err(one.into()), "an agent's set_taste of review_diffs is refused");
+    assert_eq!(act(&ana.dir, &ana.tab, "set_taste", json!({ "scope": site, "patch": { "second_opinion": true } })), Err(other.into()), "an agent's set_taste of second_opinion is refused");
+    assert_eq!(act(&ana.dir, &ana.tab, "reset_taste_field", json!({ "scope": site, "field": "review_diffs" })), Err(one.into()), "an agent's reset of review_diffs is refused");
+    assert_eq!(act(&ana.dir, &ana.tab, "reset_taste_field", json!({ "scope": site, "field": "second_opinion" })), Err(other.into()), "an agent's reset of second_opinion is refused");
+    assert_eq!(stored(&mut ana.client), json!({}), "a refused act changed the way of working");
+    assert_eq!(asks(&mut ana.client), json!([]), "a refused act held an ask for the owner");
+
+    let trail = ana.client.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let rows: Vec<(&str, &str, &str)> = trail.as_array().unwrap().iter().map(|r| (r["action"].as_str().unwrap(), r["outcome"].as_str().unwrap(), r["detail"].as_str().unwrap())).collect();
+    for expected in [("set_taste", "refused", one), ("set_taste", "refused", other), ("reset_taste_field", "refused", one), ("reset_taste_field", "refused", other)] {
+        assert!(rows.contains(&expected), "{expected:?} in {rows:?}");
+    }
+}
+
+#[test]
+fn an_agents_act_with_a_review_setting_changes_nothing_and_an_allowed_field_alone_still_waits_for_the_owner() {
+    let hub = TestHub::start("act_mixed");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "act-mixed-mac");
+    let site = json!({ "kind": "project", "repo": "github.com/acme/site" });
+    let stored = |client: &mut Client| client.hub(json!({ "cmd": "get_tastes" })).unwrap()["projects"].clone();
+    let asks = |client: &mut Client| client.hub(json!({ "cmd": "confirmations" })).unwrap();
+    let one = "review_diffs is changed only by the user, on the Way of working page; nothing changed";
+
+    assert_eq!(act(&ana.dir, &ana.tab, "set_taste", json!({ "scope": site, "patch": { "parallel": 2, "review_diffs": false } })), Err(one.into()), "the allowed field in the same patch waits too");
+    assert_eq!(stored(&mut ana.client), json!({}), "a mixed patch changed the way of working");
+    assert_eq!(asks(&mut ana.client), json!([]), "a mixed patch held an ask");
+
+    let held = act(&ana.dir, &ana.tab, "set_taste", json!({ "scope": site, "patch": { "parallel": 2 } })).unwrap();
+    assert_eq!(held["outcome"], "pending", "an allowed field still goes to the owner: {held}");
+    assert_eq!(asks(&mut ana.client).as_array().unwrap().iter().map(|c| c["action"].clone()).collect::<Vec<_>>(), [json!("set_taste")], "one ask, for the allowed field");
+    assert_eq!(stored(&mut ana.client), json!({}), "nothing changes before the owner approves");
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": held["id"], "approve": true })).unwrap()["outcome"], "done");
+    assert_eq!(stored(&mut ana.client), json!({ "github.com/acme/site": { "parallel": 2 } }), "the approved allowed field lands, and no review setting did");
+}
+
+#[test]
+fn a_review_setting_held_before_the_refusal_fails_when_the_owner_approves_it() {
+    let hub = TestHub::start("held_review");
+    let url = hub.url.clone();
+    let (token, owner) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "held-review-mac");
+    let (machine, tab) = (ana.machine.clone(), ana.tab.clone());
+    let site = json!({ "kind": "project", "repo": "github.com/acme/site" });
+    let stored = |client: &mut Client| client.hub(json!({ "cmd": "get_tastes" })).unwrap()["projects"].clone();
+    let one = "review_diffs is changed only by the user, on the Way of working page; nothing changed";
+    let other = "second_opinion is changed only by the user, on the Way of working page; nothing changed";
+    // Asks an app from before the refusal held, straight into the table, as the hub held them then.
+    let hold = |request: &str, action: &str, args: Value| {
+        let asked = Confirmation { id: String::new(), at: 1, machine: machine.clone(), machine_name: "held-review-mac".into(), tab: tab.clone(), title: "Way of working".into(), role: ActorRole::Session, action: action.into(), about: String::new(), args, target: None, request_id: Some(request.into()), decision: None, decided_at: None, outcome: None };
+        let (account_id, machine_id) = (uuid::Uuid::parse_str(&owner.id).unwrap(), uuid::Uuid::parse_str(&machine).unwrap());
+        hub.runtime.block_on(hub.hub().db.hold_confirmation(account_id, machine_id, None, &asked)).unwrap().0.to_string()
+    };
+    let review = hold("held-review", "set_taste", json!({ "scope": site, "patch": { "review_diffs": false } }));
+    let reset = hold("held-reset", "reset_taste_field", json!({ "scope": site, "field": "second_opinion" }));
+    let denied = hold("held-denied", "set_taste", json!({ "scope": site, "patch": { "second_opinion": true } }));
+    let lands = hold("held-lands", "set_taste", json!({ "scope": site, "patch": { "parallel": 2 } }));
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let decide = |client: &mut Client, id: &str, approve: bool| client.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": approve })).unwrap();
+
+    let refused = decide(&mut ana.client, &review, true);
+    assert_eq!(refused["outcome"], format!("failed: {one}"), "an approved held review_diffs fails with the refusal: {refused}");
+    let refused = decide(&mut ana.client, &reset, true);
+    assert_eq!(refused["outcome"], format!("failed: {other}"), "an approved held reset of second_opinion fails with the refusal: {refused}");
+    assert_eq!(stored(&mut ana.client), json!({}), "an approved held review setting changed the way of working");
+    let no = decide(&mut ana.client, &denied, false);
+    assert_eq!((&no["decision"], &no["outcome"]), (&json!("denied"), &json!("denied")), "a denied held review setting still ends as denied: {no}");
+    let landed = decide(&mut ana.client, &lands, true);
+    assert_eq!(landed["outcome"], "done", "an approved held allowed field still lands: {landed}");
+    assert_eq!(stored(&mut ana.client), json!({ "github.com/acme/site": { "parallel": 2 } }), "only the allowed field landed");
+}
+
+#[test]
+fn the_way_of_working_page_still_changes_both_review_settings_through_the_hub() {
+    let hub = TestHub::start("page_review");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "page-review-mac");
+    let site = json!({ "kind": "project", "repo": "github.com/acme/site" });
+
+    let set = ana.client.hub(json!({ "cmd": "set_taste", "scope": site, "patch": { "review_diffs": false, "second_opinion": true } })).unwrap();
+    assert_eq!(set["projects"]["github.com/acme/site"], json!({ "review_diffs": false, "second_opinion": true }), "the page's own set changes both");
+    let reset = ana.client.hub(json!({ "cmd": "reset_taste_field", "scope": site, "field": "review_diffs" })).unwrap();
+    assert_eq!(reset["projects"]["github.com/acme/site"], json!({ "second_opinion": true }), "the page's own reset changes review_diffs");
 }
 
 struct Through<'a>(&'a Link);
@@ -2736,6 +2897,10 @@ struct FakeState {
     /// Runs on the next booted node's machine thread, inside the call that opens its first tab and
     /// before that call answers the hub: what a session does as its first act.
     first_tab: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Each delete waits for a permit, which none is given: closing it lets every delete go on.
+    held_deletes: Option<Arc<tokio::sync::Semaphore>>,
+    /// How many deletes came to `held_deletes`.
+    deletes_held: usize,
 }
 
 /// Upstash's Box API in memory. Running the bootstrap starts a node from the account.json the hub
@@ -2873,6 +3038,14 @@ impl BoxApi for FakeBoxes {
     fn delete<'a>(&'a self, key: &'a str, id: &'a BoxId) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             Self::refuse(key)?;
+            let held = {
+                let mut state = self.state.lock().unwrap();
+                state.deletes_held += usize::from(state.held_deletes.is_some());
+                state.held_deletes.clone()
+            };
+            if let Some(held) = held {
+                let _ = held.acquire().await;
+            }
             let gone = self.state.lock().unwrap().boxes.remove(&id.0);
             tokio::task::spawn_blocking(move || drop(gone)).await.unwrap();
             Ok(())
@@ -4605,6 +4778,12 @@ impl Fleet {
         let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
         let mut client = Client::connect(&url, &token);
         client.wait("hello", |f| f["type"] == "hello");
+        Fleet::paired(hub, name, token, client, &[("mac", true), ("mini", true)])
+    }
+
+    /// `hub`'s account, signed in on `client`, with `mac` and `mini` paired and `online` the machines to wait for.
+    fn paired(hub: TestHub, name: &str, token: String, mut client: Client, online: &[(&str, bool)]) -> Fleet {
+        let url = hub.url.clone();
         let (mac_dir, mini_dir) = (temp(&format!("{name}-mac")), temp(&format!("{name}-mini")));
         let (mac_creds, mini_creds) = (pair(&url, &mut client, "mac", &mac_dir), pair(&url, &mut client, "mini", &mini_dir));
         let (mac_id, mini_id) = (mac_creds.machine_id.clone(), mini_creds.machine_id.clone());
@@ -4612,7 +4791,13 @@ impl Fleet {
         for dir in [&mac_dir, &mini_dir] {
             std::fs::write(dir.join("claude"), "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nprintf '%s\\n' \"$@\" >> \"$0.$PINNED_TAB.args\"\nexec cat\n").unwrap();
         }
-        client.wait_machines(&[("mac", true), ("mini", true)]);
+        let mut online: Vec<(String, bool)> = online.iter().map(|(n, o)| (n.to_string(), *o)).collect();
+        online.sort();
+        wait_for("the fleet's machines to be online", || {
+            let mut listed = client.machines();
+            listed.sort();
+            listed == online
+        });
         mini.machine.listen(|_| Err("not in this test".into())).unwrap();
         client.call(&mini_id, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": true } })).unwrap();
         let global = client.call(&mini_id, json!({ "cmd": "open_global_orchestrator" })).unwrap().as_str().unwrap().to_owned();
@@ -4722,6 +4907,64 @@ fn the_global_orchestrator_reaches_a_capitao_on_another_machine_and_hears_back()
     assert_eq!(
         fleet.mac.link.as_ref().unwrap().call_hub(report(&capitao, &fleet.site, "Done.")),
         Err("no online machine hosts the global orchestrator: choose one in its settings".into())
+    );
+}
+
+#[test]
+fn a_box_that_claims_to_host_the_global_orchestrator_is_never_the_host() {
+    let hub = TestHub::start_with_boxes("box_host", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    assert_eq!(hub.runtime.block_on(hub.hub().open(account, ana.box_run(issue("uuid-host")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let box_id = ana.box_machine();
+    let BoxAccount { client, token, .. } = ana;
+    let mut fleet = Fleet::paired(hub, "box_host", token, client, &[("Box · ENG-7 Fix login", true), ("mac", true), ("mini", true)]);
+    // The box's own node answers that it hosts; the hub must not believe it.
+    fleet.set_host(&box_id, true);
+    let (mac, mac_dir) = (fleet.mac_id.clone(), fleet.mac_dir.clone());
+    let project = format!("{mac}:{}", fleet.site);
+
+    let sent = fleet.send_to_captain(&project, "Ship the form.", "r-1");
+    assert_eq!(sent.as_ref().map(|sent| sent["outcome"].clone()), Ok(json!("iniciado")), "the person's machine still hosts, so the box is not a second host");
+    let capitao = sent.unwrap()["tab"].as_str().unwrap().to_owned();
+    wait_launch(&mac_dir, &capitao, "[Orchestrator] Ship the form.");
+
+    let mini = fleet.mini_id.clone();
+    fleet.set_host(&mini, false);
+    assert_eq!(
+        fleet.send_to_captain(&project, "Ship it.", "r-2"),
+        Err("no online machine hosts the global orchestrator: choose one in its settings".into()),
+        "with the person's machine off, the box must not take over as host"
+    );
+}
+
+#[test]
+fn a_box_that_claims_to_host_is_not_counted_in_the_project_list() {
+    let hub = TestHub::start_with_boxes("box_overview", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    assert_eq!(hub.runtime.block_on(hub.hub().open(account, ana.box_run(issue("uuid-host")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let box_id = ana.box_machine();
+    let BoxAccount { client, token, .. } = ana;
+    let mut fleet = Fleet::paired(hub, "box_overview", token, client, &[("Box · ENG-7 Fix login", true), ("mac", true), ("mini", true)]);
+    // The box's own node answers that it hosts, next to the person's machine that really hosts.
+    fleet.set_host(&box_id, true);
+    let mini = fleet.mini_id.clone();
+
+    // The box's projects and tabs still belong in the list, but it never counts as the host.
+    let listed = fleet.mini.link.as_ref().unwrap().call_hub(HubCall::Overview);
+    assert!(
+        listed.as_ref().is_ok_and(|overview| overview["machines"].as_array().unwrap().iter().any(|m| m["id"] == json!(mini))),
+        "the person's machine hosts, so its project list is built and lists it, and the box is not a second host: {listed:?}"
+    );
+
+    fleet.set_host(&mini, false);
+    assert_eq!(
+        fleet.mini.link.as_ref().unwrap().call_hub(HubCall::Overview),
+        Err("no online machine hosts the global orchestrator: choose one in its settings".into()),
+        "with the person's machine off, the box must not take over as host of the project list"
     );
 }
 
@@ -7538,12 +7781,23 @@ fn an_agent_holding_what_its_machine_keeps_readable_cannot_approve_or_run_a_conf
 
 const BIN: &str = env!("CARGO_BIN_EXE_pinned-server");
 
-/// A node or login started by a test must never reach the real app's socket, tab or account.
+/// A node or login started by a test must never reach the real app's socket, tab or account, nor
+/// run its built-in accounts on a CLI home the developer exported.
 fn without_app_env(command: &mut std::process::Command) -> &mut std::process::Command {
-    for name in ["PINNED_SOCK", "PINNED_TAB", "PINNED_PROJECT", "PINNED_ROLE", "PINNED_ACCOUNT", "PINNED_TUTORIAL_HELPER"] {
+    for name in pinned_core::machine::INHERITED_SESSION_ENV {
         command.env_remove(name);
     }
     command
+}
+
+#[test]
+fn a_node_a_test_starts_inherits_no_session_variable_or_cli_home() {
+    let mut command = std::process::Command::new(BIN);
+    without_app_env(&mut command);
+    let envs: BTreeMap<String, Option<String>> = command.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect();
+    for name in pinned_core::machine::INHERITED_SESSION_ENV.iter().chain(&["CLAUDE_CONFIG_DIR", "CODEX_HOME"]) {
+        assert_eq!(envs.get(*name), Some(&None), "{name} is not removed");
+    }
 }
 
 #[test]
@@ -8328,7 +8582,7 @@ fn another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invit
     };
     assert_eq!(bob_decides(&mut bob, "revoke_invite", json!({ "id": anas_invite })), format!("failed: this account has no unused invite {anas_invite}"));
     assert_eq!(bob_decides(&mut bob, "revoke_agent", json!({ "id": grant })), format!("failed: this account has no agent {grant}"));
-    assert_eq!(bob_decides(&mut bob, "extend_box", json!({ "machine": mini, "extra_usd": 5.0 })), "failed: this machine is no box");
+    assert_eq!(act(&bob.dir, &bob.tab, "extend_box", json!({ "machine": mini, "extra_usd": 5.0 })), Err("this machine is no box".into()), "refused when bob's agent asks, before anyone is asked to approve it");
     assert_eq!(act(&bob.dir, &bob.tab, "answer_box", json!({ "id": "q-ana", "allow": true })), Err(format!("answer_box is not open to agents: {ANSWER_BOX_CLOSED}")));
     let bobs_token = act(&bob.dir, &bob.tab, "set_box_claude_token", json!({ "name": "bloom" })).unwrap()["id"].clone();
     assert_eq!(approve(&mut bob.client, &bobs_token, json!({ "token": "sk-ant-oat01-bobsown" })), Err("connect Upstash Box first".into()), "bob's key goes to bob's own connection");
@@ -9031,26 +9285,1265 @@ fn a_session_box_follows_only_its_setting_and_budget_and_only_its_owner_answers_
     assert_eq!(asked["outcome"], "pending", "an agent's extend waits for the owner: {asked}");
     let extended = decide(&mut owner, &asked);
     assert_eq!((extended["outcome"].as_str(), extended["result"]["budget_usd"].as_f64()), (Some("done"), Some(2.5)), "within the Box budget the owner's yes extends it: {extended}");
-    let asked = act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": machine, "extra_usd": 1.0 })).unwrap();
     assert_eq!(
-        decide(&mut owner, &asked)["outcome"].as_str(),
-        Some("failed: a box may spend at most US$ 3.00; name less, or raise Box budget in Settings › Way of working"),
-        "past the Box budget it is refused"
+        act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": machine, "extra_usd": 1.0 })),
+        Err("a box may spend at most US$ 3.00; name less, or raise Box budget in Settings › Way of working".into()),
+        "past the Box budget it is refused when the agent asks"
     );
-    let asked = act(&bob.dir, &bob.tab, "extend_box", json!({ "machine": machine, "extra_usd": 0.5 })).unwrap();
-    assert_eq!(decide(&mut bobs_app, &asked)["outcome"].as_str(), Some("failed: this machine is no box"));
+    assert_eq!(act(&bob.dir, &bob.tab, "extend_box", json!({ "machine": machine, "extra_usd": 0.5 })), Err("this machine is no box".into()));
     assert_eq!(bobs_app.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 })), Err("this machine is no box".into()));
     let mut locked_app = Client::app(&url, &token);
     let extend = json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 });
     assert_eq!(locked_app.hub(extend.clone()), Err(LOCKED.into()), "a locked app asks for the password before it extends");
     locked_app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
     assert_eq!(locked_app.hub(extend).unwrap()["budget_usd"].as_f64(), Some(3.0), "once unlocked the app's own extend goes through");
-    // Only the agents' extends were ever confirmations, and the owner decided each: no open or answer became one.
-    for (app, expected) in [(&mut owner, 2), (&mut bobs_app, 1)] {
+    // Only the agents' extends that could run were ever confirmations, and the owner decided each: no open or answer became one.
+    for (app, expected) in [(&mut owner, 1), (&mut bobs_app, 0)] {
         let all = app.hub(json!({ "cmd": "confirmations" })).unwrap();
         assert!(all.as_array().unwrap().iter().all(|c| c["action"] == "extend_box" && c["decision"] == "approved"), "{all}");
         assert_eq!(all.as_array().unwrap().len(), expected, "exactly the extends this account's agents asked for: {all}");
     }
+}
+
+/// An agent's extend_box is checked against the box and the Box budget when it asks, counting the
+/// extends of that box still waiting for the owner, so the owner is never asked to approve one that
+/// cannot run. The owner's approval checks again, as the box may have changed in between.
+#[test]
+fn an_agents_extend_box_is_refused_when_it_asks_if_it_cannot_run_and_checked_again_when_approved() {
+    let hub = TestHub::start_with_boxes("extend_ask_check", Signup::Open, fast());
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "ana-mac");
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    ana.client.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+    ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 300 } })).unwrap();
+    box_mode(&mut ana.client, "session", "fresh");
+    let mut owner = Client::app(&url, &token);
+    owner.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let (bob_token, _) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
+    let bob = agent_of(&url, &bob_token, "bob@acme.dev", "bob-mac");
+    let mut bobs_app = Client::app(&url, &bob_token);
+    let opened = act(&ana.dir, &ana.tab, "open_box", json!({ "repo": "acme/site", "size": "small", "budget_usd": 1.0 })).unwrap();
+    assert_eq!(opened["outcome"], "done", "{opened}");
+    let machine = opened["result"]["machine"].as_str().unwrap().to_owned();
+    let extend = |agent: &Agent, extra: f64| act(&agent.dir, &agent.tab, "extend_box", json!({ "machine": machine, "extra_usd": extra }));
+    let ceiling = Err("a box may spend at most US$ 3.00; name less, or raise Box budget in Settings › Way of working".to_owned());
+
+    assert_eq!(act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": ana.machine, "extra_usd": 1.0 })), Err("this machine is no box".into()), "a machine that is no box is refused when the agent asks");
+    assert_eq!(act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": "not-a-machine", "extra_usd": 1.0 })), Err("this account has no machine not-a-machine".into()));
+    assert_eq!(extend(&ana, 0.0), Err("name an amount above zero".into()));
+    assert_eq!(extend(&ana, 2.5), ceiling, "US$ 1.00 and 2.50 pass the Box budget of US$ 3.00, so the ask is refused at once");
+    assert_eq!(waiting_actions(&mut owner), Vec::<String>::new(), "no refused extend waits for the owner");
+
+    let first = extend(&ana, 1.0).unwrap();
+    assert_eq!(first["outcome"], "pending", "within the Box budget the ask waits for the owner: {first}");
+    let again = session_tool(&ana.dir, &ana.tab, json!({ "name": "act", "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.75 }, "request_id": "r-extend" })).unwrap();
+    assert_eq!(again["outcome"], "pending", "{again}");
+    let repeat = session_tool(&ana.dir, &ana.tab, json!({ "name": "act", "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.75 }, "request_id": "r-extend" })).unwrap();
+    assert_eq!((repeat["outcome"].as_str(), repeat["id"].as_str()), (Some("pending"), again["id"].as_str()), "a repeat of a waiting ask is not counted against itself: {repeat}");
+    owner.hub(json!({ "cmd": "decide_confirmation", "id": again["id"], "approve": false })).unwrap();
+    assert_eq!(extend(&ana, 0.75).unwrap()["outcome"], "pending", "a denied extend no longer counts");
+    let waiting = waiting_actions(&mut owner);
+    assert_eq!(waiting, ["extend_box", "extend_box"], "{waiting:?}");
+    assert_eq!(extend(&ana, 0.5), Err(extend_waits("US$ 1.75")), "it fits alone, and with the US$ 1.75 already waiting it passes the Box budget");
+    assert_eq!(waiting_actions(&mut owner).len(), 2, "the refused ask does not wait");
+
+    assert_eq!(extend(&bob, 0.25), Err("this machine is no box".into()), "another account's box is no box of bob's");
+    assert_eq!(waiting_actions(&mut bobs_app), Vec::<String>::new(), "bob's refused ask does not wait");
+    assert_eq!(waiting_actions(&mut owner).len(), 2, "bob's ask touched nothing of ana's");
+
+    // The owner extends the box in the app meanwhile: the first ask no longer fits when approved.
+    assert_eq!(owner.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 1.25 })).unwrap()["budget_usd"].as_f64(), Some(2.25));
+    let decide = |app: &mut Client, asked: &Value| app.hub(json!({ "cmd": "decide_confirmation", "id": asked["id"], "approve": true })).unwrap();
+    assert_eq!(
+        decide(&mut owner, &first)["outcome"].as_str(),
+        Some("failed: a box may spend at most US$ 3.00; name less, or raise Box budget in Settings › Way of working"),
+        "approval checks again"
+    );
+    let last = owner.hub(json!({ "cmd": "confirmations" })).unwrap().as_array().unwrap().iter().find(|c| c["decision"].is_null()).cloned().unwrap();
+    let done = decide(&mut owner, &last);
+    assert_eq!((done["outcome"].as_str(), done["result"]["budget_usd"].as_f64()), (Some("done"), Some(3.0)), "{done}");
+    assert_eq!(extend(&ana, 0.01), ceiling, "the box is at its Box budget");
+
+    // The box starts to end: an ask for it is refused at once too.
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        let machine: uuid::Uuid = machine.parse().unwrap();
+        assert_eq!(client.execute("update boxes set phase = 'ending', reason = 'done' where machine = $1", &[&machine]).await.unwrap(), 1);
+    });
+    assert_eq!(extend(&ana, 0.01), Err("this box is already ending".into()));
+    assert_eq!(waiting_actions(&mut owner), Vec::<String>::new(), "no refused extend waits for the owner");
+}
+
+/// Ana's agent with a box it opened at US$ 1.00 under a Box budget of US$ 3.00, her app unlocked.
+struct ExtendSetup {
+    hub: TestHub,
+    url: String,
+    account: uuid::Uuid,
+    ana: Agent,
+    owner: Client,
+    machine: String,
+}
+
+fn extend_setup(name: &str) -> ExtendSetup {
+    let hub = TestHub::start_with_boxes(name, Signup::Open, fast());
+    let url = hub.url.clone();
+    let (account, ana, owner) = extend_account(&hub, "ana@acme.dev", "ana-mac");
+    let machine = open_extend_box(&ana);
+    ExtendSetup { hub, url, account, ana, owner, machine }
+}
+
+/// A new account `email` with Upstash connected and a Box budget of US$ 3.00: its id, its agent on
+/// `machine_name`, and its app unlocked.
+fn extend_account(hub: &TestHub, email: &str, machine_name: &str) -> (uuid::Uuid, Agent, Client) {
+    let (token, view) = account::signup(&hub.url, email, "correct horse").unwrap();
+    let mut agent = agent_of(&hub.url, &token, email, machine_name);
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    agent.client.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+    agent.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 300 } })).unwrap();
+    box_mode(&mut agent.client, "session", "fresh");
+    let mut owner = Client::app(&hub.url, &token);
+    owner.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    (view.id.parse().unwrap(), agent, owner)
+}
+
+/// Another box the agent opens at US$ 1.00: its machine.
+fn open_extend_box(ana: &Agent) -> String {
+    let opened = act(&ana.dir, &ana.tab, "open_box", json!({ "repo": "acme/site", "size": "small", "budget_usd": 1.0 })).unwrap();
+    assert_eq!(opened["outcome"], "done", "{opened}");
+    opened["result"]["machine"].as_str().unwrap().to_owned()
+}
+
+fn extend_as(dir: &Path, tab: &str, machine: &str, extra: f64, request_id: Option<&str>) -> Result<Value, String> {
+    let mut tool = json!({ "name": "act", "action": "extend_box", "args": { "machine": machine, "extra_usd": extra } });
+    if let Some(id) = request_id {
+        tool["request_id"] = json!(id);
+    }
+    session_tool(dir, tab, tool)
+}
+
+fn refused_extends(owner: &mut Client) -> usize {
+    trail_of(owner).iter().filter(|(action, outcome, _, _)| action == "extend_box" && outcome == "refused").count()
+}
+
+const EXTEND_CEILING: &str = "a box may spend at most US$ 3.00; name less, or raise Box budget in Settings › Way of working";
+
+fn extend_waits(waiting: &str) -> String {
+    format!("a box may spend at most US$ 3.00, and {waiting} for this box already waits for your decision in the app; name less, or decide that one first")
+}
+
+/// A repeat of an extend_box the session already asked gets the answer of that ask, as every
+/// repeat does, and is not checked again: the box has changed since, by that very ask. Only the
+/// same session's repeat is one: another tab or another machine with the same request id asks anew.
+#[test]
+fn an_agents_repeated_extend_box_gets_its_first_answer_and_is_not_checked_again() {
+    let ExtendSetup { hub: _hub, url, mut ana, mut owner, machine, .. } = extend_setup("extend_repeat");
+    let r1 = extend_as(&ana.dir, &ana.tab, &machine, 1.5, Some("r1")).unwrap();
+    assert_eq!(r1["outcome"], "pending", "{r1}");
+    let approved = owner.hub(json!({ "cmd": "decide_confirmation", "id": r1["id"], "approve": true })).unwrap();
+    assert_eq!((approved["outcome"].as_str(), approved["result"]["budget_usd"].as_f64()), (Some("done"), Some(2.5)), "{approved}");
+    let again = extend_as(&ana.dir, &ana.tab, &machine, 1.5, Some("r1"));
+    assert_eq!(again.as_ref().map(|a| (a["outcome"].clone(), a["earlier"].clone())), Ok((json!("repeat"), json!("approved"))), "the repeat hears the owner's yes: {again:?}");
+    assert_eq!(refused_extends(&mut owner), 0, "the repeat wrote no refusal");
+
+    let r2 = extend_as(&ana.dir, &ana.tab, &machine, 0.25, Some("r2")).unwrap();
+    assert_eq!(r2["outcome"], "pending", "{r2}");
+    assert_eq!(owner.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 })).unwrap()["budget_usd"].as_f64(), Some(3.0), "the owner raises the box in the app meanwhile");
+    let again = extend_as(&ana.dir, &ana.tab, &machine, 0.25, Some("r2"));
+    assert_eq!(again.as_ref().map(|a| (a["outcome"].clone(), a["id"].clone())), Ok((json!("pending"), r2["id"].clone())), "the repeat of a waiting ask still waits, under the same id: {again:?}");
+    assert_eq!(refused_extends(&mut owner), 0, "the repeat wrote no refusal");
+
+    let other_tab = ana.node.machine.open_tab(Some(ana.dir.join("docs").display().to_string()), false).unwrap();
+    ana.client.wait("the second tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == other_tab));
+    assert_eq!(extend_as(&ana.dir, &other_tab, &machine, 0.25, Some("r2")), Err(EXTEND_CEILING.into()), "another tab's ask with the same request id is checked");
+    let code = ana.client.hub(json!({ "cmd": "pair_code" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let mini_dir = node_dir("surface-ana-mini");
+    account::pair(&url, &code, "ana-mini", "macos").unwrap().save(&mini_dir).unwrap();
+    let mini = Node::start(&mini_dir, Credentials::load(&mini_dir).unwrap());
+    mini.machine.listen(|_| Err("unexpected".into())).unwrap();
+    std::fs::create_dir_all(mini_dir.join("site")).unwrap();
+    let mini_tab = mini.machine.open_tab(Some(mini_dir.join("site").display().to_string()), false).unwrap();
+    ana.client.wait("the other machine's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == mini_tab));
+    assert_eq!(extend_as(&mini_dir, &mini_tab, &machine, 0.25, Some("r2")), Err(EXTEND_CEILING.into()), "another machine's ask with the same request id is checked");
+    assert_eq!(waiting_actions(&mut owner), ["extend_box"], "only r2 waits");
+}
+
+/// What waits for the owner counts against a new ask only for the same box, only when above zero,
+/// and only while it was asked in the last day; an ask that fits alone but not with what waits is
+/// refused with a text that says so.
+#[test]
+fn an_agents_extend_box_counts_only_recent_positive_asks_of_the_same_box() {
+    let ExtendSetup { hub, ana, machine, .. } = extend_setup("extend_waiting");
+    let other = open_extend_box(&ana);
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &other, 1.5, None).unwrap()["outcome"], "pending");
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 1.5, None).unwrap()["outcome"], "pending", "what waits for another box of the account does not count");
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 1.0, None), Err(extend_waits("US$ 1.50")), "it fits alone, not with what waits");
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 2.5, None), Err(EXTEND_CEILING.into()), "what does not fit alone keeps its own text");
+
+    let age = |hours: &str| admin_on(&hub.database, &format!("update agent_confirmations set created_at = now() - interval '{hours}' where args->>'machine' = '{machine}' and decided_at is null"));
+    age("23 hours 59 minutes");
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 1.0, None), Err(extend_waits("US$ 1.50")), "an ask of the last day still counts");
+    age("24 hours 1 minute");
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 1.0, None).unwrap()["outcome"], "pending", "an ask older than a day no longer counts");
+
+    // An amount below zero, which no ask could leave, waits for this box: it makes no room.
+    admin_on(&hub.database, &format!("update agent_confirmations set args = jsonb_set(jsonb_set(args, '{{extra_usd}}', '-5'), '{{machine}}', '\"{machine}\"') where args->>'machine' = '{other}' and decided_at is null"));
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 1.5, None), Err(extend_waits("US$ 1.00")), "an amount below zero does not make room");
+}
+
+/// Asks for one box that each fit alone, made at once: the first waits, every other one hears it
+/// waits. The box's line takes 3 at a time and refuses the rest as busy, and an ask refused as
+/// busy did nothing, so each asks again with its request id until it hears more.
+#[test]
+fn concurrent_extend_box_asks_for_one_box_wait_only_as_far_as_the_box_budget_goes() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_concurrent");
+    // Eight acts at once, as the hub takes them from the agent's machine, each on a task of its own.
+    let answers: Vec<Result<Value, String>> = hub.runtime.block_on(async {
+        let account = hub.hub().account(account).await.unwrap();
+        let asks: Vec<_> = (0..8)
+            .map(|n| {
+                let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
+                let ask = json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 1.5 }, "request_id": format!("r-{n}") });
+                tokio::spawn(async move {
+                    loop {
+                        match pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await {
+                            Err(busy) if busy == pinned_core::wire::HUB_BUSY => tokio::time::sleep(Duration::from_millis(10)).await,
+                            answer => return answer,
+                        }
+                    }
+                })
+            })
+            .collect();
+        let mut answers = vec![];
+        for ask in asks {
+            answers.push(ask.await.unwrap());
+        }
+        answers
+    });
+    let pending = answers.iter().filter(|a| a.as_ref().is_ok_and(|a| a["outcome"] == "pending")).count();
+    let refused = answers.iter().filter(|a| **a == Err(extend_waits("US$ 1.50"))).count();
+    assert_eq!((pending, refused), (1, 7), "{answers:?}");
+    assert_eq!(waiting_actions(&mut owner), ["extend_box"]);
+}
+
+const TOO_MANY_EXTENDS: &str = "too many box extends are waiting for the owner; answer some first";
+
+/// What waits for the owner is bounded for the account too, not only per box: once 10 extends of
+/// its boxes wait, an ask for any of its boxes is refused and does not wait, while another
+/// account's boxes are not touched. An answer or an amount not above zero makes room again; an
+/// ask older than a day does not, as the owner still sees it waiting.
+#[test]
+fn an_accounts_waiting_extend_box_asks_are_capped_across_its_boxes() {
+    let ExtendSetup { hub, ana, mut owner, machine, .. } = extend_setup("extend_account_cap");
+    let boxes = [machine.clone(), open_extend_box(&ana), open_extend_box(&ana)];
+    let mut asked = vec![];
+    for n in 0..10 {
+        let ask = extend_as(&ana.dir, &ana.tab, &boxes[n % 3], 0.1, None).unwrap();
+        assert_eq!(ask["outcome"], "pending", "ask {n} fits its box and the account: {ask}");
+        asked.push(ask);
+    }
+    assert_eq!(waiting_actions(&mut owner).len(), 10);
+    for machine in &boxes {
+        assert_eq!(extend_as(&ana.dir, &ana.tab, machine, 0.1, None), Err(TOO_MANY_EXTENDS.into()), "an ask for any box of the account is refused");
+    }
+    assert_eq!(waiting_actions(&mut owner).len(), 10, "no refused ask waits for the owner");
+    assert_eq!(refused_extends(&mut owner), 3);
+
+    let (_, bob, mut bobs_app) = extend_account(&hub, "bob@acme.dev", "bob-mac");
+    let bobs_box = open_extend_box(&bob);
+    assert_eq!(extend_as(&bob.dir, &bob.tab, &bobs_box, 0.1, None).unwrap()["outcome"], "pending", "another account's box is not touched");
+    assert_eq!(waiting_actions(&mut bobs_app).len(), 1);
+
+    owner.hub(json!({ "cmd": "decide_confirmation", "id": asked[0]["id"], "approve": false })).unwrap();
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &boxes[1], 0.1, None).unwrap()["outcome"], "pending", "an answer makes room for one more");
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &boxes[2], 0.1, None), Err(TOO_MANY_EXTENDS.into()), "and only one");
+
+    let id = asked[1]["id"].as_str().unwrap();
+    admin_on(&hub.database, &format!("update agent_confirmations set created_at = now() - interval '24 hours 1 minute' where id = '{id}'"));
+    assert_eq!(waiting_actions(&mut owner).len(), 10, "the owner still sees an ask older than a day");
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &boxes[0], 0.1, None), Err(TOO_MANY_EXTENDS.into()), "so it still counts toward the cap");
+    let id = asked[2]["id"].as_str().unwrap();
+    admin_on(&hub.database, &format!("update agent_confirmations set args = jsonb_set(args, '{{extra_usd}}', '0') where id = '{id}'"));
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &boxes[0], 0.1, None).unwrap()["outcome"], "pending", "an amount not above zero does not count");
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &boxes[0], 0.1, None), Err(TOO_MANY_EXTENDS.into()));
+}
+
+/// An ask for a box that has ended can never extend anything, so it no longer counts toward the
+/// account's cap of 10, whether its box is ending or gone; the owner still sees it and can answer it.
+#[test]
+fn waiting_extend_box_asks_for_ended_boxes_do_not_count_toward_the_accounts_cap() {
+    let ExtendSetup { hub, ana, mut owner, machine, .. } = extend_setup("extend_cap_ended");
+    let (ending, gone, live) = (machine.clone(), open_extend_box(&ana), open_extend_box(&ana));
+    let mut asked = vec![];
+    for n in 0..10 {
+        let ask = extend_as(&ana.dir, &ana.tab, if n % 2 == 0 { &ending } else { &gone }, 0.1, None).unwrap();
+        assert_eq!(ask["outcome"], "pending", "ask {n}: {ask}");
+        asked.push(ask);
+    }
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &live, 0.1, None), Err(TOO_MANY_EXTENDS.into()), "10 asks for live boxes fill the cap");
+    // Moved to ending as an earlier hub left it, with its asks still waiting: Upstash holds its
+    // delete, so the reaper never deletes the row, which would close them.
+    hub.boxes.state.lock().unwrap().held_deletes = Some(Arc::new(tokio::sync::Semaphore::new(0)));
+    admin_on(&hub.database, &format!("update boxes set phase = 'ending', reason = 'done' where machine = '{ending}'"));
+    admin_on(&hub.database, &format!("delete from boxes where machine = '{gone}'"));
+    let admitted = extend_as(&ana.dir, &ana.tab, &live, 0.1, None).unwrap();
+    assert_eq!(admitted["outcome"], "pending", "asks for boxes that ended make room: {admitted}");
+    assert_eq!(waiting_actions(&mut owner).len(), 11, "the owner still sees every ask");
+    let denied = owner.hub(json!({ "cmd": "decide_confirmation", "id": asked[0]["id"], "approve": false })).unwrap();
+    assert_eq!(denied["outcome"], "denied", "and can answer one for a box that ended: {denied}");
+}
+
+/// What an extend ask still waiting for the owner reads as once its box ends.
+const BOX_ENDED: &str = "the box ended before the owner answered";
+
+/// The ids of the account's confirmations that wait.
+fn waiting_ids(client: &mut Client) -> Vec<Value> {
+    let all = client.hub(json!({ "cmd": "confirmations" })).unwrap();
+    all.as_array().unwrap().iter().filter(|c| c["decision"].is_null()).map(|c| c["id"].clone()).collect()
+}
+
+/// The decision and outcome of the account's confirmation `id`, as its app lists it.
+fn decided(client: &mut Client, id: &Value) -> (Value, Value) {
+    let all = client.hub(json!({ "cmd": "confirmations" })).unwrap();
+    let found = all.as_array().unwrap().iter().find(|c| c["id"] == *id).cloned().unwrap_or_else(|| panic!("no confirmation {id}: {all}"));
+    (found["decision"].clone(), found["outcome"].clone())
+}
+
+/// Ends the account's box on `machine` as removing its machine does, its Upstash delete held
+/// until the permit closes, so its row stays ending: the permit and the end, once the delete is held.
+fn end_box_held(hub: &TestHub, account: uuid::Uuid, machine: &str) -> (Arc<tokio::sync::Semaphore>, tokio::task::JoinHandle<Result<bool, String>>) {
+    end_box_held_on(hub, &hub.runtime, hub.hub(), account, machine)
+}
+
+/// `end_box_held`, ended by the hub `running` on `runtime`: this hub, or its twin.
+fn end_box_held_on(hub: &TestHub, runtime: &tokio::runtime::Runtime, running: &Arc<pinned_server::hub::Hub>, account: uuid::Uuid, machine: &str) -> (Arc<tokio::sync::Semaphore>, tokio::task::JoinHandle<Result<bool, String>>) {
+    let held = Arc::new(tokio::sync::Semaphore::new(0));
+    hub.boxes.state.lock().unwrap().held_deletes = Some(held.clone());
+    let (running, machine) = (running.clone(), machine.parse().unwrap());
+    let ending = runtime.spawn(async move {
+        let account = running.account(account).await?;
+        running.boxes.end_for_machine(&running, &account, machine).await
+    });
+    wait_for("the box's delete", || hub.boxes.state.lock().unwrap().deletes_held > 0);
+    (held, ending)
+}
+
+/// A box that ends closes every extend ask for it still waiting for the owner: it reads denied with
+/// the box's end, leaves what waits, and its agent hears so. An ask for another box of the account,
+/// and another account's ask that names the same machine, still wait.
+#[test]
+fn a_box_that_ends_closes_the_extend_box_asks_that_wait_for_it() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_closed_ending");
+    let other = open_extend_box(&ana);
+    // The machine in capitals, as an agent may type it: it names the box all the same.
+    let asked = extend_as(&ana.dir, &ana.tab, &machine.to_uppercase(), 0.5, None).unwrap();
+    let kept = extend_as(&ana.dir, &ana.tab, &other, 0.5, None).unwrap();
+    assert_eq!((asked["outcome"].as_str(), kept["outcome"].as_str()), (Some("pending"), Some("pending")), "{asked} {kept}");
+    // The same box spelled as `Uuid::parse_str` reads it: without hyphens, in braces, as a urn, and in capitals without hyphens.
+    let spellings = [machine.replace('-', ""), format!("{{{machine}}}"), format!("urn:uuid:{machine}"), machine.replace('-', "").to_uppercase()];
+    let spelled: Vec<Value> = spellings.iter().map(|spelling| extend_as(&ana.dir, &ana.tab, spelling, 0.1, None).unwrap()).collect();
+    assert!(spelled.iter().all(|ask| ask["outcome"] == "pending"), "{spelled:?}");
+    // Bob's agent cannot ask for ana's box, which is no box of his, so his ask that names its machine is written here.
+    let (bob_account, bob, mut bobs_app) = extend_account(&hub, "bob@acme.dev", "bob-mac");
+    admin_on(
+        &hub.database,
+        &format!(
+            "insert into agent_confirmations (id, account, machine, tab, role, action, args) values (gen_random_uuid(), '{bob_account}', '{}', '{}', 'session', 'extend_box', '{{\"machine\": \"{machine}\", \"extra_usd\": 0.5}}')",
+            bob.machine, bob.tab
+        ),
+    );
+    let (deleted, ending) = end_box_held(&hub, account, &machine);
+    assert_eq!(count_on(&hub.database, &format!("select count(*) from boxes where machine = '{machine}' and phase = 'ending'")), 1, "the box is ending, its row kept until Upstash deletes it");
+    assert_eq!(waiting_ids(&mut owner), [kept["id"].clone()], "only the ask for the box that runs still waits");
+    assert_eq!(decided(&mut owner, &asked["id"]), (json!("denied"), json!(BOX_ENDED)));
+    for ask in &spelled {
+        assert_eq!(decided(&mut owner, &ask["id"]), (json!("denied"), json!(BOX_ENDED)), "{ask}");
+    }
+    assert_eq!(waiting_actions(&mut bobs_app), ["extend_box"], "another account's ask is its own");
+    let told = notice_of(&ana, &asked["id"]);
+    assert!(told.contains(BOX_ENDED) && !told.contains("The user denied"), "the agent hears that the box ended: {told}");
+    deleted.close();
+    assert_eq!(hub.runtime.block_on(ending).unwrap(), Ok(true));
+}
+
+/// A box's end writes its trail a denied row for the extend ask it closes, as the owner's decision
+/// writes one, so the agent's activity does not keep the ask pending last.
+#[test]
+fn a_box_that_ends_writes_a_denied_row_for_each_extend_ask_it_closes() {
+    let ExtendSetup { hub, account, ana, machine, .. } = extend_setup("extend_closed_trail");
+    let asked = extend_as(&ana.dir, &ana.tab, &machine, 0.5, Some("r-closed-trail")).unwrap();
+    assert_eq!(asked["outcome"], "pending", "{asked}");
+    let (deleted, ending) = end_box_held(&hub, account, &machine);
+    let last_denied = format!("select count(*) from (select outcome, detail from agent_actions where request_id = 'r-closed-trail' order by at desc limit 1) last where outcome = 'denied' and detail = '{BOX_ENDED}'");
+    wait_for("the closed ask's denied row", || count_on(&hub.database, &last_denied) == 1);
+    assert_eq!(count_on(&hub.database, "select count(*) from agent_actions where request_id = 'r-closed-trail'"), 2, "its pending row, then its denied one");
+    deleted.close();
+    assert_eq!(hub.runtime.block_on(ending).unwrap(), Ok(true));
+}
+
+/// Deleting a box's row closes the extend asks still waiting for its box, as the row a hub left
+/// ending before it closed them: the reaper deletes it, and its asks read as the box's end.
+#[test]
+fn a_deleted_box_row_closes_the_extend_box_asks_that_wait_for_it() {
+    let ExtendSetup { hub, ana, mut owner, machine, .. } = extend_setup("extend_closed_deleted");
+    let other = open_extend_box(&ana);
+    let asked = extend_as(&ana.dir, &ana.tab, &machine, 0.5, None).unwrap();
+    let kept = extend_as(&ana.dir, &ana.tab, &other, 0.5, None).unwrap();
+    assert_eq!((asked["outcome"].as_str(), kept["outcome"].as_str()), (Some("pending"), Some("pending")), "{asked} {kept}");
+    admin_on(&hub.database, &format!("update boxes set phase = 'ending', reason = 'done' where machine = '{machine}'"));
+    wait_for("the reaper to delete the row", || count_on(&hub.database, &format!("select count(*) from boxes where machine = '{machine}'")) == 0);
+    assert_eq!(waiting_ids(&mut owner), [kept["id"].clone()], "only the ask for the box that runs still waits");
+    assert_eq!(decided(&mut owner, &asked["id"]), (json!("denied"), json!(BOX_ENDED)));
+}
+
+/// An ask stored as its box ends never waits. Checked while the box still ran, it is stored only
+/// after another hub moved the box to ending and closed its waiting asks: once stored it finds the
+/// box ending, and is closed and refused.
+#[test]
+fn an_extend_box_ask_stored_as_its_box_ends_is_closed_and_refused() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_closed_race");
+    // A row of the test's own under the key the ask is stored with, in a transaction left open: the
+    // ask's insert waits on it, after the ask's check, until it rolls back.
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let blocker = runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.batch_execute("begin").await.unwrap();
+        let (id, origin) = (uuid::Uuid::new_v4(), ana.machine.parse::<uuid::Uuid>().unwrap());
+        let insert = "insert into agent_confirmations (id, account, machine, tab, role, action, args, request_id) values ($1, $2, $3, $4, 'session', 'extend_box', '{}', 'r-race')";
+        client.execute(insert, &[&id, &account, &origin, &ana.tab]).await.unwrap();
+        client
+    });
+    let ask = {
+        let (dir, tab, machine) = (ana.dir.clone(), ana.tab.clone(), machine.clone());
+        std::thread::spawn(move || extend_as(&dir, &tab, &machine, 0.5, Some("r-race")))
+    };
+    let stored = "select count(*) from pg_stat_activity where wait_event_type = 'Lock' and query like 'insert into agent_confirmations%'";
+    wait_for("the ask's insert to wait", || count_on(&hub.database, stored) == 1);
+    // This hub's one connection waits on that insert, so its twin ends the box, as another replica would.
+    let (twin_runtime, twin) = hub.twin();
+    let (deleted, ending) = end_box_held_on(&hub, &twin_runtime, &twin.hub, account, &machine);
+    runtime.block_on(blocker.batch_execute("rollback")).unwrap();
+    assert_eq!(ask.join().unwrap(), Err("this box is already ending".into()), "stored after its box ended, the ask is refused");
+    assert_eq!(waiting_ids(&mut owner), Vec::<Value>::new(), "and does not wait");
+    deleted.close();
+    assert_eq!(twin_runtime.block_on(ending).unwrap(), Ok(true));
+}
+
+/// An approved extend whose box moves to ending before its budget is written does not write the
+/// budget: the approval reads as the box already ending, and the box keeps the budget it had.
+#[test]
+fn an_approved_extend_whose_box_ends_before_its_budget_is_written_does_not_write_it() {
+    let ExtendSetup { hub, ana, mut owner, machine, .. } = extend_setup("extend_budget_ending");
+    let asked = extend_as(&ana.dir, &ana.tab, &machine, 0.5, None).unwrap();
+    let id = asked["id"].as_str().unwrap().to_owned();
+    // The box's row locked by the test, so the approval's budget write waits on it while the box moves to ending.
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let blocker = runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.batch_execute(&format!("begin; select 1 from boxes where machine = '{machine}' for update")).await.unwrap();
+        client
+    });
+    let approving = std::thread::spawn(move || {
+        let answer = owner.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": true }));
+        (owner, answer)
+    });
+    let writing = "select count(*) from pg_stat_activity where wait_event_type = 'Lock' and query like 'update boxes set spec%'";
+    wait_for("the budget write to wait on the box's row", || count_on(&hub.database, writing) == 1);
+    runtime.block_on(blocker.batch_execute(&format!("update boxes set phase = 'ending', reason = 'done' where machine = '{machine}'; commit;"))).unwrap();
+    let (mut owner, answer) = approving.join().unwrap();
+    answer.unwrap();
+    assert_eq!(decided(&mut owner, &asked["id"]).1, json!("failed: this box is already ending"), "the approval reads as the box already ending");
+    assert_eq!(count_on(&hub.database, &format!("select count(*) from boxes where machine = '{machine}' and (spec->>'budget_usd')::float8 = 1.5")), 0, "the budget is not written");
+}
+
+/// The race of `an_extend_box_ask_stored_as_its_box_ends_is_closed_and_refused`, where the only ask
+/// the box's end closes is the one stored as it ends: the owner's app still hears of the end.
+#[test]
+fn an_extend_box_ask_stored_as_its_box_ends_pushes_the_owners_list_though_it_closes_only_itself() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_closed_push");
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let blocker = runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.batch_execute("begin").await.unwrap();
+        let (id, origin) = (uuid::Uuid::new_v4(), ana.machine.parse::<uuid::Uuid>().unwrap());
+        let insert = "insert into agent_confirmations (id, account, machine, tab, role, action, args, request_id) values ($1, $2, $3, $4, 'session', 'extend_box', '{}', 'r-closed-push')";
+        client.execute(insert, &[&id, &account, &origin, &ana.tab]).await.unwrap();
+        client
+    });
+    // The owner's frames so far, read before the ask starts: what the ask and the end push comes after.
+    owner.hub(json!({ "cmd": "confirmations" })).unwrap();
+    let mark = owner.frames.len();
+    let ask = {
+        let (dir, tab, machine) = (ana.dir.clone(), ana.tab.clone(), machine.clone());
+        std::thread::spawn(move || extend_as(&dir, &tab, &machine, 0.5, Some("r-closed-push")))
+    };
+    let stored = "select count(*) from pg_stat_activity where wait_event_type = 'Lock' and query like 'insert into agent_confirmations%'";
+    wait_for("the ask's insert to wait", || count_on(&hub.database, stored) == 1);
+    let (twin_runtime, twin) = hub.twin();
+    let (deleted, ending) = end_box_held_on(&hub, &twin_runtime, &twin.hub, account, &machine);
+    runtime.block_on(blocker.batch_execute("rollback")).unwrap();
+    assert_eq!(ask.join().unwrap(), Err("this box is already ending".into()), "stored after its box ended, the ask is refused");
+    wait_frame(&mut owner, mark, "the owner's app to hear the box's end", |f| f["type"] == "confirmations");
+    assert_eq!(waiting_ids(&mut owner), Vec::<Value>::new(), "and nothing waits");
+    deleted.close();
+    assert_eq!(twin_runtime.block_on(ending).unwrap(), Ok(true));
+}
+
+/// A database error reading the ask's box, after the ask is stored, does not fail the act: the ask
+/// waits as any ask does, is audited as pending, and the owner's app hears of it.
+#[test]
+fn an_extend_box_ask_whose_box_cannot_be_read_after_it_is_stored_still_waits() {
+    let ExtendSetup { hub, mut owner, ana, machine, .. } = extend_setup("extend_read_fails");
+    let mark = owner.frames.len();
+    // A trigger that renames a box column as the ask is stored, once: every read of the box after
+    // that fails, and the ask's own box read after its store is the first to need it.
+    admin_on(
+        &hub.database,
+        "create or replace function pinned_test_break_box_reads() returns trigger language plpgsql as $$ begin
+           if exists (select 1 from information_schema.columns where table_name = 'boxes' and column_name = 'reason') then
+             alter table boxes rename column reason to reason_test;
+           end if;
+           return null;
+         end $$;
+         create trigger pinned_test_break_box_reads after insert on agent_confirmations for each row execute function pinned_test_break_box_reads();",
+    );
+    let asked = extend_as(&ana.dir, &ana.tab, &machine, 0.5, Some("r-read-fails"));
+    admin_on(
+        &hub.database,
+        "drop trigger pinned_test_break_box_reads on agent_confirmations; drop function pinned_test_break_box_reads(); alter table boxes rename column reason_test to reason;",
+    );
+    let asked = asked.unwrap();
+    assert_eq!(asked["outcome"], "pending", "{asked}");
+    assert_eq!(waiting_ids(&mut owner), [asked["id"].clone()], "the ask waits");
+    assert_eq!(count_on(&hub.database, "select count(*) from agent_actions where request_id = 'r-read-fails' and outcome = 'pending'"), 1, "its pending row is written");
+    wait_frame(&mut owner, mark, "the owner's app to hear of the ask", |f| f["type"] == "confirmations" && f["items"].as_array().is_some_and(|items| items.iter().any(|c| c["id"] == asked["id"])));
+}
+
+/// A closed extend ask has its outcome from the moment it is closed: the sweep a restarted hub runs
+/// over decisions it left without one leaves it denied with the box's end, never failed.
+#[test]
+fn a_closed_extend_box_ask_stays_denied_with_the_boxs_end_after_a_hub_restart() {
+    let ExtendSetup { mut hub, ana, mut owner, machine, .. } = extend_setup("extend_closed_restart");
+    let asked = extend_as(&ana.dir, &ana.tab, &machine, 0.5, None).unwrap();
+    assert_eq!(asked["outcome"], "pending", "{asked}");
+    owner.hub(json!({ "cmd": "remove_machine", "id": machine })).unwrap();
+    let id = asked["id"].as_str().unwrap();
+    // Decided long enough ago for the sweep to look at it, were it still without an outcome.
+    admin_on(&hub.database, &format!("update agent_confirmations set decided_at = now() - interval '1 hour' where id = '{id}' and decided_at is not null"));
+    hub.restart();
+    let reads = format!("select count(*) from agent_confirmations where id = '{id}' and decided_at is not null and approved = false and outcome = '{BOX_ENDED}'");
+    assert_eq!(count_on(&hub.database, &reads), 1, "the ask is still denied with the box's end");
+}
+
+/// Asks for different boxes of one account made at once, with one place left under the account's
+/// cap: each box's turn lets them in together, the account's lock lets exactly one wait.
+#[test]
+fn concurrent_extend_box_asks_for_different_boxes_of_one_account_fill_its_cap_exactly() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_account_race");
+    let boxes = [machine.clone(), open_extend_box(&ana), open_extend_box(&ana)];
+    for n in 0..9 {
+        assert_eq!(extend_as(&ana.dir, &ana.tab, &boxes[n % 3], 0.1, None).unwrap()["outcome"], "pending");
+    }
+    let answers: Vec<Result<Value, String>> = hub.runtime.block_on(async {
+        let account = hub.hub().account(account).await.unwrap();
+        let asks: Vec<_> = (0..9)
+            .map(|n| {
+                let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
+                let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": boxes[n % 3], "extra_usd": 0.1 } })).unwrap();
+                tokio::spawn(async move { pinned_server::surface::act(&running, &account, &origin, act).await })
+            })
+            .collect();
+        let mut answers = vec![];
+        for ask in asks {
+            answers.push(ask.await.unwrap());
+        }
+        answers
+    });
+    let pending = answers.iter().filter(|a| a.as_ref().is_ok_and(|a| a["outcome"] == "pending")).count();
+    let refused = answers.iter().filter(|a| **a == Err(TOO_MANY_EXTENDS.to_owned())).count();
+    assert_eq!((pending, refused), (1, 8), "{answers:?}");
+    assert_eq!(waiting_actions(&mut owner).len(), 10);
+}
+
+/// The advisory lock of box extends, held on a connection of the test's own as another hub's turn
+/// holds it, and a second connection that counts the connections a hub's turns hold.
+struct ExtendLockHolder {
+    runtime: tokio::runtime::Runtime,
+    held: tokio_postgres::Client,
+    watcher: tokio_postgres::Client,
+    pid: i32,
+}
+
+impl ExtendLockHolder {
+    fn take(database: &str, account: uuid::Uuid, machines: &[&str]) -> ExtendLockHolder {
+        ExtendLockHolder::take_with(database, account, machines, false)
+    }
+
+    /// The lock of all of the account's extend asks, as another hub's ask holds it.
+    fn take_account(database: &str, account: uuid::Uuid) -> ExtendLockHolder {
+        ExtendLockHolder::take_with(database, account, &[], true)
+    }
+
+    fn take_with(database: &str, account: uuid::Uuid, machines: &[&str], of_account: bool) -> ExtendLockHolder {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (held, watcher, pid) = runtime.block_on(async {
+            let connect = || async {
+                let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
+                tokio::spawn(connection);
+                client
+            };
+            let (held, watcher) = (connect().await, connect().await);
+            held.batch_execute("begin").await.unwrap();
+            for machine in machines {
+                let machine: uuid::Uuid = machine.parse().unwrap();
+                held.execute(&format!("select pg_advisory_xact_lock({})", pinned_server::boxes::EXTEND_KEY), &[&account, &machine]).await.unwrap();
+            }
+            if of_account {
+                held.execute(&format!("select pg_advisory_xact_lock({})", pinned_server::boxes::EXTEND_ACCOUNT_KEY), &[&account]).await.unwrap();
+            }
+            let pid: i32 = held.query_one("select pg_backend_pid()", &[]).await.unwrap().get(0);
+            (held, watcher, pid)
+        });
+        ExtendLockHolder { runtime, held, watcher, pid }
+    }
+
+    /// The connections of the hub's that ran a box's or an account's extend lock and are open now.
+    fn turns(&self) -> i64 {
+        let sql = "select count(*) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and pid <> $1 and query like '%pinned-extend-%'";
+        self.runtime.block_on(self.watcher.query_one(sql, &[&self.pid])).unwrap().get(0)
+    }
+
+    fn release(self) {
+        self.runtime.block_on(self.held.batch_execute("commit")).unwrap();
+    }
+
+    /// Ends the connection of a hub's turn once it waits on a lock held here, as a Postgres that
+    /// drops it does.
+    fn end_waiting_turn(&self) {
+        self.end_turn_where("wait_event_type = 'Lock'");
+    }
+
+    /// Ends the connection of a hub's turn once it holds its locks and waits for the hub's next statement.
+    fn end_holding_turn(&self) {
+        self.end_turn_where("state = 'idle in transaction'");
+    }
+
+    fn end_turn_where(&self, condition: &str) {
+        let sql = format!("select pg_terminate_backend(pid) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and pid <> $1 and query like '%pinned-extend-%' and {condition}");
+        wait_for("a turn to end", || !self.runtime.block_on(self.watcher.query(&sql, &[&self.pid])).unwrap().is_empty());
+    }
+}
+
+/// `asks`, the extend_box args of ana's agent, sent at once as the hub takes them from her machine,
+/// each on a task of its own: their answers, and the most turn connections open at one time meanwhile.
+fn extends_watched(hub: &TestHub, account: uuid::Uuid, ana: &Agent, asks: &[Value], lock: &ExtendLockHolder) -> (Vec<Result<Value, String>>, i64) {
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let running: Vec<_> = asks
+        .iter()
+        .map(|ask| {
+            let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
+            let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": ask })).unwrap();
+            hub.runtime.spawn(async move { pinned_server::surface::act(&running, &account, &origin, act).await })
+        })
+        .collect();
+    let mut most = 0;
+    while !running.iter().all(|ask| ask.is_finished()) {
+        most = most.max(lock.turns());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let answers = running.into_iter().map(|ask| hub.runtime.block_on(ask).unwrap()).collect();
+    (answers, most)
+}
+
+/// An ask that could be no extend, an amount not above zero or a machine that is no box, is refused
+/// with its own text before it takes a turn: it opens no connection, even while another hub holds the box's lock.
+#[test]
+fn an_agents_extend_box_that_could_be_none_is_refused_before_it_opens_a_connection() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_no_turn");
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine, &ana.machine]);
+    let asks = [json!({ "machine": ana.machine, "extra_usd": 1.0 }), json!({ "machine": machine, "extra_usd": 0.0 }), json!({ "machine": machine, "extra_usd": -1.0 })];
+    let (answers, turns) = extends_watched(&hub, account, &ana, &asks, &lock);
+    let refusals = [Err("this machine is no box".to_owned()), Err("name an amount above zero".to_owned()), Err("name an amount above zero".to_owned())];
+    assert_eq!(answers, refusals);
+    assert_eq!(turns, 0, "no refused ask opened a turn connection");
+    lock.release();
+    assert_eq!(refused_extends(&mut owner), 3);
+}
+
+/// Asks for one box made at once while another hub holds its lock: this hub opens one turn
+/// connection for that box at a time, the others wait in its line, and every one hears the hub is busy.
+#[test]
+fn concurrent_extend_box_asks_for_one_box_hold_one_connection_at_a_time() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_one_line");
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    let asks = vec![json!({ "machine": machine, "extra_usd": 0.5 }); 6];
+    let started = Instant::now();
+    let (answers, turns) = extends_watched(&hub, account, &ana, &asks, &lock);
+    assert_eq!(answers, vec![Err(pinned_core::wire::HUB_BUSY.to_owned()); 6]);
+    assert!(started.elapsed() < Duration::from_secs(4), "every ask is refused when its 2 s wait ends: {:?}", started.elapsed());
+    assert_eq!(turns, 1, "one turn connection waits on the lock, the other asks wait in the hub's line");
+    lock.release();
+    assert_eq!(waiting_actions(&mut owner), Vec::<String>::new(), "no busy ask waits for the owner");
+}
+
+/// An ask refused because the box's turn was busy did nothing: it writes no refusal, and the same
+/// request id asks again and is checked and held.
+#[test]
+fn a_busy_extend_box_ask_is_asked_again_with_its_request_id() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_busy_retry");
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 0.5, Some("r-busy")), Err(pinned_core::wire::HUB_BUSY.into()));
+    lock.release();
+    let again = extend_as(&ana.dir, &ana.tab, &machine, 0.5, Some("r-busy")).unwrap();
+    assert_eq!(again["outcome"], "pending", "the retry is checked and waits for the owner: {again}");
+    assert_eq!(waiting_actions(&mut owner), ["extend_box"]);
+    assert_eq!(refused_extends(&mut owner), 0, "the busy ask wrote no refusal");
+}
+
+/// The box's turn is Postgres's advisory lock, shared by every hub on the database: while another
+/// connection holds it, an agent's ask and the owner's decision on an extend both wait about 2 s and
+/// hear the hub is busy, and the extend still waits undecided. Once it is free both go through.
+#[test]
+fn an_extend_box_ask_and_its_decision_wait_on_the_boxs_postgres_lock() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_pg_lock");
+    let first = extend_as(&ana.dir, &ana.tab, &machine, 0.5, None).unwrap();
+    assert_eq!(first["outcome"], "pending", "{first}");
+    let decide = |owner: &mut Client| owner.hub(json!({ "cmd": "decide_confirmation", "id": first["id"], "approve": true }));
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    let started = Instant::now();
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 0.5, None), Err(pinned_core::wire::HUB_BUSY.into()), "the ask waits on the lock");
+    let asked = started.elapsed();
+    let started = Instant::now();
+    assert_eq!(decide(&mut owner), Err(pinned_core::wire::HUB_BUSY.into()), "the decision waits on the lock");
+    let decided = started.elapsed();
+    for waited in [asked, decided] {
+        assert!(waited >= Duration::from_millis(1500) && waited < Duration::from_secs(4), "about 2 s: {waited:?}");
+    }
+    assert_eq!(waiting_actions(&mut owner), ["extend_box"], "the extend still waits undecided");
+    lock.release();
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 0.5, None).unwrap()["outcome"], "pending");
+    let done = decide(&mut owner).unwrap();
+    assert_eq!((done["outcome"].as_str(), done["result"]["budget_usd"].as_f64()), (Some("done"), Some(1.5)), "{done}");
+}
+
+/// A steady stream of asks for one box, each refused only once it has its turn, never keeps the
+/// owner from deciding on that box: the hub lets only a few asks wait for the box's turn and
+/// refuses the rest as busy at once, while the owner's decision always waits its turn. Many other
+/// acts wait for the owner, so each ask's check in its turn takes a while.
+#[test]
+fn a_flood_of_extend_box_asks_for_one_box_never_starves_the_owners_decision() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_flood");
+    let first = extend_as(&ana.dir, &ana.tab, &machine, 0.5, None).unwrap();
+    assert_eq!(first["outcome"], "pending", "{first}");
+    let id = first["id"].as_str().unwrap();
+    admin_on(&hub.database, &format!("insert into agent_confirmations (id, account, machine, tab, role, action, args) select gen_random_uuid(), account, machine, tab, role, 'open_box', args || jsonb_build_object('pad', repeat('x', 200)) from agent_confirmations, generate_series(1, 20000) where id = '{id}'"));
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flood: Vec<_> = (0..200)
+        .map(|n| {
+            let (running, account, origin, stop) = (hub.hub().clone(), account.clone(), ana.machine.clone(), stop.clone());
+            let ask = json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 1.75 } });
+            hub.runtime.spawn(async move {
+                // A steady stream: the asks start 10 ms apart, so some ask is always new in the line.
+                tokio::time::sleep(Duration::from_millis(10 * n)).await;
+                let mut answers = vec![];
+                while !stop.load(Ordering::SeqCst) {
+                    answers.push(pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await);
+                }
+                answers
+            })
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(2500));
+    let decided = owner.hub(json!({ "cmd": "decide_confirmation", "id": first["id"], "approve": true }));
+    stop.store(true, Ordering::SeqCst);
+    let answers: Vec<_> = flood.into_iter().flat_map(|ask| hub.runtime.block_on(ask).unwrap()).collect();
+    assert!(answers.iter().all(|a| *a == Err(extend_waits("US$ 0.50")) || *a == Err(EXTEND_CEILING.to_owned()) || *a == Err(pinned_core::wire::HUB_BUSY.to_owned())), "every flooding ask is refused");
+    let decided = decided.unwrap();
+    assert_eq!((decided["outcome"].as_str(), decided["result"]["budget_usd"].as_f64()), (Some("done"), Some(1.5)), "the owner's decision got its turn: {decided}");
+}
+
+/// An extend_box ask of ana's agent for `machine`, run as the hub takes it from her machine on a
+/// task of its own: its answer and how long it took.
+fn timed_extend(hub: &TestHub, account: &Arc<pinned_server::hub::Account>, ana: &Agent, machine: &str, extra: f64, request_id: Option<&str>) -> tokio::task::JoinHandle<(Result<Value, String>, Duration)> {
+    let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
+    let mut act = json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": extra } });
+    if let Some(id) = request_id {
+        act["request_id"] = json!(id);
+    }
+    let act = serde_json::from_value(act).unwrap();
+    hub.runtime.spawn(async move {
+        let started = tokio::time::Instant::now();
+        let answer = pinned_server::surface::act(&running, &account, &origin, act).await;
+        (answer, started.elapsed())
+    })
+}
+
+/// A box's line takes at most 3 asks of this hub, counted from when they ask, not from when they
+/// reach the box: while 3 asks for one box wait, the first in the box's Postgres lock and the
+/// others in the account's line, a 4th ask for that box is refused as busy at once and writes no row.
+#[test]
+fn a_fourth_extend_box_ask_for_one_box_is_busy_at_once_while_three_wait() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_box_cap");
+    let lock = ExtendLockHolder::take_account(&hub.database, account);
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let waiting: Vec<_> = (0..3).map(|n| timed_extend(&hub, &account, &ana, &machine, 0.5, Some(&format!("r-wait-{n}")))).collect();
+    std::thread::sleep(Duration::from_millis(300));
+    let (fourth, waited) = hub.runtime.block_on(timed_extend(&hub, &account, &ana, &machine, 0.5, Some("r-fourth"))).unwrap();
+    assert_eq!(fourth, Err(pinned_core::wire::HUB_BUSY.to_owned()));
+    assert!(waited < Duration::from_millis(500), "the 4th ask is refused at once, not when its 2 s wait ends: {waited:?}");
+    for (n, ask) in waiting.into_iter().enumerate() {
+        assert_eq!(hub.runtime.block_on(ask).unwrap().0, Err(pinned_core::wire::HUB_BUSY.to_owned()), "ask {n} waits its 2 s");
+    }
+    lock.release();
+    let rows: Vec<_> = trail_of(&mut owner).into_iter().filter(|(action, ..)| action == "extend_box").collect();
+    assert_eq!(rows, vec![], "no busy ask wrote a row");
+    assert_eq!(waiting_actions(&mut owner), Vec::<String>::new(), "no busy ask waits for the owner");
+}
+
+/// A flood of asks for one box keeps an ask for another box of the same account waiting behind at
+/// most the 3 asks of the flooded box that are in this hub's lines; the rest are refused before
+/// they join the account's line. Many other acts wait for the owner, so each ask's check in its
+/// turn takes a while (about 60 ms): one turn alone is measured first, and the other box's ask is
+/// answered within 4 such turns (3 ahead of it and its own), with room for the flood's load.
+#[test]
+fn a_flood_of_extend_box_asks_for_one_box_keeps_another_box_waiting_behind_at_most_three() {
+    let ExtendSetup { hub, account, ana, machine, .. } = extend_setup("extend_flood_other");
+    let other = open_extend_box(&ana);
+    let first = extend_as(&ana.dir, &ana.tab, &machine, 0.5, None).unwrap();
+    assert_eq!(first["outcome"], "pending", "{first}");
+    let id = first["id"].as_str().unwrap();
+    admin_on(&hub.database, &format!("insert into agent_confirmations (id, account, machine, tab, role, action, args) select gen_random_uuid(), account, machine, tab, role, 'open_box', args || jsonb_build_object('pad', repeat('x', 200)) from agent_confirmations, generate_series(1, 2000) where id = '{id}'"));
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let (alone, turn) = hub.runtime.block_on(timed_extend(&hub, &account, &ana, &machine, 1.75, None)).unwrap();
+    assert_eq!(alone, Err(extend_waits("US$ 0.50")), "refused in its turn");
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flood: Vec<_> = (0..200)
+        .map(|n| {
+            let (running, account, origin, stop) = (hub.hub().clone(), account.clone(), ana.machine.clone(), stop.clone());
+            let ask = json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 1.75 } });
+            hub.runtime.spawn(async move {
+                tokio::time::sleep(Duration::from_millis(5 * n)).await;
+                let mut answers = vec![];
+                while !stop.load(Ordering::SeqCst) {
+                    let answer = pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await;
+                    // A client asks again a little after a busy answer, as one that asks at once would only load the hub.
+                    if answer == Err(pinned_core::wire::HUB_BUSY.to_owned()) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    answers.push(answer);
+                }
+                answers
+            })
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(1500));
+    let (answer, waited) = hub.runtime.block_on(timed_extend(&hub, &account, &ana, &other, 0.5, None)).unwrap();
+    stop.store(true, Ordering::SeqCst);
+    let answers: Vec<_> = flood.into_iter().flat_map(|ask| hub.runtime.block_on(ask).unwrap()).collect();
+    assert!(answers.iter().all(|a| *a == Err(extend_waits("US$ 0.50")) || *a == Err(pinned_core::wire::HUB_BUSY.to_owned())), "every flooding ask is refused");
+    assert_eq!(answer.as_ref().map(|a| a["outcome"].clone()), Ok(json!("pending")), "the other box's ask is checked and waits for the owner: {answer:?} after {waited:?}");
+    // 4 turns, the 3 asks ahead of it and its own, and 1 s for the flood's load on the hub's shared
+    // connection, which every refused ask still reads before it is refused. Behind the whole flood,
+    // as when it joined the account's line before the box's, it waits about its 2 s.
+    let bound = turn * 4 + Duration::from_secs(1);
+    assert!(waited < bound, "the other box's ask waits behind at most 3 asks of the flooded box: {waited:?}, one turn alone {turn:?}");
+}
+
+/// An ask while the account already has 10 extends waiting is refused with the cap's text before it
+/// takes any turn: it opens no connection and does not wait, even while another hub holds the box's lock.
+#[test]
+fn an_extend_box_ask_past_the_accounts_cap_is_refused_before_it_takes_a_turn() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_cap_first");
+    for _ in 0..10 {
+        assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 0.1, None).unwrap()["outcome"], "pending");
+    }
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    let started = Instant::now();
+    let (answers, turns) = extends_watched(&hub, account, &ana, &[json!({ "machine": machine, "extra_usd": 0.1 })], &lock);
+    assert_eq!(answers, [Err(TOO_MANY_EXTENDS.to_owned())]);
+    assert!(started.elapsed() < Duration::from_secs(1), "refused at once, not after the box's turn: {:?}", started.elapsed());
+    assert_eq!(turns, 0, "the refused ask opened no turn connection");
+    lock.release();
+    assert_eq!(waiting_actions(&mut owner).len(), 10);
+}
+
+/// Asks for several boxes of one account made at once while another hub holds the account's lock:
+/// they wait in this hub's line of the account, so the hub opens one turn connection at a time for
+/// them, not one for each box, and every one hears the hub is busy.
+#[test]
+fn extend_box_asks_for_several_boxes_of_one_account_hold_one_connection_at_a_time() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_account_line");
+    let boxes = [machine.clone(), open_extend_box(&ana), open_extend_box(&ana), open_extend_box(&ana)];
+    let lock = ExtendLockHolder::take_account(&hub.database, account);
+    let asks: Vec<_> = boxes.iter().flat_map(|machine| vec![json!({ "machine": machine, "extra_usd": 0.5 }); 2]).collect();
+    let (answers, turns) = extends_watched(&hub, account, &ana, &asks, &lock);
+    assert_eq!(answers, vec![Err(pinned_core::wire::HUB_BUSY.to_owned()); 8]);
+    assert_eq!(turns, 1, "one turn connection waits on the account's lock, the other asks wait in the hub's line");
+    lock.release();
+    assert_eq!(waiting_actions(&mut owner), Vec::<String>::new(), "no busy ask waits for the owner");
+}
+
+/// An ask waits for its turn 2 s from its own start, all its waits together: one that joins the
+/// line 1 s after another, while another hub holds the box's lock, hears busy about 2 s after it asked.
+#[test]
+fn a_later_extend_box_ask_waits_2_s_from_its_own_start() {
+    let ExtendSetup { hub, account, ana, machine, .. } = extend_setup("extend_own_deadline");
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let ask = || {
+        let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
+        let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
+        hub.runtime.spawn(async move {
+            let started = tokio::time::Instant::now();
+            let answer = tokio::time::timeout(Duration::from_secs(6), pinned_server::surface::act(&running, &account, &origin, act)).await;
+            (answer, started.elapsed())
+        })
+    };
+    let first = ask();
+    std::thread::sleep(Duration::from_secs(1));
+    let second = ask();
+    for (n, ask) in [first, second].into_iter().enumerate() {
+        let (answer, waited) = hub.runtime.block_on(ask).unwrap();
+        assert_eq!(answer, Ok(Err(pinned_core::wire::HUB_BUSY.to_owned())), "ask {n}");
+        assert!(waited >= Duration::from_millis(1700) && waited < Duration::from_millis(2600), "ask {n} waits about 2 s from its own start: {waited:?}");
+    }
+    lock.release();
+}
+
+/// An ask's reads before its turn count in its 2 s too: its read of the account's waiting extends
+/// waits about 1 s on a table another connection locks, then its turn waits on the box's lock held
+/// by another hub. It hears busy about 2 s after it started, not about 3 s after the read.
+#[test]
+fn an_extend_box_asks_reads_before_its_turn_count_in_its_2_s() {
+    let ExtendSetup { hub, account, ana, machine, .. } = extend_setup("extend_read_deadline");
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let (taken, table_taken) = std::sync::mpsc::channel();
+    let database = hub.database.clone();
+    let blocker = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            client.batch_execute("begin; lock table agent_confirmations in access exclusive mode").await.unwrap();
+            taken.send(()).unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            client.batch_execute("rollback").await.unwrap();
+        });
+    });
+    table_taken.recv().unwrap();
+    let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
+    let started = Instant::now();
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let waited = started.elapsed();
+    blocker.join().unwrap();
+    lock.release();
+    assert_eq!(answer, Err(pinned_core::wire::HUB_BUSY.to_owned()));
+    assert!(waited >= Duration::from_millis(1700) && waited < Duration::from_millis(2600), "the ask waits about 2 s from its own start: {waited:?}");
+}
+
+/// An ask with a request id reads its repeat check and then its admission, and each read can wait on
+/// a held table up to the hub's lock limit. One hold of 1.5 s on `agent_actions` and one of 3.0 s on
+/// `agent_confirmations` together outlast the 2 s: the ask still hears busy about 2 s after it started,
+/// and writes no row, so the same request id asks again.
+#[test]
+fn an_extend_box_ask_with_a_request_id_answers_within_its_2_s_across_two_held_reads() {
+    let ExtendSetup { hub, account, ana, machine, .. } = extend_setup("extend_two_holds");
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    // Each table's lock is taken on its own connection and held for its time, before the ask starts.
+    let hold = |table: &'static str, held_for: Duration| {
+        let (taken, table_taken) = std::sync::mpsc::channel();
+        let database = hub.database.clone();
+        let blocker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(async {
+                let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
+                tokio::spawn(connection);
+                client.batch_execute(&format!("begin; lock table {table} in access exclusive mode")).await.unwrap();
+                taken.send(()).unwrap();
+                tokio::time::sleep(held_for).await;
+                client.batch_execute("rollback").await.unwrap();
+            });
+        });
+        table_taken.recv().unwrap();
+        blocker
+    };
+    let first = hold("agent_actions", Duration::from_millis(1500));
+    let second = hold("agent_confirmations", Duration::from_millis(3000));
+    let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 }, "request_id": "r-two-holds" })).unwrap();
+    let started = Instant::now();
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let waited = started.elapsed();
+    first.join().unwrap();
+    second.join().unwrap();
+    lock.release();
+    assert_eq!(answer, Err(pinned_core::wire::HUB_BUSY.to_owned()));
+    assert!(waited >= Duration::from_millis(1700) && waited < Duration::from_millis(2600), "an ask with a request_id waits about 2 s from its own start: {waited:?}");
+    assert_eq!(count_on(&hub.database, "select count(*) from agent_actions where request_id = 'r-two-holds'"), 0, "a busy answer writes no row, so the same request id asks again");
+}
+
+/// An ask's read of its box, before its turn, counts in its 2 s: one hold of 1.5 s on `boxes` and one
+/// of 3.0 s on `agent_confirmations`, read by the check of the account's waiting extends, outlast the
+/// 2 s. The ask still hears busy about 2 s after it started.
+#[test]
+fn an_extend_box_ask_answers_within_its_2_s_when_its_box_read_and_the_confirmations_are_held() {
+    let ExtendSetup { hub, account, ana, machine, .. } = extend_setup("extend_box_and_confirmations");
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    // Each table's lock is taken on its own connection and held for its time, before the ask starts.
+    let hold = |table: &'static str, held_for: Duration| {
+        let (taken, table_taken) = std::sync::mpsc::channel();
+        let database = hub.database.clone();
+        let blocker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(async {
+                let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
+                tokio::spawn(connection);
+                client.batch_execute(&format!("begin; lock table {table} in access exclusive mode")).await.unwrap();
+                taken.send(()).unwrap();
+                tokio::time::sleep(held_for).await;
+                client.batch_execute("rollback").await.unwrap();
+            });
+        });
+        table_taken.recv().unwrap();
+        blocker
+    };
+    let first = hold("boxes", Duration::from_millis(1500));
+    let second = hold("agent_confirmations", Duration::from_millis(3000));
+    let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
+    let started = Instant::now();
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let waited = started.elapsed();
+    first.join().unwrap();
+    second.join().unwrap();
+    assert_eq!(answer, Err(pinned_core::wire::HUB_BUSY.to_owned()));
+    assert!(waited >= Duration::from_millis(1700) && waited < Duration::from_millis(2600), "an ask waits about 2 s from its own start: {waited:?}");
+}
+
+/// An ask's turn waits for the box's advisory lock only for what is left of its 2 s: another hub's
+/// turn holds that lock for 3.0 s, and a hold of 1.0 s on `agent_confirmations` makes the ask's turn
+/// start about 1 s late. The ask hears busy about 2 s after it started, not 3 s.
+#[test]
+fn an_extend_box_ask_answers_within_its_2_s_when_its_turn_lock_is_held() {
+    let ExtendSetup { hub, account, ana, machine, .. } = extend_setup("extend_turn_lock_held");
+    // The box's turn lock, as another hub's turn holds it, is released 3.0 s after it is taken.
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(3000));
+        lock.release();
+    });
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let (taken, table_taken) = std::sync::mpsc::channel();
+    let database = hub.database.clone();
+    let blocker = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            client.batch_execute("begin; lock table agent_confirmations in access exclusive mode").await.unwrap();
+            taken.send(()).unwrap();
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            client.batch_execute("rollback").await.unwrap();
+        });
+    });
+    table_taken.recv().unwrap();
+    let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
+    let started = Instant::now();
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let waited = started.elapsed();
+    blocker.join().unwrap();
+    holder.join().unwrap();
+    assert_eq!(answer, Err(pinned_core::wire::HUB_BUSY.to_owned()));
+    assert!(waited >= Duration::from_millis(1700) && waited < Duration::from_millis(2600), "an ask waits about 2 s from its own start: {waited:?}");
+}
+
+/// A read the ask makes in its turn counts in its 2 s: the box's turn lock is held for 1.0 s, so the
+/// turn starts about 1 s late, and `agent_confirmations`, which the turn's first read (`asked_before`,
+/// of an ask with a request_id) reads, is held from 0.3 s for 4 s. That read starts at about 1.0 s
+/// and, with the session's own 2 s lock timeout from its start, would wait until about 3.0 s. The ask
+/// hears busy about 2 s after it started.
+#[test]
+fn an_extend_box_ask_answers_within_its_2_s_when_a_read_in_its_turn_is_held() {
+    let ExtendSetup { hub, account, ana, machine, .. } = extend_setup("extend_turn_read_held");
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let started = Instant::now();
+    // The turn lock is released 1.0 s after the ask started, so its turn starts, and its read with it, about 1 s late.
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep((started + Duration::from_millis(1000)).saturating_duration_since(Instant::now()));
+        lock.release();
+    });
+    // The table is locked 0.3 s after the ask started, once the ask's reads before its turn are done and it waits on the turn lock.
+    let database = hub.database.clone();
+    let blocker = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            tokio::time::sleep((started + Duration::from_millis(300)).saturating_duration_since(Instant::now())).await;
+            client.batch_execute("begin; lock table agent_confirmations in access exclusive mode").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(4000)).await;
+            client.batch_execute("rollback").await.unwrap();
+        });
+    });
+    let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "request_id": "r-read-held", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let waited = started.elapsed();
+    blocker.join().unwrap();
+    holder.join().unwrap();
+    assert_eq!(answer, Err(pinned_core::wire::HUB_BUSY.to_owned()));
+    assert!(waited >= Duration::from_millis(1700) && waited < Duration::from_millis(2300), "an ask waits about 2 s from its own start, though its read in its turn started at 1 s: {waited:?}");
+}
+
+/// An ask whose turn connection cannot be opened did nothing: it hears the hub is busy, writes no
+/// refusal, and the same request id asks again once Postgres takes connections.
+#[test]
+fn an_extend_box_ask_that_cannot_open_its_turn_connection_is_busy_and_asked_again() {
+    let ExtendSetup { hub, ana, mut owner, machine, .. } = extend_setup("extend_no_connection");
+    admin_on("postgres", &format!("alter database {} allow_connections false", hub.database));
+    let refused = extend_as(&ana.dir, &ana.tab, &machine, 0.5, Some("r-connect"));
+    admin_on("postgres", &format!("alter database {} allow_connections true", hub.database));
+    assert_eq!(refused, Err(pinned_core::wire::HUB_BUSY.into()));
+    assert_eq!(refused_extends(&mut owner), 0, "the ask wrote no refusal");
+    let again = extend_as(&ana.dir, &ana.tab, &machine, 0.5, Some("r-connect")).unwrap();
+    assert_eq!(again["outcome"], "pending", "the same request id asks again: {again}");
+}
+
+/// How many rows `sql`, a count, finds in `database`.
+fn count_on(database: &str, sql: &str) -> i64 {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.query_one(sql, &[]).await.unwrap().get(0)
+    })
+}
+
+/// A loopback port in front of the test Postgres: it passes each connection through, or, once
+/// stalled, takes new ones and never answers, as a Postgres that hangs does. Connections it
+/// passed before go on.
+struct StallingPostgres {
+    _runtime: tokio::runtime::Runtime,
+    port: u16,
+    stalled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl StallingPostgres {
+    fn start() -> StallingPostgres {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stalled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (target, stalls) = (StallingPostgres::target(), stalled.clone());
+        runtime.spawn(async move {
+            let mut taken = vec![];
+            while let Ok((mut client, _)) = listener.accept().await {
+                if stalls.load(Ordering::SeqCst) {
+                    taken.push(client);
+                    continue;
+                }
+                let target = target.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut server) = tokio::net::TcpStream::connect(target).await {
+                        let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                    }
+                });
+            }
+        });
+        StallingPostgres { _runtime: runtime, port, stalled }
+    }
+
+    /// The test Postgres's host and port.
+    fn target() -> String {
+        let config: tokio_postgres::Config = postgres().parse().unwrap();
+        let tokio_postgres::config::Host::Tcp(host) = &config.get_hosts()[0] else { panic!("the test Postgres is reached over TCP") };
+        format!("{host}:{}", config.get_ports().first().copied().unwrap_or(5432))
+    }
+
+    /// The url of `database` through this port.
+    fn url(&self, database: &str) -> String {
+        format!("{}/{database}", postgres().replace(&StallingPostgres::target(), &format!("127.0.0.1:{}", self.port)))
+    }
+
+    fn stall(&self, stalled: bool) {
+        self.stalled.store(stalled, Ordering::SeqCst);
+    }
+}
+
+/// An ask whose turn connection ends while it waits on the box's lock did nothing: it hears the
+/// hub is busy, writes no refusal, and the same request id asks again and waits for the owner.
+#[test]
+fn an_extend_box_ask_whose_turn_connection_ends_in_its_lock_is_busy_and_asked_again() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_turn_ended");
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let ask = timed_extend(&hub, &account, &ana, &machine, 0.5, Some("r-ended"));
+    lock.end_waiting_turn();
+    let (refused, _) = hub.runtime.block_on(ask).unwrap();
+    lock.release();
+    assert_eq!(refused, Err(pinned_core::wire::HUB_BUSY.to_owned()));
+    assert_eq!(refused_extends(&mut owner), 0, "the ask wrote no refusal");
+    let (again, _) = hub.runtime.block_on(timed_extend(&hub, &account, &ana, &machine, 0.5, Some("r-ended"))).unwrap();
+    assert_eq!(again.as_ref().map(|a| a["outcome"].clone()), Ok(json!("pending")), "the same request id asks again: {again:?}");
+    assert_eq!(waiting_actions(&mut owner), ["extend_box"]);
+}
+
+/// An ask whose turn connection ends while its check runs lost the locks that kept another hub's
+/// asks out, so it does not wait for the owner: it hears the hub is busy, writes no row, and the
+/// same request id asks again. Many other acts wait for the owner, so the check takes a while.
+#[test]
+fn an_extend_box_ask_whose_turn_connection_ends_in_its_check_is_busy_and_does_not_wait() {
+    let ExtendSetup { hub, account, ana, machine, .. } = extend_setup("extend_turn_lost");
+    let first = extend_as(&ana.dir, &ana.tab, &machine, 0.25, None).unwrap();
+    let id = first["id"].as_str().unwrap();
+    admin_on(&hub.database, &format!("insert into agent_confirmations (id, account, machine, tab, role, action, args) select gen_random_uuid(), account, machine, tab, role, 'open_box', args || jsonb_build_object('pad', repeat('x', 200)) from agent_confirmations, generate_series(1, 20000) where id = '{id}'"));
+    let watcher = ExtendLockHolder::take(&hub.database, account, &[]);
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let ask = timed_extend(&hub, &account, &ana, &machine, 0.5, Some("r-lost"));
+    watcher.end_holding_turn();
+    let (refused, _) = hub.runtime.block_on(ask).unwrap();
+    watcher.release();
+    assert_eq!(refused, Err(pinned_core::wire::HUB_BUSY.to_owned()));
+    let rows = "select count(*) from agent_actions where action = 'extend_box' and request_id = 'r-lost'";
+    assert_eq!(count_on(&hub.database, rows), 0, "the busy ask wrote no row");
+    let held = "select count(*) from agent_confirmations where action = 'extend_box' and decided_at is null";
+    assert_eq!(count_on(&hub.database, held), 1, "only the first ask waits for the owner");
+    let (again, _) = hub.runtime.block_on(timed_extend(&hub, &account, &ana, &machine, 0.5, Some("r-lost"))).unwrap();
+    assert_eq!(again.as_ref().map(|a| a["outcome"].clone()), Ok(json!("pending")), "the same request id asks again: {again:?}");
+    assert_eq!(count_on(&hub.database, held), 2);
+}
+
+/// An ask whose turn connection Postgres takes and never answers did nothing: it hears the hub is
+/// busy when its 2 s wait ends, not after the connection's own timeouts, writes no row, and the
+/// same request id asks again once Postgres answers.
+#[test]
+fn an_extend_box_ask_whose_turn_connection_never_answers_is_busy_within_its_wait() {
+    let mut hub = TestHub::start_with_boxes("extend_stalled_connection", Signup::Open, fast());
+    let postgres = StallingPostgres::start();
+    hub.stop();
+    let running = hub.runtime.block_on(pinned_server::start(pinned_server::Config { db: postgres.url(&hub.database), ..hub.config("127.0.0.1:0") })).unwrap();
+    hub.url = format!("http://{}", running.addr);
+    hub.running = Some(running);
+    let (account, ana, _owner) = extend_account(&hub, "ana@acme.dev", "ana-mac");
+    let machine = open_extend_box(&ana);
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    postgres.stall(true);
+    let (refused, waited) = hub.runtime.block_on(async {
+        let ask = timed_extend(&hub, &account, &ana, &machine, 0.5, Some("r-stalled"));
+        tokio::time::timeout(Duration::from_secs(20), ask).await.expect("answered within 20 s").unwrap()
+    });
+    postgres.stall(false);
+    assert_eq!(refused, Err(pinned_core::wire::HUB_BUSY.to_owned()));
+    assert!(waited < Duration::from_millis(2600), "busy when its 2 s wait ends: {waited:?}");
+    assert_eq!(count_on(&hub.database, "select count(*) from agent_actions where action = 'extend_box'"), 0, "the busy ask wrote no row");
+    let (again, _) = hub.runtime.block_on(timed_extend(&hub, &account, &ana, &machine, 0.5, Some("r-stalled"))).unwrap();
+    assert_eq!(again.as_ref().map(|a| a["outcome"].clone()), Ok(json!("pending")), "the same request id asks again: {again:?}");
 }
 
 #[test]
@@ -11730,6 +13223,7 @@ mod teams_hardening;
 #[path = "hub/teams_limits_fix.rs"] mod teams_limits_fix;
 #[path = "hub/teams_wire.rs"] mod teams_wire;
 #[path = "hub/teams_one_live_run.rs"] mod teams_one_live_run;
+#[path = "hub/trigger_fires.rs"] mod trigger_fires;
 #[path = "hub/reports.rs"]
 mod reports;
 #[path = "hub/reports_poller.rs"]
@@ -11759,7 +13253,7 @@ fn an_account_over_the_sync_limit_takes_a_push_that_does_not_grow_it_and_refuses
              from accounts a, generate_series(1, 13) n where a.email = 'ana@example.test'"
         ),
     );
-    let refused = Err("the account's synced projects would pass 1024 MB; delete old sessions to sync more".to_owned());
+    let refused = Err("the account's synced projects would pass 1024 MB; nothing is deleted, the push is refused".to_owned());
     let sha_of = |client: &mut Client, path: &str| {
         let listed = client.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
         listed.as_array().unwrap().iter().find(|e| e["path"] == path).map(|e| e["sha"].as_str().unwrap().to_owned())
@@ -11777,6 +13271,30 @@ fn an_account_over_the_sync_limit_takes_a_push_that_does_not_grow_it_and_refuses
     assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), Some(sha256_hex(b"one more note")));
     assert_eq!(push(&mut ana, vec![tombstone("claude/big-3.jsonl"), tombstone("claude/big-4.jsonl")]), Ok(Value::Null));
     assert_eq!(push(&mut ana, vec![file("claude/memory/later.md", "under the limit again")]), Ok(Value::Null), "9 sessions of 100 MiB leave room");
+}
+
+#[test]
+fn a_sync_refusal_says_nothing_is_deleted_and_keeps_the_prefix_released_nodes_match_on() {
+    let hub = TestHub::start("sync_refusal_text");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let push = |client: &mut Client, files: Vec<Value>| client.hub(json!({ "cmd": "sync_push", "project": project, "files": files }));
+    // Thirteen sessions of 100 MiB, already past the 1024 MB the account may keep.
+    admin_on(
+        &hub.database,
+        &format!(
+            "insert into project_files (account, project, path, sha, modified, data) \
+             select a.id, '{project}', 'claude/big-' || n || '.jsonl', 'big' || n, 1, convert_to(repeat('x', 104857600), 'UTF8') \
+             from accounts a, generate_series(1, 13) n where a.email = 'ana@example.test'"
+        ),
+    );
+    let text = "one more note";
+    let grows = json!({ "path": "claude/memory/more.md", "sha": sha256_hex(text.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())) });
+    let refused = push(&mut ana, vec![grows]).unwrap_err();
+    // Released 0.18.6 nodes recognise this refusal by this literal prefix alone, so it must stay byte for byte.
+    assert!(refused.starts_with("the account's synced projects would pass "), "{refused}");
+    assert_eq!(refused, "the account's synced projects would pass 1024 MB; nothing is deleted, the push is refused");
 }
 
 /// Runs `then` right after the hub answers a list, so another machine's push lands between this
@@ -11910,7 +13428,7 @@ fn over_the_sync_limit_a_stale_deletion_frees_nothing_and_agreed_on_a_file_is_ig
     );
     let stale = json!({ "path": "claude/big-1.jsonl", "sha": "", "modified": 2, "agreed": "big0" });
     let refused = push(&mut ana, vec![stale, file("claude/memory/more.md", "one more note")]);
-    assert_eq!(refused, Err("the account's synced projects would pass 1024 MB; delete old sessions to sync more".to_owned()), "the skipped deletion frees nothing");
+    assert_eq!(refused, Err("the account's synced projects would pass 1024 MB; nothing is deleted, the push is refused".to_owned()), "the skipped deletion frees nothing");
     assert_eq!(sha_of(&mut ana, "claude/big-1.jsonl"), Some("big1".to_owned()));
     assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), None);
     let current = json!({ "path": "claude/big-1.jsonl", "sha": "", "modified": 2, "agreed": "big1" });
