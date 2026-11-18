@@ -157,6 +157,38 @@ pub fn permissions() -> Vec<String> {
         .collect()
 }
 
+/// pinned's own tools that only read. A read-only session calls these without asking and is
+/// refused every other tool of `permissions`, which act.
+const READ_TOOLS: [&str; 22] = [
+    LIST_TOOL,
+    CAPABILITIES_TOOL,
+    STATUS_TOOL,
+    STATS_TOOL,
+    "agents",
+    "work_cost",
+    "memory_search",
+    "actions",
+    "projects",
+    "read_captain",
+    "waiting",
+    "sessions",
+    "read_session",
+    "repo_overview",
+    "repo_read",
+    "repo_search",
+    "taste_get",
+    "convex_tables",
+    "convex_data",
+    "convex_query",
+    "convex_run",
+    "convex_logs",
+];
+
+/// `permissions` split into the tools that only read and the tools that act.
+pub fn read_and_acting_permissions() -> (Vec<String>, Vec<String>) {
+    permissions().into_iter().partition(|tool| READ_TOOLS.iter().any(|read| *tool == format!("mcp__{SERVER}__{read}")))
+}
+
 pub fn serve(reminders: bool) {
     let stdin = std::io::stdin();
     let _ = serve_io(reminders, stdin.lock(), std::io::stdout());
@@ -1006,6 +1038,16 @@ mod tests {
     use super::*;
     use chrono::FixedOffset;
 
+    #[test]
+    fn every_read_tool_is_one_of_pinneds_and_the_rest_act() {
+        let (reads, acting) = read_and_acting_permissions();
+        assert_eq!(reads.len(), READ_TOOLS.len(), "a read tool pinned no longer has: {reads:?}");
+        assert_eq!(reads.len() + acting.len(), permissions().len());
+        for tool in ["memory_save", "memory_forget", "delegate_task", "act", "task_cancel", "remind_me", "taste_set", "send_to_captain", "plan_set"] {
+            assert!(acting.contains(&format!("mcp__{SERVER}__{tool}")), "{tool} {acting:?}");
+        }
+    }
+
     fn at_noon() -> DateTime<FixedOffset> {
         FixedOffset::west_opt(3 * 3600).unwrap().with_ymd_and_hms(2026, 10, 21, 12, 0, 0).unwrap()
     }
@@ -1181,6 +1223,8 @@ mod tests {
     fn a_wait_returns_the_summary_while_a_second_call_answers_and_progress_is_sent() {
         use std::os::unix::net::UnixListener;
         use std::sync::{Arc, Mutex};
+        // The guard reads the environment once; this test sets a session's variables in it.
+        crate::machine::refuse_real_home();
         let _guard = session_env_lock();
         let dir = std::env::temp_dir().join(format!("pinned-mcp-wait-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1450,6 +1494,8 @@ fn restore_var(name: &str, value: Option<String>) {
 
     #[cfg(unix)]
     fn offered(role: Option<&str>, task: Option<&str>) -> Vec<String> {
+        // The guard reads the environment once; this test sets a session's variables in it.
+        crate::machine::refuse_real_home();
         let _guard = session_env_lock();
         let previous = (std::env::var(ROLE_ENV).ok(), std::env::var(TASK_ENV).ok(), std::env::var(TAB_ENV).ok());
         std::env::remove_var(TAB_ENV);
@@ -1478,6 +1524,8 @@ fn restore_var(name: &str, value: Option<String>) {
     #[cfg(unix)]
     fn over_socket(task: Option<&str>, requests: &[Value], answers: Vec<Result<String, String>>) -> (Vec<Value>, Vec<String>) {
         use std::io::{BufRead, Write};
+        // The guard reads the environment once; this test sets a session's variables in it.
+        crate::machine::refuse_real_home();
         let _guard = session_env_lock();
         let dir = std::env::temp_dir().join(format!("pinned-mcp-convex-{}-{}", std::process::id(), task.unwrap_or("none")));
         let _ = std::fs::remove_dir_all(&dir);

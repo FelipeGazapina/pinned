@@ -76,6 +76,45 @@ pub fn child_model(parent: Provider, child: Provider, inherited: Option<String>,
     inherited.filter(|model| !model.is_empty())
 }
 
+/// The tools a read-only Claude session is refused outright, besides pinned's own that act.
+pub const READ_ONLY_REFUSED: [&str; 6] = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"];
+
+/// The Claude mode a read-only session runs in. It never stops at a prompt, or at a plan to
+/// approve as plan mode does: tools that never prompt (Read, Grep, Glob, TodoWrite, Agent) still
+/// run, and every tool that would prompt is refused.
+pub const READ_ONLY_MODE: &str = "dontAsk";
+
+/// Claude's flags for a read-only session: pinned's read tools allowed, every tool that writes or
+/// runs and pinned's tools that act refused, in `READ_ONLY_MODE`. The mode comes last, so neither
+/// tool list takes in an argument that follows.
+pub fn claude_read_only_args() -> Vec<String> {
+    let (reads, acting) = crate::reminders::read_and_acting_permissions();
+    let refused: Vec<String> = READ_ONLY_REFUSED.map(String::from).into_iter().chain(acting).collect();
+    vec!["--allowedTools".into(), reads.join(","), "--disallowedTools".into(), refused.join(","), "--permission-mode".into(), READ_ONLY_MODE.into()]
+}
+
+/// Gives a read-only Claude session's launch `args` the flags of `claude_read_only_args` when it
+/// lacks them, in place of any mode it asks for: right after its `--resume <id>`, or first when it
+/// resumes nothing. Never last, where a prompt may end the launch.
+pub fn keep_read_only(args: &mut Vec<String>) {
+    let read_only = claude_read_only_args();
+    if args.windows(2).any(|w| w[0] == "--disallowedTools" && w[1] == read_only[3]) {
+        return;
+    }
+    let mut kept = Vec::with_capacity(args.len() + read_only.len());
+    let mut rest = std::mem::take(args).into_iter();
+    while let Some(arg) = rest.next() {
+        if arg == "--permission-mode" {
+            rest.next();
+        } else {
+            kept.push(arg);
+        }
+    }
+    let at = kept.iter().position(|arg| arg == "--resume").map_or(0, |at| (at + 2).min(kept.len()));
+    kept.splice(at..at, read_only);
+    *args = kept;
+}
+
 /// What the child is allowed to do. Never wider than the parent tab: plan narrows a bypassed
 /// parent to read-only, and a parent that asks before acting does not hand the child a bypass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -654,6 +693,52 @@ pub(crate) use drivers::{driver, replay};
 mod tests {
     use super::*;
 
+    fn owned(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn a_prompt_only_launch_keeps_its_prompt_last() {
+        // `hand_to` on a tab with no session launches with the prompt alone.
+        let mut args = owned(&["look at the repo"]);
+        keep_read_only(&mut args);
+        let mut expect = claude_read_only_args();
+        expect.push("look at the repo".into());
+        assert_eq!(args, expect);
+    }
+
+    #[test]
+    fn a_stale_refused_list_gets_the_current_one_and_one_mode() {
+        let mut args = owned(&["--resume", "s1", "--allowedTools", "Read", "--disallowedTools", "Write", "--permission-mode", "dontAsk", "go on"]);
+        keep_read_only(&mut args);
+        let read_only = claude_read_only_args();
+        assert_eq!(args[..2], ["--resume", "s1"]);
+        assert_eq!(args[2..2 + read_only.len()], read_only[..]);
+        assert_eq!(args[2 + read_only.len()..], ["--allowedTools", "Read", "--disallowedTools", "Write", "go on"]);
+        assert_eq!(args.iter().filter(|arg| *arg == "--permission-mode").count(), 1);
+    }
+
+    #[test]
+    fn a_launch_with_only_a_mode_trades_it_for_the_read_only_flags() {
+        let mut args = owned(&["--resume", "s1", "--permission-mode", "acceptEdits"]);
+        keep_read_only(&mut args);
+        let mut expect = owned(&["--resume", "s1"]);
+        expect.extend(claude_read_only_args());
+        assert_eq!(args, expect);
+        let mut fresh = owned(&["--permission-mode", "auto"]);
+        keep_read_only(&mut fresh);
+        assert_eq!(fresh, claude_read_only_args());
+    }
+
+    #[test]
+    fn a_launch_that_already_refuses_the_current_list_is_left_alone() {
+        let mut args = owned(&["--resume", "s1"]);
+        args.extend(claude_read_only_args());
+        let before = args.clone();
+        keep_read_only(&mut args);
+        assert_eq!(args, before);
+    }
+
     #[test]
     fn a_costly_word_in_a_model_id_outranks_a_cheap_one() {
         let tiers: Vec<_> = ["claude-opus-5-5", "claude-haiku-5-5", "opus-fast", "gpt-6-max-mini", "minimax-m3", "minimax-m3.1-flash", "qwen3.8-max", "glm-5.3"].iter().map(|id| cost_of(id).name()).collect();
@@ -763,18 +848,11 @@ mod tests {
                 "auto",
             ],
         );
-        same(
-            driver_args(Provider::Claude, &spec("do the thing", Access::ReadOnly)),
-            &[
-                "-p",
-                "do the thing",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--permission-mode",
-                "plan",
-            ],
-        );
+        let read_only = claude_read_only_args();
+        let mut expect = vec!["-p", "do the thing", "--output-format", "stream-json", "--verbose"];
+        expect.extend(read_only.iter().map(String::as_str));
+        same(driver_args(Provider::Claude, &spec("do the thing", Access::ReadOnly)), &expect);
+        assert_eq!(read_only[read_only.len() - 2..], ["--permission-mode", "dontAsk"]);
 
         let mut codex = spec("do the thing", Access::Auto);
         codex.model = Some("gpt-5");
@@ -866,6 +944,30 @@ mod tests {
                 "do the thing",
             ],
         );
+    }
+
+    #[test]
+    fn a_read_only_headless_claude_worker_never_starts_in_plan_mode() {
+        let mut read_only = spec("do the thing", Access::ReadOnly);
+        read_only.mcp_config = Some(Path::new("/tmp/mcp.json"));
+        let args = driver_args(Provider::Claude, &read_only);
+        let pair = |flag: &str, value: &str| args.windows(2).any(|w| w[0] == flag && w[1] == value);
+        assert!(pair("--permission-mode", "dontAsk"), "{args:?}");
+        assert!(!pair("--permission-mode", "plan"), "{args:?}");
+        let tools = |flag: &str| args.windows(2).filter(|w| w[0] == flag).flat_map(|w| w[1].split(',').map(str::to_owned)).collect::<Vec<_>>();
+        let refused = tools("--disallowedTools");
+        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "PowerShell", "mcp__pinned__memory_save", "mcp__pinned__delegate_task", "mcp__pinned__act"] {
+            assert!(refused.iter().any(|t| t == tool), "{tool} is not refused: {args:?}");
+        }
+        let allowed = tools("--allowedTools");
+        for tool in ["mcp__pinned__memory_search", "mcp__pinned__task_status", "mcp__pinned__agents", "mcp__pinned__actions", "mcp__pinned__repo_read"] {
+            assert!(allowed.iter().any(|t| t == tool), "{tool} is not allowed: {args:?}");
+            assert!(!refused.iter().any(|t| t == tool), "{tool} is refused: {args:?}");
+        }
+        assert_eq!(args[args.len() - 2..], ["--mcp-config".to_owned(), "/tmp/mcp.json".to_owned()], "{args:?}");
+        for (at, _) in args.iter().enumerate().filter(|(_, arg)| *arg == "--allowedTools" || *arg == "--disallowedTools") {
+            assert!(args.get(at + 2).is_some_and(|next| next.starts_with("--")), "an option ends each tool list: {args:?}");
+        }
     }
 
     #[test]

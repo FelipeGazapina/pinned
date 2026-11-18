@@ -100,6 +100,7 @@ impl TestHub {
 
     #[allow(clippy::too_many_arguments)]
     fn start_every(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str, team_policy: pinned_core::teams::TeamPolicy, reports: Option<pinned_server::reports::Config>) -> TestHub {
+        pinned_core::machine::refuse_real_home();
         let _ = rustls::crypto::ring::default_provider().install_default();
         let database = format!("pinned_test_{name}_{}", std::process::id());
         admin(&format!("drop database if exists {database} with (force)"));
@@ -413,6 +414,7 @@ fn launched(dir: &Path) -> Arc<Machine> {
 
 /// A machine that tells `events` what it reports.
 fn launched_with(dir: &Path, events: impl Fn(MachineEvent) + Send + Sync + 'static) -> Arc<Machine> {
+    pinned_core::machine::refuse_real_home();
     let claude = dir.join("claude");
     std::fs::write(&claude, "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
     std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -3939,6 +3941,7 @@ fn node_with_a_transcript(name: &str) -> (TestHub, Client, String, PathBuf, Node
             model: None,
             permission_mode: None,
             spawned_by: None,
+            read_only: false,
         }],
     )
     .unwrap();
@@ -7781,13 +7784,89 @@ fn an_agent_holding_what_its_machine_keeps_readable_cannot_approve_or_run_a_conf
 
 const BIN: &str = env!("CARGO_BIN_EXE_pinned-server");
 
-/// A node or login started by a test must never reach the real app's socket, tab or account, nor
-/// run its built-in accounts on a CLI home the developer exported.
+/// A node or login started by a test must never reach the real app's socket, tab or account, nor a
+/// Claude or GitHub login, nor run its built-in accounts on a CLI home the developer exported.
 fn without_app_env(command: &mut std::process::Command) -> &mut std::process::Command {
-    for name in pinned_core::machine::INHERITED_SESSION_ENV {
+    for name in pinned_core::machine::session_variables() {
         command.env_remove(name);
     }
     command
+}
+
+#[test]
+fn a_spawned_node_carries_no_claude_or_github_login() {
+    use pinned_core::agent::{CONNECTOR_ENV, ISSUE_ENV, PROJECT_ENV, ROLE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV};
+    let session = [PROJECT_ENV, ROLE_ENV, pinned_core::accounts::ACCOUNT_ENV, pinned_core::plugin::HELPER_ENV, CONNECTOR_ENV, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV, pinned_core::team_call::TEAM_BOX_ENV, pinned_server::box_exit::BOX_ENV];
+    let logins: Vec<&str> = pinned_core::machine::REAL_HOME_VARIABLES.into_iter().chain(session).collect();
+    let mut command = std::process::Command::new("env");
+    for name in &logins {
+        command.env(name, "fake-value-xyz");
+    }
+    let spawned = without_app_env(&mut command).output().unwrap();
+    assert!(spawned.status.success());
+    let env = String::from_utf8_lossy(&spawned.stdout);
+    for name in logins {
+        assert!(!env.lines().any(|line| line.starts_with(&format!("{name}="))), "the node got {name}");
+    }
+}
+
+/// A machine a test node runs answers from the stand-in CLIs `launched` writes, never one found on the PATH.
+#[test]
+fn a_test_nodes_machine_answers_from_its_stand_in_clis() {
+    let dir = temp("launched");
+    let machine = launched(&dir);
+    let signed_in: Vec<(Provider, bool)> = machine.list_accounts().into_iter().map(|view| (view.account.provider, view.status.signed_in)).collect();
+    assert!(signed_in.contains(&(Provider::Claude, true)), "{signed_in:?}");
+    assert!(signed_in.iter().all(|(provider, signed_in)| *provider == Provider::Claude || !signed_in), "{signed_in:?}");
+    machine.quit();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Each place that calls the guard stops a real test run in a real home.
+#[test]
+fn a_hub_started_in_a_real_home_stops_the_test_process() {
+    pinned_core::machine::assert_refused_in_a_real_home("a_node_keeps_only_its_machine_token_and_ends_a_login_an_older_pinned_kept");
+}
+
+#[test]
+fn a_node_machine_launched_in_a_real_home_stops_the_test_process() {
+    pinned_core::machine::assert_refused_in_a_real_home("a_test_nodes_machine_answers_from_its_stand_in_clis");
+}
+
+/// The guard on its own. `a_test_run_in_a_real_home_stops_at_once_with_one_line` runs it in a child.
+#[test]
+fn the_real_home_guard() {
+    pinned_core::machine::refuse_real_home();
+}
+
+#[test]
+fn a_test_run_in_a_real_home_stops_at_once_with_one_line() {
+    let guard = |home: &Path| {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "the_real_home_guard"]).env("HOME", home).env_remove("XDG_CONFIG_HOME");
+        for name in pinned_core::machine::REAL_HOME_VARIABLES {
+            command.env_remove(name);
+        }
+        command
+    };
+    let real = temp("real-home");
+    std::fs::create_dir_all(real.join(".claude")).unwrap();
+    std::fs::write(real.join(".claude.json"), "{}").unwrap();
+    let refused = guard(&real).env("GH_TOKEN", "fake-value-xyz").output().unwrap();
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(2), "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        ["pinned tests refuse to run in a real home: found a Claude config file in HOME, a Claude folder in HOME, GH_TOKEN; run them with a temporary HOME and without these variables"]
+    );
+    assert!(!String::from_utf8_lossy(&refused.stdout).contains("test result"), "it stopped before any test ran");
+
+    let clean = temp("clean-home");
+    let started = guard(&clean).output().unwrap();
+    assert!(started.status.success(), "{}", String::from_utf8_lossy(&started.stderr));
+    assert!(String::from_utf8_lossy(&started.stdout).contains("1 passed"), "{}", String::from_utf8_lossy(&started.stdout));
+    let _ = std::fs::remove_dir_all(real);
+    let _ = std::fs::remove_dir_all(clean);
 }
 
 #[test]
@@ -9508,7 +9587,7 @@ fn concurrent_extend_box_asks_for_one_box_wait_only_as_far_as_the_box_budget_goe
                 let ask = json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 1.5 }, "request_id": format!("r-{n}") });
                 tokio::spawn(async move {
                     loop {
-                        match pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await {
+                        match pinned_server::surface::act(&running, &account, &origin, false, serde_json::from_value(ask.clone()).unwrap()).await {
                             Err(busy) if busy == pinned_core::wire::HUB_BUSY => tokio::time::sleep(Duration::from_millis(10)).await,
                             answer => return answer,
                         }
@@ -9855,7 +9934,7 @@ fn concurrent_extend_box_asks_for_different_boxes_of_one_account_fill_its_cap_ex
             .map(|n| {
                 let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
                 let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": boxes[n % 3], "extra_usd": 0.1 } })).unwrap();
-                tokio::spawn(async move { pinned_server::surface::act(&running, &account, &origin, act).await })
+                tokio::spawn(async move { pinned_server::surface::act(&running, &account, &origin, false, act).await })
             })
             .collect();
         let mut answers = vec![];
@@ -9948,7 +10027,7 @@ fn extends_watched(hub: &TestHub, account: uuid::Uuid, ana: &Agent, asks: &[Valu
         .map(|ask| {
             let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
             let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": ask })).unwrap();
-            hub.runtime.spawn(async move { pinned_server::surface::act(&running, &account, &origin, act).await })
+            hub.runtime.spawn(async move { pinned_server::surface::act(&running, &account, &origin, false, act).await })
         })
         .collect();
     let mut most = 0;
@@ -10053,7 +10132,7 @@ fn a_flood_of_extend_box_asks_for_one_box_never_starves_the_owners_decision() {
                 tokio::time::sleep(Duration::from_millis(10 * n)).await;
                 let mut answers = vec![];
                 while !stop.load(Ordering::SeqCst) {
-                    answers.push(pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await);
+                    answers.push(pinned_server::surface::act(&running, &account, &origin, false, serde_json::from_value(ask.clone()).unwrap()).await);
                 }
                 answers
             })
@@ -10079,7 +10158,7 @@ fn timed_extend(hub: &TestHub, account: &Arc<pinned_server::hub::Account>, ana: 
     let act = serde_json::from_value(act).unwrap();
     hub.runtime.spawn(async move {
         let started = tokio::time::Instant::now();
-        let answer = pinned_server::surface::act(&running, &account, &origin, act).await;
+        let answer = pinned_server::surface::act(&running, &account, &origin, false, act).await;
         (answer, started.elapsed())
     })
 }
@@ -10131,7 +10210,7 @@ fn a_flood_of_extend_box_asks_for_one_box_keeps_another_box_waiting_behind_at_mo
                 tokio::time::sleep(Duration::from_millis(5 * n)).await;
                 let mut answers = vec![];
                 while !stop.load(Ordering::SeqCst) {
-                    let answer = pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await;
+                    let answer = pinned_server::surface::act(&running, &account, &origin, false, serde_json::from_value(ask.clone()).unwrap()).await;
                     // A client asks again a little after a busy answer, as one that asks at once would only load the hub.
                     if answer == Err(pinned_core::wire::HUB_BUSY.to_owned()) {
                         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -10201,7 +10280,7 @@ fn a_later_extend_box_ask_waits_2_s_from_its_own_start() {
         let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
         hub.runtime.spawn(async move {
             let started = tokio::time::Instant::now();
-            let answer = tokio::time::timeout(Duration::from_secs(6), pinned_server::surface::act(&running, &account, &origin, act)).await;
+            let answer = tokio::time::timeout(Duration::from_secs(6), pinned_server::surface::act(&running, &account, &origin, false, act)).await;
             (answer, started.elapsed())
         })
     };
@@ -10240,7 +10319,7 @@ fn an_extend_box_asks_reads_before_its_turn_count_in_its_2_s() {
     table_taken.recv().unwrap();
     let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
     let started = Instant::now();
-    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, false, act));
     let waited = started.elapsed();
     blocker.join().unwrap();
     lock.release();
@@ -10279,7 +10358,7 @@ fn an_extend_box_ask_with_a_request_id_answers_within_its_2_s_across_two_held_re
     let second = hold("agent_confirmations", Duration::from_millis(3000));
     let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 }, "request_id": "r-two-holds" })).unwrap();
     let started = Instant::now();
-    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, false, act));
     let waited = started.elapsed();
     first.join().unwrap();
     second.join().unwrap();
@@ -10318,7 +10397,7 @@ fn an_extend_box_ask_answers_within_its_2_s_when_its_box_read_and_the_confirmati
     let second = hold("agent_confirmations", Duration::from_millis(3000));
     let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
     let started = Instant::now();
-    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, false, act));
     let waited = started.elapsed();
     first.join().unwrap();
     second.join().unwrap();
@@ -10355,7 +10434,7 @@ fn an_extend_box_ask_answers_within_its_2_s_when_its_turn_lock_is_held() {
     table_taken.recv().unwrap();
     let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
     let started = Instant::now();
-    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, false, act));
     let waited = started.elapsed();
     blocker.join().unwrap();
     holder.join().unwrap();
@@ -10393,7 +10472,7 @@ fn an_extend_box_ask_answers_within_its_2_s_when_a_read_in_its_turn_is_held() {
         });
     });
     let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "request_id": "r-read-held", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
-    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, false, act));
     let waited = started.elapsed();
     blocker.join().unwrap();
     holder.join().unwrap();
@@ -13201,6 +13280,7 @@ mod teams_groups;
 mod teams_box_call;
 #[path = "hub/teams_calls.rs"] mod teams_calls;
 #[path = "hub/teams_runs.rs"] mod teams_runs;
+#[path = "hub/box_push_gate.rs"] mod box_push_gate;
 #[path = "hub/teams_go_ahead.rs"] mod teams_go_ahead;
 #[path = "hub/teams_separation_fixes.rs"] mod teams_separation_fixes;
 #[path = "hub/teams_hardening.rs"]

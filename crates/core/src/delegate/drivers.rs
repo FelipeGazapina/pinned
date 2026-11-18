@@ -68,7 +68,7 @@ fn claude_args(spec: &SpawnSpec) -> Vec<String> {
     match spec.access {
         Access::Full => args.push("--dangerously-skip-permissions".into()),
         Access::Auto => args.extend(["--permission-mode".into(), "auto".into()]),
-        Access::ReadOnly => args.extend(["--permission-mode".into(), "plan".into()]),
+        Access::ReadOnly => args.extend(super::claude_read_only_args()),
     }
     if let Some(block) = spec.profile {
         // --disallowedTools takes any number of values, so the prompt's flag after it ends the list.
