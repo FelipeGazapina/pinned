@@ -7442,10 +7442,7 @@ fn needs_update(e: String) -> String {
     }
 }
 
-/// A tool's answer as one line of JSON, which the session reads and the chat can render.
-/// Refuses a global orchestrator's message to a Capitão on another machine or in a box when the
-/// orchestrator asks for its permission prompts and Full access is the default: that Capitão likely
-/// skips them, and this machine can't check that it asks too. With the switch off it goes as before.
+/// Refuses an asking orchestrator's message to a Capitão elsewhere while Full access is the default: this machine can't check that it asks.
 fn remote_needs_full(project: &str, full: bool) -> Result<(), String> {
     if !full && full_access_by_default() {
         return Err(format!("the Captain of {project} runs on another machine, and your session asks for permissions, so pinned can't check that it asks too; the user can send it from that machine"));
@@ -7453,6 +7450,7 @@ fn remote_needs_full(project: &str, full: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// A tool's answer as one line of JSON, which the session reads and the chat can render.
 fn text_json<T: Serialize>(value: T) -> Result<String, String> {
     serde_json::to_string(&value).map_err(|e| e.to_string())
 }
