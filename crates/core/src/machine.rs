@@ -13792,10 +13792,44 @@ Have another model review a risky change before it goes ahead.";
         let users = m.call(Call::OpenOrchestrator { path: stopped.clone(), ask_permissions: false }).unwrap().as_str().unwrap().to_owned();
         assert!(bypass(&users), "the app opens a Captain in Full access");
         let refused = act_as(&m, &auto, "enqueue", json!({ "path": stopped, "text": "Ship it.", "request_id": "r-5" })).unwrap_err();
-        assert_eq!(refused, format!("the Capitão of {stopped} skips its permission prompts and your session asks for them, so your message can't start it: ask the user to start it"));
+        assert_eq!(refused, format!("the Captain of {stopped} skips its permission prompts and your session asks for them, so your message can't reach it; the user can switch that Captain to ask for permissions"));
         assert!(!m.view(&users).unwrap().running, "an agent that asks for its prompts started a Captain that skips them");
         assert!(act_as(&m, "", "enqueue", json!({ "path": stopped, "text": "Ship it.", "request_id": "r-6" })).is_err(), "an agent from another machine started it");
         assert_eq!(enqueue(&full, &stopped, "r-7"), users, "a Full agent starts it");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_running_captain_that_skips_its_prompts_takes_no_text_from_an_agent_that_asks_for_them() {
+        let dir = temp("act-enqueue-running-full");
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let project = |name: &str| {
+            let folder = dir.join(name);
+            std::fs::create_dir_all(&folder).unwrap();
+            m.open_project(folder).display().to_string()
+        };
+        let path = project("running");
+        let auto = m.open_tab(Some(project("home")), false).unwrap();
+        let full = m.open_tab(Some(project("full-home")), true).unwrap();
+        let captain = m.call(Call::OpenOrchestrator { path: path.clone(), ask_permissions: false }).unwrap().as_str().unwrap().to_owned();
+        m.start_claude(&captain, 80, 24).unwrap();
+        let view = m.view(&captain).unwrap();
+        assert!(view.running && view.bypass, "the precondition: the user's Captain runs and skips its permission prompts");
+        let typed = || (m.tab(&captain, |t| (t.held.clone(), t.launch.clone())).unwrap(), m.delegates.queued().get(&captain).copied());
+        let before = typed();
+        for (from, request) in [(auto.as_str(), "r-1"), ("", "r-2")] {
+            let refused = act_as(&m, from, "enqueue", json!({ "path": path, "text": "Drop the tables.", "request_id": request })).unwrap_err();
+            assert_eq!(refused, format!("the Captain of {path} skips its permission prompts and your session asks for them, so your message can't reach it; the user can switch that Captain to ask for permissions"), "from {from:?}");
+            assert_eq!(typed(), before, "an agent that asks for its prompts typed into a running Captain that skips them (from {from:?})");
+        }
+        let sent = act_as(&m, &full, "enqueue", json!({ "path": path, "text": "Ship it.", "request_id": "r-3" })).unwrap();
+        assert_eq!(sent["tab"], captain, "a Full agent's message reaches the Captain");
+        let app = m.call(Call::Enqueue { path: path.clone(), text: "Ship it.".into(), request_id: "r-4".into(), sender: String::new(), busy: None });
+        assert_eq!(app.unwrap()["tab"], captain, "the app's own enqueue reaches the Captain");
+        let global = m.enqueue_to_captain(&path, "Ship it.", "r-5", "Orchestrator", None).unwrap();
+        assert!(matches!(global, Handoff::Delivered { .. } | Handoff::Started { .. } | Handoff::Queued { .. }), "send_to_captain reaches the Captain: {global:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -13854,6 +13888,15 @@ Have another model review a risky change before it goes ahead.";
             assert!(lines.iter().any(|a| a == skip), "a {instance} worker asked for in Full access is Full: {lines:?}");
         }
         assert!(run(json!({ "task": "look", "target": { "providerInstanceId": "codex" }, "mode": "async" })).iter().any(|a| a == "--full-auto"), "a default Codex worker runs at its old level, auto");
+        // The switch decides it: off, a default Codex worker of the hand-set Full session takes its
+        // ceiling, Full, as in 0.18.6; on, it runs in auto.
+        for on in [false, true] {
+            FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(on)));
+            let lines = run(json!({ "task": "look", "target": { "providerInstanceId": "codex" }, "mode": "async" }));
+            FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
+            let skips = lines.iter().any(|a| a == "--dangerously-bypass-approvals-and-sandbox");
+            assert_eq!(skips, !on, "with Full access by default {}, a default Codex worker of a Full session: {lines:?}", if on { "on" } else { "off" });
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

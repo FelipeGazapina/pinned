@@ -517,11 +517,47 @@ mod tests {
     }
 
     #[test]
+    fn a_move_into_a_folder_a_parents_copy_and_rsync_with_a_temp_dir_are_denied() {
+        let calls = [
+            ("mv /tmp/settings.json .claude/", ".claude/settings.json"),
+            ("mv x .claude/settings.json", ".claude/settings.json"),
+            ("rsync -T /tmp x/.mcp.json ./", ".mcp.json"),
+            ("cp --parents .claude/settings.json sub/", ".claude/settings.json"),
+        ];
+        for (command, name) in calls {
+            let (out, _) = decision(&payload("Bash", json!({ "command": command })), false, Ok(r#"{"id":"k1"}"#));
+            assert_eq!(denied(&out.unwrap_or_else(|| panic!("allowed: {command}"))), owners(name), "{command}");
+        }
+        for command in ["mv a.txt docs/", "cp --parents src/a.rs sub/"] {
+            assert!(decision(&payload("Bash", json!({ "command": command })), false, Ok(r#"{"id":"k1"}"#)).0.is_none(), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_write_to_a_relative_path_with_no_cwd_is_denied_as_unreadable() {
+        for team_box in [false, true] {
+            for path in [".mcp.json", "notes.md"] {
+                let call = json!({ "tool_name": "Write", "tool_input": { "file_path": path, "content": "{}" } }).to_string();
+                let (out, message) = decision(&call, team_box, Ok(r#"{"id":"k1","granted":true}"#));
+                assert_eq!(denied(&out.unwrap_or_else(|| panic!("allowed: {call}"))), UNREADABLE, "{call} (team box {team_box})");
+                assert!(message.is_none(), "{call}");
+            }
+        }
+    }
+
+    #[test]
     fn claude_mcp_add_or_remove_through_bash_is_denied_as_an_owners_file() {
-        for command in ["claude mcp add x -- cmd", "claude mcp add-json x '{}'", "claude mcp remove x", "claude --debug mcp add -s user x -- npx y", "cd sub && claude mcp add x -- cmd"] {
+        for (command, name) in [
+            ("claude mcp add x -- cmd", ".mcp.json"),
+            ("claude mcp add-json x '{}'", ".mcp.json"),
+            ("claude mcp remove x", ".mcp.json"),
+            ("claude --debug mcp add -s user x -- npx y", "~/.claude.json"),
+            ("claude mcp add --scope user x -- npx y", "~/.claude.json"),
+            ("cd sub && claude mcp add x -- cmd", ".mcp.json"),
+        ] {
             for team_box in [false, true] {
                 let (out, message) = decision(&payload("Bash", json!({ "command": command })), team_box, Ok(r#"{"id":"k1","granted":true}"#));
-                assert_eq!(denied(&out.unwrap_or_else(|| panic!("allowed: {command}"))), owners(".mcp.json"), "{command}");
+                assert_eq!(denied(&out.unwrap_or_else(|| panic!("allowed: {command}"))), owners(name), "{command}");
                 assert!(message.is_none(), "{command}");
             }
         }

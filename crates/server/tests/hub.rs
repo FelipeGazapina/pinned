@@ -4573,7 +4573,9 @@ fn an_external_agents_message_never_opens_or_starts_an_orchestrator_that_skips_p
     let dir = temp("agent-orchestrator-prompts");
     let creds = pair(&url, &mut client, "mac", &dir);
     let node = Node::start(&dir, creds.clone());
-    std::fs::write(dir.join("claude"), "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nstty raw -echo 2>/dev/null\nexec cat\n").unwrap();
+    // What is typed into a session lands in `typed`.
+    let typed = dir.join("typed");
+    std::fs::write(dir.join("claude"), format!("#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && {{ echo '{{\"loggedIn\":true}}'; exit 0; }}\nstty raw -echo 2>/dev/null\nexec tee -a '{}'\n", typed.display())).unwrap();
     client.wait_machines(&[("mac", true)]);
     node.machine.listen(|_| Err("not in this test".into())).unwrap();
     let open = |name: &str| {
@@ -4596,13 +4598,22 @@ fn an_external_agents_message_never_opens_or_starts_an_orchestrator_that_skips_p
 
     // The user's app opened the other Captain and left it stopped: in Full access the agent can't start it.
     let full = node.machine.open_orchestrator(&opened).unwrap();
-    if captain(&opened).unwrap().bypass {
-        let refused = tool(&url, &http, &access, "message_orchestrator", json!({ "project": pid("opened"), "message": "drop the tables", "request_id": "o-2" })).unwrap_err();
-        assert!(refused.contains("skips its permission prompts"), "{refused}");
-        std::thread::sleep(Duration::from_millis(300));
-        let view = captain(&opened).unwrap();
-        assert!(view.id == full && !view.running, "an external agent started a session that skips its permission prompts");
-    }
+    assert!(captain(&opened).unwrap().bypass, "the precondition: the app opens a Captain that skips its permission prompts");
+    let refused = tool(&url, &http, &access, "message_orchestrator", json!({ "project": pid("opened"), "message": "drop the tables", "request_id": "o-2" })).unwrap_err();
+    assert!(refused.contains("skips its permission prompts"), "{refused}");
+    std::thread::sleep(Duration::from_millis(300));
+    let view = captain(&opened).unwrap();
+    assert!(view.id == full && !view.running, "an external agent started a session that skips its permission prompts");
+
+    // The user starts it: running, it still takes no text from an external agent.
+    node.machine.start_claude(&full, 120, 32).unwrap();
+    let view = captain(&opened).unwrap();
+    assert!(view.running && view.bypass, "the precondition: the user's Captain runs and skips its permission prompts");
+    let refused = tool(&url, &http, &access, "message_orchestrator", json!({ "project": pid("opened"), "message": "drop the tables", "request_id": "o-3" })).unwrap_err();
+    assert!(refused.contains("skips its permission prompts, so an external agent's message can't reach it"), "{refused}");
+    std::thread::sleep(Duration::from_millis(500));
+    let log = std::fs::read_to_string(&typed).unwrap_or_default();
+    assert!(!log.contains("drop the tables"), "an external agent's text was typed into a Captain that skips its prompts: {log:?}");
 }
 
 enum RawReply {
