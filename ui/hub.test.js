@@ -27,7 +27,7 @@ function app(passwords) {
     close() {}
   }
   const locked = passwords && (async (error) => (asked.push(error), passwords.shift()));
-  const context = { WebSocket, setTimeout: (run) => run(), locked };
+  const context = { WebSocket, setTimeout: (run) => run(), locked, atob };
   vm.createContext(context);
   vm.runInContext(`${hubSrc}\nthis.hub = new Hub("https://hub.example", "login", locked ? { locked } : {});`, context);
   const open = () => {
@@ -106,4 +106,15 @@ test("an app with no password prompt passes the refusal on", async () => {
   const removed = hub.hub({ cmd: "remove_machine", id: "imac" });
   answer(ws, { id: 1, err: LOCKED });
   await assert.rejects(removed, (e) => e === LOCKED);
+});
+
+test("an attached tab's output reaches its terminal as the bytes the session wrote", () => {
+  const { hub, open } = app(null);
+  const ws = open();
+  const written = [];
+  hub.attach("imac", "tab-3", { write: (bytes) => written.push([...bytes]), reset() {} });
+  const output = "\x1b[2K✻ Wrangling… é";
+  ws.onmessage({ data: JSON.stringify({ type: "event", machine: "imac", event: { kind: "output", tab: "tab-3", data: Buffer.from(output).toString("base64") } }) });
+  ws.onmessage({ data: JSON.stringify({ type: "event", machine: "imac", event: { kind: "output", tab: "tab-4", data: Buffer.from("other").toString("base64") } }) });
+  assert.deepEqual(written, [[...Buffer.from(output)]]);
 });
