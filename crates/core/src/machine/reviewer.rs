@@ -1007,6 +1007,24 @@ mod tests {
         }
 
         #[test]
+        fn a_file_listed_with_an_empty_diff_is_named_as_not_read() {
+            // No real git leaves a listed file's section empty, so a git that prints nothing for
+            // one file's diff stands in for it.
+            let fake = std::env::temp_dir().join(format!("pinned-review-run-emptygit-{}", std::process::id()));
+            std::fs::create_dir_all(&fake).unwrap();
+            let real = crate::process::command("sh").args(["-c", "command -v git"]).output().unwrap();
+            let real = String::from_utf8_lossy(&real.stdout).trim().to_owned();
+            std::fs::write(fake.join("git"), format!("#!/bin/sh\ncase \" $* \" in *' diff --cached --text '*) exit 0;; esac\nexec {real} \"$@\"\n")).unwrap();
+            std::fs::set_permissions(fake.join("git"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            let t = team_with("emptysection", Switch::On, 6, SONNET, false, false, Some(&fake));
+            t.change(CHANGED, json!({ "findings": [] }));
+            t.end_turn();
+            let note = t.not_reviewed();
+            assert!(note.contains("not read: src/parser.rs is listed as changed but its diff is empty"), "{note}");
+            let _ = std::fs::remove_dir_all(&fake);
+        }
+
+        #[test]
         fn a_first_commit_on_an_unborn_head_is_reviewed() {
             let t = team_with("unborn", Switch::On, 6, SONNET, false, true, None);
             t.change(CHANGED, json!({ "findings": [] }));
