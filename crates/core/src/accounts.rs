@@ -451,6 +451,9 @@ impl Accounts {
     /// Asks the account's CLI, at `bin`, who is signed in. A Go account is signed in while its key
     /// file holds a key. Its empty home would otherwise look signed out.
     pub fn status(&self, account: &Account, bin: &Path, path_env: Option<&str>) -> Status {
+        // The CLI keeps its login in the home: this crate's tests stop here in a real home.
+        #[cfg(test)]
+        crate::machine::refuse_real_home();
         if account.auth == Auth::OpenCodeGo {
             return Status { signed_in: self.key(account).is_some(), plan: Some("OpenCode Go".into()), ..Status::default() };
         }

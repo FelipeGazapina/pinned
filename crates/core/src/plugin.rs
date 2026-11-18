@@ -10,6 +10,8 @@ const BRO: &str = include_str!("../../../plugin/skills/bro/SKILL.md");
 const UPSTASH_BOX: &str = include_str!("../../../plugin/skills/upstash-box/SKILL.md");
 const PROPOSTA: &str = include_str!("../../../plugin/skills/proposta-blueprint/SKILL.md");
 const PROPOSTA_TEMPLATE: &str = include_str!("../../../plugin/skills/proposta-blueprint/template.html");
+const PENDENCIAS: &str = include_str!("../../../plugin/skills/pendencias/SKILL.md");
+const PENDENCIAS_TEMPLATE: &str = include_str!("../../../plugin/skills/pendencias/template.html");
 
 /// Where `install` puts the helper, relative to the plugin directory.
 fn helper_path(dir: &Path) -> PathBuf {
@@ -26,6 +28,8 @@ pub fn install(dir: &Path) -> std::io::Result<PathBuf> {
         ("skills/upstash-box/SKILL.md", UPSTASH_BOX),
         ("skills/proposta-blueprint/SKILL.md", PROPOSTA),
         ("skills/proposta-blueprint/template.html", PROPOSTA_TEMPLATE),
+        ("skills/pendencias/SKILL.md", PENDENCIAS),
+        ("skills/pendencias/template.html", PENDENCIAS_TEMPLATE),
     ] {
         let file = dir.join(name);
         std::fs::create_dir_all(file.parent().unwrap())?;
@@ -56,7 +60,22 @@ mod tests {
         assert!(proposta.contains("template.html"));
         let template = std::fs::read_to_string(dir.join("skills/proposta-blueprint/template.html")).unwrap();
         assert!(template.contains("class=\"sheet\""));
+        let pendencias = std::fs::read_to_string(dir.join("skills/pendencias/SKILL.md")).unwrap();
+        assert!(pendencias.starts_with("---\nname: pendencias\n"));
+        assert!(pendencias.contains("template.html"));
+        let pendencias_template = std::fs::read_to_string(dir.join("skills/pendencias/template.html")).unwrap();
+        assert!(pendencias_template.contains("const ITEMS"));
+        assert!(pendencias_template.contains("answers/"));
         assert!(std::fs::read_to_string(dir.join(".claude-plugin/plugin.json")).unwrap().contains("\"name\": \"pinned\""));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_bundled_pendencias_skill_names_no_person() {
+        for (file, text) in [("plugin/skills/pendencias/SKILL.md", PENDENCIAS), ("plugin/skills/pendencias/template.html", PENDENCIAS_TEMPLATE)] {
+            assert!(!text.contains("Felipe"), "{file} names a person; it must say \"o usuário\"");
+        }
+        assert!(PENDENCIAS.contains("description: Como o usuário quer receber perguntas."));
+        assert!(PENDENCIAS_TEMPLATE.contains("<title>Pendências</title>"));
     }
 }

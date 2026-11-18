@@ -1583,6 +1583,29 @@
                 ]
               },
               {
+                "description": "`board::BoardView`: the team board of the Captain of `tab`, or only `task`'s part of it.\nKept apart from `Plan`. Empty until U11 fills it in.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "board"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
+                ]
+              },
+              {
                 "description": "`null`. Types `text` into the session as one prompt and submits it.",
                 "type": "object",
                 "properties": {
@@ -3939,6 +3962,27 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "plan_step": {
+                "description": "The step or list of the calling Captain's plan this task drives: a step id or a list id.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "profile": {
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "then": {
+                "description": "The profiles that take the work on after this task, in order: a handoff chain.\n`chain::admit` refuses it until U12.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
               }
             },
             "required": [
@@ -6583,6 +6627,76 @@
                 ]
               },
               {
+                "description": "`taste::Tastes`, once `patch` is applied to the Reviewer's settings as `Tastes::set_reviewer`\ndoes. The user's own: no agent may call it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_reviewer"
+                  },
+                  "patch": {
+                    "$ref": "#/$defs/ReviewerPatch"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "patch"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `profiles` are the worker profiles of `project`, or the account's\nwithout it, as `Tastes::set_worker_profiles` does, and the proposals named in\n`drop_proposed` are gone, in the same write. Approving a proposal sends the list with its\nrow and its name in `drop_proposed`; discarding one sends the list unchanged. The user's\nown: no agent may call it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_worker_profiles"
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "profiles": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/WorkerProfile"
+                    }
+                  },
+                  "drop_proposed": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "profiles"
+                ]
+              },
+              {
+                "description": "From a machine only: `taste::Tastes`, once `profile` waits in `proposed` for the user, as\n`Tastes::propose_worker_profile` writes it. The hub takes it only when `tab` is a Captain or\nthe global orchestrator on that machine; `profile_propose` sends it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "propose_worker_profile"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "profile": {
+                    "$ref": "#/$defs/WorkerProfile"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "profile"
+                ]
+              },
+              {
                 "description": "From a machine: `true` when the account had no tastes and took these, a signed-out app's own.",
                 "type": "object",
                 "properties": {
@@ -7184,6 +7298,13 @@
                     "additionalProperties": {
                       "type": "string"
                     }
+                  },
+                  "reason": {
+                    "description": "Why the user said no, when they said. Carried to `surface::decide`; U2 shows it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -10329,6 +10450,175 @@
               "box_size"
             ]
           },
+          "ReviewerPatch": {
+            "description": "What `HubCall::SetReviewer` changes; a field left out stays. `rules` and `switch` are the\nproject's when `project` names one, else `rules` are the account's.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A model sets it; null clears it back to the ladder's pick.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "rounds": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "rules": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/Rule"
+                }
+              },
+              "project": {
+                "description": "The project's repo, as in `github.com/acme/site`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "switch": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Switch2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "Rule": {
+            "description": "One review rule.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "A1 and on for the account's, P1 and on for a project's.",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "replaces": {
+                "description": "The account rule a project rule stands in for.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "text"
+            ]
+          },
+          "Switch2": {
+            "description": "Whether a project's workers get a review.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "on",
+                  "off"
+                ]
+              },
+              {
+                "description": "pinned decides by the change.",
+                "type": "string",
+                "const": "auto"
+              }
+            ]
+          },
+          "WorkerProfile": {
+            "description": "One named worker setup.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "tools": {
+                "description": "The tools the worker is granted, as `delegate_task`'s `tools`.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "access": {
+                "$ref": "#/$defs/ProfileAccess",
+                "default": "edit"
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "delivers": {
+                "description": "What the worker hands back, in one line.",
+                "type": "string",
+                "default": ""
+              },
+              "by": {
+                "$ref": "#/$defs/ProfileAuthor",
+                "default": "user"
+              }
+            },
+            "required": [
+              "name",
+              "skills",
+              "tools",
+              "access",
+              "delivers",
+              "by"
+            ]
+          },
+          "ProfileAccess": {
+            "type": "string",
+            "enum": [
+              "read_only",
+              "edit"
+            ]
+          },
+          "ProfileAuthor": {
+            "description": "Who wrote a profile.",
+            "type": "string",
+            "enum": [
+              "user",
+              "orchestrator"
+            ]
+          },
           "Tastes": {
             "description": "An account's tastes.",
             "type": "object",
@@ -10415,13 +10705,34 @@
                   "avoid": [],
                   "heavy": "worktree"
                 }
+              },
+              "reviewer": {
+                "description": "The Reviewer's rules, model, rounds and project switches: the user's own, written only by\n`HubCall::SetReviewer`. No `TastePatch` field, so the taste tools cannot name it.",
+                "$ref": "#/$defs/Reviewer",
+                "default": {
+                  "model": null,
+                  "rounds": 2,
+                  "rules": [],
+                  "projects": {}
+                }
+              },
+              "worker_profiles": {
+                "description": "The account's and each project's worker profiles: the user's own, written only by\n`HubCall::SetWorkerProfiles`.",
+                "$ref": "#/$defs/WorkerProfiles",
+                "default": {
+                  "account": [],
+                  "projects": {},
+                  "proposed": []
+                }
               }
             },
             "required": [
               "orchestrator",
               "captains",
               "projects",
-              "placement"
+              "placement",
+              "reviewer",
+              "worker_profiles"
             ]
           },
           "Taste": {
@@ -10570,6 +10881,114 @@
               "time_limit_min",
               "box_budget_cents",
               "box_size"
+            ]
+          },
+          "Reviewer": {
+            "description": "The account's review settings, kept in `Tastes::reviewer`.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "The model reviews run on. None picks the next model down the ladder from the hard-work model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "rounds": {
+                "description": "Rounds of findings sent back before the Captain hears, 1 to 5.",
+                "type": "integer",
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255,
+                "default": 2
+              },
+              "rules": {
+                "description": "The account's rules, A1, A2 and on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Rule"
+                },
+                "default": []
+              },
+              "projects": {
+                "description": "Each project's switch and rules, by repo as in `github.com/acme/site`.",
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/ProjectReview"
+                },
+                "default": {}
+              }
+            },
+            "required": [
+              "model",
+              "rounds",
+              "rules",
+              "projects"
+            ]
+          },
+          "ProjectReview": {
+            "description": "One project's review settings.",
+            "type": "object",
+            "properties": {
+              "switch": {
+                "$ref": "#/$defs/Switch2",
+                "default": "auto"
+              },
+              "rules": {
+                "description": "The project's rules, P1, P2 and on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Rule"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "switch",
+              "rules"
+            ]
+          },
+          "WorkerProfiles": {
+            "description": "The account's worker profiles, kept in `Tastes::worker_profiles`.",
+            "type": "object",
+            "properties": {
+              "account": {
+                "description": "Every project's.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/WorkerProfile"
+                },
+                "default": []
+              },
+              "projects": {
+                "description": "One project's own, by repo as in `github.com/acme/site`.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/WorkerProfile"
+                  }
+                },
+                "default": {}
+              },
+              "proposed": {
+                "description": "What orchestrators proposed and the user has not taken or dropped yet.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/WorkerProfile"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "account",
+              "projects",
+              "proposed"
             ]
           },
           "TaskRecord": {
@@ -14101,6 +14520,29 @@
                 ]
               },
               {
+                "description": "`board::BoardView`: the team board of the Captain of `tab`, or only `task`'s part of it.\nKept apart from `Plan`. Empty until U11 fills it in.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "board"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
+                ]
+              },
+              {
                 "description": "`null`. Types `text` into the session as one prompt and submits it.",
                 "type": "object",
                 "properties": {
@@ -16430,6 +16872,27 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "plan_step": {
+                "description": "The step or list of the calling Captain's plan this task drives: a step id or a list id.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "profile": {
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "then": {
+                "description": "The profiles that take the work on after this task, in order: a handoff chain.\n`chain::admit` refuses it until U12.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
               }
             },
             "required": [
@@ -19021,6 +19484,76 @@
                 ]
               },
               {
+                "description": "`taste::Tastes`, once `patch` is applied to the Reviewer's settings as `Tastes::set_reviewer`\ndoes. The user's own: no agent may call it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_reviewer"
+                  },
+                  "patch": {
+                    "$ref": "#/$defs/ReviewerPatch"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "patch"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `profiles` are the worker profiles of `project`, or the account's\nwithout it, as `Tastes::set_worker_profiles` does, and the proposals named in\n`drop_proposed` are gone, in the same write. Approving a proposal sends the list with its\nrow and its name in `drop_proposed`; discarding one sends the list unchanged. The user's\nown: no agent may call it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_worker_profiles"
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "profiles": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/WorkerProfile"
+                    }
+                  },
+                  "drop_proposed": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "profiles"
+                ]
+              },
+              {
+                "description": "From a machine only: `taste::Tastes`, once `profile` waits in `proposed` for the user, as\n`Tastes::propose_worker_profile` writes it. The hub takes it only when `tab` is a Captain or\nthe global orchestrator on that machine; `profile_propose` sends it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "propose_worker_profile"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "profile": {
+                    "$ref": "#/$defs/WorkerProfile"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "profile"
+                ]
+              },
+              {
                 "description": "From a machine: `true` when the account had no tastes and took these, a signed-out app's own.",
                 "type": "object",
                 "properties": {
@@ -19620,6 +20153,13 @@
                     "additionalProperties": {
                       "type": "string"
                     }
+                  },
+                  "reason": {
+                    "description": "Why the user said no, when they said. Carried to `surface::decide`; U2 shows it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -22663,6 +23203,170 @@
               "box_size"
             ]
           },
+          "ReviewerPatch": {
+            "description": "What `HubCall::SetReviewer` changes; a field left out stays. `rules` and `switch` are the\nproject's when `project` names one, else `rules` are the account's.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A model sets it; null clears it back to the ladder's pick.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "rounds": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "rules": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/Rule"
+                }
+              },
+              "project": {
+                "description": "The project's repo, as in `github.com/acme/site`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "switch": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Switch2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "Rule": {
+            "description": "One review rule.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "A1 and on for the account's, P1 and on for a project's.",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "replaces": {
+                "description": "The account rule a project rule stands in for.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "text"
+            ]
+          },
+          "Switch2": {
+            "description": "Whether a project's workers get a review.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "on",
+                  "off"
+                ]
+              },
+              {
+                "description": "pinned decides by the change.",
+                "type": "string",
+                "const": "auto"
+              }
+            ]
+          },
+          "WorkerProfile": {
+            "description": "One named worker setup.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "tools": {
+                "description": "The tools the worker is granted, as `delegate_task`'s `tools`.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "access": {
+                "$ref": "#/$defs/ProfileAccess",
+                "default": "edit"
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "delivers": {
+                "description": "What the worker hands back, in one line.",
+                "type": "string",
+                "default": ""
+              },
+              "by": {
+                "$ref": "#/$defs/ProfileAuthor",
+                "default": "user"
+              }
+            },
+            "required": [
+              "name"
+            ]
+          },
+          "ProfileAccess": {
+            "type": "string",
+            "enum": [
+              "read_only",
+              "edit"
+            ]
+          },
+          "ProfileAuthor": {
+            "description": "Who wrote a profile.",
+            "type": "string",
+            "enum": [
+              "user",
+              "orchestrator"
+            ]
+          },
           "Tastes": {
             "description": "An account's tastes.",
             "type": "object",
@@ -22748,6 +23452,25 @@
                   "prefer": [],
                   "avoid": [],
                   "heavy": "worktree"
+                }
+              },
+              "reviewer": {
+                "description": "The Reviewer's rules, model, rounds and project switches: the user's own, written only by\n`HubCall::SetReviewer`. No `TastePatch` field, so the taste tools cannot name it.",
+                "$ref": "#/$defs/Reviewer",
+                "default": {
+                  "model": null,
+                  "rounds": 2,
+                  "rules": [],
+                  "projects": {}
+                }
+              },
+              "worker_profiles": {
+                "description": "The account's and each project's worker profiles: the user's own, written only by\n`HubCall::SetWorkerProfiles`.",
+                "$ref": "#/$defs/WorkerProfiles",
+                "default": {
+                  "account": [],
+                  "projects": {},
+                  "proposed": []
                 }
               }
             }
@@ -22879,6 +23602,99 @@
                   }
                 ],
                 "default": null
+              }
+            }
+          },
+          "Reviewer": {
+            "description": "The account's review settings, kept in `Tastes::reviewer`.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "The model reviews run on. None picks the next model down the ladder from the hard-work model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "rounds": {
+                "description": "Rounds of findings sent back before the Captain hears, 1 to 5.",
+                "type": "integer",
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255,
+                "default": 2
+              },
+              "rules": {
+                "description": "The account's rules, A1, A2 and on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Rule"
+                },
+                "default": []
+              },
+              "projects": {
+                "description": "Each project's switch and rules, by repo as in `github.com/acme/site`.",
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/ProjectReview"
+                },
+                "default": {}
+              }
+            }
+          },
+          "ProjectReview": {
+            "description": "One project's review settings.",
+            "type": "object",
+            "properties": {
+              "switch": {
+                "$ref": "#/$defs/Switch2",
+                "default": "auto"
+              },
+              "rules": {
+                "description": "The project's rules, P1, P2 and on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Rule"
+                },
+                "default": []
+              }
+            }
+          },
+          "WorkerProfiles": {
+            "description": "The account's worker profiles, kept in `Tastes::worker_profiles`.",
+            "type": "object",
+            "properties": {
+              "account": {
+                "description": "Every project's.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/WorkerProfile"
+                },
+                "default": []
+              },
+              "projects": {
+                "description": "One project's own, by repo as in `github.com/acme/site`.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/WorkerProfile"
+                  }
+                },
+                "default": {}
+              },
+              "proposed": {
+                "description": "What orchestrators proposed and the user has not taken or dropped yet.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/WorkerProfile"
+                },
+                "default": []
               }
             }
           },
@@ -25740,6 +26556,11 @@
                 "description": "Does one task another session delegated, and may delegate parts of it in turn.",
                 "type": "string",
                 "const": "worker"
+              },
+              {
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "type": "string",
+                "const": "reviewer"
               }
             ]
           },
@@ -27682,6 +28503,76 @@
                 ]
               },
               {
+                "description": "`taste::Tastes`, once `patch` is applied to the Reviewer's settings as `Tastes::set_reviewer`\ndoes. The user's own: no agent may call it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_reviewer"
+                  },
+                  "patch": {
+                    "$ref": "#/$defs/ReviewerPatch"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "patch"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `profiles` are the worker profiles of `project`, or the account's\nwithout it, as `Tastes::set_worker_profiles` does, and the proposals named in\n`drop_proposed` are gone, in the same write. Approving a proposal sends the list with its\nrow and its name in `drop_proposed`; discarding one sends the list unchanged. The user's\nown: no agent may call it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_worker_profiles"
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "profiles": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/WorkerProfile"
+                    }
+                  },
+                  "drop_proposed": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "profiles"
+                ]
+              },
+              {
+                "description": "From a machine only: `taste::Tastes`, once `profile` waits in `proposed` for the user, as\n`Tastes::propose_worker_profile` writes it. The hub takes it only when `tab` is a Captain or\nthe global orchestrator on that machine; `profile_propose` sends it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "propose_worker_profile"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "profile": {
+                    "$ref": "#/$defs/WorkerProfile"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "profile"
+                ]
+              },
+              {
                 "description": "From a machine: `true` when the account had no tastes and took these, a signed-out app's own.",
                 "type": "object",
                 "properties": {
@@ -28283,6 +29174,13 @@
                     "additionalProperties": {
                       "type": "string"
                     }
+                  },
+                  "reason": {
+                    "description": "Why the user said no, when they said. Carried to `surface::decide`; U2 shows it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -31575,6 +32473,175 @@
               "box_size"
             ]
           },
+          "ReviewerPatch": {
+            "description": "What `HubCall::SetReviewer` changes; a field left out stays. `rules` and `switch` are the\nproject's when `project` names one, else `rules` are the account's.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A model sets it; null clears it back to the ladder's pick.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "rounds": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "rules": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/Rule"
+                }
+              },
+              "project": {
+                "description": "The project's repo, as in `github.com/acme/site`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "switch": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Switch2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "Rule": {
+            "description": "One review rule.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "A1 and on for the account's, P1 and on for a project's.",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "replaces": {
+                "description": "The account rule a project rule stands in for.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "text"
+            ]
+          },
+          "Switch2": {
+            "description": "Whether a project's workers get a review.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "on",
+                  "off"
+                ]
+              },
+              {
+                "description": "pinned decides by the change.",
+                "type": "string",
+                "const": "auto"
+              }
+            ]
+          },
+          "WorkerProfile": {
+            "description": "One named worker setup.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "tools": {
+                "description": "The tools the worker is granted, as `delegate_task`'s `tools`.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "access": {
+                "$ref": "#/$defs/ProfileAccess",
+                "default": "edit"
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "delivers": {
+                "description": "What the worker hands back, in one line.",
+                "type": "string",
+                "default": ""
+              },
+              "by": {
+                "$ref": "#/$defs/ProfileAuthor",
+                "default": "user"
+              }
+            },
+            "required": [
+              "name",
+              "skills",
+              "tools",
+              "access",
+              "delivers",
+              "by"
+            ]
+          },
+          "ProfileAccess": {
+            "type": "string",
+            "enum": [
+              "read_only",
+              "edit"
+            ]
+          },
+          "ProfileAuthor": {
+            "description": "Who wrote a profile.",
+            "type": "string",
+            "enum": [
+              "user",
+              "orchestrator"
+            ]
+          },
           "Tastes": {
             "description": "An account's tastes.",
             "type": "object",
@@ -31661,13 +32728,34 @@
                   "avoid": [],
                   "heavy": "worktree"
                 }
+              },
+              "reviewer": {
+                "description": "The Reviewer's rules, model, rounds and project switches: the user's own, written only by\n`HubCall::SetReviewer`. No `TastePatch` field, so the taste tools cannot name it.",
+                "$ref": "#/$defs/Reviewer",
+                "default": {
+                  "model": null,
+                  "rounds": 2,
+                  "rules": [],
+                  "projects": {}
+                }
+              },
+              "worker_profiles": {
+                "description": "The account's and each project's worker profiles: the user's own, written only by\n`HubCall::SetWorkerProfiles`.",
+                "$ref": "#/$defs/WorkerProfiles",
+                "default": {
+                  "account": [],
+                  "projects": {},
+                  "proposed": []
+                }
               }
             },
             "required": [
               "orchestrator",
               "captains",
               "projects",
-              "placement"
+              "placement",
+              "reviewer",
+              "worker_profiles"
             ]
           },
           "Taste": {
@@ -31816,6 +32904,114 @@
               "time_limit_min",
               "box_budget_cents",
               "box_size"
+            ]
+          },
+          "Reviewer": {
+            "description": "The account's review settings, kept in `Tastes::reviewer`.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "The model reviews run on. None picks the next model down the ladder from the hard-work model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "rounds": {
+                "description": "Rounds of findings sent back before the Captain hears, 1 to 5.",
+                "type": "integer",
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255,
+                "default": 2
+              },
+              "rules": {
+                "description": "The account's rules, A1, A2 and on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Rule"
+                },
+                "default": []
+              },
+              "projects": {
+                "description": "Each project's switch and rules, by repo as in `github.com/acme/site`.",
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/ProjectReview"
+                },
+                "default": {}
+              }
+            },
+            "required": [
+              "model",
+              "rounds",
+              "rules",
+              "projects"
+            ]
+          },
+          "ProjectReview": {
+            "description": "One project's review settings.",
+            "type": "object",
+            "properties": {
+              "switch": {
+                "$ref": "#/$defs/Switch2",
+                "default": "auto"
+              },
+              "rules": {
+                "description": "The project's rules, P1, P2 and on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Rule"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "switch",
+              "rules"
+            ]
+          },
+          "WorkerProfiles": {
+            "description": "The account's worker profiles, kept in `Tastes::worker_profiles`.",
+            "type": "object",
+            "properties": {
+              "account": {
+                "description": "Every project's.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/WorkerProfile"
+                },
+                "default": []
+              },
+              "projects": {
+                "description": "One project's own, by repo as in `github.com/acme/site`.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/WorkerProfile"
+                  }
+                },
+                "default": {}
+              },
+              "proposed": {
+                "description": "What orchestrators proposed and the user has not taken or dropped yet.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/WorkerProfile"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "account",
+              "projects",
+              "proposed"
             ]
           },
           "RepoLook": {
@@ -32000,6 +33196,27 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "plan_step": {
+                "description": "The step or list of the calling Captain's plan this task drives: a step id or a list id.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "profile": {
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "then": {
+                "description": "The profiles that take the work on after this task, in order: a handoff chain.\n`chain::admit` refuses it until U12.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
               }
             },
             "required": [
@@ -35122,6 +36339,11 @@
                 "description": "Does one task another session delegated, and may delegate parts of it in turn.",
                 "type": "string",
                 "const": "worker"
+              },
+              {
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "type": "string",
+                "const": "reviewer"
               }
             ]
           },
@@ -37031,6 +38253,76 @@
                 ]
               },
               {
+                "description": "`taste::Tastes`, once `patch` is applied to the Reviewer's settings as `Tastes::set_reviewer`\ndoes. The user's own: no agent may call it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_reviewer"
+                  },
+                  "patch": {
+                    "$ref": "#/$defs/ReviewerPatch"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "patch"
+                ]
+              },
+              {
+                "description": "`taste::Tastes`, once `profiles` are the worker profiles of `project`, or the account's\nwithout it, as `Tastes::set_worker_profiles` does, and the proposals named in\n`drop_proposed` are gone, in the same write. Approving a proposal sends the list with its\nrow and its name in `drop_proposed`; discarding one sends the list unchanged. The user's\nown: no agent may call it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_worker_profiles"
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "profiles": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/WorkerProfile"
+                    }
+                  },
+                  "drop_proposed": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "profiles"
+                ]
+              },
+              {
+                "description": "From a machine only: `taste::Tastes`, once `profile` waits in `proposed` for the user, as\n`Tastes::propose_worker_profile` writes it. The hub takes it only when `tab` is a Captain or\nthe global orchestrator on that machine; `profile_propose` sends it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "propose_worker_profile"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "profile": {
+                    "$ref": "#/$defs/WorkerProfile"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "profile"
+                ]
+              },
+              {
                 "description": "From a machine: `true` when the account had no tastes and took these, a signed-out app's own.",
                 "type": "object",
                 "properties": {
@@ -37630,6 +38922,13 @@
                     "additionalProperties": {
                       "type": "string"
                     }
+                  },
+                  "reason": {
+                    "description": "Why the user said no, when they said. Carried to `surface::decide`; U2 shows it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -40818,6 +42117,170 @@
               "box_size"
             ]
           },
+          "ReviewerPatch": {
+            "description": "What `HubCall::SetReviewer` changes; a field left out stays. `rules` and `switch` are the\nproject's when `project` names one, else `rules` are the account's.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "A model sets it; null clears it back to the ladder's pick.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "rounds": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "rules": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/$defs/Rule"
+                }
+              },
+              "project": {
+                "description": "The project's repo, as in `github.com/acme/site`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "switch": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Switch2"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "Rule": {
+            "description": "One review rule.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "A1 and on for the account's, P1 and on for a project's.",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "replaces": {
+                "description": "The account rule a project rule stands in for.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "text"
+            ]
+          },
+          "Switch2": {
+            "description": "Whether a project's workers get a review.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "on",
+                  "off"
+                ]
+              },
+              {
+                "description": "pinned decides by the change.",
+                "type": "string",
+                "const": "auto"
+              }
+            ]
+          },
+          "WorkerProfile": {
+            "description": "One named worker setup.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "tools": {
+                "description": "The tools the worker is granted, as `delegate_task`'s `tools`.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "access": {
+                "$ref": "#/$defs/ProfileAccess",
+                "default": "edit"
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "delivers": {
+                "description": "What the worker hands back, in one line.",
+                "type": "string",
+                "default": ""
+              },
+              "by": {
+                "$ref": "#/$defs/ProfileAuthor",
+                "default": "user"
+              }
+            },
+            "required": [
+              "name"
+            ]
+          },
+          "ProfileAccess": {
+            "type": "string",
+            "enum": [
+              "read_only",
+              "edit"
+            ]
+          },
+          "ProfileAuthor": {
+            "description": "Who wrote a profile.",
+            "type": "string",
+            "enum": [
+              "user",
+              "orchestrator"
+            ]
+          },
           "Tastes": {
             "description": "An account's tastes.",
             "type": "object",
@@ -40903,6 +42366,25 @@
                   "prefer": [],
                   "avoid": [],
                   "heavy": "worktree"
+                }
+              },
+              "reviewer": {
+                "description": "The Reviewer's rules, model, rounds and project switches: the user's own, written only by\n`HubCall::SetReviewer`. No `TastePatch` field, so the taste tools cannot name it.",
+                "$ref": "#/$defs/Reviewer",
+                "default": {
+                  "model": null,
+                  "rounds": 2,
+                  "rules": [],
+                  "projects": {}
+                }
+              },
+              "worker_profiles": {
+                "description": "The account's and each project's worker profiles: the user's own, written only by\n`HubCall::SetWorkerProfiles`.",
+                "$ref": "#/$defs/WorkerProfiles",
+                "default": {
+                  "account": [],
+                  "projects": {},
+                  "proposed": []
                 }
               }
             }
@@ -41034,6 +42516,99 @@
                   }
                 ],
                 "default": null
+              }
+            }
+          },
+          "Reviewer": {
+            "description": "The account's review settings, kept in `Tastes::reviewer`.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "The model reviews run on. None picks the next model down the ladder from the hard-work model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "rounds": {
+                "description": "Rounds of findings sent back before the Captain hears, 1 to 5.",
+                "type": "integer",
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255,
+                "default": 2
+              },
+              "rules": {
+                "description": "The account's rules, A1, A2 and on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Rule"
+                },
+                "default": []
+              },
+              "projects": {
+                "description": "Each project's switch and rules, by repo as in `github.com/acme/site`.",
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/ProjectReview"
+                },
+                "default": {}
+              }
+            }
+          },
+          "ProjectReview": {
+            "description": "One project's review settings.",
+            "type": "object",
+            "properties": {
+              "switch": {
+                "$ref": "#/$defs/Switch2",
+                "default": "auto"
+              },
+              "rules": {
+                "description": "The project's rules, P1, P2 and on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Rule"
+                },
+                "default": []
+              }
+            }
+          },
+          "WorkerProfiles": {
+            "description": "The account's worker profiles, kept in `Tastes::worker_profiles`.",
+            "type": "object",
+            "properties": {
+              "account": {
+                "description": "Every project's.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/WorkerProfile"
+                },
+                "default": []
+              },
+              "projects": {
+                "description": "One project's own, by repo as in `github.com/acme/site`.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/WorkerProfile"
+                  }
+                },
+                "default": {}
+              },
+              "proposed": {
+                "description": "What orchestrators proposed and the user has not taken or dropped yet.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/WorkerProfile"
+                },
+                "default": []
               }
             }
           },
@@ -41217,6 +42792,27 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "plan_step": {
+                "description": "The step or list of the calling Captain's plan this task drives: a step id or a list id.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "profile": {
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "then": {
+                "description": "The profiles that take the work on after this task, in order: a handoff chain.\n`chain::admit` refuses it until U12.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
               }
             },
             "required": [
@@ -60839,6 +62435,11 @@
                 "description": "Does one task another session delegated, and may delegate parts of it in turn.",
                 "type": "string",
                 "const": "worker"
+              },
+              {
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "type": "string",
+                "const": "reviewer"
               }
             ]
           },
@@ -61465,6 +63066,11 @@
                 "description": "Does one task another session delegated, and may delegate parts of it in turn.",
                 "type": "string",
                 "const": "worker"
+              },
+              {
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "type": "string",
+                "const": "reviewer"
               }
             ]
           },
@@ -61750,13 +63356,34 @@
               "avoid": [],
               "heavy": "worktree"
             }
+          },
+          "reviewer": {
+            "description": "The Reviewer's rules, model, rounds and project switches: the user's own, written only by\n`HubCall::SetReviewer`. No `TastePatch` field, so the taste tools cannot name it.",
+            "$ref": "#/$defs/Reviewer",
+            "default": {
+              "model": null,
+              "rounds": 2,
+              "rules": [],
+              "projects": {}
+            }
+          },
+          "worker_profiles": {
+            "description": "The account's and each project's worker profiles: the user's own, written only by\n`HubCall::SetWorkerProfiles`.",
+            "$ref": "#/$defs/WorkerProfiles",
+            "default": {
+              "account": [],
+              "projects": {},
+              "proposed": []
+            }
           }
         },
         "required": [
           "orchestrator",
           "captains",
           "projects",
-          "placement"
+          "placement",
+          "reviewer",
+          "worker_profiles"
         ],
         "$defs": {
           "Taste": {
@@ -62214,6 +63841,231 @@
                 "const": "worktree"
               }
             ]
+          },
+          "Reviewer": {
+            "description": "The account's review settings, kept in `Tastes::reviewer`.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "The model reviews run on. None picks the next model down the ladder from the hard-work model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "rounds": {
+                "description": "Rounds of findings sent back before the Captain hears, 1 to 5.",
+                "type": "integer",
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255,
+                "default": 2
+              },
+              "rules": {
+                "description": "The account's rules, A1, A2 and on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Rule"
+                },
+                "default": []
+              },
+              "projects": {
+                "description": "Each project's switch and rules, by repo as in `github.com/acme/site`.",
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/ProjectReview"
+                },
+                "default": {}
+              }
+            },
+            "required": [
+              "model",
+              "rounds",
+              "rules",
+              "projects"
+            ]
+          },
+          "Rule": {
+            "description": "One review rule.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "A1 and on for the account's, P1 and on for a project's.",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "replaces": {
+                "description": "The account rule a project rule stands in for.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "text"
+            ]
+          },
+          "ProjectReview": {
+            "description": "One project's review settings.",
+            "type": "object",
+            "properties": {
+              "switch": {
+                "$ref": "#/$defs/Switch",
+                "default": "auto"
+              },
+              "rules": {
+                "description": "The project's rules, P1, P2 and on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Rule"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "switch",
+              "rules"
+            ]
+          },
+          "Switch": {
+            "description": "Whether a project's workers get a review.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "on",
+                  "off"
+                ]
+              },
+              {
+                "description": "pinned decides by the change.",
+                "type": "string",
+                "const": "auto"
+              }
+            ]
+          },
+          "WorkerProfiles": {
+            "description": "The account's worker profiles, kept in `Tastes::worker_profiles`.",
+            "type": "object",
+            "properties": {
+              "account": {
+                "description": "Every project's.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/WorkerProfile"
+                },
+                "default": []
+              },
+              "projects": {
+                "description": "One project's own, by repo as in `github.com/acme/site`.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/WorkerProfile"
+                  }
+                },
+                "default": {}
+              },
+              "proposed": {
+                "description": "What orchestrators proposed and the user has not taken or dropped yet.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/WorkerProfile"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "account",
+              "projects",
+              "proposed"
+            ]
+          },
+          "WorkerProfile": {
+            "description": "One named worker setup.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "tools": {
+                "description": "The tools the worker is granted, as `delegate_task`'s `tools`.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "access": {
+                "$ref": "#/$defs/ProfileAccess",
+                "default": "edit"
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "delivers": {
+                "description": "What the worker hands back, in one line.",
+                "type": "string",
+                "default": ""
+              },
+              "by": {
+                "$ref": "#/$defs/ProfileAuthor",
+                "default": "user"
+              }
+            },
+            "required": [
+              "name",
+              "skills",
+              "tools",
+              "access",
+              "delivers",
+              "by"
+            ]
+          },
+          "ProfileAccess": {
+            "type": "string",
+            "enum": [
+              "read_only",
+              "edit"
+            ]
+          },
+          "ProfileAuthor": {
+            "description": "Who wrote a profile.",
+            "type": "string",
+            "enum": [
+              "user",
+              "orchestrator"
+            ]
           }
         }
       },
@@ -62304,6 +64156,25 @@
               "prefer": [],
               "avoid": [],
               "heavy": "worktree"
+            }
+          },
+          "reviewer": {
+            "description": "The Reviewer's rules, model, rounds and project switches: the user's own, written only by\n`HubCall::SetReviewer`. No `TastePatch` field, so the taste tools cannot name it.",
+            "$ref": "#/$defs/Reviewer",
+            "default": {
+              "model": null,
+              "rounds": 2,
+              "rules": [],
+              "projects": {}
+            }
+          },
+          "worker_profiles": {
+            "description": "The account's and each project's worker profiles: the user's own, written only by\n`HubCall::SetWorkerProfiles`.",
+            "$ref": "#/$defs/WorkerProfiles",
+            "default": {
+              "account": [],
+              "projects": {},
+              "proposed": []
             }
           }
         },
@@ -62739,6 +64610,211 @@
                 "type": "string",
                 "const": "worktree"
               }
+            ]
+          },
+          "Reviewer": {
+            "description": "The account's review settings, kept in `Tastes::reviewer`.",
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "The model reviews run on. None picks the next model down the ladder from the hard-work model.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "rounds": {
+                "description": "Rounds of findings sent back before the Captain hears, 1 to 5.",
+                "type": "integer",
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255,
+                "default": 2
+              },
+              "rules": {
+                "description": "The account's rules, A1, A2 and on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Rule"
+                },
+                "default": []
+              },
+              "projects": {
+                "description": "Each project's switch and rules, by repo as in `github.com/acme/site`.",
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/ProjectReview"
+                },
+                "default": {}
+              }
+            }
+          },
+          "Rule": {
+            "description": "One review rule.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "A1 and on for the account's, P1 and on for a project's.",
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "replaces": {
+                "description": "The account rule a project rule stands in for.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "text"
+            ]
+          },
+          "ProjectReview": {
+            "description": "One project's review settings.",
+            "type": "object",
+            "properties": {
+              "switch": {
+                "$ref": "#/$defs/Switch",
+                "default": "auto"
+              },
+              "rules": {
+                "description": "The project's rules, P1, P2 and on.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Rule"
+                },
+                "default": []
+              }
+            }
+          },
+          "Switch": {
+            "description": "Whether a project's workers get a review.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "on",
+                  "off"
+                ]
+              },
+              {
+                "description": "pinned decides by the change.",
+                "type": "string",
+                "const": "auto"
+              }
+            ]
+          },
+          "WorkerProfiles": {
+            "description": "The account's worker profiles, kept in `Tastes::worker_profiles`.",
+            "type": "object",
+            "properties": {
+              "account": {
+                "description": "Every project's.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/WorkerProfile"
+                },
+                "default": []
+              },
+              "projects": {
+                "description": "One project's own, by repo as in `github.com/acme/site`.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/WorkerProfile"
+                  }
+                },
+                "default": {}
+              },
+              "proposed": {
+                "description": "What orchestrators proposed and the user has not taken or dropped yet.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/WorkerProfile"
+                },
+                "default": []
+              }
+            }
+          },
+          "WorkerProfile": {
+            "description": "One named worker setup.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "skills": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/SkillRef"
+                },
+                "default": []
+              },
+              "tools": {
+                "description": "The tools the worker is granted, as `delegate_task`'s `tools`.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "access": {
+                "$ref": "#/$defs/ProfileAccess",
+                "default": "edit"
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "delivers": {
+                "description": "What the worker hands back, in one line.",
+                "type": "string",
+                "default": ""
+              },
+              "by": {
+                "$ref": "#/$defs/ProfileAuthor",
+                "default": "user"
+              }
+            },
+            "required": [
+              "name"
+            ]
+          },
+          "ProfileAccess": {
+            "type": "string",
+            "enum": [
+              "read_only",
+              "edit"
+            ]
+          },
+          "ProfileAuthor": {
+            "description": "Who wrote a profile.",
+            "type": "string",
+            "enum": [
+              "user",
+              "orchestrator"
             ]
           }
         }
@@ -65394,6 +67470,11 @@
                 "description": "Does one task another session delegated, and may delegate parts of it in turn.",
                 "type": "string",
                 "const": "worker"
+              },
+              {
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "type": "string",
+                "const": "reviewer"
               }
             ]
           },
@@ -70164,6 +72245,11 @@
                 "description": "Does one task another session delegated, and may delegate parts of it in turn.",
                 "type": "string",
                 "const": "worker"
+              },
+              {
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "type": "string",
+                "const": "reviewer"
               }
             ]
           },
@@ -75752,6 +77838,29 @@
                 ]
               },
               {
+                "description": "`board::BoardView`: the team board of the Captain of `tab`, or only `task`'s part of it.\nKept apart from `Plan`. Empty until U11 fills it in.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "board"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
+                ]
+              },
+              {
                 "description": "`null`. Types `text` into the session as one prompt and submits it.",
                 "type": "object",
                 "properties": {
@@ -78108,6 +80217,27 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "plan_step": {
+                "description": "The step or list of the calling Captain's plan this task drives: a step id or a list id.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "profile": {
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "then": {
+                "description": "The profiles that take the work on after this task, in order: a handoff chain.\n`chain::admit` refuses it until U12.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
               }
             },
             "required": [
@@ -81343,6 +83473,29 @@
                 ]
               },
               {
+                "description": "`board::BoardView`: the team board of the Captain of `tab`, or only `task`'s part of it.\nKept apart from `Plan`. Empty until U11 fills it in.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "board"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab"
+                ]
+              },
+              {
                 "description": "`null`. Types `text` into the session as one prompt and submits it.",
                 "type": "object",
                 "properties": {
@@ -83672,6 +85825,27 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "plan_step": {
+                "description": "The step or list of the calling Captain's plan this task drives: a step id or a list id.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "profile": {
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "then": {
+                "description": "The profiles that take the work on after this task, in order: a handoff chain.\n`chain::admit` refuses it until U12.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
               }
             },
             "required": [

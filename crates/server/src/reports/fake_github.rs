@@ -224,11 +224,13 @@ impl FakeGithub {
         issue.timeline.push(json!({ "event": "reopened", "created_at": at }));
     }
 
-    /// Puts `label` on issue `number`.
+    /// Puts `label` on issue `number`, which updates it, as on GitHub.
     pub fn add_label(&self, number: u64, label: &str) {
         let mut repo = self.repo();
+        let at = repo.now();
         let issue = repo.issues.get_mut(number as usize - 1).expect("no such issue in the fake");
         issue.labels.push(label.into());
+        issue.updated_at = at;
     }
 
     /// Starts the clock at `seconds` since the Unix epoch instead of 2026-01-01, so what happens in the fake is dated

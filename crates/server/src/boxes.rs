@@ -504,11 +504,25 @@ pub async fn extend_of(hub: &Hub, account: &Account, machine: Uuid, extra_usd: f
     if !(extra_usd > 0.0) {
         return Err("name an amount above zero".into());
     }
-    let row = hub.db.box_of(account.id, machine).await?.ok_or_else(|| "this machine is no box".to_owned())?;
+    still_open(hub.db.box_of(account.id, machine).await?)
+}
+
+/// The box `row`, or why it can take no extend: no box of the account's, or one already ending.
+pub fn still_open(row: Option<BoxRow>) -> Result<BoxRow, String> {
+    let row = row.ok_or_else(|| "this machine is no box".to_owned())?;
     if matches!(row.phase, Phase::Ending(_)) {
         return Err("this box is already ending".into());
     }
     Ok(row)
+}
+
+/// Closes the extend asks still waiting for the box `machine`, which moved to ending, and tells
+/// their sessions. A failure is only logged: the row's delete closes them first.
+async fn close_extends(hub: &Hub, account: &Arc<Account>, machine: Uuid) {
+    match hub.db.close_extends(account.id, machine).await {
+        Ok(closed) => crate::surface::closed_extends(hub, account, closed, None).await,
+        Err(e) => eprintln!("pinned-server: could not close the extend asks of the box on machine {machine}: {e}"),
+    }
 }
 
 /// The key of the advisory lock of one box's extends: the account and the box's machine, as two
@@ -526,7 +540,7 @@ pub const EXTEND_ACCOUNT_KEY: &str = "hashtext('pinned-extend-account:' || $1::u
 /// do not wait. `end` commits it; a turn dropped on an error closes its connection, which frees the lock.
 /// This hub's lines come first (`Place`), so the hub holds at most one such connection per account
 /// for asks, and one more per box for the owner's decisions.
-/// All waits together are bounded by `EXTEND_WAIT`: a turn not had by then (the lines, then the
+/// All waits before the turn is held share `EXTEND_WAIT`: a turn not had by then (the lines, then the
 /// advisory locks for what is left) is refused as `crate::db::BUSY`, as is a turn whose connection
 /// cannot be opened: nothing was done, so the same request asks again.
 pub struct ExtendTurn {
@@ -535,7 +549,8 @@ pub struct ExtendTurn {
     deadline: tokio::time::Instant,
 }
 
-/// How long an extend waits for its box's turn, as long as Postgres's lock timeout.
+/// How long an extend waits, from its own start, for every wait before its turn is held: its reads,
+/// its lines and its locks. The writes after the hold are bounded only by the database's own limits.
 const EXTEND_WAIT: Duration = Duration::from_secs(2);
 
 /// How many asks may be in a box's line at once on this hub, the one that holds it and those that
@@ -602,9 +617,14 @@ fn lines_in_use(account: Uuid) -> usize {
 }
 
 impl ExtendTurn {
+    /// When a turn's wait ends, for a call that starts now: `EXTEND_WAIT` from its own start.
+    pub fn deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + EXTEND_WAIT
+    }
+
     /// The owner's decision's turn: the box's line, however many are in it, then the box's lock.
     pub async fn take(hub: &Hub, account: Uuid, machine: Uuid) -> Result<ExtendTurn, String> {
-        let deadline = tokio::time::Instant::now() + EXTEND_WAIT;
+        let deadline = ExtendTurn::deadline();
         let place = Place::join((account, Some(machine)), usize::MAX).ok_or(crate::db::BUSY)?;
         let lines = vec![place.hold(deadline).await?];
         ExtendTurn::locked(hub, account, machine, lines, deadline, false).await
@@ -615,9 +635,9 @@ impl ExtendTurn {
     /// the account's line, then the box's, then the box's lock and the account's on the same
     /// connection, so asks for different boxes of one account are counted one after another. Always
     /// account, then box in this hub's lines, and box, then account in Postgres: a decision takes
-    /// only the box's, so no two turns wait on each other.
-    pub async fn ask(hub: &Hub, account: Uuid, machine: Uuid) -> Result<ExtendTurn, String> {
-        let deadline = tokio::time::Instant::now() + EXTEND_WAIT;
+    /// only the box's, so no two turns wait on each other. `deadline` is the 2 s from the start of the
+    /// ask that every wait before the hold shares.
+    pub async fn ask(hub: &Hub, account: Uuid, machine: Uuid, deadline: tokio::time::Instant) -> Result<ExtendTurn, String> {
         let in_box = Place::join((account, Some(machine)), MOST_ASKS_IN_BOX_LINE).ok_or(crate::db::BUSY)?;
         let of_account = Place::join((account, None), usize::MAX).ok_or(crate::db::BUSY)?.hold(deadline).await?;
         let of_box = in_box.hold(deadline).await?;
@@ -644,9 +664,14 @@ impl ExtendTurn {
 
     /// Takes an advisory lock, waiting only for what is left of the deadline, whatever the session's lock timeout.
     async fn lock(&self, sql: &str, params: &[&(dyn tokio_postgres::types::ToSql + Sync)]) -> Result<(), String> {
-        let left = self.deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().max(1);
-        self.held.batch_execute(&format!("set local lock_timeout = {left}")).await.map_err(lost_turn)?;
-        self.held.execute(sql, params).await.map_err(lost_turn).map(drop)
+        // The round trips around the lock count in the wait too, not only Postgres's own lock timeout.
+        tokio::time::timeout_at(self.deadline, async {
+            let left = self.deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().max(1);
+            self.held.batch_execute(&format!("set local lock_timeout = {left}")).await.map_err(lost_turn)?;
+            self.held.execute(sql, params).await.map_err(lost_turn).map(drop)
+        })
+        .await
+        .map_err(|_| crate::db::BUSY.to_owned())?
     }
 
     /// Whether the turn still holds its locks: a connection that ended took them with it, and
@@ -1639,6 +1664,7 @@ impl Boxes {
             let failed = Phase::Ending(End::Failed(e.clone()));
             for from in [Phase::Creating, Phase::Booting] {
                 if hub.db.set_box_phase(account.id, &row.id, &from, &failed).await? {
+                    close_extends(hub, account, row.machine).await;
                     let mut row = row.clone();
                     row.phase = failed.clone();
                     self.tell_origin(hub, account, &row, &End::Failed(e.clone())).await;
@@ -1799,6 +1825,9 @@ impl Boxes {
         account.went_offline(&machine, None);
         hub.push_machines(account).await;
         self.delete_box(key, row).await?;
+        // Before the row goes, on every try, so no row is deleted with an ask still waiting for its box.
+        let closed = hub.db.close_extends(account.id, row.machine).await.map_err(Failed::Row)?;
+        crate::surface::closed_extends(hub, account, closed, None).await;
         if hub.db.delete_box(row.account, &row.id).await.map_err(Failed::Row)? == 0 {
             eprintln!("pinned-server: delete_box of row {} matched no row", row.id);
         }
@@ -1965,6 +1994,7 @@ impl Boxes {
                 return Err(format!("box {} changed while pinned ended it; it ends on the next check", row.id));
             }
             row.phase = ending;
+            close_extends(hub, account, row.machine).await;
             if tell {
                 self.tell_origin(hub, account, &row, &why).await;
             }

@@ -157,6 +157,38 @@ pub fn permissions() -> Vec<String> {
         .collect()
 }
 
+/// pinned's own tools that only read. A read-only session calls these without asking and is
+/// refused every other tool of `permissions`, which act.
+const READ_TOOLS: [&str; 22] = [
+    LIST_TOOL,
+    CAPABILITIES_TOOL,
+    STATUS_TOOL,
+    STATS_TOOL,
+    "agents",
+    "work_cost",
+    "memory_search",
+    "actions",
+    "projects",
+    "read_captain",
+    "waiting",
+    "sessions",
+    "read_session",
+    "repo_overview",
+    "repo_read",
+    "repo_search",
+    "taste_get",
+    "convex_tables",
+    "convex_data",
+    "convex_query",
+    "convex_run",
+    "convex_logs",
+];
+
+/// `permissions` split into the tools that only read and the tools that act.
+pub fn read_and_acting_permissions() -> (Vec<String>, Vec<String>) {
+    permissions().into_iter().partition(|tool| READ_TOOLS.iter().any(|read| *tool == format!("mcp__{SERVER}__{read}")))
+}
+
 pub fn serve(reminders: bool) {
     let stdin = std::io::stdin();
     let _ = serve_io(reminders, stdin.lock(), std::io::stdout());
@@ -225,6 +257,8 @@ enum Seat {
     GlobalOrchestrator,
     Captain,
     TasteChat,
+    /// A worker or reviewer thread.
+    Worker,
     Other,
 }
 
@@ -235,6 +269,7 @@ impl Seat {
             Some(crate::global_orchestrator::ROLE) => Seat::GlobalOrchestrator,
             Some(crate::taste::CHAT_ROLE) => Seat::TasteChat,
             Some(role) if Role::parse(role) == Some(Role::Orchestrator) => Seat::Captain,
+            Some(role) if matches!(Role::parse(role), Some(Role::Worker | Role::Reviewer)) => Seat::Worker,
             _ => Seat::Other,
         }
     }
@@ -274,6 +309,7 @@ fn tool_definitions(reminders: bool, child: bool, seat: Seat) -> Value {
         tools.push(stats_tool());
     }
     tools.extend(project_tools().into_iter().filter(|(audience, _)| offered(*audience)).map(|(_, tool)| tool));
+    tools.extend(crate::team_tools::offered(&crate::team_tools::TeamSeat { captain: seat == Seat::Captain, worker: seat == Seat::Worker || child, child }));
     Value::Array(tools)
 }
 
@@ -286,7 +322,7 @@ fn convex_offer(child: bool) -> Option<convex::Offer> {
 }
 
 fn delegation_tools() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         json!({
             "name": CAPABILITIES_TOOL,
             "description": "Call this before the first delegate_task and pick providerInstanceId, model, and options from it. It lists the accounts this machine can run a child agent on, and the access this session inherits.",
@@ -351,6 +387,7 @@ fn delegation_tools() -> Vec<Value> {
                     },
                     "isolation": { "type": "string", "enum": ["shared", "worktree"], "description": "shared runs in this checkout. worktree makes a separate checkout and runs the child there." },
                     "heavy": { "type": "boolean", "description": "Whether the account's placement policy picks the machine for this worker when target names none. Left out, a worker with isolation worktree is heavy and a shared one is not." },
+                    "planStep": { "type": "string", "description": "A step id (s2) or a list id (l1) of this Captain's plan. The task drives that step or list: it reads Running while the task works and Done or Failed when it ends, and a plan_step report on it waits for the task. A newer delegate_task naming the step replaces the link. Naming a failed step opens a fix of one step named for the task, at most 3 fixes per step. Only a project's Captain may name one." },
                     "mode": { "type": "string", "enum": ["async", "wait"], "default": "async", "description": "async returns at once. The notice is typed automatically only when this session is idle; otherwise the user sends it from the task's card. End your turn and do not poll. wait blocks until the result is in this call." },
                     "timeoutMs": { "type": "number", "description": "How long wait blocks, in milliseconds. The child keeps running after a timeout." },
                     "budgetMs": { "type": "number", "description": "How long the child may work before pinned tells this session how long it has run, in milliseconds. The default is 7200000, two hours, or half of the run limit when that is shorter. It must be below the run limit. Time counts only while the machine is awake." },
@@ -398,7 +435,13 @@ fn delegation_tools() -> Vec<Value> {
                 "required": ["taskId", "verdict"],
             },
         }),
-    ]
+    ];
+    // The agent team's delegate_task arguments, each offered once its unit turns it on.
+    let delegate = tools.iter_mut().find(|tool| tool["name"] == DELEGATE_TOOL).expect("delegate_task is listed");
+    for (name, schema) in [crate::profiles::delegate_property(), crate::chain::delegate_property()].into_iter().flatten() {
+        delegate["inputSchema"]["properties"][name] = schema;
+    }
+    tools
 }
 
 fn stats_tool() -> Value {
@@ -830,6 +873,7 @@ fn call(params: &Value, reminders: bool, output: &Mutex<impl Write>) -> Value {
             reason: args["reason"].as_str().unwrap_or("the parent asked").to_owned(),
         }),
         "" => Err(format!("unknown tool {}", params["name"])),
+        name if crate::team_tools::named(name) => crate::team_tools::request(name, args).map(|tool| Message::Team { tab: session_var(TAB_ENV), task: session_var(TASK_ENV), tool }),
         name if name.starts_with("convex_") => match session_var(TASK_ENV) {
             Some(_) => Err("A delegated child reads no Convex data: ask the session that started you.".into()),
             None => convex::ask(name, args).and_then(|ask| in_tab(ProjectTool::Convex { ask }, std::env::var(TAB_ENV).ok())),
@@ -994,8 +1038,27 @@ mod tests {
     use super::*;
     use chrono::FixedOffset;
 
+    #[test]
+    fn every_read_tool_is_one_of_pinneds_and_the_rest_act() {
+        let (reads, acting) = read_and_acting_permissions();
+        assert_eq!(reads.len(), READ_TOOLS.len(), "a read tool pinned no longer has: {reads:?}");
+        assert_eq!(reads.len() + acting.len(), permissions().len());
+        for tool in ["memory_save", "memory_forget", "delegate_task", "act", "task_cancel", "remind_me", "taste_set", "send_to_captain", "plan_set"] {
+            assert!(acting.contains(&format!("mcp__{SERVER}__{tool}")), "{tool} {acting:?}");
+        }
+    }
+
     fn at_noon() -> DateTime<FixedOffset> {
         FixedOffset::west_opt(3 * 3600).unwrap().with_ymd_and_hms(2026, 10, 21, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn taste_set_refuses_a_patch_that_names_the_reviewer_or_the_worker_profiles() {
+        for field in ["reviewer", "worker_profiles"] {
+            let refused = project_request("taste_set", &json!({ "scope": "captains", "patch": { field: {} } }), Some("tab-1".into())).unwrap_err();
+            assert!(refused.starts_with(&format!("taste_set: {field} is the user's own, set only on the Way of working page; nothing changed")), "{refused}");
+        }
+        assert!(project_request("taste_set", &json!({ "scope": "captains", "patch": { "parallel": 2 } }), Some("tab-1".into())).is_ok());
     }
 
     #[test]
@@ -1111,6 +1174,7 @@ mod tests {
                 "isolation".into(),
                 "limitMs".into(),
                 "mode".into(),
+                "planStep".into(),
                 "role".into(),
                 "runtimeMode".into(),
                 "target".into(),
@@ -1158,6 +1222,8 @@ mod tests {
     fn a_wait_returns_the_summary_while_a_second_call_answers_and_progress_is_sent() {
         use std::os::unix::net::UnixListener;
         use std::sync::{Arc, Mutex};
+        // The guard reads the environment once; this test sets a session's variables in it.
+        crate::machine::refuse_real_home();
         let _guard = session_env_lock();
         let dir = std::env::temp_dir().join(format!("pinned-mcp-wait-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1427,6 +1493,8 @@ fn restore_var(name: &str, value: Option<String>) {
 
     #[cfg(unix)]
     fn offered(role: Option<&str>, task: Option<&str>) -> Vec<String> {
+        // The guard reads the environment once; this test sets a session's variables in it.
+        crate::machine::refuse_real_home();
         let _guard = session_env_lock();
         let previous = (std::env::var(ROLE_ENV).ok(), std::env::var(TASK_ENV).ok(), std::env::var(TAB_ENV).ok());
         std::env::remove_var(TAB_ENV);
@@ -1455,6 +1523,8 @@ fn restore_var(name: &str, value: Option<String>) {
     #[cfg(unix)]
     fn over_socket(task: Option<&str>, requests: &[Value], answers: Vec<Result<String, String>>) -> (Vec<Value>, Vec<String>) {
         use std::io::{BufRead, Write};
+        // The guard reads the environment once; this test sets a session's variables in it.
+        crate::machine::refuse_real_home();
         let _guard = session_env_lock();
         let dir = std::env::temp_dir().join(format!("pinned-mcp-convex-{}-{}", std::process::id(), task.unwrap_or("none")));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1616,6 +1686,41 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("plan_fix", json!({ "step": "s2", "steps": [{ "name": "Fix the test" }] })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"plan_fix","step":"s2","steps":[{"name":"Fix the test","what":null}]}}"#.into()));
         assert_eq!(ask("plan_close", json!({ "plan": "p1", "reason": "The user dropped it." })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"plan_close","plan":"p1","reason":"The user dropped it."}}"#.into()));
         assert_eq!(ask("plan_step", json!({ "step": "s2", "state": "late" })), Err("plan_step: unknown variant `late`, expected one of `pending`, `running`, `waiting`, `done`, `failed`".into()));
+    }
+
+    #[test]
+    fn the_plan_tools_and_planstep_name_the_limits_of_plan_rs() {
+        use crate::plan::{MAX_FIXES_PER_STEP, MAX_LISTS, MAX_NAME, MAX_NOTE, MAX_PLANS_UNFINISHED, MAX_REASON, MAX_STEPS_IN_ALL, MAX_STEPS_PER_FIX, MAX_STEPS_PER_LIST, MAX_TITLE, MAX_WHAT};
+        let listed = tool_definitions(true, false, Seat::Captain);
+        let tools = listed.as_array().unwrap();
+        let tool = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap();
+        let about = |name: &str| tool(name)["description"].as_str().unwrap().to_owned();
+        let planstep = tool("delegate_task")["inputSchema"]["properties"]["planStep"]["description"].as_str().unwrap().to_owned();
+        let cases = [
+            ("plan_set", about("plan_set"), vec![
+                format!("{MAX_LISTS} lists"),
+                format!("{MAX_STEPS_PER_LIST} steps per list"),
+                format!("{MAX_STEPS_IN_ALL} steps in all"),
+                format!("up to {MAX_NAME} characters"),
+                format!("up to {MAX_WHAT}"),
+                format!("up to {MAX_TITLE}"),
+                format!("{MAX_PLANS_UNFINISHED} unfinished plans"),
+            ]),
+            ("plan_step", about("plan_step"), vec![format!("up to {MAX_NOTE} characters")]),
+            ("plan_fix", about("plan_fix"), vec![
+                format!("up to {MAX_STEPS_PER_FIX} steps"),
+                format!("at most {MAX_FIXES_PER_STEP} fixes per step"),
+                format!("up to {MAX_NAME} characters"),
+                format!("up to {MAX_WHAT}"),
+            ]),
+            ("plan_close", about("plan_close"), vec![format!("up to {MAX_REASON} characters")]),
+            ("delegate_task planStep", planstep, vec![format!("at most {MAX_FIXES_PER_STEP} fixes per step")]),
+        ];
+        for (name, text, limits) in cases {
+            for limit in limits {
+                assert!(text.contains(&limit), "{name} names `{limit}`: {text}");
+            }
+        }
     }
 
     #[test]

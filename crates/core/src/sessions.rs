@@ -37,6 +37,9 @@ pub struct Saved {
     /// The session of the tab that started this one, which nests it there again on restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by: Option<String>,
+    /// The tab is a read-only worker, which resumes with the same tools refused.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 /// What the harness types to a session that has work left.
@@ -48,6 +51,10 @@ impl Saved {
     /// held at one.
     pub fn reopen(&self, now: u64, provider: crate::accounts::Provider) -> (Vec<String>, Option<u64>) {
         let mut args = crate::delegate::resume_args(provider, &self.session);
+        // A read-only worker resumes with the same tools refused as when it started.
+        if self.read_only && provider == crate::accounts::Provider::Claude {
+            args.extend(crate::delegate::claude_read_only_args());
+        }
         let waiting = self.resume_at.filter(|&at| self.interrupted && at > now);
         if self.interrupted && waiting.is_none() && !(self.held && self.resume_at.is_some()) {
             args.push(CONTINUE_PROMPT.to_owned());
@@ -98,7 +105,7 @@ mod tests {
 
     #[test]
     fn interrupted_sessions_continue_once_no_limit_blocks_them() {
-        let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at, held: false, account: "claude".into(), model: None, permission_mode: None, cut_by_sleep: None, spawned_by: None };
+        let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at, held: false, account: "claude".into(), model: None, permission_mode: None, cut_by_sleep: None, spawned_by: None, read_only: false };
         let resumed = vec!["--resume".to_owned(), "s1".to_owned()];
         let continued = [resumed.clone(), vec![CONTINUE_PROMPT.to_owned()]].concat();
         let claude = crate::accounts::Provider::Claude;
@@ -114,13 +121,30 @@ mod tests {
     }
 
     #[test]
+    fn a_read_only_session_reopens_with_its_tools_still_refused() {
+        let saved = Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted: true, resume_at: None, held: false, account: "claude".into(), model: None, permission_mode: Some("dontAsk".into()), cut_by_sleep: None, spawned_by: None, read_only: true };
+        let expect = [vec!["--resume".to_owned(), "s1".to_owned()], crate::delegate::claude_read_only_args(), vec![CONTINUE_PROMPT.to_owned()]].concat();
+        assert_eq!(saved.reopen(100, crate::accounts::Provider::Claude), (expect, None), "the prompt follows the mode, so no tool list takes it in");
+        let codex = saved.reopen(100, crate::accounts::Provider::Codex).0;
+        assert_eq!(codex, ["resume", "s1", CONTINUE_PROMPT], "Codex has no such flags");
+    }
+
+    #[test]
+    fn a_session_saved_without_read_only_loads_as_not_read_only() {
+        let old = r#"[{ "cwd": "/repo", "session": "s1", "env": [], "permission_mode": "dontAsk" }]"#;
+        let loaded: Vec<Saved> = serde_json::from_str(old).unwrap();
+        assert!(!loaded[0].read_only);
+        assert_eq!(loaded[0].reopen(100, crate::accounts::Provider::Claude), (vec!["--resume".to_owned(), "s1".to_owned()], None));
+    }
+
+    #[test]
     #[cfg(unix)]
     fn a_failed_save_keeps_the_previous_sessions() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("pinned-sessions-atomic-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("sessions.json");
-        let kept = |session: &str| Saved { cwd: "/repo".into(), session: session.into(), env: vec![], bypass: false, interrupted: true, resume_at: None, held: false, account: "claude".into(), model: None, permission_mode: None, cut_by_sleep: None, spawned_by: None };
+        let kept = |session: &str| Saved { cwd: "/repo".into(), session: session.into(), env: vec![], bypass: false, interrupted: true, resume_at: None, held: false, account: "claude".into(), model: None, permission_mode: None, cut_by_sleep: None, spawned_by: None, read_only: false };
         save(&file, &[kept("s1")]).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
         assert!(save(&file, &[kept("s2")]).is_err(), "a read-only drive fails the write");
@@ -145,6 +169,7 @@ mod tests {
             model: Some("claude-opus-4-8".into()),
             permission_mode: Some("plan".into()),
             spawned_by: Some("4f0e2b8a-parent".into()),
+            read_only: true,
         }];
         save(&file, &saved).unwrap();
         assert_eq!(load(&file), saved);

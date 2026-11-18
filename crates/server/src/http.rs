@@ -1023,6 +1023,13 @@ fn client_frame(server: &Arc<Server>, account: &Arc<Account>, client: u64, text:
                 account.watch_threads(client, &machine, tabs);
                 account.to_client(client, &ToClient::Reply(Reply::new(id, Ok(Value::Null))));
             }
+            // A box backs off a push the hub refuses as it does at the account's size limit, which
+            // is no notice for the account's people: the hub answers that the box has none. The box
+            // is asked about, not the connection this asks on, so its own live connection's flag
+            // (`Account::dedicated`) is the one `is_box` reads.
+            Call::SyncLimit if crate::box_gate::is_box(false, account, &machine) => {
+                account.to_client(client, &ToClient::Reply(Reply::new(id, Ok(Value::Null))));
+            }
             Call::UpdateSelf if account.dedicated(&machine) => {
                 let status = UpdateStatus::Cannot { reason: "an Upstash box is replaced by the hub".into() };
                 account.note_update(&machine, Some(status.clone()));
@@ -1118,7 +1125,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
                 break;
             }
             frame = tokio::time::timeout(MACHINE_SILENT, stream.next()) => match frame {
-                Ok(Some(Ok(Message::Text(text)))) => machine_frame(&hub, &account, &machine, socket_id, team, &text),
+                Ok(Some(Ok(Message::Text(text)))) => machine_frame(&hub, &account, &machine, socket_id, team, row.dedicated, &text),
                 Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) | Err(_) => break,
                 Ok(Some(Ok(_))) => {}
             },
@@ -1139,7 +1146,8 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
     eprintln!("pinned-server: machine {machine} of account {} disconnected", account.id);
 }
 
-fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: u64, team: bool, text: &str) {
+/// `boxed`: whether the machine was a box when this connection signed in (`db::machine_connected`).
+fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: u64, team: bool, boxed: bool, text: &str) {
     let parsed = serde_json::from_str::<MachineFrame>(text);
     crate::traffic::received(parsed.as_ref().map_or(crate::traffic::UNREADABLE, crate::traffic::Labeled::label), text.len());
     match parsed {
@@ -1207,11 +1215,11 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 // Its sessions act as the user only through `surface`, which checks, audits and holds
                 // each act, and never decide a confirmation.
                 let surfaced = match call {
-                    call if team => return forward_team_box(hub, account, machine, socket, id, call).await,
-                    HubCall::Act { act } => crate::surface::act(&hub, &account, &machine, act).await,
+                    call if team => return forward_team_box(hub, account, machine, socket, boxed, id, call).await,
+                    HubCall::Act { act } => crate::surface::act(&hub, &account, &machine, boxed, act).await,
                     HubCall::Confirmations => hub.hub_call(&account, HubCall::Confirmations).await,
                     HubCall::DecideConfirmation { .. } => Err("only the account's owner decides, in the app".to_owned()),
-                    call => return forward(hub, account, machine, socket, id, call).await,
+                    call => return forward(hub, account, machine, socket, boxed, id, call).await,
                 };
                 if let Err(e) = &surfaced {
                     eprintln!("pinned-server: machine {machine}'s agent act failed: {e}");
@@ -1235,7 +1243,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
 /// the hub bound to this machine (`teams::db::bound_runs`): the tabs a box reports vouch for
 /// nothing. No agent act, import, tastes, sync, sharing, delegation, MCP secrets or global
 /// orchestrator.
-async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, id: u64, call: HubCall) {
+async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, boxed: bool, id: u64, call: HubCall) {
     let allowed = matches!(
         call,
         HubCall::Stage { .. }
@@ -1255,12 +1263,12 @@ async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String,
     // A run's callback is held to the run the hub bound to this machine (`team_runs.box`), never
     // to the tabs the box reports: a box vouches for nothing of its own.
     let Some((connector, subject)) = run_work(&call) else {
-        return forward(hub, account, machine, socket, id, call).await;
+        return forward(hub, account, machine, socket, boxed, id, call).await;
     };
     let refused = match crate::teams::db::bound_runs(&hub.db, account.id, &machine).await {
         Ok(runs) if runs.is_empty() => "this box has no live run of the team".to_owned(),
         Ok(runs) if runs.iter().any(|(workflow, bound)| *workflow == connector && bound.as_ref() == Some(&subject)) => {
-            return forward(hub, account, machine, socket, id, call).await;
+            return forward(hub, account, machine, socket, boxed, id, call).await;
         }
         Ok(_) => "this box's run is not of that workflow on that subject".to_owned(),
         Err(e) => e,
@@ -1284,7 +1292,15 @@ pub(crate) fn run_work(call: &HubCall) -> Option<(String, Subject)> {
 }
 
 /// A machine's hub call other than an agent's act: only the callbacks its sessions may pass on.
-async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, id: u64, call: HubCall) {
+/// A box may only pull the account's files (`box_gate`): it is held to that for the whole
+/// connection it signed in with as a box, even once its row is gone.
+async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, boxed: bool, id: u64, call: HubCall) {
+    if crate::box_gate::is_box(boxed, &account, &machine) {
+        if let Err(refused) = crate::box_gate::box_may_send(&call) {
+            eprintln!("pinned-server: box machine {machine} of account {} was refused {}", account.id, surface::cmd_of(&call));
+            return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, Err(refused))));
+        }
+    }
     if matches!(call, HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } | HubCall::RemoteAsked { .. } | HubCall::Place { .. }) {
         let result = crate::remote::serve(&hub, &account, &machine, call).await;
         if let Err(e) = &result {
@@ -1324,6 +1340,14 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         let result = crate::teams::machine_call(&hub, &account, &machine, op).await;
         if let Err(e) = &result {
             eprintln!("pinned-server: machine {machine}'s team call failed: {e}");
+        }
+        return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+    }
+    // A Captain or the global orchestrator proposes a worker profile for the user to take or drop.
+    if let HubCall::ProposeWorkerProfile { tab, profile } = call {
+        let result = hub.propose_worker_profile(&account, &machine, &tab, profile).await;
+        if let Err(e) = &result {
+            eprintln!("pinned-server: machine {machine}'s worker profile proposal was refused: {e}");
         }
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }

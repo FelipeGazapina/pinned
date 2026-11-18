@@ -148,3 +148,39 @@ impl Delegates {
             .collect()
     }
 }
+
+impl Delegates {
+    /// What the plans need of each task in `ids`, read now: how it stands, what its worker waits on, and what
+    /// its tree cost. An id no task holds is left out, so a plan reads its saved outcome for it.
+    pub fn plan_facts(&self, ids: &[String]) -> Vec<crate::plan::TaskFacts> {
+        let tasks = self.tasks.lock().unwrap();
+        ids.iter()
+            .filter_map(|id| {
+                let task = tasks.iter().find(|task| &task.id == id)?;
+                let rolled = rollup_of(&tasks, vec![task]);
+                let work = match task.state {
+                    WorkState::Working => crate::plan::Work::Working,
+                    WorkState::WaitingForChildren => crate::plan::Work::WaitingForChildren,
+                    WorkState::ResultAvailable => crate::plan::Work::ResultAvailable,
+                    WorkState::Failed => crate::plan::Work::Failed,
+                    WorkState::Cancelled => crate::plan::Work::Cancelled,
+                };
+                let review = match task.review.as_ref().map(|review| review.verdict) {
+                    None => crate::plan::Review::Unreviewed,
+                    Some(Verdict::Accepted) => crate::plan::Review::Accepted,
+                    Some(Verdict::Redone) => crate::plan::Review::Redone,
+                };
+                Some(crate::plan::TaskFacts {
+                    id: task.id.clone(),
+                    work,
+                    waits_on_user: task.run.user_wait.is_some() || task.remote.as_ref().is_some_and(|remote| remote.waiting.is_some()),
+                    review,
+                    failure: task.limit.clone().or_else(|| task.error.clone()),
+                    // A worker whose cost is unknown leaves the total short, so the tree has no cost to show.
+                    cost: (rolled.unknown == 0).then_some(rolled.total_usd),
+                    ended_at: task.ended,
+                })
+            })
+            .collect()
+    }
+}
