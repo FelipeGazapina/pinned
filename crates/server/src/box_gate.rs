@@ -247,6 +247,40 @@ mod tests {
         assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "extend_box", "machine": BOX, "extra_usd": 1.0 }))), machines, "only as a session's ask");
     }
 
+    /// The call an agent's act of `action` with `args` parses to, as the hub holds it to the gate.
+    fn acted(action: &str, args: serde_json::Value) -> Parsed {
+        pinned_core::surface::parse(pinned_core::surface::find(action).unwrap(), &args).unwrap()
+    }
+
+    #[test]
+    fn a_boxs_agent_may_not_save_an_mcp_server_import_one_save_a_connector_or_set_a_taste() {
+        let server = serde_json::json!({ "name": "ctx", "transport": { "type": "stdio", "command": "npx" } });
+        let connector = serde_json::json!({
+            "name": "Nightly", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
+            "folder": "/w/site", "model": "claude-sonnet-5-5", "effort": "medium", "permissionMode": "acceptEdits", "worktree": false, "instructions": "Check the build.",
+        });
+        let acts = [
+            (acted("save_mcp_server", serde_json::json!({ "server": server })), "a box may not change the account's MCP servers"),
+            (acted("import_mcp_server", serde_json::json!({ "machine": MAC, "account": "claude", "name": "linear" })), "a box may not change the account's MCP servers"),
+            (acted("save_connector", serde_json::json!({ "connector": connector })), "a box may not change the account's workflows"),
+            (acted("set_taste", serde_json::json!({ "scope": { "kind": "orchestrator" }, "patch": {} })), "a box may not change the account's way of working"),
+        ];
+        for (act, refused) in acts {
+            assert_eq!(box_may_act(BOX, &act, true, false), Err(refused.to_owned()), "on the box itself");
+            assert_eq!(box_may_act(BOX, &act, false, false), Err(refused.to_owned()), "on another machine");
+        }
+    }
+
+    #[test]
+    fn a_boxs_node_act_on_a_persons_machine_is_refused_when_it_writes_and_passes_when_it_reads() {
+        let write = acted("make_folder", serde_json::json!({ "path": "/w/new" }));
+        let read = acted("list_projects", serde_json::Value::Null);
+        assert!(matches!((&write, &read), (Parsed::Node(_), Parsed::Node(_))));
+        assert_eq!(box_may_act(BOX, &write, false, false), Err("a box may not change the account's machines".to_owned()));
+        assert_eq!(box_may_act(BOX, &read, false, true), Ok(()));
+        assert_eq!(box_may_act(BOX, &write, true, false), Ok(()), "a write on the box itself is its own");
+    }
+
     #[test]
     fn a_box_acts_on_another_machine_only_to_read() {
         let node = Parsed::Node(Call::SyncLimit);
