@@ -2432,6 +2432,39 @@ mod tests {
     }
 
     #[test]
+    fn a_check_error_logs_when_its_kind_changes_and_every_30_minutes_while_it_lasts() {
+        let id = Uuid::from_u128(0x1234_5678_9abc_def0_1111_2222_3333_4444);
+        let log = |prev: &CheckLog, error: Option<&str>, now: i64| log_check(prev, id, &check_at("", error), now);
+        let starts = |lines: &[String], head: &str| lines.len() == 1 && lines[0].starts_with(head);
+        // Ten checks of one kind whose texts differ (a request id each) make one line.
+        let mut state = CheckLog::default();
+        let mut printed = vec![];
+        for n in 0..10 {
+            let (next, lines) = log(&state, Some(&format!("Linear answered 500: request req-{n:04}")), n * 60);
+            printed.extend(lines);
+            state = next;
+        }
+        assert!(starts(&printed, "pinned-server: check-error account=12345678 class=linear "), "{printed:?}");
+        // Another status of the same connector is another kind, and so is another connector.
+        let (state, lines) = log(&state, Some("Linear answered 503: request req-0010"), 600);
+        assert!(starts(&lines, "pinned-server: check-error account=12345678 class=linear "), "{lines:?}");
+        let (state, lines) = log(&state, Some("Slack answered 503"), 660);
+        assert!(starts(&lines, "pinned-server: check-error account=12345678 class=slack "), "{lines:?}");
+        // The same kind that lasts 31 minutes more prints once more, and not before.
+        let (state, lines) = log(&state, Some("Slack answered 503: retry after 7"), 660 + 29 * 60);
+        assert!(lines.is_empty(), "{lines:?}");
+        let (state, lines) = log(&state, Some("Slack answered 503: retry after 9"), 660 + 31 * 60);
+        assert!(starts(&lines, "pinned-server: check-error account=12345678 class=slack "), "{lines:?}");
+        let (state, lines) = log(&state, Some("Slack answered 503: retry after 3"), 660 + 32 * 60);
+        assert!(lines.is_empty(), "{lines:?}");
+        // The recovery prints once, counted from the first failure.
+        let (state, lines) = log(&state, None, 660 + 33 * 60);
+        assert_eq!(lines, ["pinned-server: check-ok account=12345678 after_s=2640"]);
+        let (_, lines) = log(&state, None, 660 + 34 * 60);
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    #[test]
     fn check_ok_counts_from_the_first_failure() {
         let id = Uuid::from_u128(0x1234_5678_9abc_def0_1111_2222_3333_4444);
         let log = |prev: &CheckLog, error: Option<&str>, now: i64| log_check(prev, id, &check_at("", error), now);
