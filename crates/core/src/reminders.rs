@@ -159,7 +159,7 @@ pub fn permissions() -> Vec<String> {
 
 /// pinned's own tools that only read. A read-only session calls these without asking and is
 /// refused every other tool of `permissions`, which act.
-const READ_TOOLS: [&str; 22] = [
+const READ_TOOLS: [&str; 21] = [
     LIST_TOOL,
     CAPABILITIES_TOOL,
     STATUS_TOOL,
@@ -179,7 +179,6 @@ const READ_TOOLS: [&str; 22] = [
     "taste_get",
     "convex_tables",
     "convex_data",
-    "convex_query",
     "convex_run",
     "convex_logs",
 ];
@@ -1457,7 +1456,6 @@ fn restore_var(name: &str, value: Option<String>) {
                 "mcp__pinned__plan_close",
                 "mcp__pinned__convex_tables",
                 "mcp__pinned__convex_data",
-                "mcp__pinned__convex_query",
                 "mcp__pinned__convex_run",
                 "mcp__pinned__convex_logs",
             ]

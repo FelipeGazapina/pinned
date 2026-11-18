@@ -696,13 +696,12 @@ project is connected on every machine, and a folder without an origin cannot be 
 When a project's `.env.local` or `.env` names a deployment that is not connected, the Convex
 card and the project's threads offer to connect it.
 
-A session that pinned starts in a connected project gets five tools:
+A session that pinned starts in a connected project gets four tools:
 
 | Tool | What it does |
 |---|---|
 | `convex_tables` | Lists the table names. With `table`, shows one table's fields and indexes. |
 | `convex_data` | Reads documents of one table, 20 at a time and at most 100. |
-| `convex_query` | Runs a read-only JavaScript query. |
 | `convex_run` | Runs a deployed query function by path, such as `invoices:byNumber`. |
 | `convex_logs` | Shows recent function runs with their log lines and errors. |
 
