@@ -495,6 +495,30 @@ mod tests {
         assert_eq!(files, [longest.as_str(), "src/login.rs:7"]);
     }
 
+    #[test]
+    fn a_corrupt_board_file_is_set_aside_not_replaced() {
+        let t = team("corrupt");
+        noted(&t.m, &t.worker, "src/login.rs", "the token check moved");
+        let file = t.m.board_file(&t.root).unwrap();
+        let bytes = std::fs::read(&file).unwrap();
+        let truncated = &bytes[..bytes.len() / 2];
+        std::fs::write(&file, truncated).unwrap();
+        assert_eq!(t.m.board(&t.captain, Some(&t.root)).unwrap().notes, vec![], "a view reads the empty board");
+        assert_eq!(std::fs::read(&file).unwrap(), truncated, "and writes nothing");
+        noted(&t.m, &t.worker, "src/login.rs", "signup reads it too");
+        let aside: Vec<PathBuf> = std::fs::read_dir(file.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.file_name().unwrap().to_str().unwrap().starts_with(&format!("{}.json.corrupt-", t.root)))
+            .collect();
+        assert_eq!(aside.len(), 1, "{aside:?}");
+        let millis = aside[0].file_name().unwrap().to_str().unwrap().rsplit('-').next().unwrap().to_owned();
+        assert!(millis.parse::<u64>().is_ok_and(|ms| ms > 1_700_000_000_000), "{aside:?}");
+        assert_eq!(std::fs::read(&aside[0]).unwrap(), truncated, "the old bytes survive");
+        let notes: Vec<String> = t.m.board(&t.captain, Some(&t.root)).unwrap().notes.into_iter().map(|n| n.text).collect();
+        assert_eq!(notes, ["signup reads it too"], "the new board holds the note");
+    }
+
     /// A second Captain (`cap-b`) in the same app, whose plan links one root task with one worker.
     fn foreign_captain(t: &Team) -> (String, String, String) {
         let project = t.dir.join("app");
