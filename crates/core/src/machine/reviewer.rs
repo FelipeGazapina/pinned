@@ -686,19 +686,40 @@ mod tests {
         }
 
         #[test]
-        fn a_full_project_holds_the_review() {
-            let t = team("full", Switch::On, 1, SONNET);
+        fn the_review_takes_the_waiting_authors_place() {
+            // One worker at once: the author waits on its review, so the review runs in its place.
+            let t = team("one", Switch::On, 1, SONNET);
             t.change(CHANGED, json!({ "findings": [a1("unwrap on the input")] }));
             t.end_turn();
-            t.no_reviewer_started();
-            assert_eq!(t.state(), "result_available", "a held review held the worker's end");
-            assert!(t.rounds().is_empty());
+            t.reviewer();
+            let rounds = t.rounds();
+            assert_eq!((rounds.len(), serde_json::to_value(rounds[0].state).unwrap()), (1, json!("limit")), "{rounds:?}");
+        }
 
-            let room = team("room", Switch::On, 2, SONNET);
-            room.change(CHANGED, json!({ "findings": [a1("unwrap on the input")] }));
-            room.end_turn();
-            room.reviewer();
-            assert_eq!(room.rounds().len(), 1, "with a place left the review runs");
+        #[test]
+        fn a_project_full_of_other_workers_writes_not_reviewed() {
+            let t = team("full", Switch::On, 1, SONNET);
+            let account = t.m.delegates.get(&t.task).unwrap().account;
+            let other = crate::delegate::NewTask {
+                parent: crate::delegate::Parent::Task("task-other".into()),
+                tool: None,
+                title: "Another worker".into(),
+                account,
+                provider: Provider::Claude,
+                model: Some(SONNET.into()),
+                cwd: t.app.clone(),
+                mode: crate::delegate::Mode::Async,
+                access: crate::delegate::Access::Auto,
+                isolated: false,
+                caller_key: "other".into(),
+                client_request_id: None,
+                role: None,
+            };
+            t.m.delegates.begin(other);
+            t.change(CHANGED, json!({ "findings": [a1("unwrap on the input")] }));
+            t.end_turn();
+            assert_eq!(t.not_reviewed(), "the project was at its workers-at-once limit");
+            assert!(!t.claude.with_extension("review").exists(), "a reviewer ran past the limit");
         }
 
         #[test]
