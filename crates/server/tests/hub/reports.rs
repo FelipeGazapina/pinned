@@ -1073,7 +1073,7 @@ fn two_hubs_on_one_database_count_the_sixth_send_under_the_accounts_lock() {
     let fake = Fake::start();
     let first = reporting("reports_two_hubs", Some(&fake));
     let token = signed_up(&first, "ana@example.test");
-    let mut second = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database: first.database.clone(), dir: first.dir.clone(), boxes: first.boxes.clone(), policy: Policy::default(), learning: None, signup: Signup::Open, access: Default::default(), team_policy: Default::default(), reports: Some(fake.config()) };
+    let mut second = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database: first.database.clone(), dir: first.dir.clone(), boxes: first.boxes.clone(), policy: Policy::default(), learning: None, signup: Signup::Open, access: Default::default(), team_policy: Default::default(), reports: Some(fake.config()), sync_limits: Default::default() };
     second.serve("127.0.0.1:0");
     let mut ana = Client::connect(&first.url, &token);
     for n in 0..4 {

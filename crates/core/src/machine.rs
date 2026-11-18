@@ -1072,8 +1072,8 @@ pub struct Machine {
     sleeps: Mutex<sleep::Watch>,
     sync_file: Option<PathBuf>,
     sync_loop_holds_state: AtomicBool,
-    /// Set while the sync loop's last push was refused at the account's size limit, and no push has been taken since.
-    sync_limited: AtomicBool,
+    /// The hub's latest refusal at a sync limit, while the sync loop's last push stays refused and no push has been taken since.
+    sync_limited: Mutex<Option<String>>,
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
     accounts: Accounts,
@@ -1303,7 +1303,7 @@ impl Machine {
             sleeps: Mutex::new(sleep::Watch::with_window(dir.as_ref().and_then(|d| sleep::load(&d.join("sleep.json"))))),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
             sync_loop_holds_state: AtomicBool::new(false),
-            sync_limited: AtomicBool::new(false),
+            sync_limited: Mutex::new(None),
             projects: Mutex::new(projects),
             projects_file,
             accounts,
@@ -4510,12 +4510,13 @@ impl Machine {
         self.sync_loop_holds_state.store(held, Ordering::SeqCst);
     }
 
-    pub(crate) fn hold_sync_limit(&self, limited: bool) {
-        self.sync_limited.store(limited, Ordering::SeqCst);
+    /// Holds the hub's latest limit refusal while a push stays refused, `None` once none is.
+    pub(crate) fn hold_sync_limit(&self, refusal: Option<String>) {
+        *self.sync_limited.lock().unwrap() = refusal;
     }
 
     fn sync_limit(&self) -> Option<String> {
-        self.sync_limited.load(Ordering::SeqCst).then(|| sync::LIMIT_NOTICE.to_owned())
+        self.sync_limited.lock().unwrap().as_deref().map(sync::limit_notice)
     }
 
     fn sync_stopped(&self) -> Option<String> {
