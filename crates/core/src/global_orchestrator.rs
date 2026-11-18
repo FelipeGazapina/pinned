@@ -801,7 +801,7 @@ fn session(machine: &MachineSnapshot, tab: &TabView, now: u64) -> Session {
     };
     let role = match tab.role {
         Some(Role::Orchestrator) => SessionRole::Captain,
-        Some(Role::Worker) => SessionRole::Worker,
+        Some(Role::Worker | Role::Reviewer) => SessionRole::Worker,
         None => SessionRole::Thread,
     };
     let captain = (role == SessionRole::Worker).then(|| owning_captain(machine.tabs, tab).or_else(|| captain_tab(machine.tabs, &project.path)).map(|c| c.id.clone())).flatten();
@@ -880,6 +880,8 @@ Quando uma ferramenta falha porque uma máquina ou o hub precisa atualizar, ou p
 
 Quando uma resposta termina com uma pergunta fechada ao usuário, a última linha traz só as opções, separadas por \" | \", assim:
 Opções: Sim | Ainda não
+
+Antes de terminar uma resposta com perguntas para o usuário, carregue a skill pendencias.
 
 Guarde fatos duráveis sobre o usuário e os projetos do usuário (preferências, decisões, qual máquina tem o quê) com memory_save, procure com memory_search antes de decidir e apague os errados com memory_forget.
 
@@ -1406,6 +1408,17 @@ mod tests {
         assert!(!text.to_lowercase().contains("felipe"), "the prompt names the hub's first owner");
         assert!(text.contains("usuário"));
         assert!(text.contains("the user"));
+    }
+
+    #[test]
+    fn the_orchestrator_prompt_loads_the_pendencias_skill_before_asking() {
+        let text = prompt("Comandante", "mini");
+        let sentence = "Antes de terminar uma resposta com perguntas para o usuário, carregue a skill pendencias.";
+        let at = text.find(sentence).expect("the prompt does not load the pendencias skill");
+        let options = text.find("Opções: Sim | Ainda não").unwrap();
+        let memory = text.find("Guarde fatos duráveis").unwrap();
+        assert!(options < at && at < memory, "the pendencias sentence is not between the options line and the memory paragraph");
+        assert!(text.contains(&format!("Opções: Sim | Ainda não\n\n{sentence}\n\nGuarde fatos")));
     }
 
     #[test]

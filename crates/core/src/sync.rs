@@ -256,15 +256,12 @@ pub struct Synced {
 /// What became of the files a sync had to send.
 #[derive(Debug, Default, PartialEq)]
 pub enum Push {
-    /// The hub took them all, or there were none.
+    /// The hub refused nothing this sync sent; a shrinking sync may have kept files back.
     #[default]
     Done,
-    /// Not sent: they are the same files as the `hold` the caller passed.
-    Held,
     /// The hub refused a batch, so it and the ones after it wait for a later sync. Their agreed
-    /// baseline stays as it was, and the sync still pulled. `sending` names the files the sync had
-    /// to send; passed back as `hold`, it keeps the next sync from sending them again unchanged.
-    Refused { error: String, sending: u64 },
+    /// baseline stays as it was, and the sync still pulled, but not over a file changed here.
+    Refused { error: String },
 }
 
 /// Claude Code's folder for a project's sessions and memory in `claude_home`: the path with every
@@ -276,12 +273,19 @@ pub fn claude_dir(claude_home: &Path, checkout: &Path) -> PathBuf {
 
 /// Brings one checkout and the hub to the same files.
 pub fn sync(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemTime) -> Result<Synced, String> {
-    sync_with(hub, state, checkout, now, None)
+    sync_checkout(hub, state, checkout, now, false)
 }
 
-/// Like `sync`, but sends nothing while the files to send are still those of `hold`, the
-/// `sending` of a refused push. It lists and pulls all the same.
-pub fn sync_with(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemTime, hold: Option<u64>) -> Result<Synced, String> {
+/// Like `sync`, at the account's limit: sends only the files that do not grow the copy the hub
+/// holds (deletions, and files no bigger than theirs), keeps every other file for a later sync the
+/// hub takes, and sends no history, which grows with every turn. It lists and pulls all the same,
+/// except that a file changed here, or deleted here, is not pulled over: the files kept back are
+/// this machine's only copy of the change.
+pub fn sync_shrinking(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemTime) -> Result<Synced, String> {
+    sync_checkout(hub, state, checkout, now, true)
+}
+
+fn sync_checkout(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemTime, shrinking: bool) -> Result<Synced, String> {
     let roots = Roots::new(checkout);
     let key = &checkout.project.key;
     let mut local: BTreeMap<String, (String, u64)> = BTreeMap::new();
@@ -303,7 +307,7 @@ pub fn sync_with(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: Sy
             state.flush()?;
         }
     }
-    let synced = exchange(hub, state, key, &agreed_key, &mut agreed, &local, &|path| roots.local(path), now, true, hold)?;
+    let synced = exchange(hub, state, key, &agreed_key, &mut agreed, &local, &|path| roots.local(path), now, true, shrinking)?;
     state.keep_agreed(agreed_key, agreed);
     Ok(synced)
 }
@@ -318,7 +322,7 @@ fn exchange(
     resolve: &dyn Fn(&str) -> Option<PathBuf>,
     now: SystemTime,
     sessions: bool,
-    hold: Option<u64>,
+    shrinking: bool,
 ) -> Result<Synced, String> {
     let remote: BTreeMap<String, Entry> = hub.list(key)?.into_iter().map(|e| (e.path.clone(), e)).collect();
     let paths: BTreeSet<String> = local.keys().chain(remote.keys()).chain(agreed.keys()).filter(|p| resolve(p).is_some()).cloned().collect();
@@ -379,31 +383,24 @@ fn exchange(
         hub.mark_executable(key, repairs)?;
     }
     // Files to pull that this machine changed since it last agreed with the hub: changed here, or
-    // deleted here. While the hub has not taken this machine's push, they are this machine's only
-    // copy of a change, so the pull leaves them alone until a push is taken.
+    // deleted here. While the hub has not taken this machine's push, or while a shrinking sync
+    // keeps files back, they are this machine's only copy of a change, so the pull leaves them
+    // alone until a push is taken.
     let changed_here: BTreeSet<String> = pull.iter().filter(|path| local.get(*path).map(|(sha, _)| sha) != agreed.get(*path)).cloned().collect();
     let mut synced = Synced::default();
-    // `local` is what this machine has to send: a merged history is written here only once the hub
-    // took it, so turns that came only from the hub never change `sending`.
-    // The set of files to send, whichever list each is in: a history that moves between `push` and
-    // `merge` as the hub's copy changes is still the same file to send.
-    let sending = fingerprint(push.iter().chain(&merge).collect::<BTreeSet<_>>().into_iter(), local);
-    // A `hold` is the `sending` of a refused batch, so it never names an empty set of files.
-    let held = hold == Some(sending);
     // The history to send once the other files are: with the sha of the hub's copy listed when
     // only this machine changed it, with none when the hub's copy has to be merged in first.
     let mut history: Option<(String, Option<String>)> = None;
-    if held {
-        push.clear();
-        synced.push = Push::Held;
-    } else {
-        if let Some(at) = push.iter().position(|path| sessions && path.as_str() == HISTORY && resolve(path).is_some_and(|f| f.is_file())) {
-            let listed = remote.get(HISTORY).map_or(String::new(), |e| e.sha.clone());
-            history = Some((push.remove(at), Some(listed)));
-        }
-        if let Some(path) = merge.pop() {
-            history = Some((path, None));
-        }
+    if let Some(at) = push.iter().position(|path| sessions && path.as_str() == HISTORY && resolve(path).is_some_and(|f| f.is_file())) {
+        let listed = remote.get(HISTORY).map_or(String::new(), |e| e.sha.clone());
+        history = Some((push.remove(at), Some(listed)));
+    }
+    if let Some(path) = merge.pop() {
+        history = Some((path, None));
+    }
+    // At the account's limit no history goes: it grows with every turn, so it waits for a probe.
+    if shrinking {
+        history = None;
     }
 
     // Deletions go first, in batches of their own: they never grow the account, so a hub at its
@@ -431,6 +428,11 @@ fn exchange(
                     },
                 },
                 Some(target) => {
+                    // At the limit a file the hub holds no copy of grows it whatever it holds, so
+                    // it waits without being read and packed again each cycle.
+                    if shrinking && remote.get(&path).map_or(0, |e| e.size) == 0 {
+                        continue;
+                    }
                     let Some((sha, modified)) = state.hash(&target) else { continue };
                     let bytes = std::fs::read(&target).map_err(|e| e.to_string())?;
                     let data = pack(&bytes);
@@ -451,20 +453,25 @@ fn exchange(
                     }
                 }
             };
+            // At the limit a file that would grow the copy the hub holds waits for a probe; a deletion
+            // grows nothing, and is sent.
+            if shrinking && file.entry.size > remote.get(&path).map_or(0, |e| e.size) {
+                continue;
+            }
             size += file.entry.size;
             pending.push((file.entry.path.clone(), file.data.as_ref().map(|_| file.entry.sha.clone())));
             batch.push(file);
             if size >= BATCH {
-                send(hub, state, key, agreed_key, agreed, &mut synced, sending, std::mem::take(&mut batch), std::mem::take(&mut pending))?;
+                send(hub, state, key, agreed_key, agreed, &mut synced, std::mem::take(&mut batch), std::mem::take(&mut pending))?;
                 size = 0;
             }
         }
         if !batch.is_empty() && synced.push == Push::Done {
-            send(hub, state, key, agreed_key, agreed, &mut synced, sending, batch, pending)?;
+            send(hub, state, key, agreed_key, agreed, &mut synced, batch, pending)?;
         }
     }
     if let Some((path, listed)) = history.filter(|_| synced.push == Push::Done) {
-        send_history(hub, state, key, agreed_key, agreed, &mut synced, sending, &path, listed, resolve, now)?;
+        send_history(hub, state, key, agreed_key, agreed, &mut synced, &path, listed, resolve, now)?;
     }
 
     let mut wanted: Vec<String> = vec![];
@@ -493,7 +500,7 @@ fn exchange(
         result.and(committed)
     };
     for path in pull {
-        if synced.push != Push::Done && changed_here.contains(&path) {
+        if (shrinking || synced.push != Push::Done) && changed_here.contains(&path) {
             continue;
         }
         if !remote.contains_key(&path) {
@@ -524,7 +531,6 @@ fn send(
     agreed_key: &str,
     agreed: &mut BTreeMap<String, String>,
     synced: &mut Synced,
-    sending: u64,
     batch: Vec<File>,
     pending: Vec<(String, Option<String>)>,
 ) -> Result<(), String> {
@@ -535,7 +541,7 @@ fn send(
             Ok(())
         }
         Err(error) if error.starts_with(LIMIT_REFUSAL) => {
-            synced.push = Push::Refused { error, sending };
+            synced.push = Push::Refused { error };
             Ok(())
         }
         Err(e) => Err(e),
@@ -555,7 +561,6 @@ fn send_history(
     agreed_key: &str,
     agreed: &mut BTreeMap<String, String>,
     synced: &mut Synced,
-    sending: u64,
     path: &str,
     mut listed: Option<String>,
     resolve: &dyn Fn(&str) -> Option<PathBuf>,
@@ -604,24 +609,13 @@ fn send_history(
             }
             Err(error) if error.starts_with(STALE_REFUSAL) => continue,
             Err(error) if error.starts_with(LIMIT_REFUSAL) => {
-                synced.push = Push::Refused { error, sending };
+                synced.push = Push::Refused { error };
                 return Ok(());
             }
             Err(e) => return Err(e),
         }
     }
     Ok(())
-}
-
-/// Names the files a sync has to send by their paths and their contents here.
-fn fingerprint<'a>(paths: impl Iterator<Item = &'a String>, local: &BTreeMap<String, (String, u64)>) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for path in paths {
-        path.hash(&mut hasher);
-        local.get(path).map(|(sha, _)| sha).hash(&mut hasher);
-    }
-    hasher.finish()
 }
 
 fn skill_file(key: &str, path: &str) -> bool {
@@ -696,11 +690,27 @@ pub struct PluginShare {
     pub dir: PathBuf,
 }
 
-/// How the hub's refusal of a push past the account's limit begins, from 0.18.5 on.
+/// How the hub's refusal of a push past a sync limit begins: an account's limit, from 0.18.5 on,
+/// or the space the whole hub has left, from 0.18.7 on. Released machines match this prefix alone.
+///
+/// A second contract: the text after the prefix up to the first ';' is the tail the app shows
+/// (`limit_notice`). A tail that ends in " MB" names the account's limit ("1024 MB"); any other
+/// tail ("the space the hub has left") says the hub is out of space.
 pub const LIMIT_REFUSAL: &str = "the account's synced projects would pass ";
 
-/// What the app shows while the hub's limit refuses a push. Sync resumes once a push is taken.
-pub const LIMIT_NOTICE: &str = "Sync stopped: your synced projects would pass 1024 MB. Nothing was lost; this machine keeps everything.";
+/// What the app shows while the hub is out of space for synced projects, or no refusal says more.
+pub const HUB_FULL_NOTICE: &str = "Sync paused: the hub is out of space for synced projects. Nothing was lost; this machine keeps everything.";
+
+/// What the app shows for the hub's latest limit refusal, `refusal`, while it holds. Sync resumes
+/// once a push is taken.
+pub fn limit_notice(refusal: &str) -> String {
+    let tail = refusal.strip_prefix(LIMIT_REFUSAL).and_then(|rest| rest.split(';').next()).unwrap_or("");
+    if tail.ends_with(" MB") {
+        format!("Sync stopped: your synced projects would pass {tail}. Nothing was lost; this machine keeps everything.")
+    } else {
+        HUB_FULL_NOTICE.to_owned()
+    }
+}
 
 /// The hub's refusal of a history whose `base` is no longer the hub's copy, from 0.18.7 on.
 pub const STALE_REFUSAL: &str = "the hub's copy of the history changed since this machine merged it";
@@ -735,11 +745,15 @@ pub fn plugin_dirs(claude_home: &Path, dir: &Path) -> Vec<PathBuf> {
 /// Claude Code has no flag for a second skills directory.
 /// A user skill this home already has, and has not synced before, stays when the hub holds a different copy.
 pub fn sync_plugins(hub: &impl Hub, state: &mut State, share: &PluginShare, now: SystemTime) -> Result<Synced, String> {
-    sync_plugins_with(hub, state, share, now, None)
+    sync_plugin_share(hub, state, share, now, false)
 }
 
-/// Like `sync_plugins`, holding the push back the way `sync_with` does.
-pub fn sync_plugins_with(hub: &impl Hub, state: &mut State, share: &PluginShare, now: SystemTime, hold: Option<u64>) -> Result<Synced, String> {
+/// Like `sync_shrinking`, for a plugin share.
+pub fn sync_plugins_shrinking(hub: &impl Hub, state: &mut State, share: &PluginShare, now: SystemTime) -> Result<Synced, String> {
+    sync_plugin_share(hub, state, share, now, true)
+}
+
+fn sync_plugin_share(hub: &impl Hub, state: &mut State, share: &PluginShare, now: SystemTime, shrinking: bool) -> Result<Synced, String> {
     publish(share)?;
     let mut local = BTreeMap::new();
     for (path, file) in plugin_files(share) {
@@ -750,7 +764,7 @@ pub fn sync_plugins_with(hub: &impl Hub, state: &mut State, share: &PluginShare,
     let agreed_key = format!("{PLUGINS_KEY} {}", share.claude_home.display());
     let mut agreed = state.agreed.get(&agreed_key).cloned().unwrap_or_default();
     let keep = conflicting_user_skills(&local, &agreed, &hub.list(PLUGINS_KEY)?);
-    let synced = exchange(hub, state, PLUGINS_KEY, &agreed_key, &mut agreed, &local, &|path| if keep.contains(path) { None } else { plugin_local(share, path) }, now, false, hold)?;
+    let synced = exchange(hub, state, PLUGINS_KEY, &agreed_key, &mut agreed, &local, &|path| if keep.contains(path) { None } else { plugin_local(share, path) }, now, false, shrinking)?;
     state.keep_agreed(agreed_key, agreed);
     Ok(synced)
 }
@@ -1207,6 +1221,19 @@ fn millis(t: SystemTime) -> u64 {
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn the_limit_notice_names_the_account_limit_or_says_the_hub_is_out_of_space() {
+        let stopped = "Sync stopped: your synced projects would pass 1024 MB. Nothing was lost; this machine keeps everything.";
+        let paused = "Sync paused: the hub is out of space for synced projects. Nothing was lost; this machine keeps everything.";
+        assert_eq!(limit_notice("the account's synced projects would pass 1024 MB; nothing is deleted, the push is refused"), stopped);
+        assert_eq!(
+            limit_notice("the account's synced projects would pass 2048 MB; nothing is deleted, the push is refused"),
+            "Sync stopped: your synced projects would pass 2048 MB. Nothing was lost; this machine keeps everything."
+        );
+        assert_eq!(limit_notice("the account's synced projects would pass the space the hub has left; nothing is deleted, the push is refused"), paused);
+        assert_eq!(limit_notice(""), paused, "no text says the hub is out of space");
+    }
 
     #[derive(Default)]
     struct MemHub(RefCell<BTreeMap<String, File>>);
@@ -3165,6 +3192,31 @@ mod tests {
         format!("claude/memory/{name}.md")
     }
 
+    /// The hub refuses every push of a box with a refusal that reads as the size limit, so a box's
+    /// node backs off its push and still pulls the account's files in the same cycle.
+    #[test]
+    fn a_box_whose_push_the_hub_refuses_still_pulls_the_accounts_skill_in_the_same_sync() {
+        let root = root("box-refused");
+        let hub = QuotaHub::new(u64::MAX);
+        let (mac_home, box_home) = (root.join("mac"), root.join("box"));
+        put(&mac_home.join(".claude/skills/ship/SKILL.md"), "---\nname: ship\ndescription: Ship the branch\n---\n");
+        let (mac, boxed) = (
+            PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") },
+            PluginShare { claude_home: box_home.join(".claude"), dir: root.join("box-synced") },
+        );
+        sync_plugins(&hub, &mut State::default(), &mac, SystemTime::now()).unwrap();
+        put(&box_home.join(".claude/skills/local/SKILL.md"), "---\nname: local\n---\n");
+        let refusal = "the account's synced projects would pass 0 MB from a box: a box only pulls the account's files";
+        *hub.refuse.borrow_mut() = Some(refusal.to_owned());
+
+        let done = sync_plugins(&hub, &mut State::default(), &boxed, SystemTime::now()).unwrap();
+        assert!(matches!(&done.push, Push::Refused { error, .. } if error == refusal), "{:?}", done.push);
+        assert_eq!(done.pulled, vec!["user-skills/ship/SKILL.md".to_owned()]);
+        assert_eq!(std::fs::read_to_string(box_home.join(".claude/skills/ship/SKILL.md")).unwrap(), "---\nname: ship\ndescription: Ship the branch\n---\n");
+        assert!(!hub.inner.0.borrow().contains_key("user-skills/local/SKILL.md"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn deletions_reach_the_hub_first_in_a_batch_of_their_own_and_the_same_files_are_sent() {
         let root = root("deletions-first");
@@ -3394,8 +3446,8 @@ mod tests {
     }
 
     #[test]
-    fn a_held_cycle_leaves_this_machines_unsent_change_alone() {
-        let root = root("held-keeps-change");
+    fn a_shrinking_cycle_leaves_this_machines_unsent_change_alone_for_the_whole_hold() {
+        let root = root("shrinking-keeps-change");
         let hub = QuotaHub::new(u64::MAX);
         let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
         put(&mac.claude("memory/MEMORY.md"), "both machines' notes");
@@ -3410,15 +3462,90 @@ mod tests {
         assert_eq!(sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap().pushed, vec![memory("MEMORY")]);
         hub.limit.set(hub.used());
         let refused = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap().push;
-        let Push::Refused { sending, .. } = refused else { panic!("the first cycle is refused, got {refused:?}") };
+        assert!(matches!(refused, Push::Refused { .. }), "the first cycle is refused, got {refused:?}");
         assert_eq!(std::fs::read_to_string(mac.claude("memory/MEMORY.md")).unwrap(), "mac's notes the hub never took");
-        hub.pushes.borrow_mut().clear();
 
-        let held = sync_with(&hub, &mut mac.state, &mac.checkout, SystemTime::now(), Some(sending)).unwrap();
-        assert_eq!((held.push, held.pushed, held.pulled), (Push::Held, vec![], vec![]));
-        assert_eq!(*hub.pushes.borrow(), Vec::<Vec<(String, bool)>>::new(), "a held cycle sends nothing");
-        assert_eq!(std::fs::read_to_string(mac.claude("memory/MEMORY.md")).unwrap(), "mac's notes the hub never took");
-        assert_eq!(mac.state.agreed[&agreed_key].get(&memory("MEMORY")), Some(&baseline), "the baseline stays under the hold");
+        for cycle in 0..3 {
+            hub.pushes.borrow_mut().clear();
+            let held = sync_shrinking(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+            assert_eq!((held.push, held.pushed, held.pulled), (Push::Done, vec![], vec![]), "cycle {cycle} of the hold");
+            assert_eq!(*hub.pushes.borrow(), Vec::<Vec<(String, bool)>>::new(), "a shrinking cycle that has only growth to send sends nothing");
+            assert_eq!(std::fs::read_to_string(mac.claude("memory/MEMORY.md")).unwrap(), "mac's notes the hub never took", "mini's newer copy is not pulled over mac's unsent edit, cycle {cycle}");
+            assert_eq!(mac.state.agreed[&agreed_key].get(&memory("MEMORY")), Some(&baseline), "the baseline stays under the hold");
+        }
+
+        hub.limit.set(u64::MAX);
+        let taken = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert_eq!((taken.push, taken.pushed), (Push::Done, vec![memory("big")]));
+        assert_eq!(std::fs::read_to_string(mac.claude("memory/MEMORY.md")).unwrap(), "mini's later notes", "once the push is taken the newer side wins, as on main");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_file_deleted_here_stays_gone_for_the_whole_hold() {
+        let root = root("deleted-for-the-hold");
+        let hub = QuotaHub::new(u64::MAX);
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        put(&mac.claude("memory/f.md"), "first");
+        sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap();
+        let agreed_key = format!("github.com/acme/app {}", mac.checkout.path.display());
+        let baseline = mac.state.agreed[&agreed_key][&memory("f")].clone();
+        put(&mini.claude("memory/f.md"), "second, from mini");
+        assert_eq!(sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap().pushed, vec![memory("f")]);
+        hub.limit.set(hub.used());
+        std::fs::remove_file(mac.claude("memory/f.md")).unwrap();
+        big(&mac);
+        let refused = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert!(matches!(refused.push, Push::Refused { .. }), "the first cycle is refused");
+
+        for cycle in 0..3 {
+            let held = sync_shrinking(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+            assert_eq!((held.push, held.pushed, held.pulled), (Push::Done, vec![], vec![]), "cycle {cycle} of the hold");
+            assert!(!mac.claude("memory/f.md").exists(), "mini's copy does not undo the deletion during the hold, cycle {cycle}");
+            assert_eq!(mac.state.agreed[&agreed_key].get(&memory("f")), Some(&baseline), "the baseline stays");
+        }
+
+        hub.limit.set(u64::MAX);
+        let taken = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert_eq!((taken.push, taken.pushed, taken.pulled), (Push::Done, vec![memory("big")], vec![memory("f")]));
+        assert_eq!(std::fs::read_to_string(mac.claude("memory/f.md")).unwrap(), "second, from mini", "once the push is taken the newer side wins, as on main");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_shrinking_plugin_sync_sends_only_what_does_not_grow_the_hub_and_keeps_an_unsent_edit() {
+        let root = root("shrinking-plugins");
+        let hub = MemHub::default();
+        let (mac_home, mini_home) = (root.join("mac"), root.join("mini"));
+        let mac = PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") };
+        let mini = PluginShare { claude_home: mini_home.join(".claude"), dir: root.join("mini-synced") };
+        let skill = |home: &Path, name: &str| home.join(".claude/skills").join(name).join("SKILL.md");
+        let (mut mac_state, mut mini_state) = (State::default(), State::default());
+        put(&skill(&mac_home, "ship"), "ship, as both machines had it");
+        put(&skill(&mac_home, "tidy"), "tidy, a first version that is long enough to shrink");
+        sync_plugins(&hub, &mut mac_state, &mac, SystemTime::now()).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, SystemTime::now()).unwrap();
+        put(&skill(&mini_home, "ship"), "ship, from mini");
+        assert_eq!(sync_plugins(&hub, &mut mini_state, &mini, SystemTime::now()).unwrap().pushed, vec!["user-skills/ship/SKILL.md"]);
+        put(&skill(&mac_home, "ship"), "ship, as mac wrote it, and longer than mini's copy");
+        age(&skill(&mac_home, "ship"), 60);
+        put(&skill(&mac_home, "tidy"), "tidy");
+        put(&skill(&mac_home, "new"), "a skill the hub has no copy of");
+
+        for cycle in 0..2 {
+            let held = sync_plugins_shrinking(&hub, &mut mac_state, &mac, SystemTime::now()).unwrap();
+            let sent: Vec<String> = if cycle == 0 { vec!["user-skills/tidy/SKILL.md".to_owned()] } else { vec![] };
+            assert_eq!((held.push, held.pushed, held.pulled), (Push::Done, sent, vec![]), "cycle {cycle} of the hold: only the shrunk skill goes, and nothing is pulled over the edit");
+            assert_eq!(std::fs::read_to_string(skill(&mac_home, "ship")).unwrap(), "ship, as mac wrote it, and longer than mini's copy", "cycle {cycle}");
+        }
+        let stored = texts(&hub);
+        assert_eq!(stored["user-skills/tidy/SKILL.md"], "tidy");
+        assert!(!stored.contains_key("user-skills/new/SKILL.md"), "a skill the hub has no copy of grows it, so it waits");
+
+        let taken = sync_plugins(&hub, &mut mac_state, &mac, SystemTime::now()).unwrap();
+        assert_eq!((taken.push, taken.pushed, taken.pulled), (Push::Done, vec!["user-skills/new/SKILL.md".to_owned()], vec!["user-skills/ship/SKILL.md".to_owned()]));
+        assert_eq!(std::fs::read_to_string(skill(&mac_home, "ship")).unwrap(), "ship, from mini", "once a push is taken the newer side wins, as on main");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3510,24 +3637,24 @@ mod tests {
     }
 
     #[test]
-    fn a_hold_survives_the_hub_first_history_turn_moving_the_history_between_send_lists() {
-        let root = root("hold-history-moves");
+    fn a_shrinking_cycle_sends_no_history_and_leaves_this_machines_turns_unmerged() {
+        let root = root("shrinking-history");
         let hub = QuotaHub::new(0);
         let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
         put(mac.checkout.history.as_ref().unwrap(), &turn("mac", 1));
         put(&mac.checkout.path.join(".claude/skills/greet/SKILL.md"), "say hello");
         let refused = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap().push;
-        let Push::Refused { sending, .. } = refused else { panic!("the first cycle is refused, got {refused:?}") };
+        assert!(matches!(refused, Push::Refused { .. }), "the first cycle is refused, got {refused:?}");
         hub.limit.set(u64::MAX);
         put(mini.checkout.history.as_ref().unwrap(), &turn("mini", 2));
         assert_eq!(sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap().pushed, vec![HISTORY]);
         hub.limit.set(hub.used());
         hub.pushes.borrow_mut().clear();
 
-        let held = sync_with(&hub, &mut mac.state, &mac.checkout, SystemTime::now(), Some(sending)).unwrap();
-        assert_eq!(held.push, Push::Held, "the same files to send are the same hold in whichever list each is");
-        assert_eq!(*hub.pushes.borrow(), Vec::<Vec<(String, bool)>>::new(), "a held cycle sends nothing");
-        assert_eq!(std::fs::read_to_string(mac.checkout.history.as_ref().unwrap()).unwrap(), turn("mac", 1));
+        let held = sync_shrinking(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert_eq!((held.push, held.pushed), (Push::Done, vec![]), "the history grows the hub's copy, so it waits for a probe");
+        assert_eq!(*hub.pushes.borrow(), Vec::<Vec<(String, bool)>>::new(), "a shrinking cycle sends nothing");
+        assert_eq!(std::fs::read_to_string(mac.checkout.history.as_ref().unwrap()).unwrap(), turn("mac", 1), "the hub's turns are not merged in while the hold lasts");
         let _ = std::fs::remove_dir_all(root);
     }
 }

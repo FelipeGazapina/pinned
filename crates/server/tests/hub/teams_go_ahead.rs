@@ -19,7 +19,7 @@ pub(super) const DEPLOY: &str = "vercel deploy --prod site-a";
 /// the hook's reason for denying it.
 pub(super) fn try_step(hub: &TestHub, tb: &TeamBox, command: &str) -> Option<String> {
     let payload = json!({ "tool_name": "Bash", "tool_input": { "command": command }, "cwd": "/work/site" }).to_string();
-    let env = HookEnv { team_box: true, project_dir: Some(PathBuf::from("/work/site")), home: PathBuf::from("/home/box") };
+    let env = HookEnv { team_box: true, project_dir: Some(PathBuf::from("/work/site")), home: PathBuf::from("/home/box"), claude_home: None };
     let out = on_node(hub, &tb.box_id, |node| team_hook::decide(&payload, &env, |m| node.link.as_ref().unwrap().forward(m)))?;
     let out: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");

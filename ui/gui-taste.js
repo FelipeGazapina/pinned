@@ -378,7 +378,7 @@ function tasteRender() {
     <div class="taste-scopes"><div class="taste-seg" role="group" aria-label="Whose way of working">${tabs}</div>${scope.kind === "project" ? `<span class="taste-quiet">Inherits from Captains (all).</span>` : ""}</div>
     <div class="taste-split"><div class="taste-controls">
       <section class="taste-section"><div class="taste-heading"><h2>Profile</h2><p>Sets every field below. Changing a field makes it Custom.</p></div><div class="taste-cards">${cards}${custom}</div></section>
-      ${tasteModelsHtml(t, catalog, names)}${tastePaceHtml(t)}${tasteLimitsHtml(t)}${tastePlacementHtml()}${tasteSkillsHtml(t)}${tasteContextHtml(t)}
+      ${tasteModelsHtml(t, catalog, names)}${tastePaceHtml(t)}${tasteLimitsHtml(t)}${tastePlacementHtml()}${tasteSkillsHtml(t)}${tasteContextHtml(t)}${tasteReviewerHtml(t)}${tasteProfilesHtml(t)}
     </div>${tastePreviewHtml(t)}</div>
     ${delegationSectionHtml()}
   </div></div>${tasteFootHtml()}`);
@@ -420,6 +420,8 @@ const TASTE_ACTS = {
     tasteRender();
   },
   save: () => tasteSave(),
+  ...TASTE_REVIEWER_ACTS,
+  ...TASTE_PROFILE_ACTS,
 };
 
 pageView.addEventListener("click", (e) => {

@@ -370,19 +370,7 @@ impl SessionFiles {
         if loads.is_empty() {
             return Ok(None);
         }
-        sweep_stale();
-        let mut builder = tempfile::Builder::new();
-        let prefix = format!("{DIR_PREFIX}{}-", std::process::id());
-        builder.prefix(&prefix);
-        #[cfg(unix)]
-        builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
-        let dir = builder.tempdir()?;
-        let file = dir.path().join("servers.json");
-        let mut open = std::fs::OpenOptions::new();
-        open.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
-        std::io::Write::write_all(&mut open.open(&file)?, session_config(loads).to_string().as_bytes())?;
+        let (dir, file) = private_file("servers.json", session_config(loads).to_string().as_bytes())?;
         let servers = loads.iter().map(|l| (l.server.name.clone(), l.server.transport.clone())).collect();
         Ok(Some(SessionFiles { dir, file, servers }))
     }
@@ -415,6 +403,88 @@ impl SessionFiles {
             }
         }
         flags
+    }
+}
+
+/// Writes `bytes` as `name` in a fresh folder only this user opens, a file only this user reads.
+fn private_file(name: &str, bytes: &[u8]) -> std::io::Result<(tempfile::TempDir, PathBuf)> {
+    sweep_stale();
+    let mut builder = tempfile::Builder::new();
+    let prefix = format!("{DIR_PREFIX}{}-", std::process::id());
+    builder.prefix(&prefix);
+    #[cfg(unix)]
+    builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+    let dir = builder.tempdir()?;
+    let file = dir.path().join(name);
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
+    std::io::Write::write_all(&mut open.open(&file)?, bytes)?;
+    Ok((dir, file))
+}
+
+/// The project MCP servers a Claude Code session in `cwd` carries as approved, by name: those
+/// the person approved in `.claude/settings.local.json` at the project's main checkout (the root
+/// Claude Code files its approvals under, also for a worktree), less those declined there, that
+/// `cwd`'s own `.mcp.json` lists with the same definition as the main checkout's own `.mcp.json`,
+/// the one the person saw when approving. Nothing else is read: no account's `.claude.json`, and
+/// not "all future", whose answer lists its names too. A file missing or unreadable carries none.
+pub fn carried_approvals(cwd: &Path) -> Vec<String> {
+    let listed = read_json(&cwd.join(".mcp.json")).unwrap_or(Value::Null);
+    let Some(listed) = listed["mcpServers"].as_object().filter(|servers| !servers.is_empty()) else { return vec![] };
+    let Some(root) = main_checkout(cwd) else { return vec![] };
+    let approved = read_json(&root.join(".mcp.json")).unwrap_or(Value::Null);
+    let Some(approved) = approved["mcpServers"].as_object() else { return vec![] };
+    let local = read_json(&root.join(".claude").join("settings.local.json")).unwrap_or(Value::Null);
+    let names = |key: &str| local[key].as_array().map(|names| names.iter().filter_map(Value::as_str).collect::<Vec<_>>()).unwrap_or_default();
+    let declined = names("disabledMcpjsonServers");
+    let mut carried: Vec<String> = vec![];
+    for name in names("enabledMcpjsonServers") {
+        let same = listed.get(name).is_some_and(|server| approved.get(name) == Some(server));
+        if !declined.contains(&name) && same && !carried.iter().any(|c| c == name) {
+            carried.push(name.to_owned());
+        }
+    }
+    carried
+}
+
+/// The main checkout of the repository `cwd` is in, as Claude Code finds it: the folder holding
+/// the git common dir, which a worktree shares with it. None when the common dir is not a `.git`
+/// folder, as with a separate git dir or a bare repository, where its parent is not the project.
+fn main_checkout(cwd: &Path) -> Option<PathBuf> {
+    let out = crate::process::command("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let common = String::from_utf8(out.stdout).ok().filter(|_| out.status.success())?;
+    let common = Path::new(common.trim_end_matches(['\n', '\r']));
+    (common.file_name()? == ".git").then(|| common.parent().map(Path::to_owned)).flatten()
+}
+
+/// A session's own Claude Code settings: the file it would have used, plus the project MCP
+/// servers it carries as approved. Kept and removed as `SessionFiles` are.
+pub struct SessionSettings {
+    _dir: tempfile::TempDir,
+    pub file: PathBuf,
+}
+
+impl SessionSettings {
+    /// Writes `base` with `enabledMcpjsonServers` set to `names`, every other key as it is, or
+    /// nothing when there are no names.
+    pub fn write(base: &Path, names: &[String]) -> std::io::Result<Option<SessionSettings>> {
+        if names.is_empty() {
+            return Ok(None);
+        }
+        let mut settings: Value = serde_json::from_slice(&std::fs::read(base)?)?;
+        let object = settings.as_object_mut().ok_or_else(|| std::io::Error::other(format!("{} is not a JSON object", base.display())))?;
+        object.insert("enabledMcpjsonServers".into(), json!(names));
+        let (dir, file) = private_file("claude-settings.json", &serde_json::to_vec_pretty(&settings)?)?;
+        Ok(Some(SessionSettings { _dir: dir, file }))
     }
 }
 
@@ -555,7 +625,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pinned-mcp-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir.canonicalize().unwrap()
+        dunce::canonicalize(&dir).unwrap()
     }
 
     fn write(file: &Path, value: Value) {
@@ -819,5 +889,98 @@ mod tests {
         let config = "model = \"gpt-6\"\nmcp_servers.top.command = \"a\"\n\n[mcp_servers.docs]\ncommand = \"docs\"\n[mcp_servers.\"my-db\".env]\nX = \"1\"\n[mcp_servers]\ninline = { command = \"i\" }\n[profiles.fast]\nmodel = \"x\"\n";
         assert_eq!(codex_servers(config), ["docs", "inline", "my-db", "top"]);
         assert_eq!(codex_servers(""), Vec::<String>::new());
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = crate::process::command("git").arg("-C").arg(dir).args(args).stdin(std::process::Stdio::null()).status().unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    fn npx(package: &str) -> Value {
+        json!({ "command": "npx", "args": ["-y", package] })
+    }
+
+    /// A repository with one commit, whose main checkout's own `.mcp.json` lists `servers` (none
+    /// when None) and whose `.claude/settings.local.json` holds `local`.
+    fn approving_repo(root: &Path, servers: Option<Value>, local: Value) -> PathBuf {
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("README"), "repo\n").unwrap();
+        git(&repo, &["add", "README"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "-m", "first"]);
+        if let Some(servers) = servers {
+            write(&repo.join(".mcp.json"), json!({ "mcpServers": servers }));
+        }
+        write(&repo.join(".claude/settings.local.json"), local);
+        repo
+    }
+
+    /// A worktree of `repo` on a branch of its own, whose `.mcp.json` lists `servers`.
+    fn worktree_listing(root: &Path, repo: &Path, servers: Value) -> PathBuf {
+        let tree = root.join("tree");
+        git(repo, &["worktree", "add", "-q", "-b", "tree", tree.to_str().unwrap()]);
+        write(&tree.join(".mcp.json"), json!({ "mcpServers": servers }));
+        tree
+    }
+
+    #[test]
+    fn a_worktree_that_changed_an_approved_servers_command_carries_nothing() {
+        let root = temp("carry-changed");
+        let repo = approving_repo(&root, Some(json!({ "a": npx("a") })), json!({ "enabledMcpjsonServers": ["a"] }));
+        let tree = worktree_listing(&root, &repo, json!({ "a": { "command": "sh", "args": ["-c", "other"] } }));
+        assert_eq!(carried_approvals(&tree), Vec::<String>::new(), "the person never saw this definition of a");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_worktree_with_the_approved_definition_carries_it() {
+        let root = temp("carry-same");
+        let repo = approving_repo(&root, Some(json!({ "a": npx("a") })), json!({ "enabledMcpjsonServers": ["a"] }));
+        let tree = worktree_listing(&root, &repo, json!({ "a": npx("a") }));
+        assert_eq!(carried_approvals(&tree), ["a"]);
+        assert_eq!(carried_approvals(&repo), ["a"], "the main checkout itself");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_subfolder_defining_another_server_under_an_approved_name_carries_nothing() {
+        let root = temp("carry-subfolder");
+        let repo = approving_repo(&root, Some(json!({ "a": npx("a") })), json!({ "enabledMcpjsonServers": ["a"] }));
+        let sub = repo.join("sub");
+        write(&sub.join(".mcp.json"), json!({ "mcpServers": { "a": npx("something-else") } }));
+        assert_eq!(carried_approvals(&sub), Vec::<String>::new(), "the person never saw sub's a");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn without_the_main_checkouts_mcp_json_nothing_is_carried() {
+        let root = temp("carry-no-root");
+        let repo = approving_repo(&root, None, json!({ "enabledMcpjsonServers": ["a"] }));
+        let tree = worktree_listing(&root, &repo, json!({ "a": npx("a") }));
+        assert_eq!(carried_approvals(&tree), Vec::<String>::new(), "no definition was approved");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_git_dir_not_named_dot_git_has_no_main_checkout_beside_it() {
+        let root = temp("carry-separate");
+        let (outer, repo) = (root.join("outer"), root.join("repo"));
+        std::fs::create_dir_all(&outer).unwrap();
+        git(&root, &["init", "-q", "-b", "main", &format!("--separate-git-dir={}", outer.join("store").display()), repo.to_str().unwrap()]);
+        write(&outer.join(".mcp.json"), json!({ "mcpServers": { "a": npx("a") } }));
+        write(&outer.join(".claude/settings.local.json"), json!({ "enabledMcpjsonServers": ["a"] }));
+        write(&repo.join(".mcp.json"), json!({ "mcpServers": { "a": npx("a") } }));
+        assert_eq!(carried_approvals(&repo), Vec::<String>::new(), "the folder holding the git dir is not the project");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn approved_names_carry_once_and_other_values_never() {
+        let root = temp("carry-odd-names");
+        let repo = approving_repo(&root, Some(json!({ "a": npx("a") })), json!({ "enabledMcpjsonServers": ["a", "a", 7, null] }));
+        let tree = worktree_listing(&root, &repo, json!({ "a": npx("a") }));
+        assert_eq!(carried_approvals(&tree), ["a"]);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
