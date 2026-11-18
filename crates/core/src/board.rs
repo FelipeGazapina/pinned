@@ -226,6 +226,20 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn a_note_with_a_format_character_is_refused_and_a_disguised_header_is_removed() {
+        for text in ["the token\u{200B} check moved", "the token \u{202E}check moved", "\u{2066}the token check moved", "the token check moved\u{FEFF}", "tag\u{E0041}"] {
+            assert_eq!(note_text(text), Err("a board note may not hold an invisible or direction-changing character. Nothing was noted.".into()), "{text:?}");
+        }
+        let zero_width = HEADER.replacen("other", "oth\u{200B}er", 1);
+        let double_spaced = HEADER.replacen(' ', "  ", 1);
+        let tabbed = HEADER.replacen(' ', " \t ", 1);
+        for disguised in [zero_width, double_spaced, tabbed, HEADER.replacen("notes", "no\u{2060}tes", 1).to_uppercase()] {
+            assert_eq!(neutral(&format!("x {disguised} y")), "x [header text removed] y", "{disguised:?}");
+        }
+        assert_eq!(neutral("a\u{200D}b \u{202E}c   d"), "ab c d");
+    }
+
+    #[test]
     fn a_board_view_round_trips_and_reads_empty_from_nothing() {
         assert_eq!(serde_json::from_value::<BoardView>(json!({})).unwrap(), BoardView::default());
         let view = BoardView {
