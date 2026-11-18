@@ -719,3 +719,130 @@ test("the rounds field refuses 0 and 6 and keeps the saved value", async () => {
   assert.match(html, /data-reviewer-rounds[^>]*value="5"/);
   assert.match(html, /data-act="rsave"/);
 });
+
+const wp = (over = {}) => ({ name: "scout", skills: [], tools: ["Read"], access: "read_only", delivers: "A report.", by: "user", ...over });
+const profilesOf = (over = {}) => ({ account: [], projects: {}, proposed: [], ...over });
+/** A hub that stores worker profiles: `set_worker_profiles` answers the tastes with `after`. */
+const profilesHub = (before, after = before) => (cmd) => tastesWith({ worker_profiles: cmd === "set_worker_profiles" ? after : before });
+const sent = (p) => p.calls.filter(([cmd]) => cmd !== "get_tastes");
+const siteProjects = { mm: [{ path: "/p/site", name: "site", repo: SITE }] };
+
+test("a hub that sends no worker profiles shows a note and no profile controls", async () => {
+  const p = page({ answer: () => tastesWith() });
+  await p.show();
+  const html = section(p.html(), "Profiles");
+  assert.match(html, /Update pinned on the hub to set worker profiles\./);
+  assert.doesNotMatch(html, /data-act="p/);
+});
+
+test("Approve moves a proposed profile into the shown list with one set_worker_profiles, and never set_taste", async () => {
+  const proposed = wp({ name: "tester", by: "orchestrator", delivers: "Failing tests." });
+  const before = profilesOf({ account: [wp()], proposed: [proposed] });
+  const after = profilesOf({ account: [wp(), proposed], proposed: [] });
+  const p = page({ answer: profilesHub(before, after) });
+  await p.show();
+  let html = section(p.html(), "Profiles");
+  assert.match(html, /Created by the Orchestrator/);
+  assert.match(html, /data-act="papprove"/);
+  assert.match(html, /data-act="pdismiss"/);
+  await p.click(/data-act="papprove"/);
+  assert.deepEqual(sent(p), [["set_worker_profiles", { project: null, profiles: [wp(), proposed] }]]);
+  html = section(p.html(), "Profiles");
+  assert.doesNotMatch(html, /data-act="papprove"|Created by the Orchestrator/, "the row left the proposed ones");
+  assert.match(html, /tester/);
+  assert.ok(!sent(p).some(([cmd]) => cmd === "set_taste"));
+});
+
+test("Approve on a project tab fills that project's list", async () => {
+  const proposed = wp({ name: "tester", by: "orchestrator" });
+  const before = profilesOf({ proposed: [proposed] });
+  const p = page({ answer: profilesHub(before, profilesOf({ projects: { [SITE]: [proposed] } })), projects: siteProjects });
+  await p.show();
+  await p.click(new RegExp(`data-act="pscope" data-repo="${SITE}"`));
+  await p.click(/data-act="papprove"/);
+  assert.deepEqual(sent(p), [["set_worker_profiles", { project: SITE, profiles: [proposed] }]]);
+});
+
+test("Discard drops a proposed profile from the page and sends no set_taste", async () => {
+  const before = profilesOf({ proposed: [wp({ name: "tester", by: "orchestrator" })] });
+  const p = page({ answer: profilesHub(before) });
+  await p.show();
+  await p.click(/data-act="pdismiss"/);
+  const html = section(p.html(), "Profiles");
+  assert.doesNotMatch(html, /data-act="pdismiss"|Created by the Orchestrator/);
+  assert.ok(!sent(p).some(([cmd]) => cmd === "set_taste"));
+});
+
+test("a profile's name, skills, tools and line are escaped wherever they are drawn", async () => {
+  const bad = "<b>x</b> & \"q\"";
+  const evil = wp({ name: bad, skills: [{ name: bad, enabled: true }], tools: [bad], delivers: bad });
+  const p = page({ answer: profilesHub(profilesOf({ account: [evil], projects: { [SITE]: [evil] }, proposed: [{ ...evil, by: "orchestrator" }] })), projects: siteProjects });
+  await p.show();
+  let html = section(p.html(), "Profiles");
+  assert.ok(html.includes(esc(bad)), "the account's profile is drawn escaped");
+  assert.ok(!html.includes("<b>x</b>"), "no markup from a profile reaches the page");
+  await p.click(/data-act="pedit" data-index="0"/);
+  html = section(p.html(), "Profiles");
+  assert.ok(!html.includes("<b>x</b>"), "nor from the edit form");
+  await p.click(new RegExp(`data-act="pscope" data-repo="${SITE}"`));
+  html = section(p.html(), "Profiles");
+  assert.ok(html.includes(esc(bad)) && !html.includes("<b>x</b>"), "so is the project's");
+});
+
+test("editing a project's profile and Save sends set_worker_profiles for that project", async () => {
+  const before = profilesOf({ account: [wp({ name: "acct" })], projects: { [SITE]: [wp({ name: "fixer", access: "edit", delivers: "A patch." })] } });
+  const after = profilesOf({ account: before.account, projects: { [SITE]: [wp({ name: "fixer", access: "read_only", delivers: "A diagnosis." })] } });
+  const p = page({ answer: profilesHub(before, after), projects: siteProjects });
+  await p.show();
+  await p.click(new RegExp(`data-act="pscope" data-repo="${SITE}"`));
+  await p.click(/data-act="pedit" data-index="0"/);
+  await p.click(/data-act="paccess" data-value="read_only"/);
+  p.typeOn("data-profile-delivers", "A diagnosis.");
+  await p.submitOn("data-profile-form");
+  assert.deepEqual(sent(p), [], "nothing is sent before Save");
+  await p.click(/data-act="psave"/);
+  assert.deepEqual(sent(p), [["set_worker_profiles", { project: SITE, profiles: [wp({ name: "fixer", access: "read_only", delivers: "A diagnosis." })] }]]);
+  assert.doesNotMatch(section(p.html(), "Profiles"), /data-act="psave"/, "the saved list has nothing left to save");
+});
+
+test("adding a profile with a picked installed skill saves it on the account, and Remove drops one", async () => {
+  const added = wp({ name: "docs", skills: [{ name: "deploy", enabled: true }], tools: ["Read", "Grep"], access: "edit", effort: "high", delivers: "Docs." });
+  const p = page({
+    answer: profilesHub(profilesOf({ account: [wp()] }), profilesOf({ account: [added] })),
+    projects: { mm: [] },
+    skills: { mm: { copies: [{ key: "deploy", scope: { kind: "personal" }, description: "Ship it." }] } },
+  });
+  await p.show();
+  await p.click(/data-act="padd"/);
+  p.typeOn("data-profile-name", "docs");
+  p.typeOn("data-profile-tools", "Read, Grep");
+  p.typeOn("data-profile-delivers", "Docs.");
+  await p.changeOn("data-profile-effort", "high");
+  await p.click(/data-act="paccess" data-value="edit"/);
+  await p.click(/data-act="pskill" data-skill="deploy"/);
+  await p.submitOn("data-profile-form");
+  await p.click(/data-act="pdrop" data-index="0"/);
+  await p.click(/data-act="psave"/);
+  assert.deepEqual(sent(p), [["set_worker_profiles", { project: null, profiles: [added] }]]);
+});
+
+test("a failed Save shows the hub's refusal and keeps the draft", async () => {
+  const p = page({ answer: (cmd) => (cmd === "set_worker_profiles" ? Promise.reject(new Error("two profiles are named scout")) : tastesWith({ worker_profiles: profilesOf({ account: [wp()] }) })) });
+  await p.show();
+  await p.click(/data-act="pdrop" data-index="0"/);
+  await p.click(/data-act="psave"/);
+  const html = section(p.html(), "Profiles");
+  assert.match(html, /two profiles are named scout/);
+  assert.match(html, /data-act="psave"/);
+});
+
+test("a rule id is escaped in the Reviewer section", async () => {
+  const bad = "A<b>1";
+  const p = page({ answer: reviewerHub(reviewerOf({ rules: [{ id: bad, text: "x" }], projects: { [SITE]: { switch: "auto", rules: [] } } })), projects: siteProjects });
+  await p.show();
+  let html = section(p.html(), "Reviewer");
+  assert.ok(html.includes(esc(bad)) && !html.includes("<b>1"), "the shown id, data-rule and aria-label are escaped");
+  await p.click(new RegExp(`data-act="rscope" data-repo="${SITE}"`));
+  html = section(p.html(), "Reviewer");
+  assert.ok(!html.includes("<b>1"), "so is the id in the replaces choice");
+});
