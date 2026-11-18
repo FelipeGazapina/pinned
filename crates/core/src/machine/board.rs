@@ -727,4 +727,23 @@ mod tests {
         let empty = read(&t.m, Some(&t.captain), None, Some(&t.other_worker));
         assert_eq!(empty, Err(format!("task {} is not on your board. Nothing was read.", t.other_worker)));
     }
+
+    #[test]
+    fn a_workers_whole_subtree_keeps_at_most_20_notes_and_another_workers_notes_survive() {
+        let t = team("subtree");
+        let project = t.dir.join("app");
+        let second = task(&t.m, Parent::Task(t.root.clone()), "Review login", &project);
+        noted(&t.m, &second, "src/login.rs", "the second worker's note");
+        let children: Vec<String> = (0..10).map(|n| task(&t.m, Parent::Task(t.worker.clone()), &format!("Child {n}"), &project)).collect();
+        for child in &children {
+            for n in 0..20 {
+                noted(&t.m, child, "src/login.rs", &format!("{child} note {n}"));
+            }
+        }
+        let notes = t.m.read_board(&t.root).unwrap().notes;
+        let subtree: Vec<&str> = notes.iter().filter(|n| n.by != second).map(|n| n.text.as_str()).collect();
+        assert_eq!(subtree, (0..20).map(|n| format!("{} note {n}", children[9])).collect::<Vec<_>>(), "the subtree keeps its newest 20");
+        let theirs: Vec<&str> = notes.iter().filter(|n| n.by == second).map(|n| n.text.as_str()).collect();
+        assert_eq!(theirs, ["the second worker's note"]);
+    }
 }
