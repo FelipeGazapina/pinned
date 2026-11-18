@@ -144,6 +144,9 @@ pub fn note_text(text: &str) -> Result<String, String> {
     if text.contains(['\n', '\r', '\u{2028}', '\u{2029}']) {
         return Err("a board note is one line. Nothing was noted.".into());
     }
+    if text.chars().any(format_char) {
+        return Err("a board note may not hold an invisible or direction-changing character. Nothing was noted.".into());
+    }
     let chars = text.chars().count();
     if chars > NOTE_CHARS {
         return Err(format!("a board note is at most {NOTE_CHARS} characters, and this one has {chars}. Nothing was noted."));
@@ -188,10 +191,12 @@ pub fn cite(cwd: &std::path::Path, file: &str) -> Result<String, String> {
 }
 
 /// `text` made safe to sit on one line inside the fence: no line break, no run of backticks or
-/// tildes that could close or open a fence, and no copy of the header.
+/// tildes that could close or open a fence, no invisible or direction-changing character, runs
+/// of whitespace folded to one space, and no copy of the header.
 pub fn neutral(text: &str) -> String {
-    let mut line: String = text
+    let mapped: String = text
         .chars()
+        .filter(|c| !format_char(*c))
         .map(|c| match c {
             '`' => '\'',
             '~' => '-',
@@ -199,6 +204,7 @@ pub fn neutral(text: &str) -> String {
             c => c,
         })
         .collect();
+    let mut line = mapped.split_whitespace().collect::<Vec<_>>().join(" ");
     loop {
         // ASCII lowercasing keeps every byte where it was, so `at` points into `line` too.
         let Some(at) = line.to_ascii_lowercase().find(HEADER) else { break };
