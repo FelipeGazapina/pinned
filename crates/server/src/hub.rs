@@ -179,21 +179,26 @@ fn account_census(id: Uuid, runs: usize, (store_bytes, runs_bytes, pending): (us
     )
 }
 
-/// What the hub's check log keeps of an account's previous check: when it ran, the fingerprint of
-/// its error, and when the failure that error belongs to began.
+/// What the hub's check log keeps of an account's previous check: when it ran, the kind of its
+/// error (`error_kind`), when the failure that error belongs to began, and when its line last printed.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct CheckLog {
     at: Option<i64>,
     error: Option<String>,
     error_since: i64,
+    error_logged: i64,
 }
+
+/// An error that lasts with the same kind prints its line again after this many seconds.
+const CHECK_ERROR_REPEAT_S: i64 = 30 * 60;
 
 /// A check that comes more than this many seconds after the one before it is late.
 const CHECK_LATE_AFTER_S: i64 = 120;
 
 /// The check log's lines for one new check of `account`, and what it keeps for the next one. An
 /// error's text stays out of the log: its line names the error's class, its part count and its
-/// fingerprint.
+/// fingerprint. The line prints when the error's kind changes, and while one kind lasts at most once
+/// per `CHECK_ERROR_REPEAT_S`, so a text that varies per check (a request id) does not print each time.
 fn log_check(prev: &CheckLog, account: Uuid, check: &pinned_core::connectors::Check, now: i64) -> (CheckLog, Vec<String>) {
     let who: String = account.to_string().chars().take(8).collect();
     let mut lines = vec![];
@@ -201,16 +206,17 @@ fn log_check(prev: &CheckLog, account: Uuid, check: &pinned_core::connectors::Ch
         lines.push(format!("pinned-server: check-late account={who} gap_s={gap}"));
     }
     let error = check.error.as_deref();
-    let fp = error.map(error_fingerprint);
-    let mut next = CheckLog { at: Some(now), error: fp.clone(), error_since: prev.error_since };
-    match (&prev.error, error, &fp) {
-        (Some(was), _, Some(new)) if was == new => {}
-        (_, Some(error), Some(new)) => {
+    let kind = error.map(error_kind);
+    let mut next = CheckLog { at: Some(now), error: kind.clone(), ..prev.clone() };
+    match (&prev.error, error, &kind) {
+        (Some(was), _, Some(new)) if was == new && now - prev.error_logged < CHECK_ERROR_REPEAT_S => {}
+        (_, Some(error), Some(_)) => {
+            next.error_logged = now;
             // A changed error belongs to the failure that is already on, so it does not restart the count.
             if prev.error.is_none() {
                 next.error_since = now;
             }
-            lines.push(format!("pinned-server: check-error account={who} class={} parts={} fp={new}", error_class(error), error.split("; ").count()));
+            lines.push(format!("pinned-server: check-error account={who} class={} parts={} fp={}", error_class(error), error.split("; ").count(), error_fingerprint(error)));
         }
         (Some(_), _, None) => lines.push(format!("pinned-server: check-ok account={who} after_s={}", now - prev.error_since)),
         _ => {}
@@ -222,6 +228,14 @@ fn log_check(prev: &CheckLog, account: Uuid, check: &pinned_core::connectors::Ch
 /// log keeps it in place of the text.
 fn error_fingerprint(error: &str) -> String {
     Sha256::digest(error.as_bytes())[..4].iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// What decides that an error is another one: its class and the status it names after "answered"
+/// (`Linear answered 503`). Neither holds the rest of the text, which may vary per check.
+fn error_kind(error: &str) -> String {
+    let first = error.split("; ").next().unwrap_or_default();
+    let status = first.split("answered ").nth(1).map(|after| after.chars().take_while(char::is_ascii_digit).collect::<String>()).filter(|status| status.len() == 3);
+    format!("{}/{}", error_class(error), status.unwrap_or_default())
 }
 
 /// The class of a check's error, from the prefix of its first part (the parts are joined by "; "):
@@ -2450,17 +2464,18 @@ mod tests {
         assert!(starts(&lines, "pinned-server: check-error account=12345678 class=linear "), "{lines:?}");
         let (state, lines) = log(&state, Some("Slack answered 503"), 660);
         assert!(starts(&lines, "pinned-server: check-error account=12345678 class=slack "), "{lines:?}");
-        // The same kind that lasts 31 minutes more prints once more, and not before.
-        let (state, lines) = log(&state, Some("Slack answered 503: retry after 7"), 660 + 29 * 60);
-        assert!(lines.is_empty(), "{lines:?}");
-        let (state, lines) = log(&state, Some("Slack answered 503: retry after 9"), 660 + 31 * 60);
-        assert!(starts(&lines, "pinned-server: check-error account=12345678 class=slack "), "{lines:?}");
-        let (state, lines) = log(&state, Some("Slack answered 503: retry after 3"), 660 + 32 * 60);
-        assert!(lines.is_empty(), "{lines:?}");
+        // The same kind that lasts prints once more after 30 minutes, and not before.
+        let (mut state, mut printed) = (state, vec![]);
+        for minute in 12..=45 {
+            let (next, lines) = log(&state, Some(&format!("Slack answered 503: retry after {minute}")), minute * 60);
+            printed.extend(lines.into_iter().map(|line| (minute, line)));
+            state = next;
+        }
+        assert_eq!(printed.iter().map(|(minute, _)| *minute).collect::<Vec<_>>(), [41], "{printed:?}");
         // The recovery prints once, counted from the first failure.
-        let (state, lines) = log(&state, None, 660 + 33 * 60);
-        assert_eq!(lines, ["pinned-server: check-ok account=12345678 after_s=2640"]);
-        let (_, lines) = log(&state, None, 660 + 34 * 60);
+        let (state, lines) = log(&state, None, 46 * 60);
+        assert_eq!(lines, ["pinned-server: check-ok account=12345678 after_s=2760"]);
+        let (_, lines) = log(&state, None, 47 * 60);
         assert!(lines.is_empty(), "{lines:?}");
     }
 
