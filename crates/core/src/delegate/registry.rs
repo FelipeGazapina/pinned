@@ -295,6 +295,13 @@ impl Delegates {
     /// task starts unless `at_once` tasks already work in its project, counted under the same lock
     /// so two callers can't both take the last place.
     pub fn claim(&self, new: NewTask, at_once: Option<u32>) -> Claim {
+        self.claim_in_place_of(new, at_once, None)
+    }
+
+    /// `claim`, not counting task `waiting`, which holds still while the new task runs for it, as
+    /// an author waits on its review (U8). The number working never passes `at_once`: the waiting
+    /// task's place is the one the new task takes.
+    pub fn claim_in_place_of(&self, new: NewTask, at_once: Option<u32>, waiting: Option<&str>) -> Claim {
         let mut tasks = self.tasks.lock().unwrap();
         if let Some(request_id) = new.client_request_id.as_deref() {
             if let Some(existing) = tasks.iter().find(|task| {
@@ -305,7 +312,7 @@ impl Delegates {
         }
         if let Some(most) = at_once {
             let project = crate::history::project_of(&new.cwd);
-            let working = tasks.iter().filter(|task| !task.state.terminal() && crate::history::project_of(&task.cwd) == project).count();
+            let working = tasks.iter().filter(|task| !task.state.terminal() && Some(task.id.as_str()) != waiting && crate::history::project_of(&task.cwd) == project).count();
             if working >= most as usize {
                 return Claim::Full(working);
             }

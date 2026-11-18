@@ -103,7 +103,8 @@ impl Machine {
             format!("{wanted} {why}, so this review ran on {model}, the next model on the ladder")
         });
 
-        let review = match self.delegates.claim(
+        // The author waits on its review and runs nothing meanwhile, so the review takes its place.
+        let review = match self.delegates.claim_in_place_of(
             NewTask {
                 parent: Parent::Task(task.to_owned()),
                 tool: None,
@@ -120,11 +121,12 @@ impl Machine {
                 role: Some(Role::Reviewer.name().to_owned()),
             },
             Some(limits.parallel),
+            Some(task),
         ) {
             Claim::Fresh(review) => review.id,
             Claim::Existing(running) => return Ok(!self.delegates.is_terminal(&running)),
-            // A full project holds the review rather than run one worker past its limit.
-            Claim::Full(_) => return Ok(false),
+            // Other workers fill the project: no review runs past its limit, and the round says so.
+            Claim::Full(_) => return Ok(self.not_reviewed(task, round, None, "the project was at its workers-at-once limit", None)),
         };
         let (budget_ms, limit_ms) = match crate::delegate::run_limits(None, None, limits.time_limit_ms()) {
             Ok(run) => run,
