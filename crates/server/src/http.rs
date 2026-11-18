@@ -10,7 +10,7 @@ use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use pinned_core::agent::Subject;
 use pinned_core::account::{DictationFeedback, Failure, NewMachine, NewPassword, Paired, Pairing, Registered, Session, SignIn, Signup, SignupInfo};
-use pinned_core::link::UNAUTHORIZED;
+use pinned_core::link::{self, UNAUTHORIZED};
 use pinned_core::surface::{self, Side};
 use pinned_core::sync;
 use pinned_core::wire::{AccountView, Call, ClientFrame, HubCall, MachineEvent, MachineFrame, MachineView, Reply, ToClient, ToMachine, UpdateStatus};
@@ -1142,50 +1142,87 @@ pub(crate) struct Pump {
 }
 
 /// Runs a signed in socket until it ends, handing each text frame to `on_text`. Returns why it ended, for the log.
+/// Its writes go through their own task, so the loop keeps reading, pinging and watching for its end
+/// while a write waits on a peer that is busy writing too. Both ends waiting to write while neither
+/// read held the link forever (#468).
 pub(crate) async fn pump_socket<S, M, E>(socket: S, pump: Pump, mut on_text: impl FnMut(&str)) -> &'static str
 where
     S: futures_util::Stream<Item = Result<M, E>> + futures_util::Sink<M> + Send + 'static,
     M: Wire,
 {
-    let Pump { mut outbox, overflowed, mut going_away, silent, mut closed } = pump;
-    let (mut sink, mut stream) = socket.split();
-    let mut ping = tokio::time::interval(PING);
-    let ended = loop {
+    let Pump { outbox, overflowed, mut going_away, silent, closed } = pump;
+    let (sink, mut stream) = socket.split();
+    let ping = Arc::new(tokio::sync::Notify::new());
+    let (close, closing) = tokio::sync::oneshot::channel();
+    let mut writer = tokio::spawn(write_socket(sink, outbox, ping.clone(), closing, closed));
+    let mut pinging = tokio::time::interval(PING);
+    let mut heard = tokio::time::Instant::now();
+    let (ended, last) = loop {
+        let quiet = async {
+            match silent {
+                Some(silent) => tokio::time::sleep_until(heard + silent).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
-            text = outbox.recv() => match text {
-                Some(text) => if sink.send(M::text(text)).await.is_err() { break "could not write" },
-                None => {
-                    if let Some(frame) = closed.take() {
-                        let _ = sink.send(M::close(frame)).await;
-                    }
-                    break "the outbox closed";
+            ended = &mut writer => break (ended.unwrap_or("the writer failed"), None),
+            _ = hub_going_away(&mut going_away) => break ("the hub is restarting", Some(close_going_away())),
+            frame = stream.next() => {
+                heard = tokio::time::Instant::now();
+                match frame {
+                    Some(Ok(frame)) if frame.is_close() => break ("the peer closed", None),
+                    Some(Ok(frame)) => if let Some(text) = frame.as_text() { on_text(text) },
+                    Some(Err(_)) => break ("could not read", None),
+                    None => break ("the peer closed", None),
                 }
-            },
-            _ = hub_going_away(&mut going_away) => {
-                let _ = sink.send(M::close(close_going_away())).await;
-                break "the hub is restarting";
             }
-            frame = async {
-                match silent {
-                    Some(silent) => tokio::time::timeout(silent, stream.next()).await,
-                    None => Ok(stream.next().await),
+            _ = quiet => break ("the peer went silent", None),
+            _ = pinging.tick() => ping.notify_one(),
+            _ = overflowed.notified() => break ("fell behind", Some(close_behind())),
+        }
+    };
+    // The writer sends the close after the write it is in, if the peer reads that much, and closes the socket.
+    // Without a close frame, dropping `close` ends it the same way.
+    if let Some(frame) = last {
+        let _ = close.send(M::close(frame));
+    }
+    ended
+}
+
+/// Writes a socket's frames in order, a close frame or a ping before any text that waits in the outbox.
+/// Ends once `closing` resolves, the outbox closes, a write fails, or a write outlasts `link::write_budget`.
+async fn write_socket<W, M>(mut sink: W, mut outbox: OutboxQueue, ping: Arc<tokio::sync::Notify>, mut closing: tokio::sync::oneshot::Receiver<M>, mut closed: Option<Message>) -> &'static str
+where
+    W: futures_util::Sink<M> + Unpin,
+    M: Wire,
+{
+    let ended = loop {
+        let (frame, bytes, last) = tokio::select! {
+            biased;
+            close = &mut closing => match close {
+                Ok(frame) => (frame, 0, true),
+                Err(_) => break "the loop ended",
+            },
+            _ = ping.notified() => (M::ping(), 0, false),
+            text = outbox.recv() => match (text, closed.take()) {
+                (Some(text), closed_after) => {
+                    closed = closed_after;
+                    let bytes = text.len();
+                    (M::text(text), bytes, false)
                 }
-            } => match frame {
-                Ok(Some(Ok(frame))) if frame.is_close() => break "the peer closed",
-                Ok(Some(Ok(frame))) => if let Some(text) = frame.as_text() { on_text(text) },
-                Ok(Some(Err(_))) => break "could not read",
-                Ok(None) => break "the peer closed",
-                Err(_) => break "the peer went silent",
+                (None, Some(frame)) => (M::close(frame), 0, true),
+                (None, None) => break "the outbox closed",
             },
-            _ = ping.tick() => if sink.send(M::ping()).await.is_err() { break "could not write" },
-            _ = overflowed.notified() => {
-                let _ = sink.send(M::close(close_behind())).await;
-                break "fell behind";
-            }
+        };
+        match tokio::time::timeout(link::write_budget(bytes), sink.send(frame)).await {
+            Ok(Ok(())) if last => break "the outbox closed",
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return "could not write",
+            Err(_) => return "the peer stopped reading",
         }
     };
     // Answers a peer's close frame, so the peer sees a clean close instead of 1006.
-    let _ = sink.close().await;
+    let _ = tokio::time::timeout(link::write_budget(0), sink.close()).await;
     ended
 }
 
@@ -1994,7 +2031,7 @@ mod socket_tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_machine_that_sends_but_never_reads_is_ended_once_a_write_stalls_for_a_minute() {
+    async fn a_machine_that_sends_but_never_reads_is_ended_once_a_write_outlasts_its_budget() {
         let (socket, mut peer) = pair().await;
         let hub = machine(socket, &["h".repeat(BIG)]);
         let started = tokio::time::Instant::now();
@@ -2012,7 +2049,8 @@ mod socket_tests {
         })
         .await;
         assert_eq!(ended, Ok("the peer stopped reading"));
-        assert_eq!(started.elapsed().as_secs(), 60);
+        // A minute, and 64 s for 2 MiB at 32 KiB/s.
+        assert_eq!(started.elapsed().as_secs(), 124);
     }
 
     #[tokio::test]

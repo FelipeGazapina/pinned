@@ -41,6 +41,17 @@ const PUSH_HOLD_MIN: Duration = SYNC_EVERY;
 const PUSH_HOLD_MAX: Duration = Duration::from_secs(10 * 60);
 /// The close code the hub sends when it doesn't know the token a socket signed in with.
 pub const UNAUTHORIZED: u16 = 4001;
+
+/// A write that waits on its peer longer than this, plus the time `WRITE_RATE` gives its bytes, means
+/// the peer stopped reading. TCP alone keeps such a socket open for good (#468).
+pub const WRITE_STALLED: Duration = Duration::from_secs(60);
+/// The slowest reader a write waits for, in bytes a second: an 8 MiB frame gets about four minutes more.
+pub const WRITE_RATE: usize = 32 * 1024;
+
+/// How long a write of `bytes` may wait on its peer.
+pub fn write_budget(bytes: usize) -> Duration {
+    WRITE_STALLED + Duration::from_secs((bytes / WRITE_RATE) as u64)
+}
 /// How long a box's node is refused with `UNAUTHORIZED`, with no hello accepted in between, before
 /// the node ends its sessions and exits. The node leaves on a refusal that arrives at or after
 /// this span from the first one; a hub that is merely unreachable never makes it leave. A live box
