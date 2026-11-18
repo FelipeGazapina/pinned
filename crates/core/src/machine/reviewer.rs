@@ -242,7 +242,8 @@ impl Machine {
         base.join("reviews").join(review)
     }
 
-    /// Ends the task a review held, as `settle_thread_task` ends a worker's: with its latest reply.
+    /// Ends the task a review held, as `settle_thread_task` ends a worker's: with its latest reply,
+    /// read now, so a turn the worker ended while the review ran is the one it settles with.
     fn end_reviewed(&self, task: &str, tab: &str) {
         let Some(info) = self.delegates.get(task) else { return };
         if info.state.terminal() {
@@ -279,7 +280,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nothing_reviews_yet() {
+    fn a_task_this_machine_does_not_know_holds_no_review() {
         let m = Machine::new(launch(), None, None, |_| {});
         assert!(!m.review_turn_end("t1", "tab-1"));
     }
@@ -634,6 +635,21 @@ mod tests {
         }
 
         #[test]
+        fn the_task_ends_with_the_workers_reply_as_it_is_when_the_review_answers() {
+            let t = team("fresh", Switch::On, 6, SONNET);
+            t.change(CHANGED, json!({ "findings": [] }));
+            std::fs::write(t.claude.with_extension("hold"), "").unwrap();
+            t.end_turn();
+            wait_for("the review to start", || t.m.delegates.requested(&format!("review:{}", t.task), Some("round-1")).is_some());
+            // The worker ends another turn while its review runs.
+            t.end_turn_saying("Also covered the empty input.");
+            assert_eq!(t.state(), "working", "the worker's end did not wait for its review");
+            std::fs::remove_file(t.claude.with_extension("hold")).unwrap();
+            assert_eq!(t.rounds().len(), 1);
+            assert_eq!(t.m.delegates.get(&t.task).unwrap().summary.as_deref(), Some("Also covered the empty input."));
+        }
+
+        #[test]
         fn the_reviewer_only_reads_and_has_no_mcp() {
             let t = team("readonly", Switch::On, 6, SONNET);
             t.change(CHANGED, json!({ "findings": [] }));
@@ -732,7 +748,7 @@ mod tests {
             assert_eq!(t.rounds().len(), 1);
             let caller = Caller { tab: Some(t.captain.clone()), task: None };
             let status = t.m.delegates.status(&caller, &t.task).unwrap();
-            assert_eq!(status["reviews"], json!([{ "round": 1, "findings": [], "state": "passed", "model": HAIKU, "note": status["reviews"][0]["note"] }]), "{status}");
+            assert_eq!(status["reviews"], json!([{ "round": 1, "findings": [], "state": "passed", "model": HAIKU, "note": format!("{SONNET} is the worker's own model, so this review ran on {HAIKU}, the next model on the ladder") }]), "{status}");
             let cost = t.m.delegates.work_cost_of_task(&caller, &t.task).unwrap();
             assert!((cost.agents_usd - 0.25).abs() < 1e-9 && cost.workers == 2, "the review's cost is not on the author's card: {cost:?}");
         }
