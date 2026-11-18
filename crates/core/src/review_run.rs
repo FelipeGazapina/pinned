@@ -406,6 +406,13 @@ mod tests {
         assert_eq!(models(&ladder, Some(&rung("sonnet")), None, "x"), ("haiku".into(), vec!["haiku".into(), "sonnet".into(), "opus".into()]));
         assert_eq!(models(&ladder, None, Some(&rung("opus")), "opus[1m]").1, ["sonnet", "haiku"]);
         assert_eq!(models(&[rung("opus")], None, None, "opus").1, Vec::<String>::new(), "with no other model there is none to run");
+        let claude = [rung("claude-haiku-5-5"), rung("claude-sonnet-5-5"), rung("claude-opus-5-5")];
+        let (_, tried) = models(&claude, None, Some(&rung("claude-sonnet-5-5")), "claude-sonnet-5-5-20261101");
+        assert!(!tried.iter().any(|model| model == "claude-sonnet-5-5"), "a dated author got its own model: {tried:?}");
+        assert!(same_model("claude-sonnet-5-5-20261101", "claude-sonnet-5-5[1m]") && !same_model("claude-sonnet-5-5", "claude-sonnet-5"));
+        let codex = ModelRef { provider: Some("codex".into()), model: "gpt-6".into() };
+        let (_, tried) = models(&[rung("claude-haiku-5-5"), codex, rung("claude-opus-5-5")], None, None, "claude-opus-5-5");
+        assert_eq!(tried, ["claude-haiku-5-5"], "a rung of another provider was tried as the Claude reviewer");
     }
 
     #[test]
