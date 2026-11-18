@@ -391,8 +391,9 @@ async fn run(hub: &Arc<Hub>, account: &Arc<Account>, caller_tab: &str, actor: Ac
 /// How a machine hears an agent's `Call`: on the origin machine as `act_for` the asking session,
 /// elsewhere bare, except a guarded one, which goes as `act_for` with no session. `Enqueue` is
 /// guarded: a bare one types its own `sender`, while `act_for` stamps the caller's role.
+/// `OpenOrchestrator` is too: `act_for` with no session opens a Captain that asks for its prompts.
 fn stamped(call: Call, caller_tab: &str, on_origin: bool) -> Result<Call, String> {
-    let guarded = matches!(call, Call::Prompt { .. } | Call::Enqueue { .. } | Call::OpenGlobalOrchestrator | Call::RestartClaude { .. } | Call::SetModel { .. } | Call::SetBypass { .. } | Call::Rewind { .. } | Call::SwitchAccount { .. } | Call::SetWorkspace { .. });
+    let guarded = matches!(call, Call::Prompt { .. } | Call::Enqueue { .. } | Call::OpenOrchestrator { .. } | Call::OpenGlobalOrchestrator | Call::RestartClaude { .. } | Call::SetModel { .. } | Call::SetBypass { .. } | Call::Rewind { .. } | Call::SwitchAccount { .. } | Call::SetWorkspace { .. });
     Ok(match (on_origin, guarded) {
         (true, _) => Call::ActFor { caller: caller_tab.to_owned(), call: json(&call)? },
         (false, true) => Call::ActFor { caller: String::new(), call: json(&call)? },
@@ -718,6 +719,15 @@ mod tests {
                 assert_eq!((caller.as_str(), call["cmd"].as_str()), ("", Some("enqueue")), "{call}");
             }
             bare => panic!("a bare {bare:?} would reach the other machine under the sender it chose"),
+        }
+    }
+
+    #[test]
+    fn an_agents_open_orchestrator_for_another_machine_goes_as_act_for_with_no_session() {
+        let call = Call::OpenOrchestrator { path: "/w/site".into(), ask_permissions: false };
+        match stamped(call, "tab-a", false).unwrap() {
+            Call::ActFor { caller, call } => assert_eq!((caller.as_str(), call["cmd"].as_str()), ("", Some("open_orchestrator")), "{call}"),
+            bare => panic!("a bare {bare:?} would open a Captain that skips its permission prompts"),
         }
     }
 

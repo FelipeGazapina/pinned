@@ -154,6 +154,16 @@ pub fn resolve_access(ceiling: Access, request: &Request) -> Result<Access, Stri
     Ok(asked)
 }
 
+/// The access of a worker on `provider` whose `runtimeMode` was left out: a Claude Code worker
+/// takes its parent's, a Codex or Cursor one at most auto, the level it had before Captains opened
+/// in Full access. One that names its mode keeps what `resolve_access` gave it.
+pub fn default_for(provider: Provider, access: Access, request: &Request) -> Access {
+    match (provider, request.runtime) {
+        (Provider::Claude, _) | (_, Some(_)) => access,
+        (Provider::Codex | Provider::Cursor, None) => tighten(access, Access::Auto),
+    }
+}
+
 /// `asked` cannot be wider than `ceiling`. A plan request is already read-only before this.
 pub fn tighten(ceiling: Access, asked: Access) -> Access {
     match (ceiling, asked) {

@@ -1029,7 +1029,7 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
 
     let folder = dir.join("app");
     std::fs::create_dir_all(&folder).unwrap();
-    let captain = node.machine.call(Call::OpenOrchestrator { path: folder.display().to_string() }).unwrap();
+    let captain = node.machine.call(Call::OpenOrchestrator { path: folder.display().to_string(), ask_permissions: false }).unwrap();
     node.machine.start_claude(captain.as_str().unwrap(), 80, 24).unwrap();
     let kept = || std::fs::read(dir.join("taste.json")).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
     assert_eq!(kept(), Some(stored), "the Capitão's start kept the account's taste for when the hub can't answer");

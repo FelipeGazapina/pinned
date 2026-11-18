@@ -25,7 +25,7 @@ pub const GLOBAL_SETTINGS: &str = "claude-settings-global.json";
 /// The file tools the global orchestrator keeps, each held to its folders by the guard hook.
 const GUARDED: &str = "Read|Write|Edit|MultiEdit|Grep|Glob|LS";
 /// The tools that can write one of the owner's files, which the team-guard hook checks on every machine.
-const OWNERS_GUARDED: &str = "Bash|Edit|Write|MultiEdit|NotebookEdit";
+pub(crate) const OWNERS_GUARDED: &str = "Bash|Edit|Write|MultiEdit|NotebookEdit";
 
 /// What the harness answers to each socket line.
 type Reply = Result<String, String>;

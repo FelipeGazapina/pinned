@@ -55,6 +55,27 @@ const THREAD_PAGE_MAX: usize = 5000;
 const PAGE_POLL: Duration = Duration::from_millis(1200);
 const LOCAL_VIEWER: &str = "local";
 const NOT_LINKED: &str = "this machine is not linked to a hub";
+
+/// Whether a new Captain or global Orchestrator opens in Full access, skipping its permission
+/// prompts, so that its default Claude Code workers inherit Full. The one switch for that default:
+/// false opens them asking, as before 0.18.7, and keeps the owner-file hook, the ceiling on an
+/// agent's enqueue and the external agents' path as they are. Read it through
+/// `full_access_by_default`.
+pub const FULL_ACCESS_BY_DEFAULT: bool = true;
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own setting of `FULL_ACCESS_BY_DEFAULT`, on its thread only.
+    static FULL_ACCESS_SWITCH: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+fn full_access_by_default() -> bool {
+    #[cfg(test)]
+    if let Some(on) = FULL_ACCESS_SWITCH.with(Cell::get) {
+        return on;
+    }
+    FULL_ACCESS_BY_DEFAULT
+}
 /// How long a session's Convex offer waits for the hub to hear of its new tab, and how often it asks.
 const CONVEX_OFFER_WAIT: Duration = Duration::from_secs(3);
 const CONVEX_OFFER_RETRY: Duration = Duration::from_millis(250);
@@ -1543,7 +1564,7 @@ impl Machine {
                 json(removed)
             }
             Call::SetProjectAccount { path, account } => json(self.set_project_account(&path, account)?),
-            Call::OpenOrchestrator { path } => json(self.open_orchestrator(&path)?),
+            Call::OpenOrchestrator { path, ask_permissions } => json(self.open_captain(&path, full_access_by_default() && !ask_permissions)?),
             Call::Enqueue { path, text, request_id, sender, busy } => json(self.enqueue_to_captain(&path, &text, &request_id, &sender, busy)?),
             Call::OrchestratorReport { request_id, report } => json(self.deliver_report(&request_id, &report)?),
             Call::OpenGlobalOrchestrator => json(self.open_global_orchestrator()?),
@@ -3149,8 +3170,15 @@ impl Machine {
         Ok(self.project_view(&path))
     }
 
-    /// The project's orchestrator tab: the one already open, else a new one, not yet started.
+    /// The project's orchestrator tab: the one already open, else a new one, not yet started, in
+    /// Full access when `FULL_ACCESS_BY_DEFAULT` says so.
     pub fn open_orchestrator(&self, path: &str) -> Result<TabId, String> {
+        self.open_captain(path, full_access_by_default())
+    }
+
+    /// `open_orchestrator`, where a new tab skips its permission prompts only with `full`. One
+    /// already open keeps its mode.
+    fn open_captain(&self, path: &str, full: bool) -> Result<TabId, String> {
         if !Path::new(path).is_dir() {
             return Err(format!("{path} is not a folder on this machine"));
         }
@@ -3164,8 +3192,8 @@ impl Machine {
         if !account.provider.spec().harness {
             return Err(format!("account {} runs {}, which can't be a project's orchestrator", account.id, account.provider.spec().name));
         }
-        // It runs unattended, so it opens in Full access; the owner's files stay blocked by the hook.
-        let id = self.add_tab(project.clone(), account, vec![], role_env(Role::Orchestrator, &project), true, None);
+        // It runs unattended, so by default it opens in Full access; the owner's files stay blocked by the hook.
+        let id = self.add_tab(project.clone(), account, vec![], role_env(Role::Orchestrator, &project), full, None);
         self.emit_tabs();
         Ok(id)
     }
@@ -3183,7 +3211,7 @@ impl Machine {
         if !account.provider.spec().harness {
             return Err(format!("account {} runs {}, which can't be the global orchestrator", account.id, account.provider.spec().name));
         }
-        let id = self.add_tab(folder, account, vec![], global::env(), true, None);
+        let id = self.add_tab(folder, account, vec![], global::env(), full_access_by_default(), None);
         self.emit_tabs();
         Ok(id)
     }
@@ -3316,6 +3344,11 @@ impl Machine {
     /// answers the first outcome without typing. The ledger keeps which turn the message started,
     /// so the Capitão's reply can go back up when that turn ends.
     pub fn enqueue_to_captain(&self, path: &str, text: &str, request_id: &str, sender: &str, busy: Option<BusyPolicy>) -> Result<Handoff, String> {
+        self.hand_to_captain(path, text, request_id, sender, busy, full_access_by_default())
+    }
+
+    /// `enqueue_to_captain`, where a Capitão it opens skips its permission prompts only with `full`.
+    fn hand_to_captain(&self, path: &str, text: &str, request_id: &str, sender: &str, busy: Option<BusyPolicy>, full: bool) -> Result<Handoff, String> {
         let (request_id, text) = (request_id.trim(), text.trim());
         if request_id.is_empty() {
             return Err("request_id is required".into());
@@ -3331,7 +3364,7 @@ impl Machine {
         if let Some(earlier) = sent.find(request_id) {
             return if earlier.project == canonical(path) { Ok(earlier.handoff.clone()) } else { Err(format!("request_id {request_id} was already used for another message")) };
         }
-        let tab = self.open_orchestrator(path)?;
+        let tab = self.open_captain(path, full)?;
         let project = canonical(path);
         let sender = if sender.trim().is_empty() { settings.name } else { global::Settings { name: sender.to_owned(), ..global::Settings::default() }.cleaned().name };
         let handoff = self.hand_to(&tab, &format!("[{sender}] {}", pinned_lines::guard(text)), request_id, busy.unwrap_or(settings.busy), &sent)?;
@@ -3948,6 +3981,11 @@ impl Machine {
         if let Call::Enqueue { path, text, request_id, busy, .. } = call {
             return json(self.enqueue_for(caller, &path, &text, &request_id, busy)?);
         }
+        if let Call::OpenOrchestrator { path, .. } = &call {
+            // As with enqueue, a Captain an agent opens is no wider than the agent.
+            let full = self.tab(caller, |t| t.child_access() == crate::delegate::Access::Full).unwrap_or(false);
+            return json(self.open_captain(path, full && full_access_by_default())?);
+        }
         if let Call::RunNow { run, title } = call {
             return json(self.run_now(&run, &title, Some(caller))?);
         }
@@ -3995,14 +4033,21 @@ impl Machine {
     /// own role, never the orchestrator's name; the `sender` it sent is ignored. A Captain that is not running starts on it, which is
     /// a session start: it must pass the project's tier and effort limits, and the project must run
     /// fewer than its workers-at-once. A Captain that runs takes the message with no new session.
+    /// It is no wider than the caller, as a worker is: only a caller in Full access opens a Captain
+    /// that skips its permission prompts, or starts one, and a caller this machine does not know
+    /// (an act from another machine names none) is not in Full access.
     fn enqueue_for(&self, caller: &str, path: &str, text: &str, request_id: &str, busy: Option<BusyPolicy>) -> Result<Handoff, String> {
         let project = canonical(path);
-        let tab = self.open_orchestrator(path)?;
+        let full = self.tab(caller, |t| t.child_access() == crate::delegate::Access::Full).unwrap_or(false);
+        let tab = self.open_captain(path, full && full_access_by_default())?;
         if tab == caller {
             return Err("enqueue hands a message to a Captain; your own session is the one reading this".into());
         }
-        let (running, model, account) = self.tab(&tab, |t| (t.live() || t.starting, t.model.clone(), t.account.clone()))?;
+        let (running, model, account, skips) = self.tab(&tab, |t| (t.live() || t.starting, t.model.clone(), t.account.clone(), t.bypass))?;
         if !running {
+            if skips && !full {
+                return Err(format!("the Capitão of {} skips its permission prompts and your session asks for them, so your message can't start it: ask the user to start it", project.display()));
+            }
             let limits = self.limits_in(caller, &project);
             limits.admit(&account, model.as_deref(), None, &self.claude_models())?;
             let working = self.delegates.working_in(&project);
@@ -4010,7 +4055,7 @@ impl Machine {
                 return Err(workers_full(working));
             }
         }
-        self.enqueue_to_captain(path, text, request_id, &self.sender_of(caller), busy)
+        self.hand_to_captain(path, text, request_id, &self.sender_of(caller), busy, full && full_access_by_default())
     }
 
     /// Who the agent in `caller` is, as the stamp on what it types into another session reads:
@@ -5175,6 +5220,7 @@ impl Machine {
             None => (account, false),
         };
         let provider = account.provider;
+        let access = crate::delegate::default_for(provider, access, &request);
         let place = Some(placed.machine_name.clone()).filter(|name| !name.is_empty()).or_else(|| request.target.machine.clone()).unwrap_or_else(|| "an Upstash Box".into());
         // Held here to the caller's limits, and sent with them, so the worker there is held too.
         // An account this machine lacks is held by the machine that runs it, which checks the model
@@ -5810,6 +5856,7 @@ impl Machine {
         let inherited_model = if parent_auth == account.auth { inherited_model } else { None };
         let model = crate::delegate::child_model(parent_provider, account.provider, inherited_model, request.target.model.clone());
         let (account, mut model, moved) = self.route_around_limits(account, model, &limits, &cwd, request.target.effort.as_deref())?;
+        let access = crate::delegate::default_for(account.provider, access, &request);
         let mut effort = limits.admit(&account, model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
         let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
         self.ensure_parent(parent_tab.as_deref(), None)?;
@@ -12976,7 +13023,7 @@ while True:
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
         m.call(Call::DeviceAgents { allow: Some(true) }).unwrap();
         let path = project.display().to_string();
-        let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
+        let tab = m.call(Call::OpenOrchestrator { path: path.clone(), ask_permissions: false }).unwrap().as_str().unwrap().to_owned();
         m.start_claude(&tab, 80, 24).unwrap();
         let args = started(&claude, &tab);
         let prompt = format!("{}\n\n{}\n\n{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), taste::Taste::default().brief(), taste::Taste::default().limits().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
@@ -13012,7 +13059,7 @@ while True:
             _ => Err("not this test's".into()),
         }));
         let path = site.display().to_string();
-        let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
+        let tab = m.call(Call::OpenOrchestrator { path: path.clone(), ask_permissions: false }).unwrap().as_str().unwrap().to_owned();
         m.start_claude(&tab, 80, 24).unwrap();
         let site_brief = "Run up to 4 workers at once.
 Start each worker on glm-5.3, and when it fails twice move it one rung up the ladder: claude-sonnet-5-5, then claude-opus-5-5.
@@ -13227,7 +13274,7 @@ Have another model review a risky change before it goes ahead.";
         for p in [&app, &api, &side] {
             std::fs::create_dir_all(p).unwrap();
         }
-        let open = |p: &Path| m.call(Call::OpenOrchestrator { path: p.display().to_string() });
+        let open = |p: &Path| m.call(Call::OpenOrchestrator { path: p.display().to_string(), ask_permissions: false });
         let app_tab = open(&app).unwrap();
         assert_eq!(open(&app).unwrap(), app_tab, "a second orchestrator opened for the project");
         let api_tab = open(&api).unwrap();
@@ -13259,7 +13306,7 @@ Have another model review a risky change before it goes ahead.";
         m.start_claude(&tabs[0], 80, 24).unwrap();
         let prompt = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), taste::Taste::default().limits().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
         assert_eq!(started(&claude, &tabs[0]), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--resume", "s1", "--append-system-prompt", prompt.as_str()]);
-        assert_eq!(m.call(Call::OpenOrchestrator { path }), Ok(json!(tabs[0])), "the restored orchestrator is not the project's");
+        assert_eq!(m.call(Call::OpenOrchestrator { path, ask_permissions: false }), Ok(json!(tabs[0])), "the restored orchestrator is not the project's");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -13668,6 +13715,8 @@ Have another model review a risky change before it goes ahead.";
     #[cfg(unix)]
     fn an_agents_enqueue_starts_a_stopped_captain_only_under_the_projects_limits_and_signs_as_the_caller() {
         let (m, dir, captain) = limited_captain("act-enqueue", TastePatch { tier: Some(taste::Tier::Mid), parallel: Some(1), ..TastePatch::default() });
+        // A Captain that asks for its prompts, which a session that asks for its own may start.
+        m.tab(&captain, |t| t.bypass = false).unwrap();
         let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
         let session = m.open_tab(Some(path.clone()), false).unwrap();
         m.tab(&session, |t| t.title = Some("Fix login".into())).unwrap();
@@ -13730,10 +13779,51 @@ Have another model review a risky change before it goes ahead.";
         assert!(!started(&dir.join("claude"), &captain).iter().any(|a| a == "--dangerously-skip-permissions"), "the Captain started on the agent's text skips its prompts");
         let captain = enqueue("", &project("from-elsewhere"), "r-2");
         assert!(!bypass(&captain), "an agent on another machine, whose access this machine can't know, opened a Captain that skips its prompts");
+        for from in [auto.as_str(), ""] {
+            let opened = act_as(&m, from, "open_orchestrator", json!({ "path": project(&format!("opened-by{from}")) })).unwrap();
+            assert!(!bypass(opened.as_str().unwrap()), "open_orchestrator from {from:?} opened a Captain that skips its prompts");
+        }
         assert!(bypass(&enqueue(&full, &project("from-full"), "r-3")), "a Full agent's Captain is Full like it");
 
         let opened: String = serde_json::from_value(m.call(Call::Enqueue { path: project("from-app"), text: "Ship it.".into(), request_id: "r-4".into(), sender: String::new(), busy: None }).unwrap()["tab"].clone()).unwrap();
         assert!(bypass(&opened), "the user's own enqueue opens the Captain in Full access");
+
+        let stopped = project("stopped");
+        let users = m.call(Call::OpenOrchestrator { path: stopped.clone(), ask_permissions: false }).unwrap().as_str().unwrap().to_owned();
+        assert!(bypass(&users), "the app opens a Captain in Full access");
+        let refused = act_as(&m, &auto, "enqueue", json!({ "path": stopped, "text": "Ship it.", "request_id": "r-5" })).unwrap_err();
+        assert_eq!(refused, format!("the Capitão of {stopped} skips its permission prompts and your session asks for them, so your message can't start it: ask the user to start it"));
+        assert!(!m.view(&users).unwrap().running, "an agent that asks for its prompts started a Captain that skips them");
+        assert!(act_as(&m, "", "enqueue", json!({ "path": stopped, "text": "Ship it.", "request_id": "r-6" })).is_err(), "an agent from another machine started it");
+        assert_eq!(enqueue(&full, &stopped, "r-7"), users, "a Full agent starts it");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn with_full_access_by_default_off_captains_and_the_orchestrator_open_asking_as_before() {
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(Some(false)));
+        let dir = temp("full-access-off");
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let project = |name: &str| {
+            let folder = dir.join(name);
+            std::fs::create_dir_all(&folder).unwrap();
+            m.open_project(folder).display().to_string()
+        };
+        let app = m.call(Call::OpenOrchestrator { path: project("app"), ask_permissions: false }).unwrap().as_str().unwrap().to_owned();
+        let sent: String = serde_json::from_value(m.call(Call::Enqueue { path: project("sent"), text: "Ship it.".into(), request_id: "r-1".into(), sender: String::new(), busy: None }).unwrap()["tab"].clone()).unwrap();
+        let global = m.open_global_orchestrator().unwrap();
+        let full = m.open_tab(Some(project("full")), true).unwrap();
+        let agents: String = serde_json::from_value(act_as(&m, &full, "enqueue", json!({ "path": project("agents"), "text": "Ship it.", "request_id": "r-2" })).unwrap()["tab"].clone()).unwrap();
+        for tab in [&app, &sent, &global, &agents] {
+            assert!(!m.view(tab).unwrap().bypass, "{tab} skips its permission prompts with the switch off");
+        }
+        assert!(!started(&dir.join("claude"), &sent).iter().any(|a| a == "--dangerously-skip-permissions"));
+        let ceiling = m.tab(&app, |t| t.child_access()).unwrap();
+        let worker = crate::delegate::resolve_access(ceiling, &crate::delegate::parse_request(&json!({ "task": "look" })).unwrap());
+        assert_eq!(worker, Ok(crate::delegate::Access::Auto), "a default worker of a Captain runs in auto, as before");
+        FULL_ACCESS_SWITCH.with(|switch| switch.set(None));
         let _ = std::fs::remove_dir_all(dir);
     }
 

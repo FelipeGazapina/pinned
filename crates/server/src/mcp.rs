@@ -4,9 +4,9 @@
 //! Every call carries an access token from `oauth`, which names the account, the scopes and the
 //! projects the user picked. The tools only reuse what the app's own clients already ask machines
 //! for: a session starts as a connector's run does (`Call::Run`), the orchestrator opens as the
-//! app opens it (`Call::OpenOrchestrator`), text goes in as a typed prompt (`Call::Prompt`), and
-//! replies come out of the transcript (`Call::Thread`). Nothing here answers a permission prompt
-//! or starts a session that skips them.
+//! app opens it (`Call::OpenOrchestrator`, but asking for its permission prompts), text goes in as
+//! a typed prompt (`Call::Prompt`), and replies come out of the transcript (`Call::Thread`).
+//! Nothing here answers a permission prompt or starts a session that skips them.
 
 use crate::db::{AgentGrant, AgentSession, Reserved};
 use crate::http::Server;
@@ -653,7 +653,8 @@ async fn message_orchestrator(ctx: &Ctx<'_>, args: &Value) -> Result<Value, Stri
     }
     let machine = project.machine.as_str();
     let _held = ctx.hub.hold_captain(&ctx.account, machine, &project.path).await;
-    let opened = ctx.hub.call_machine(&ctx.account, machine, Call::OpenOrchestrator { path: project.path.clone() }, CALL_WAIT).await;
+    // A Captain the app opens skips its permission prompts; one opened for an external agent asks for them.
+    let opened = ctx.hub.call_machine(&ctx.account, machine, Call::OpenOrchestrator { path: project.path.clone(), ask_permissions: true }, CALL_WAIT).await;
     // Opening is idempotent on the machine, so a lost answer did nothing a retry would repeat.
     let tab = match opened.map(|v| v.as_str().map(str::to_owned)) {
         Ok(Some(tab)) => tab,
@@ -677,6 +678,11 @@ async fn message_orchestrator(ctx: &Ctx<'_>, args: &Value) -> Result<Value, Stri
         forget(ctx, key).await;
         return Err("the orchestrator's tab closed before the message reached it; try again".into());
     };
+    if !view.running && view.bypass {
+        // The user opened it in Full access and left it stopped: only the user starts it.
+        forget(ctx, key).await;
+        return Err("the orchestrator is stopped and skips its permission prompts, so only the user can start it in pinned; ask them to, then send this message again with the same request_id".into());
+    }
     if !view.running {
         // Nothing is typed into it yet: it may open on a prompt only the user may answer.
         // The key is released, so the same request_id delivers the message once it is ready.

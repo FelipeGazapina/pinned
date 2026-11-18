@@ -362,7 +362,13 @@ pub enum Call {
     /// The project's `ProjectView`. `account: null` runs it under the default account again.
     SetProjectAccount { path: String, account: Option<AccountId> },
     /// The id of the project's orchestrator tab: the one already open, else a new one, not yet started.
-    OpenOrchestrator { path: String },
+    /// A new one skips its permission prompts when the machine opens Captains in Full access,
+    /// unless `ask_permissions`, which the hub sends for an external agent. One already open keeps its mode.
+    OpenOrchestrator {
+        path: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ask_permissions: bool,
+    },
     /// `global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,
     /// opening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt
     /// when it is stopped, else queued until it is idle, or refused as busy when `busy` (else this

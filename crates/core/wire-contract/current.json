@@ -963,7 +963,7 @@
                 ]
               },
               {
-                "description": "The id of the project's orchestrator tab: the one already open, else a new one, not yet started.",
+                "description": "The id of the project's orchestrator tab: the one already open, else a new one, not yet started.\nA new one skips its permission prompts when the machine opens Captains in Full access,\nunless `ask_permissions`, which the hub sends for an external agent. One already open keeps its mode.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -972,6 +972,9 @@
                   },
                   "path": {
                     "type": "string"
+                  },
+                  "ask_permissions": {
+                    "type": "boolean"
                   }
                 },
                 "required": [
@@ -13482,7 +13485,7 @@
                 ]
               },
               {
-                "description": "The id of the project's orchestrator tab: the one already open, else a new one, not yet started.",
+                "description": "The id of the project's orchestrator tab: the one already open, else a new one, not yet started.\nA new one skips its permission prompts when the machine opens Captains in Full access,\nunless `ask_permissions`, which the hub sends for an external agent. One already open keeps its mode.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -13491,6 +13494,9 @@
                   },
                   "path": {
                     "type": "string"
+                  },
+                  "ask_permissions": {
+                    "type": "boolean"
                   }
                 },
                 "required": [
@@ -75132,7 +75138,7 @@
                 ]
               },
               {
-                "description": "The id of the project's orchestrator tab: the one already open, else a new one, not yet started.",
+                "description": "The id of the project's orchestrator tab: the one already open, else a new one, not yet started.\nA new one skips its permission prompts when the machine opens Captains in Full access,\nunless `ask_permissions`, which the hub sends for an external agent. One already open keeps its mode.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -75141,6 +75147,9 @@
                   },
                   "path": {
                     "type": "string"
+                  },
+                  "ask_permissions": {
+                    "type": "boolean"
                   }
                 },
                 "required": [
@@ -80724,7 +80733,7 @@
                 ]
               },
               {
-                "description": "The id of the project's orchestrator tab: the one already open, else a new one, not yet started.",
+                "description": "The id of the project's orchestrator tab: the one already open, else a new one, not yet started.\nA new one skips its permission prompts when the machine opens Captains in Full access,\nunless `ask_permissions`, which the hub sends for an external agent. One already open keeps its mode.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -80733,6 +80742,9 @@
                   },
                   "path": {
                     "type": "string"
+                  },
+                  "ask_permissions": {
+                    "type": "boolean"
                   }
                 },
                 "required": [

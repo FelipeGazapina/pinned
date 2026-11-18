@@ -10,9 +10,11 @@
 //! Any other step, or the same one again, is asked again.
 //!
 //! On every machine, team box or not, the hook denies a write, move or delete of the owner's
-//! files (`never::OWNERS_FILES`: `.mcp.json`, `settings.local.json`) and asks nobody: they would let
-//! an agent grant itself MCP servers or permissions, and Full access skips every prompt. Outside a
-//! team box that is all it does, and Claude Code runs it only for the tools that write.
+//! files (`never::OWNERS_FILES`: `.mcp.json`, `settings.local.json`, `.claude/settings.json`,
+//! `.claude.json`) and asks nobody: they would let an agent grant itself MCP servers or
+//! permissions, and Full access skips every prompt. Outside a team box that is all it does, and
+//! Claude Code runs it only for the tools that write. A call to one of those it cannot read is
+//! denied.
 
 use super::never::{never, owners_file, Ask, AskCtx};
 use crate::agent::Message;
@@ -37,6 +39,10 @@ pub const TOO_LONG: &str = "This step is too long to show to the team; split it 
 /// What a session reads for a step that sets a secret-named variable to a command: hiding the
 /// value would hide the command from the person asked, so nobody is asked and the step is denied.
 pub const HIDES_COMMAND: &str = "this step hides a command in a secret";
+
+/// What a session reads for a call to a tool that writes whose payload the hook could not read:
+/// it may write one of the owner's files, so it does not run.
+pub const UNREADABLE: &str = "pinned could not read this tool call, so it does not run: make the call again with its usual fields.";
 
 /// The longest step, secrets hidden, a person is asked to approve whole.
 const STEP_CHARS: usize = 4000;
@@ -70,19 +76,26 @@ pub fn run() {
 }
 
 /// The hook's stdout for one PreToolUse payload: `None` when the call may go on (not a team box, no
-/// never-list hit, or a payload that is no tool call), else a deny. `ask` sends the node a message
-/// and returns the hub's answer.
+/// never-list hit, or a tool the never list has no rule for), else a deny. It fails closed: a
+/// payload it cannot read, or a call to a tool that writes without its fields, is denied. `ask`
+/// sends the node a message and returns the hub's answer.
 pub fn decide(payload: &str, env: &HookEnv, ask: impl FnOnce(Message) -> Result<String, String>) -> Option<String> {
-    let hook: Value = serde_json::from_str(payload).ok()?;
+    let Ok(hook) = serde_json::from_str::<Value>(payload) else { return Some(deny(UNREADABLE)) };
+    let Some(tool) = hook["tool_name"].as_str() else { return Some(deny(UNREADABLE)) };
     let input = &hook["tool_input"];
-    let tool_ask = Ask::from_tool(hook["tool_name"].as_str()?, input)?;
-    let cwd = PathBuf::from(hook["cwd"].as_str()?);
-    if let Some(name) = owners_file(&AskCtx { worktree: &cwd, scratch: None, home: &env.home, cwd: &cwd, default_branch: "main", current_branch: None }, &tool_ask) {
+    let Some(tool_ask) = Ask::from_tool(tool, input) else {
+        return crate::hooks::OWNERS_GUARDED.split('|').any(|guarded| guarded == tool).then(|| deny(UNREADABLE));
+    };
+    // With no cwd the path still names the file: an absolute one whole, a relative one by its last components.
+    let cwd = hook["cwd"].as_str().map(PathBuf::from);
+    let at = cwd.clone().unwrap_or_else(|| PathBuf::from("/"));
+    if let Some(name) = owners_file(&AskCtx { worktree: &at, scratch: None, home: &env.home, cwd: &at, default_branch: "main", current_branch: None }, &tool_ask) {
         return Some(deny(&owners(name)));
     }
     if !env.team_box {
         return None;
     }
+    let cwd = cwd?;
     let start = env.project_dir.clone().unwrap_or_else(|| cwd.clone());
     let worktree = repo_top(&start).unwrap_or_else(|| start.clone());
     let worktree = std::fs::canonicalize(&worktree).unwrap_or(worktree);
@@ -90,7 +103,6 @@ pub fn decide(payload: &str, env: &HookEnv, ask: impl FnOnce(Message) -> Result<
     let default_branch = repo_top(&cwd).and_then(|top| default_branch(&top)).unwrap_or_else(|| "main".into());
     let ctx = AskCtx { worktree: &worktree, scratch: None, home: &env.home, cwd: &cwd, default_branch: &default_branch, current_branch: current_branch.as_deref() };
     let hit = never(&ctx, &tool_ask)?;
-    let tool = hook["tool_name"].as_str()?;
     if hides_command(&step_text(tool, &tool_ask, input)) {
         return Some(deny(HIDES_COMMAND));
     }
@@ -385,7 +397,7 @@ mod tests {
 
     #[test]
     fn a_step_off_the_never_list_runs_without_asking() {
-        for call in [payload("Bash", json!({ "command": "cargo test" })), payload("Read", json!({ "file_path": "/work/site/README.md" })), payload("TodoWrite", json!({})), "not json".into()] {
+        for call in [payload("Bash", json!({ "command": "cargo test" })), payload("Read", json!({ "file_path": "/work/site/README.md" })), payload("TodoWrite", json!({}))] {
             let (out, message) = decision(&call, true, Ok(r#"{"id":"k1"}"#));
             assert!(out.is_none() && message.is_none(), "{call}");
         }
@@ -437,9 +449,6 @@ mod tests {
             assert!(out.is_none() && message.is_none(), "{call}");
         }
     }
-
-    /// What a session reads when the hook could not read a tool call it guards.
-    const UNREADABLE: &str = "pinned could not read this tool call, so it does not run: make the call again with its usual fields.";
 
     #[test]
     fn a_tool_call_the_hook_cannot_read_is_denied_and_a_tool_it_does_not_guard_runs() {

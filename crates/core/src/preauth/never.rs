@@ -110,8 +110,9 @@ pub fn never(ctx: &AskCtx, ask: &Ask) -> Option<NeverHit> {
 }
 
 /// The files that would let an agent grant itself MCP servers or permissions: only the owner
-/// writes them, on every machine, whatever mode the session runs in.
-pub const OWNERS_FILES: [&str; 2] = [".mcp.json", "settings.local.json"];
+/// writes them, on every machine, whatever mode the session runs in. One with a `/` names that
+/// many last components of the path.
+pub const OWNERS_FILES: [&str; 4] = [".mcp.json", "settings.local.json", ".claude/settings.json", ".claude.json"];
 
 /// Which of `OWNERS_FILES` the ask writes, moves or deletes, if any. A read is no hit.
 pub fn owners_file(ctx: &AskCtx, ask: &Ask) -> Option<&'static str> {
@@ -239,12 +240,15 @@ fn secret(c: &[String]) -> Option<&'static str> {
     None
 }
 
-/// The one of `OWNERS_FILES` the path text names as its last component, with case folded where
+/// The one of `OWNERS_FILES` the path text names as its last components, with case folded where
 /// the OS folds it (macOS, Windows) and kept where it does not.
 fn owners_name(text: &str) -> Option<&'static str> {
-    let last = text.split(['/', '\\']).rfind(|c| !c.is_empty() && *c != ".")?;
-    let same = |name: &str| if cfg!(any(target_os = "macos", windows)) { last.eq_ignore_ascii_case(name) } else { last == name };
-    OWNERS_FILES.into_iter().find(|name| same(name))
+    let comps: Vec<&str> = text.split(['/', '\\']).filter(|c| !c.is_empty() && *c != ".").collect();
+    let same = |a: &str, b: &str| if cfg!(any(target_os = "macos", windows)) { a.eq_ignore_ascii_case(b) } else { a == b };
+    OWNERS_FILES.into_iter().find(|name| {
+        let want: Vec<&str> = name.split('/').collect();
+        comps.len() >= want.len() && comps[comps.len() - want.len()..].iter().zip(&want).all(|(a, b)| same(a, b))
+    })
 }
 
 /// Whether writing the path changes what the agent may do, or what runs on this machine.
@@ -1294,6 +1298,35 @@ impl<'c, 'a> Scan<'c, 'a> {
         }
     }
 
+    /// A copy into a folder writes each source's name there: `cp x/.mcp.json .claude/`,
+    /// `cp -t .claude x/.mcp.json`, `rsync x/.mcp.json conf` with `conf` a folder.
+    fn owners_into(&mut self, cwd: &Option<PathBuf>, c: &Cmd) {
+        if c.has("T", &["no-target-directory"]) {
+            return;
+        }
+        let pos = c.positionals();
+        // rsync's -t keeps times, and takes no folder.
+        let target = if c.prog == "rsync" { None } else { c.value('t', "target-directory") };
+        let named = target.is_some();
+        let (folder, sources) = match target {
+            Some(folder) => (folder, pos),
+            None => match pos.split_last() {
+                Some((last, rest)) if !rest.is_empty() => ((*last).clone(), rest.to_vec()),
+                _ => return,
+            },
+        };
+        let t = self.tgt(cwd, &folder);
+        let named = named || folder.text.ends_with(['/', '\\']) || matches!(folder.text.as_str(), "." | ".." | "~");
+        if !named && !t.path.as_deref().is_some_and(Path::is_dir) {
+            return;
+        }
+        for source in sources {
+            let Some(name) = source.text.split(['/', '\\']).rfind(|part| !part.is_empty() && *part != ".") else { continue };
+            let raw = format!("{}/{name}", folder.text.trim_end_matches(['/', '\\']));
+            self.owners_check(&raw, t.path.as_ref().map(|p| p.join(name)).as_deref());
+        }
+    }
+
     fn owners_check(&mut self, raw: &str, path: Option<&Path>) {
         if let Some(name) = owners_name(raw).or_else(|| path.and_then(|p| owners_name(&p.to_string_lossy()))) {
             self.owners.get_or_insert(name);
@@ -1355,6 +1388,7 @@ impl<'c, 'a> Scan<'c, 'a> {
                     self.hit(NeverItem::MachineWide, "rsync to a host");
                 } else if let Some(last) = pos.last() {
                     self.write_words(cwd, vec![(*last).clone()]);
+                    self.owners_into(cwd, c);
                 }
             }
             "railway" | "vercel" | "fly" | "flyctl" | "wrangler" | "kubectl" | "helm" | "netlify" | "heroku" => self.hit(NeverItem::Deploy, prog.to_owned()),
@@ -1370,6 +1404,13 @@ impl<'c, 'a> Scan<'c, 'a> {
             "cp" | "install" | "mv" | "ln" | "tee" | "touch" | "mkdir" | "truncate" | "mkfifo" | "sed" | "dd" | "curl" | "wget" => {
                 let words = self.write_args(c);
                 self.write_words(cwd, words);
+                if matches!(prog, "cp" | "install" | "ln") {
+                    self.owners_into(cwd, c);
+                }
+            }
+            // It writes .mcp.json in project scope, and ~/.claude.json in the others.
+            "claude" if sub == "mcp" && pos.get(1).is_some_and(|w| w.text.starts_with("add") || w.text == "remove") => {
+                self.owners.get_or_insert(OWNERS_FILES[0]);
             }
             "npm" | "pnpm" | "yarn" | "bun" | "npx" | "bunx" | "cargo" | "pip" | "pip3" | "pip2" | "pipx" | "python" | "python3" | "python2" | "uv" | "uvx" | "poetry" | "brew" | "apt" | "apt-get" | "aptitude"
             | "dnf" | "yum" | "apk" | "zypper" | "pacman" | "gem" | "go" | "conda" | "mamba" | "micromamba" | "rustup" | "volta" | "asdf" | "mise" | "composer" | "bundle" | "dotnet" => {
