@@ -1,0 +1,14 @@
+/* Review rounds in a thread: a card per round in the worker's, a line per reviewed child in the Captain's. */
+.review-card { margin: 0 0 14px; padding: 10px 12px; border: 1px solid var(--g-input); border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.02); font-size: 13px; line-height: 1.45; }
+.review-head { display: flex; align-items: baseline; gap: 10px; }
+.review-title { font-weight: 600; color: var(--g-fg); }
+.review-state { font-size: 12px; color: var(--g-muted); }
+.review-card[data-review-state="passed"] .review-state { color: var(--g-blue); }
+.review-card:is([data-review-state="limit"], [data-review-state="not_reviewed"], [data-review-state="unknown"]) .review-state { color: var(--g-warning-fg); }
+.review-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 2px; font-size: 12px; color: var(--g-muted); }
+.review-findings { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.review-finding { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; overflow-wrap: anywhere; }
+.review-file { font-size: 12px; color: var(--g-muted); }
+.review-line { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; padding: 6px 12px; border: 1px solid var(--g-input); border-radius: 10px; font-size: 13px; }
+.review-line .review-said { flex: 1; min-width: 0; color: var(--g-muted); overflow-wrap: anywhere; }
+.review-ask { margin: 0 0 14px; padding: 8px 12px; border: 1px solid var(--g-warning-fg); border-radius: 10px; font-size: 13px; color: var(--g-warning-fg); }

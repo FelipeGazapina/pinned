@@ -1128,13 +1128,13 @@ const reviewCards = () => blocks(threadView.innerHTML, '<section class="review-c
 
 test("a round pinned wrote shows as a review card with its state, model, note and findings", async () => {
   const { tab, s, net } = await opened();
-  s.reviews = reviewed([round({ model: "claude-opus-5-5", note: "Not the author's model" })]);
+  s.reviews = reviewed([round({ model: "claude-opus-5-5", note: "A different model than the author" })]);
   await poll(tab, net);
   const [card] = reviewCards();
   assert.ok(card, "no review card was drawn");
   assert.match(textOf(card), /^Reviewer · round 1\s*Sent back/);
   assert.match(textOf(card), /claude-opus-5-5/);
-  assert.match(textOf(card), /Not the author's model/);
+  assert.match(textOf(card), /A different model than the author/);
   assert.match(textOf(card), /A1\s*src\/a\.rs:3,4\s*unwrap on user input/);
   assert.match(card, /data-review-round="1"/);
 });

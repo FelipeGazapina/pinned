@@ -90,6 +90,7 @@ function rig() {
       return Promise.resolve(null);
     },
     takeAgents() {},
+    takeReviews() {},
     guiOn: () => true,
     terminalOnly: () => false,
     renderTerminalOnly() {},

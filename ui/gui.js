@@ -130,7 +130,7 @@ function phaseOf(tab) {
 const turnLive = (tab) => ["working", "asking", "input"].includes(phaseOf(tab));
 const unseenDone = (tab) => phaseOf(tab) === "done" && tab !== active && lastActivity(tab) > (seenAt[threadKey(tab)] ?? 0);
 
-const drawnOf = (t) => JSON.stringify([t.session, t.loaded, t.unsupported, t.error, t.items.length, t.todos, t.context, t.branch, t.agentsKey, t.pending?.map((p) => p.id)]);
+const drawnOf = (t) => JSON.stringify([t.session, t.loaded, t.unsupported, t.error, t.items.length, t.todos, t.context, t.branch, t.agentsKey, t.reviewsKey, t.pending?.map((p) => p.id)]);
 
 /** A prompt's text with its whitespace collapsed, so a message claude joined or re-wrapped still matches. */
 const squashed = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
