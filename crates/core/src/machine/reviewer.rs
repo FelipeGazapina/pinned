@@ -562,6 +562,28 @@ mod tests {
         }
 
         #[test]
+        fn a_cut_diff_never_passes_and_the_padding_is_what_is_cut() {
+            let t = team("cut", Switch::On, 6, SONNET);
+            std::fs::create_dir_all(t.app.join("aaa")).unwrap();
+            std::fs::write(t.app.join("aaa/padding.txt"), "padding line\n".repeat(100 * 1024 / 13)).unwrap();
+            t.change(CHANGED, json!({ "findings": [] }));
+            t.end_turn();
+            let (_, prompt, _) = t.reviewer();
+            assert!(prompt.contains(CHANGED), "the real change was cut for the padding");
+            let note = t.not_reviewed();
+            assert!(note.starts_with("the diff was cut at 96 KiB: ") && note.contains(" bytes were not read"), "{note}");
+
+            let t = team("cutfound", Switch::On, 6, SONNET);
+            std::fs::create_dir_all(t.app.join("aaa")).unwrap();
+            std::fs::write(t.app.join("aaa/padding.txt"), "padding line\n".repeat(100 * 1024 / 13)).unwrap();
+            t.change(CHANGED, json!({ "findings": [a1("unwrap on the input")] }));
+            t.end_turn();
+            let rounds = t.rounds();
+            assert_eq!(serde_json::to_value(rounds[0].state).unwrap(), "limit");
+            assert!(rounds[0].note.as_deref().unwrap_or_default().contains("the diff was cut at 96 KiB"), "{rounds:?}");
+        }
+
+        #[test]
         fn the_reviewer_only_reads_and_has_no_mcp() {
             let t = team("readonly", Switch::On, 6, SONNET);
             t.change(CHANGED, json!({ "findings": [] }));
