@@ -314,8 +314,8 @@ pub struct CaptainReport {
     /// The Capitão's tab.
     pub tab: TabId,
     pub text: String,
-    /// The `request_id`s of the orchestrator's messages whose turn this report ends. Empty for
-    /// `tell_orchestrator`.
+    /// The `request_id`s this report concerns. A turn's end answers the messages in flight; a
+    /// `tell_orchestrator` names the ones its Capitão still serves without answering them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub answers: Vec<String>,
 }

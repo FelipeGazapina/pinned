@@ -8,6 +8,7 @@ use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Hand
 use crate::taste::{self, TasteField, TastePatch, TasteScope, Tastes};
 use crate::panel::{DeviceHub, FileServer, Shells};
 use crate::{sleep, branches, commands, favicon, files, github, history, hooks, mcp, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, sessions, skills, subagents, surface, sync, thread, titles, uploads, usage, workspace};
+use crate::user_requests::CaptainRef;
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -3726,11 +3727,33 @@ impl Machine {
         if let Some(earlier) = sent.find(request_id) {
             return if earlier.project == self.global_folder() { Ok(earlier.handoff.clone()) } else { Err(format!("request_id {request_id} was already used for another message")) };
         }
-        let tab = self.open_global_orchestrator()?;
-        let handoff = self.hand_to(&tab, &report.line(), request_id, BusyPolicy::Queue, &sent)?;
+        let captain = CaptainRef { machine: report.machine.clone(), path: report.path.clone(), project: report.project.clone(), machine_name: report.machine_name.clone(), boxed: false, at: crate::connectors::unix_millis() };
+        let routes = self.requests.lock().unwrap().route(request_id, &report.answers, &captain, captain.at);
+        let mut first = None;
+        for route in routes {
+            let tab = self.tab_of_route(&route)?;
+            let handoff = self.hand_to(&tab, &report.line(), request_id, BusyPolicy::Queue, &sent)?;
+            self.requests.lock().unwrap().delivered(request_id, &route);
+            first.get_or_insert(handoff);
+        }
+        let handoff = match first {
+            Some(handoff) => handoff,
+            None => self.hand_to(&self.open_global_orchestrator()?, &report.line(), request_id, BusyPolicy::Queue, &sent)?,
+        };
         let progress = if matches!(handoff, Handoff::Queued { .. }) { Progress::Queued } else { Progress::InFlight };
         sent.record(global::Sent { request_id: request_id.to_owned(), sender: report.project.clone(), project: self.global_folder(), handoff: handoff.clone(), progress, at: unix_now() });
         Ok(handoff)
+    }
+
+    /// The tab a report routed to `route` is typed into: the request's own, opened on its session
+    /// when it rests with none, else the global tab on that session; the anchor when neither is.
+    fn tab_of_route(&self, route: &crate::user_requests::Route) -> Result<TabId, String> {
+        use crate::user_requests::Route;
+        let found = match route {
+            Route::Request(id) => self.request_tab(id).or_else(|| self.open_request_tab(id).ok()),
+            Route::Session(session) => self.tabs().into_iter().find(|v| v.orchestrator_global && v.session.as_deref() == Some(session.as_str())).map(|v| v.id),
+        };
+        found.map_or_else(|| self.open_global_orchestrator(), Ok)
     }
 
     /// Types `line` into `tab` now when its session is idle, or starts the session on it as its
@@ -3796,6 +3819,34 @@ impl Machine {
                 Ok(Handoff::Queued { position: sent.queued_on(tab) + 1, tab: id })
             }
         }
+    }
+
+    /// The Claude session of global tab `tab` and the id its message travels under: `<request>/<id>`
+    /// from a request's tab, so ids stay unique across requests, and `request_id` as it is from the
+    /// anchor or an old app's global tab.
+    fn sent_from(&self, tab: &str, request_id: &str) -> Result<(Option<String>, String), String> {
+        self.tab(tab, |t| {
+            let id = match crate::user_requests::of_env(&t.env) {
+                Some(request) if !request_id.trim().is_empty() => format!("{request}/{}", request_id.trim()),
+                _ => request_id.to_owned(),
+            };
+            (t.claude_session.clone(), id)
+        })
+    }
+
+    /// The Capitão in `tab` as a request records it: its folder as the tab reports it, and its
+    /// repo's name as the project, under the machine id `report_up` sends. A Capitão on another
+    /// machine is known by neither here.
+    fn captain_ref(&self, tab: &str, remote: bool) -> CaptainRef {
+        let at = crate::connectors::unix_millis();
+        let (machine, machine_name) = (self.hub_id.lock().unwrap().clone(), crate::account::hostname());
+        if remote {
+            return CaptainRef { at, ..CaptainRef::default() };
+        }
+        let path = self.view(tab).map(|v| v.cwd).unwrap_or_default();
+        let folder = Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let project = git_remote(Path::new(&path)).as_deref().and_then(repo_name).map(str::to_owned).unwrap_or(folder);
+        CaptainRef { machine, path, project, machine_name, boxed: false, at }
     }
 
     /// Hands `message` to `project`'s Capitão: on this machine when the project is here and
@@ -4210,11 +4261,25 @@ impl Machine {
             }
             ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: Some(boxed) } => {
                 only_global()?;
-                text_json(self.send_to_captain_box(&project, machine.as_deref(), boxed, &message, &request_id)?)
+                let (session, request_id) = self.sent_from(tab, &request_id)?;
+                let repo = boxed.repo.clone();
+                let answer = self.send_to_captain_box(&project, machine.as_deref(), boxed, &message, &request_id)?;
+                if let Some(session) = session {
+                    let repo = repo.or_else(|| self.project_origin(&project, machine.as_deref()).ok()).unwrap_or_else(|| project.clone());
+                    let captain = CaptainRef { project: repo_name(&repo).unwrap_or(repo.as_str()).to_owned(), boxed: true, at: crate::connectors::unix_millis(), ..CaptainRef::default() };
+                    self.requests.lock().unwrap().record_send(&session, &request_id, captain);
+                }
+                text_json(answer)
             }
             ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: None } => {
                 only_global()?;
-                text_json(self.send_to_captain(&project, machine.as_deref(), &message, &request_id)?)
+                let (session, request_id) = self.sent_from(tab, &request_id)?;
+                let handoff = self.send_to_captain(&project, machine.as_deref(), &message, &request_id)?;
+                if let Some(session) = session.filter(|_| !matches!(handoff, Handoff::Busy { .. })) {
+                    let captain = self.captain_ref(handoff.tab(), self.local_project(&project, machine.as_deref()).is_none());
+                    self.requests.lock().unwrap().record_send(&session, &request_id, captain);
+                }
+                text_json(handoff)
             }
             ProjectTool::ReadCaptain { project, machine } => {
                 only_global()?;
@@ -4267,7 +4332,11 @@ impl Machine {
                 Ok(answer)
             }
             ProjectTool::TellOrchestrator { text } => match self.tab(tab, |t| role_of(&t.env))? {
-                Some((Role::Orchestrator, project)) => text_json(self.report_up(tab, &project, text, vec![])?),
+                Some((Role::Orchestrator, project)) => {
+                    // The requests this Capitão still serves, named without being answered.
+                    let serving = self.sent.lock().unwrap().in_flight(&project).into_iter().map(|s| s.request_id).collect();
+                    text_json(self.report_up(tab, &project, text, serving)?)
+                }
                 _ => Err("only a project's Capitão reports to the global orchestrator".into()),
             },
             ProjectTool::MemorySearch { query, limit } => {
