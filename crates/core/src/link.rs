@@ -300,6 +300,12 @@ fn report_state(shared: &Shared, machine: &Machine) {
     }
 }
 
+/// The next state report, once `now` has reached `at`. A notice wakes a cycle early and does not
+/// move this clock, so a stream of notices cannot postpone the report past `SYNC_EVERY`.
+fn take_report(now: Instant, at: Instant) -> Option<Instant> {
+    (now >= at).then(|| now + SYNC_EVERY)
+}
+
 #[derive(Default)]
 struct Syncer {
     state: Option<sync::State>,
@@ -454,6 +460,7 @@ impl Syncer {
     fn run(mut self, shared: &Shared, machine: &Machine, file: Option<&Path>, stopped: &watch::Receiver<bool>) {
         let mut wait = SYNC_FIRST;
         let mut seen = 0;
+        let mut report_at = Instant::now() + SYNC_FIRST;
         'run: loop {
             let until = Instant::now() + wait;
             let mut why = Wake::Tick;
@@ -478,7 +485,6 @@ impl Syncer {
                         break 'run;
                     }
                     if shared.sync_now.load(Ordering::SeqCst) {
-                        why = Wake::Now;
                         break;
                     }
                     std::thread::park_timeout(left);
@@ -486,8 +492,9 @@ impl Syncer {
             }
             wait = SYNC_EVERY;
             if shared.online() {
-                if why == Wake::Tick {
+                if let Some(next) = take_report(Instant::now(), report_at) {
                     report_state(shared, machine);
+                    report_at = next;
                 }
                 // Taken before the cycle, so a notice during it wakes the next one.
                 seen = shared.watch.notices();
@@ -507,8 +514,10 @@ impl Syncer {
     }
 
     fn cycle(&mut self, shared: &Shared, hub: &impl mirror::Source, machine: &Machine, file: &Path) {
-        // A user action ends every hold, so the refused pushes go out in this cycle.
-        if shared.sync_now.swap(false, Ordering::SeqCst) {
+        // A user action ends every hold, so the refused pushes go out in this cycle, and the
+        // mirror is read again even when no notice arrived.
+        let explicit = shared.sync_now.swap(false, Ordering::SeqCst);
+        if explicit {
             self.backoff.end();
         }
         if self.state.is_none() {
@@ -534,7 +543,7 @@ impl Syncer {
             self.backoff.end();
         }
         self.backoff.begin(Instant::now());
-        let feed = mirror::Feed::new(hub, &shared.watch, &mut self.mirrors, Instant::now());
+        let feed = mirror::Feed::new(hub, &shared.watch, &mut self.mirrors, Instant::now()).fresh(explicit);
         for checkout in checkouts {
             if !shared.online() {
                 self.backoff.skipped();
@@ -2418,6 +2427,14 @@ mod tests {
         assert_eq!(syncer.backoff.limit.as_ref().map(|limit| limit.wait), Some(PUSH_HOLD_MAX), "the steps reach the cap");
         assert!(holds.iter().all(|seconds| *seconds <= PUSH_HOLD_MAX.as_secs()), "no hold is longer than {PUSH_HOLD_MAX:?}: {holds:?}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_notice_does_not_postpone_the_state_report() {
+        let start = Instant::now();
+        let first = start + SYNC_FIRST;
+        assert_eq!(take_report(start + Duration::from_secs(1), first), None, "an early notice leaves the report where it was");
+        assert_eq!(take_report(first, first), Some(first + SYNC_EVERY), "once the deadline arrives the next one is a full interval later");
     }
 
     #[test]
