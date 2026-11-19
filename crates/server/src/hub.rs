@@ -1110,7 +1110,7 @@ impl Hub {
                 return Ok(Value::Null);
             }
             call @ (HubCall::Relay { .. } | HubCall::Overview | HubCall::ReadCaptain { .. } | HubCall::ReadSession { .. } | HubCall::RepoLook { .. }) => return crate::relay::serve(self, account, crate::relay::Source::Client, call).await,
-            HubCall::GetTastes => return json(self.db.tastes(account.id).await?.unwrap_or_default()),
+            HubCall::GetTastes => return json(self.with_box_cap(self.db.tastes(account.id).await?.unwrap_or_default())),
             HubCall::SetTaste { scope, patch } => return self.change_tastes(account, |tastes| tastes.set(&scope, patch)).await,
             HubCall::ResetTasteField { scope, field } => {
                 let reset = |tastes: &mut Tastes| {
@@ -1389,7 +1389,13 @@ impl Hub {
         let mut tastes = self.db.tastes(account.id).await?.unwrap_or_default();
         change(&mut tastes)?;
         self.db.save_tastes(account.id, &tastes).await?;
-        json(tastes)
+        json(self.with_box_cap(tastes))
+    }
+
+    /// `tastes` as a reader gets them: with this hub's cap on the account's open boxes, the most
+    /// Boxes at once can be.
+    fn with_box_cap(&self, tastes: Tastes) -> Tastes {
+        Tastes { box_cap: self.boxes.policy.max_open, ..tastes }
     }
 
     pub async fn machines(&self, account: &Account) -> Result<Vec<MachineView>, String> {

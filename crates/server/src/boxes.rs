@@ -211,6 +211,11 @@ impl Default for Policy {
     }
 }
 
+/// An agent's box refused because the account's Boxes at once is 0.
+pub const BOXES_AT_ONCE_ZERO: &str = "Boxes at once is 0, so agents cannot start a box on this account. Run it on a connected machine, or raise Boxes at once in Settings › Way of working.";
+/// The rest of an agent's box refused because the account's agents already have Boxes at once open.
+const BOXES_AT_ONCE_FULL: &str = "the most it allows at once. Wait for one to end, or raise Boxes at once in Settings › Way of working.";
+
 /// The hub's record that one run lives in one box. It exists before its box does and goes only
 /// after the box and its machine are gone.
 #[derive(Clone, Debug)]
@@ -1319,15 +1324,10 @@ impl Boxes {
         if self.drive_guard(account.id, &fresh.id).is_none() {
             return Err("Upstash Box: its box is still booting; try again".into());
         }
-        // Kept before the row, so the box can't end before its opener is known.
-        if let Some(opener) = &opener {
-            hub.db.hold_agent_box(&fresh.id, account.id, opener, unix_millis()).await?;
-        }
-        if let Err(e) = hub.db.reserve_box(&fresh).await {
-            if opener.is_some() {
-                let _ = hub.db.forget_agent_box(account.id, &fresh.id).await;
-            }
-            return Err(e);
+        // An agent's opener is kept with its row, so the box can't end before its opener is known.
+        match &opener {
+            Some(opener) => drop(self.reserve_agent(hub, account, &fresh, Some(opener)).await?),
+            None => drop(hub.db.reserve_box(&fresh).await?),
         }
         let (hub, account, keys) = (hub.clone(), account.clone(), keys.clone());
         let row = fresh.clone();
@@ -1425,7 +1425,7 @@ impl Boxes {
         if self.drive_guard(account.id, &fresh.id).is_none() {
             return Err("Upstash Box: its box is still booting; try again".into());
         }
-        let (row, written) = hub.db.reserve_box(&fresh).await?;
+        let (row, written) = self.reserve_agent(hub, account, &fresh, None).await?;
         if !written {
             return Ok(row);
         }
@@ -1590,7 +1590,13 @@ impl Boxes {
             self.give_back(hub, account, claimed.as_deref()).await;
             return Err("Upstash Box: its box is still booting; the next check tries again".into());
         }
-        let (row, _) = hub.db.reserve_box(&fresh).await?;
+        let row = match self.reserve_agent(hub, account, &fresh, None).await {
+            Ok((row, _)) => row,
+            Err(e) => {
+                self.give_back(hub, account, claimed.as_deref()).await;
+                return Err(e);
+            }
+        };
         if row.id != fresh.id {
             self.give_back(hub, account, claimed.as_deref()).await;
         }
@@ -1611,6 +1617,21 @@ impl Boxes {
             if let Err(e) = connectors.release_fixed_row(id) {
                 eprintln!("pinned-server: could not release box claim {id}: {e}");
             }
+        }
+    }
+
+    /// Reserves `row` for a box an agent opens: the workflows', the workers', the Captains', and an
+    /// agent's `open_box` with its `opener`. Every agent path writes its row here and nowhere else, so
+    /// each is held to the account's Boxes at once, at most the hub's cap, counted and written at once.
+    /// A box the user opens is not held to it and does not count.
+    async fn reserve_agent(&self, hub: &Hub, account: &Account, row: &BoxRow, opener: Option<&Opener>) -> Result<(BoxRow, bool), String> {
+        let tastes = hub.db.tastes(account.id).await?.unwrap_or_default();
+        let most = Tastes { box_cap: self.policy.max_open, ..tastes }.boxes_limit();
+        match hub.db.reserve_agent_box(row, most, opener, unix_millis()).await? {
+            Ok(reserved) => Ok(reserved),
+            Err(_) if most == 0 => Err(BOXES_AT_ONCE_ZERO.into()),
+            Err(1) => Err(format!("1 box already runs on this account, {BOXES_AT_ONCE_FULL}")),
+            Err(open) => Err(format!("{open} boxes already run on this account, {BOXES_AT_ONCE_FULL}")),
         }
     }
 
