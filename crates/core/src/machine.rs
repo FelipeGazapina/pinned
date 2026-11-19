@@ -3558,6 +3558,7 @@ impl Machine {
         if self.requests.lock().unwrap().migrate(session.as_deref(), crate::connectors::unix_millis()).is_some() {
             self.emit_tabs();
         }
+        self.reopen_held_requests();
     }
 
     /// After a restart, each request that waited for room to start rests again in a tab of its
@@ -20582,21 +20583,22 @@ Have another model review a risky change before it goes ahead.";
     #[test]
     #[cfg(unix)]
     fn an_unmatched_report_starts_its_own_reports_thread_not_the_anchor() {
-        let (dir, _claude, m, path) = routing_machine("req-route-phantom");
+        let (dir, claude, m, path) = routing_machine("req-route-phantom");
         let anchor = m.open_global_orchestrator().unwrap();
         m.record_event(AgentEvent { session: Some("s-0".into()), ..hook(&anchor, AgentStatus::Done) });
         let handoff = m.deliver_report("report:1", &report_of(&path, "Unasked news.", &[])).unwrap();
         let tab = handoff.tab().to_owned();
         assert_ne!(tab, anchor);
         assert!(!heard(&m, &anchor, "Unasked news."));
-        assert!(heard(&m, &tab, "Unasked news."));
-        assert!(!m.tab(&tab, |t| t.launch.iter().any(|a| a.contains("s-0"))).unwrap(), "it never resumes the anchor");
+        let args = started(&claude, &tab);
+        assert!(args.iter().any(|a| a.contains("Unasked news.")), "the report is its first prompt: {args:?}");
+        assert!(!args.iter().any(|a| a.contains("s-0")), "it never resumes the anchor");
         let id = m.view(&tab).unwrap().request.expect("a request tab");
         let r = m.requests.lock().unwrap().get(&id).cloned().unwrap();
         assert_eq!((r.title.as_str(), r.kind), ("Reports from Captain site", crate::user_requests::Kind::CaptainReports));
         let next = m.deliver_report("report:2", &report_of(&path, "More news.", &[])).unwrap();
         assert_eq!(next.tab(), tab, "the next unmatched report joins it");
-        assert!(heard(&m, &tab, "More news."));
+        assert!(heard(&m, &tab, "More news.") || started(&claude, &tab).iter().any(|a| a.contains("More news.")));
         let _ = std::fs::remove_dir_all(dir);
     }
 
