@@ -204,6 +204,17 @@ test("# filters projects by slug and @ filters machines by slug or name", () => 
   assert.deepEqual(tagOptions(null, catalog), []);
 });
 
+test("a folder that holds only global Orchestrator tabs is no project, whether it has one tab or a request thread beside the anchor", () => {
+  const anchor = { machine: "mm", view: { orchestrator_global: true } };
+  const request = { machine: "mm", view: { orchestrator_global: true, request: "q1" } };
+  const own = (thread) => ({ machine: "mm", path: "/Users/f/.pinned/orquestrador", name: "orquestrador", repo: null, thread });
+  for (const threads of [[own(anchor)], [own(anchor), own(request)], [own(request)]]) {
+    const groups = groupProjects({ threads, listed: {}, grouping: true });
+    const built = here(context.tagCatalog({ groups, directory: { localId: "mm", localName: "Mac mini", names: { mm: "Mac mini" }, online: { mm: true } }, phase: (tab) => tab.view.status, repoAt: () => null }));
+    assert.deepEqual(built.projects, [], `${threads.length} tab(s)`);
+  }
+});
+
 test("the catalog groups projects by repo as the sidebar does and reads each Captain", () => {
   const capWorking = { machine: "mb", view: { role: "orchestrator", status: "working" } };
   const capIdle = { machine: "mm", view: { role: "orchestrator", status: "idle" } };

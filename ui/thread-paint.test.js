@@ -70,12 +70,16 @@ const sandbox = {
   machines: new Map([["box", {}]]),
   ui: { sidebarOpen: true },
   performance: { now: () => clock.now },
+  queueMicrotask,
   setTimeout: (run, ms) => clock.timers.push({ at: clock.now + ms, run }),
   document: {
     hidden: false,
     activeElement: null,
     body: { dataset: { mode: "gui" }, toggleAttribute() {} },
     addEventListener() {},
+    createElement() {
+      return { set innerHTML(v) { this.value = v; } };
+    },
     getElementById(id) {
       if (id === "context-meter") return contextMeter;
       return element();
@@ -96,6 +100,8 @@ const agents = read("./gui-agents.js");
 const model = read("./redesign-model.js");
 const composer = read("./gui-composer.js");
 const chat = read("./global-chat.js");
+const orchestrator = read("./gui-orchestrator.js");
+const panel = read("./gui-panel.js");
 vm.runInContext(read("./vendor/marked.js"), sandbox);
 vm.runInContext(
   `
@@ -138,6 +144,19 @@ function renderDialog() {}
 function showScrollEnd() {}
 function renderMinimap() {}
 function workersKey() { return ""; }
+function speakGlobalTexts() {}
+function fileIcon() { return ""; }
+let laneCatalogNow = { projects: [], machines: [], name: "Orchestrator" };
+function composerTagCatalog() { return laneCatalogNow; }
+function projectGroups() { return []; }
+function runningWorkers() { return new Map(); }
+function machineName(id) { return id; }
+function groupName(group) { return group.name; }
+function hasProject() { return true; }
+function lastSeen() { return ""; }
+function monogram(name) { return String(name).slice(0, 2).toUpperCase(); }
+const MONOGRAM_COLORS = ["#fff"];
+const globalSettings = { group_reports: true };
 function workersNow(tab) { return workersOf(tab); }
 function threadTitle(tab) { return tab.view.title ?? "New thread"; }
 function threadState() { return "idle"; }
@@ -167,6 +186,12 @@ ${between(timeline, "const CITATIONS_BLOCK", "const citeButton")}
 ${agents.slice(agents.indexOf("const agentsOf"))}
 ${between(model, "const STEP_KINDS", "function needsYouItem")}
 ${between(chat, "function waitingKindOf", "/** What a thread blocked")}
+${between(chat, "const REPORT_HEADER", "/** What read aloud says")}
+${between(panel, "function fileChip", "function openFileChip")}
+${read("./composer-tags.js")}
+${read("./global-orchestrator.js")}
+${read("./requests-model.js")}
+${between(orchestrator, "/** A value built at most once per task", 'threadView.addEventListener("click"')}
 ${between(model, "const GLYPH_LOOKS", "\n")}
 ${between(model, "const glyphHtml", "\n")}
 ${between(model, "const runsInBox", "\n")}
@@ -1117,4 +1142,150 @@ test("a delivered message an idle thread still lacks after 30 s is drawn as stal
   idle.thread.pending[0].sentAt = Date.now();
   sandbox.renderThread();
   assert.match(textOf(blocks(threadView.innerHTML, '<section class="pending-turn"')[0]), /bump the version\s*Sending…/, "the render key carries the stale state both ways");
+});
+
+// A request thread is a global Orchestrator tab that carries `view.request`; the anchor is a global
+// tab without it. Both paint through the Orchestrator's lane.
+const GLOBAL_AT = "2026-11-19T10:00:00Z";
+function globalTab(id, view = {}, items = []) {
+  const tab = tabFor(id, "idle");
+  tab.view = { ...tab.view, orchestrator_global: true, ...view };
+  tab.thread = { ...tab.thread, loaded: true, session: "s", items };
+  return tab;
+}
+const askedItem = (text = "Fix the login code delay.") => ({ kind: "user", id: "u1", at: GLOBAL_AT, text });
+const answerItem = (body, id = "a1") => ({ kind: "text", id, at: "2026-11-19T10:00:09Z", text: body });
+function sentSteps(project, result, id = "toolu_s1") {
+  const step = { kind: "tool", id, at: "2026-11-19T10:00:02Z", name: "mcp__pinned__send_to_captain", summary: project, detail: "", args: [["project", project], ["message", "Fix it."], ["request_id", "r-1"]] };
+  return result === undefined ? [step] : [step, { kind: "result", tool: id, at: "2026-11-19T10:00:03Z", error: false, text: JSON.stringify(result) }];
+}
+function paintLane(tabs, shown = tabs[0]) {
+  clearScreen();
+  sandbox.tabs = tabs;
+  sandbox.active = shown;
+  sandbox.renderThread();
+  return threadView.innerHTML;
+}
+const dividers = (html) => blocks(html, '<div class="sent-divider"').map(textOf);
+const inSandbox = (code) => vm.runInContext(code, sandbox);
+const CATALOG = { projects: [{ slug: "site", name: "site", repo: "", machines: [{ id: "box", slug: "box", name: "Box", online: true, captain: "idle" }] }], machines: [{ slug: "box", name: "Box", online: true }], name: "Orchestrator" };
+
+test("a request thread reads the Sent to Captain divider off the send_to_captain step, one line per outcome", () => {
+  const outcomes = [
+    [{ outcome: "entregue", tab: "tab-9" }, "Sent to Captain site · delivered"],
+    [{ outcome: "na_fila", tab: "tab-9", position: 2 }, "Sent to Captain site · queued, position 2"],
+    [{ outcome: "iniciado", tab: "tab-9" }, "Sent to Captain site · started"],
+  ];
+  for (const [result, line] of outcomes) {
+    const tab = globalTab("tab-r1", { request: "q1" }, [askedItem(), ...sentSteps("github.com/o/site", result), answerItem("Sent it to the Captain.")]);
+    const html = paintLane([tab]);
+    assert.deepEqual(dividers(html), [line], result.outcome);
+    assert.doesNotMatch(html, /Routed to/, "the tag-guessed line is gone");
+  }
+});
+
+test("a send_to_captain step with no answer yet, or one the host refused, still reads as what happened", () => {
+  const waiting = globalTab("tab-r1", { request: "q1" }, [askedItem(), ...sentSteps("/w/site")]);
+  assert.deepEqual(dividers(paintLane([waiting])), ["Sent to Captain site"]);
+  const busy = globalTab("tab-r1", { request: "q1" }, [askedItem(), ...sentSteps("m-book:/w/site", { outcome: "ocupado", tab: "tab-9" })]);
+  assert.deepEqual(dividers(paintLane([busy])), ["Sent to Captain site · busy, not sent"]);
+});
+
+test("once a plan names the request, the divider reads plan with N lists, and only for that Captain's plan", () => {
+  const glance = { id: "q1", title: "Fix the login code delay", project: "site", opened_at: 1, kind: "asked", closed_at: null, needs: "", needs_at: null, last_user_at: null, last_who: null, last_text: "", last_at: null, replies: 0, captains: [{ machine: "box", path: "/w/site", project: "site", machine_name: "Box" }], tab: "tab-r1" };
+  const plan = (id, strips, requests) => ({ id, title: "Ship the fix", state: "working", done: 1, total: 4, strips, requests });
+  const captain = (id, cwd, plans) => ({ ...tabFor(id, "working"), view: { id, status: "working", cwd, message: "", role: "orchestrator", plans } });
+  const request = globalTab("tab-r1", { request: "q1", requests: [glance] }, [askedItem(), ...sentSteps("github.com/o/site", { outcome: "entregue", tab: "tab-c1" })]);
+  assert.deepEqual(dividers(paintLane([request, captain("tab-c1", "/w/site", [plan("p1", ["dd", "p", "-"], ["q1"])])], request)), ["Sent to Captain site · plan with 3 lists"]);
+  assert.deepEqual(dividers(paintLane([request, captain("tab-c1", "/w/site", [plan("p1", ["dd"], ["q1"])])], request)), ["Sent to Captain site · plan with 1 list"]);
+  assert.deepEqual(dividers(paintLane([request, captain("tab-c1", "/w/site", [plan("p1", ["dd"], ["q2"])])], request)), ["Sent to Captain site · delivered"], "a plan of another request does not count");
+  assert.deepEqual(dividers(paintLane([request, captain("tab-c2", "/w/other", [plan("p1", ["dd", "p"], ["q1"])])], request)), ["Sent to Captain site · delivered"], "nor does a plan of another Captain");
+});
+
+test("the anchor keeps today's Routed to line and draws no divider", () => {
+  inSandbox(`laneCatalogNow = ${JSON.stringify(CATALOG)}`);
+  const anchor = globalTab("tab-a1", {}, [askedItem("#site fix the login code delay"), ...sentSteps("github.com/o/site", { outcome: "entregue", tab: "tab-9" }), answerItem("Sent.")]);
+  const html = paintLane([anchor]);
+  assert.match(html, /<p class="routed">Routed to Captain site on Box<\/p>/);
+  assert.deepEqual(dividers(html), []);
+  inSandbox(`laneCatalogNow = ${JSON.stringify({ projects: [], machines: [], name: "Orchestrator" })}`);
+});
+
+test("the Worked for fold is hidden in a request thread and kept on the anchor", () => {
+  const items = [askedItem(), { kind: "tool", id: "toolu_b", at: "2026-11-19T10:00:04Z", name: "Bash", summary: "ls", detail: "ls" }, { kind: "result", tool: "toolu_b", at: "2026-11-19T10:00:05Z", error: false, text: "ok" }, answerItem("Looked around.")];
+  const request = globalTab("tab-r1", { request: "q1" }, structuredClone(items));
+  const anchor = globalTab("tab-a1", {}, structuredClone(items));
+  const asked = paintLane([request]);
+  assert.doesNotMatch(asked, /<details class="work"/);
+  assert.match(asked, /Looked around\./, "the answer stays");
+  assert.match(paintLane([anchor]), /<details class="work"[\s\S]*Worked/);
+});
+
+test("the Captains rail belongs to the anchor tab, not to a request thread, a Captain or an ordinary thread", () => {
+  assert.equal(sandbox.wantsRail(globalTab("tab-a1")), true);
+  assert.equal(sandbox.wantsRail(globalTab("tab-r1", { request: "q1" })), false);
+  assert.equal(sandbox.wantsRail({ ...tabFor("tab-c1"), view: { id: "tab-c1", role: "orchestrator" } }), false);
+  assert.equal(sandbox.wantsRail(tabFor("tab-t1")), false);
+  assert.equal(sandbox.wantsRail(null), false);
+});
+
+const reportPrompt = (project, machine, id, body) => `[pinned] Capitão ${project} (${machine}) [${id} t1]: ${body}`;
+
+test("lastReports scans every global tab, so a report in a request thread counts", () => {
+  const anchor = globalTab("tab-a1", {}, [askedItem("hello")]);
+  const request = globalTab("tab-r1", { request: "q1" }, [{ kind: "user", id: "u2", at: "2026-11-19T11:00:00Z", text: reportPrompt("site", "Box", "m1", "Published v2.") }]);
+  const ordinary = tabFor("tab-t1");
+  ordinary.thread.items = [{ kind: "user", id: "u9", at: "2026-11-19T12:00:00Z", text: reportPrompt("other", "Box", "m1", "Not a global tab.") }];
+  sandbox.tabs = [anchor, request, ordinary];
+  const reports = sandbox.lastReports();
+  assert.equal(reports.get("site"), "2026-11-19T11:00:00Z");
+  assert.equal(reports.has("other"), false, "an ordinary thread's text is not a report");
+  const second = globalTab("tab-r2", { request: "q2" }, [{ kind: "user", id: "u3", at: "2026-11-19T13:00:00Z", text: reportPrompt("site", "Box", "m1", "Published v3.") }]);
+  sandbox.tabs = [anchor, request, second];
+  assert.equal(sandbox.lastReports().get("site"), "2026-11-19T13:00:00Z", "the latest of the tabs wins");
+  sandbox.tabs = [second, request];
+  assert.equal(sandbox.lastReports().get("site"), "2026-11-19T13:00:00Z", "whatever the tab order");
+});
+
+test("a report row in a request thread shows the machine only; the anchor keeps its Captain's tile", () => {
+  const prompt = reportPrompt("site", "Mac mini", "m1", "Both pieces are written.");
+  const request = globalTab("tab-r1", { request: "q1" }, [askedItem(), { kind: "user", id: "u2", at: "2026-11-19T11:00:00Z", text: prompt }]);
+  const asked = paintLane([request]);
+  assert.match(asked, /<button type="button" class="who"[^>]*>Captain site<\/button><span class="where">Mac mini<\/span>/);
+  assert.doesNotMatch(asked, /captain-mono|captain-count|class="review"/);
+  assert.match(asked, /class="open-thread"/, "Open thread stays");
+  const anchor = globalTab("tab-a1", {}, [{ kind: "user", id: "u2", at: "2026-11-19T11:00:00Z", text: prompt }]);
+  assert.match(paintLane([anchor]), /class="captain-mono"/);
+});
+
+test("the latest answer of a request thread offers its Options line as quick replies", () => {
+  const request = globalTab("tab-r1", { request: "q1" }, [askedItem(), answerItem("One thing is left for you.\nOptions: Post it in #support | Leave me a draft")]);
+  const html = paintLane([request]);
+  assert.deepEqual(blocks(html, '<button type="button" class="quick-reply"').map(textOf), ["Post it in #support", "Leave me a draft"]);
+  assert.match(html, /data-reply="Post it in #support"/);
+  assert.doesNotMatch(html, /Options: /, "the line itself is not drawn");
+});
+
+const TAGS = /<([A-Za-z][A-Za-z0-9-]*)((?:[^"'<>]|"[^"]*"|'[^']*')*)>/g;
+const ATTRS = /([^\s"'<>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+const elementsOf = (html) => [...html.matchAll(TAGS)].map((m) => ({ tag: m[1].toLowerCase(), attrs: [...(m[2] ?? "").matchAll(ATTRS)].map((a) => [a[1].toLowerCase(), a[2] ?? a[3] ?? a[4] ?? ""]) }));
+const withoutBodies = (html) => blocks(html, '<div class="body md').reduce((rest, body) => rest.replace(body, ""), html);
+
+test("markup in the divider and in a report row stays text: no img element and no javascript: link", () => {
+  const evil = "<img src=x onerror=alert(1)>";
+  const items = [
+    askedItem(),
+    ...sentSteps(evil, { outcome: evil, tab: evil, position: evil }),
+    ...sentSteps("[x](javascript:alert(1))", { outcome: "na_fila", position: "[x](javascript:alert(1))" }, "toolu_s2"),
+    { kind: "user", id: "u2", at: "2026-11-19T11:00:00Z", text: reportPrompt("<img src=x onerror=x>", "<img src=x onerror=x>", 'm"><img/src=x/onerror=x>', `[x](javascript:alert(1)) ${evil}\n[y](javascript:alert(2))`) },
+  ];
+  const html = paintLane([globalTab("tab-r1", { request: "q1" }, items)]);
+  assert.equal(dividers(html).length, 2, "both dividers drew");
+  assert.match(html, /class="report-row"/, "the report row drew");
+  const shown = elementsOf(withoutBodies(html));
+  assert.deepEqual(shown.filter((e) => e.tag === "img"), [], "no img element outside a markdown body");
+  const all = elementsOf(html);
+  assert.deepEqual(all.flatMap((e) => e.attrs).filter(([name]) => name.startsWith("on")), [], "no event handler attribute anywhere");
+  assert.deepEqual(all.flatMap((e) => e.attrs).filter(([name, value]) => /^(href|src|xlink:href)$/.test(name) && /^\s*javascript:/i.test(value)), [], "no javascript: link anywhere");
+  assert.ok(dividers(html).includes("Sent to Captain &#60;img src=x onerror=alert(1)&#62;"), "the payload reads as text");
 });
