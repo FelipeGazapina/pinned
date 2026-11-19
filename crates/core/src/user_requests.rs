@@ -1089,6 +1089,24 @@ mod tests {
     }
 
     #[test]
+    fn only_the_lines_typed_leave_the_record_and_a_named_session_clears_none() {
+        let dir = temp("held-count");
+        let mut store = UserRequests::load(Some(&dir));
+        let (a, _) = store.open("a", "Ask", None, 1_000);
+        store.hold(&a, "First.");
+        store.hold(&a, "Second.");
+        store.hold_for_anchor("Anchor one.");
+        store.hold_for_anchor("Anchor two.");
+        assert!(store.set_session(&a, "s-a"));
+        store.clear_held(&a, 1);
+        store.clear_anchor_held(1);
+        let again = UserRequests::load(Some(&dir));
+        assert_eq!(again.get(&a).map(|r| r.held.clone()), Some(vec!["Second.".to_owned()]), "the first write went in, the second failed");
+        assert_eq!(again.anchor_held(), ["Anchor two."]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_report_after_clear_reaches_the_request_that_sent_it() {
         let dir = temp("clear");
         let mut store = UserRequests::load(Some(&dir));
