@@ -18603,7 +18603,11 @@ Have another model review a risky change before it goes ahead.";
         m.set_local_taste(&TasteScope::Captains, serde_json::from_value(json!({ "parallel": 2 })).unwrap()).unwrap();
         let tool = |tab: &str, call: Value| m.project_tool(tab, serde_json::from_value(call).unwrap());
         let signed_out = tool(&global_tab, json!({ "name": "projects" })).unwrap();
-        assert!(signed_out.contains(&path), "{signed_out}");
+        let listed: Value = serde_json::from_str(&signed_out).unwrap();
+        let listed_here = listed["projects"].as_array().unwrap().iter().any(|project| {
+            project["checkouts"].as_array().unwrap().iter().any(|checkout| checkout["path"] == path)
+        });
+        assert!(listed_here, "projects lists this machine's checkout {path}: {signed_out}");
 
         for down in [crate::link::OFFLINE, crate::link::HUB_TIMEOUT] {
             m.set_hub(Arc::new(move |_| Err(down.into())));
