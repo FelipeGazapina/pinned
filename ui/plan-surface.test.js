@@ -209,7 +209,7 @@ test("zoom, a folded list and the picked plan survive a re-render", async () => 
   h.run("renderPlanPanel(shownSurface(active))");
   const html = h.html();
   assert.ok(html.includes('<span class="pl-zoom-name">Details</span>'), "the Details zoom shows again");
-  assert.ok(/class="pl-list folded"[\s\S]*Diagnose/.test(html), "the folded list stays folded");
+  assert.ok(/class="lane folded"[\s\S]*Diagnose/.test(html), "the folded list stays folded");
   assert.ok(/data-plan="p2"[^>]*aria-selected="true"/.test(html), "the picked plan stays picked");
 });
 
@@ -346,7 +346,7 @@ test("a step shows who runs it: its by, else Worker for a task, else Captain", a
   const runBy = (id) => {
     h.click("[data-step]", { step: id });
     h.run("renderPlanPanel(shownSurface(active))");
-    return /<dt>Run by<\/dt><dd>([^<]*)<\/dd>/.exec(h.html())?.[1];
+    return /class="fact">Run by<b>([^<]*)<\/b>/.exec(h.html())?.[1];
   };
   assert.equal(runBy("s1"), "Worker A");
   assert.equal(runBy("s2"), "Worker");

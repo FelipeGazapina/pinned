@@ -237,7 +237,7 @@ test("plan titles, step names, Captain names and a snapshot's text with markup d
   await h.draw();
 
   const html = h.html();
-  assert.ok(html.length > 500 && html.includes("pl-list"), "the plan drew");
+  assert.ok(html.length > 500 && html.includes('class="lane'), "the plan drew");
   assert.ok(!/<img/i.test(html), "no image element is created");
   assert.ok(!/href\s*=\s*["']?javascript:/i.test(html), "no javascript: href is created");
   assert.ok(!/<a[\s>]/i.test(html), "no link element is created");
@@ -252,11 +252,11 @@ test("a list folded in one Captain's section does not fold the same list id in a
   h.tabs.push(store, billing, request);
   await h.open(request);
   const scoped = (m, t) => `${m}|${t}|p1|l1`;
-  assert.equal((h.html().match(/class="pl-list"/g) ?? []).length, 4, "two plans of two lists draw open");
+  assert.equal((h.html().match(/class="lane"/g) ?? []).length, 4, "two plans of two lists draw open");
 
   h.click("[data-fold]", { fold: scoped("m1", "tab-1") });
   await h.draw();
-  assert.equal((h.html().match(/class="pl-list folded"/g) ?? []).length, 1, "only the picked plan's list folds");
+  assert.equal((h.html().match(/class="lane folded"/g) ?? []).length, 1, "only the picked plan's list folds");
   assert.ok(h.html().includes('data-fold="m1|tab-1|p1|l1" aria-expanded="false"'), "it is the storefront's");
   assert.ok(h.html().includes('data-fold="m2|tab-7|p1|l1" aria-expanded="true"'), "billing's stays open");
 });
