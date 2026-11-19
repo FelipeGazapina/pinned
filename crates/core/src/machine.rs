@@ -14068,8 +14068,7 @@ while True:
         m.record_event(hook(&capitao, AgentStatus::Done));
         wait_for("the report", || relayed.lock().unwrap().len() == 2);
         let report = |text: &str, answers: Value| json!({ "cmd": "relay", "request_id": "report:*", "to": { "kind": "orchestrator", "report": { "machine": "", "machine_name": host, "project": "site", "path": path, "tab": capitao, "text": text, "answers": answers } } });
-        let mut asked = report("Which form?", json!([]));
-        asked["to"]["report"].as_object_mut().unwrap().remove("answers");
+        let asked = report("Which form?", json!(["r-1"]));
         assert_eq!(relays(), [asked, report("Shipped.", json!(["r-1"]))]);
         assert_eq!(m.projects_overview().map(|o| o.projects.len()), Ok(1), "the hub's refusal did not fall back to this machine");
 
