@@ -1371,7 +1371,9 @@ test("9r7 item 11: a report row in a request thread carries no time at all, hove
   const rows = blocks(html, '<div class="report-row"');
   assert.equal(rows.length, 2);
   for (const row of rows) assert.doesNotMatch(row, /class="when"/);
-  const anchor = reportsBlock(paintLane([globalTab("tab-a1", {}, [user])]));
+  const open = globalTab("tab-a1", {}, [user]);
+  open.thread.open.add("reports:u2");
+  const anchor = reportsBlock(paintLane([open]));
   assert.equal(blocks(anchor, '<div class="report-row"').length, 2);
   for (const row of blocks(anchor, '<div class="report-row"')) assert.match(row, /class="when"/, "the anchor chat's rows keep the hover time");
 });
