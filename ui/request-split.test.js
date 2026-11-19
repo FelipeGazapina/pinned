@@ -43,12 +43,12 @@ test("each tagged paragraph starts an item, and its project and machine come fro
 });
 
 test("an untagged paragraph joins the item above it: two tagged and one untagged give 2 items, the second including it", () => {
-  const items = splitRequest("#pinned Fix the login bug\n\n#site Update the footer\n\nAlso check the links", catalog);
+  const items = splitRequest("#pinned Fix the login bug\n\n#site @macbook Update the footer\n\nAlso check the links", catalog);
   assert.equal(items.length, 2);
   assert.equal(items[0].text, "#pinned Fix the login bug");
-  assert.equal(items[1].text, "#site Update the footer\n\nAlso check the links");
+  assert.equal(items[1].text, "#site @macbook Update the footer\n\nAlso check the links");
   assert.equal(items[1].project, "Site");
-  assert.equal(items[1].machine, null);
+  assert.equal(items[1].machine, "MacBook");
 });
 
 test("an untagged paragraph between two tagged ones joins the first", () => {
