@@ -3248,7 +3248,7 @@ impl Machine {
                     s.write(data).map_err(|e| e.to_string())?
                 }
                 // A start under way has given it no process yet; one held at the cap starts with them.
-                None if t.starting || t.asleep => t.keys.extend_from_slice(data),
+                None if t.starting => t.keys.extend_from_slice(data),
                 None => {}
             }
             Ok::<_, String>((submitted, mode_unknown))
