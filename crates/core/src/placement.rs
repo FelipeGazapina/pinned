@@ -183,6 +183,8 @@ pub struct Seen {
     pub state: Option<MachineState>,
     /// It has a checkout of the project, or can clone one.
     pub has_repo: bool,
+    /// It is an Upstash Box.
+    pub upstash_box: bool,
 }
 
 /// Places a worker for `caller` among `machines` at unix second `now`. `exclude` are machines
@@ -280,7 +282,7 @@ mod tests {
     }
 
     fn seen(id: &str, state: MachineState) -> Seen {
-        Seen { id: id.into(), name: id.into(), online: true, state: Some(state), has_repo: true }
+        Seen { id: id.into(), name: id.into(), online: true, state: Some(state), has_repo: true, upstash_box: false }
     }
 
     fn policy(prefer: &[&str], avoid: &[&str]) -> Placement {
@@ -413,5 +415,12 @@ mod tests {
         let wire = serde_json::to_value(&set).unwrap();
         assert_eq!(wire, serde_json::json!({ "prefer": ["mini"], "avoid": ["book"], "heavy": "all_workers" }));
         assert_eq!(serde_json::from_value::<Placement>(wire).unwrap(), set);
+    }
+
+    #[test]
+    fn placement_never_picks_a_box_even_a_preferred_one_that_fits() {
+        let machines = vec![Seen { upstash_box: true, ..seen("box", state(0, 5, 80)) }, seen("book", state(1, 95, 200))];
+        let placed = place(&policy(&["box"], &[]), "book", &Need::default(), &machines, &[], NOW);
+        assert_eq!(outcome(&placed), ("book", By::Fallback, vec![("book", Why::Busy)]), "the busy machine that asked, never the box");
     }
 }

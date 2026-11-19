@@ -211,6 +211,10 @@ pub struct TastePatch {
     /// it belongs to the account, and a project's own comes later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<crate::placement::Placement>,
+    /// The account's Boxes at once. Only the Captains' and the orchestrator's scope take it, and
+    /// only the user's own app sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boxes_at_once: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
@@ -245,6 +249,7 @@ pub enum TasteField {
     BoxBudgetCents,
     Placement,
     BoxSize,
+    BoxesAtOnce,
 }
 
 impl TasteField {
@@ -302,6 +307,24 @@ pub struct Tastes {
     /// The account's and each project's worker profiles: the user's own, written only by
     /// `HubCall::SetWorkerProfiles`.
     pub worker_profiles: crate::profiles::WorkerProfiles,
+    /// How many boxes the account's agents may have open at once.
+    pub boxes_at_once: u32,
+    /// The hub's fixed cap on the account's open boxes.
+    pub box_cap: u32,
+}
+
+impl Tastes {
+    pub fn boxes_limit(&self) -> u32 {
+        self.boxes_at_once
+    }
+
+    pub fn boxes_note(&self) -> String {
+        String::new()
+    }
+
+    pub fn boxes_brief(&self) -> Option<String> {
+        None
+    }
 }
 
 impl Profile {
@@ -495,7 +518,7 @@ impl Taste {
             TasteField::BudgetCents => self.budget_cents = default.budget_cents,
             TasteField::TimeLimitMin => self.time_limit_min = default.time_limit_min,
             TasteField::BoxBudgetCents => self.box_budget_cents = default.box_budget_cents,
-            TasteField::Placement => {}
+            TasteField::Placement | TasteField::BoxesAtOnce => {}
             TasteField::BoxSize => self.box_size = default.box_size,
         }
     }
@@ -680,6 +703,7 @@ impl TastePatch {
         take(newer.box_budget_cents, &mut self.box_budget_cents);
         take(newer.box_size, &mut self.box_size);
         take(newer.placement, &mut self.placement);
+        take(newer.boxes_at_once, &mut self.boxes_at_once);
     }
 
     /// Drops each field equal to `base`'s, so the scope inherits it again.
@@ -744,6 +768,7 @@ impl TastePatch {
             TasteField::BoxBudgetCents => self.box_budget_cents = None,
             TasteField::Placement => self.placement = None,
             TasteField::BoxSize => self.box_size = None,
+            TasteField::BoxesAtOnce => self.boxes_at_once = None,
         }
     }
 }
@@ -1735,5 +1760,46 @@ Deploys go through the VPS."
         assert_eq!(sized(&tastes, Some(SITE), None), (BoxSize::Small, BoxSizeSource::BuiltIn));
         assert_eq!(serde_json::to_value(&tastes.captains).unwrap()["box_size"], Value::Null, "the account's is written, null included");
         assert!(serde_json::to_value(&tastes.projects[SITE]).unwrap().get("box_size").is_none(), "a project's patch leaves it out");
+    }
+
+    const ZERO_NOTE: &str = "Boxes at once is 0: agents cannot start an Upstash Box on this account. Never pass target.box to delegate_task or box to send_to_captain, and never call open_box; run the work on the connected machines that orchestrator_capabilities lists under machines.";
+
+    #[test]
+    fn boxes_at_once_reads_8_without_the_field_and_takes_the_hubs_cap_above_it() {
+        let old: Tastes = serde_json::from_value(json!({ "captains": { "parallel": 3 } })).unwrap();
+        assert_eq!((old.boxes_at_once, old.box_cap, old.boxes_limit()), (8, 8, 8), "tastes from before the field");
+        assert_eq!(Tastes::default().boxes_limit(), 8, "a fresh account");
+        let patch: TastePatch = serde_json::from_value(json!({ "parallel": 2 })).unwrap();
+        assert_eq!(patch.boxes_at_once, None, "an old app's patch leaves it alone");
+        let stored: Tastes = serde_json::from_value(json!({ "boxes_at_once": 20, "box_cap": 8 })).unwrap();
+        assert_eq!(stored.boxes_limit(), 8, "a stored 20 is the cap of 8");
+
+        let mut tastes = Tastes::default();
+        let set = |n: u32| TastePatch { boxes_at_once: Some(n), ..TastePatch::default() };
+        assert_eq!(tastes.set(&TasteScope::Project { repo: SITE.into() }, set(2)), Err("Boxes at once belongs to the account: set it for Captains (all), not for one project".into()));
+        tastes.set(&TasteScope::Captains, set(20)).unwrap();
+        assert_eq!((tastes.boxes_at_once, tastes.boxes_limit()), (20, 8));
+        tastes.set(&TasteScope::Captains, TastePatch { parallel: Some(2), boxes_at_once: Some(0), ..TastePatch::default() }).unwrap();
+        assert_eq!((tastes.boxes_at_once, tastes.captains.parallel), (0, 2), "with another field in the same patch");
+        tastes.reset(&TasteScope::Captains, TasteField::BoxesAtOnce);
+        assert_eq!(tastes.boxes_at_once, 8, "a reset gives the default back");
+    }
+
+    #[test]
+    fn boxes_at_once_is_the_users_own() {
+        let refused = Err("boxes_at_once is changed only by the user, on the Way of working page; nothing changed".to_owned());
+        let patch = TastePatch { parallel: Some(2), boxes_at_once: Some(3), ..TastePatch::default() };
+        assert_eq!(refuse_review_settings(patch.review_settings()), refused);
+        assert_eq!(refuse_review_settings(TasteField::BoxesAtOnce.review_setting()), refused);
+    }
+
+    #[test]
+    fn boxes_at_once_tells_the_agents_the_number_or_to_use_the_machines() {
+        let with = |n: u32| Tastes { boxes_at_once: n, ..Tastes::default() };
+        assert_eq!(with(3).boxes_note(), "Boxes at once: 3. The account's agents may have 3 Upstash Boxes open at once; one more is refused.");
+        assert_eq!(with(1).boxes_note(), "Boxes at once: 1. The account's agents may have 1 Upstash Box open at once; one more is refused.");
+        assert_eq!(with(0).boxes_note(), ZERO_NOTE);
+        assert_eq!(with(3).boxes_brief(), None, "the prompt says nothing more while boxes are allowed");
+        assert_eq!(with(0).boxes_brief().as_deref(), Some(ZERO_NOTE));
     }
 }

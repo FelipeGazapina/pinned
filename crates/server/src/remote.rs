@@ -95,7 +95,7 @@ async fn place(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, repo: Option<
     }
     let seen: Vec<Seen> = machines
         .into_iter()
-        .map(|machine| Seen { has_repo: machine.id == from || cloneable || lists(&machine.id), id: machine.id, name: machine.name, online: machine.online, state: machine.state })
+        .map(|machine| Seen { has_repo: machine.id == from || cloneable || lists(&machine.id), upstash_box: machine.upstash_box.is_some(), id: machine.id, name: machine.name, online: machine.online, state: machine.state })
         .collect();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
     serde_json::to_value(pinned_core::placement::place(&policy, from, need, &seen, exclude, now)).map_err(|e| e.to_string())

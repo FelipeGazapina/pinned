@@ -854,7 +854,7 @@ fn prompt_field(text: &str) -> Option<String> {
 
 /// The global orchestrator's system prompt. `name` is its configured name, `machine` the machine it
 /// runs on. Both are made one short line, and an empty name falls back to the default.
-pub fn prompt(name: &str, machine: &str) -> String {
+pub fn prompt(name: &str, machine: &str, _boxes_at_once: u32) -> String {
     let name = prompt_field(name).unwrap_or_else(default_name);
     let machine = prompt_field(machine).unwrap_or_else(|| "local".to_owned());
     format!(
@@ -1473,5 +1473,14 @@ mod tests {
         assert!(turns.lock().unwrap().is_empty(), "the answered turn is over");
         assert_eq!(ledger.answer(Path::new("/p")).len(), 0, "an answered message reports once");
         assert_eq!(ledger.find("r1").map(|s| s.progress), Some(Progress::Answered));
+    }
+
+    #[test]
+    fn boxes_at_once_0_takes_the_box_out_of_the_prompt() {
+        let offered = "passe box: true";
+        assert!(prompt("Atlas", "mac", 8).contains(offered), "a box is offered while Boxes at once allows one");
+        let none = prompt("Atlas", "mac", 0);
+        assert!(!none.contains(offered) && !none.contains("Upstash Box"), "{none}");
+        assert!(none.contains("4b. Boxes at once é 0 nesta conta: nunca passe box em send_to_captain. Rode o Capitão numa máquina conectada, que projects() lista."), "{none}");
     }
 }
