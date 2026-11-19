@@ -104,7 +104,7 @@ function harness(extra = {}) {
   run(planSrc);
   const listen = (type, target) => listeners[type]({ target });
   /** A click on an element matching `sel` (a selector gui-plan.js queries) inside the plan body. */
-  const click = (sel, dataset = {}) => listen("click", { closest: (s) => (s === sel ? { dataset } : s === ".pl" ? { dataset: {} } : null) });
+  const click = (sel, dataset = {}) => listen("click", { closest: (s) => (s === sel ? { dataset } : s === ".plan-root" ? { dataset: {} } : null) });
   const push = () => models.forEach((fn) => fn());
   const html = () => log.shown.at(-1) ?? "";
   return { context, log, run, click, push, html, listeners, models, tabs };
@@ -232,8 +232,8 @@ test("the root row has its trunk dot", async () => {
   const { html } = await draw(lists());
   assert.ok(/<div class="root-row">/.test(html), "the plan opens with a root row");
   assert.ok(html.indexOf('class="root-row"') < html.indexOf('class="lane'), "before the first lane");
-  assert.match(cssSrc, /\.pl \.root-row::before\s*\{[^}]*border-radius:\s*50%/, "the row draws its dot");
-  assert.match(cssSrc, /\.pl \.root-row::after\s*\{[^}]*width:\s*2px/, "and the trunk that leaves it");
+  assert.match(cssSrc, /\.plan-root \.root-row::before\s*\{[^}]*border-radius:\s*50%/, "the row draws its dot");
+  assert.match(cssSrc, /\.plan-root \.root-row::after\s*\{[^}]*width:\s*2px/, "and the trunk that leaves it");
 });
 
 test("the zoom is Dots, Steps and Details, and the cell width follows it", async () => {
@@ -278,7 +278,7 @@ test("phone, 390 px: Steps gives lanes that scroll sideways, Dots gives none", a
   const dots = await draw(lists("running"), { zoom: 0 });
   for (const t of tags(dots.html, "track")) assert.ok(px(t, "width") <= room, `a Dots lane fits ${room}px, got ${px(t, "width")}`);
   const phone = cssSrc.slice(cssSrc.indexOf("body[data-phone-screen]"));
-  assert.match(phone, /\.pl[^{]*button[^{]*\{[^}]*min-height:\s*44px/, "every button is touch-sized on the phone");
+  assert.match(phone, /\.plan-root[^{]*button[^{]*\{[^}]*min-height:\s*44px/, "every button is touch-sized on the phone");
   assert.match(phone, /\.pl-zoom button[^{]*\{[^}]*min-width:\s*44px/, "so is the zoom");
 });
 
@@ -335,14 +335,14 @@ test("9r3 item 4: a step with a fix branch opens it on the first paint, and the 
 });
 
 test("9r3 item 5: a merged fix branch keeps its right arm", () => {
-  assert.doesNotMatch(rule(".pl .ubranch.merged"), /border-right-color/);
+  assert.doesNotMatch(rule(".plan-root .ubranch.merged"), /border-right-color/);
 });
 
 test("9r3 item 6: the Dots zoom beats every per-state glyph rule, waiting included", () => {
   const css = cssSrc.replace(/\/\*[\s\S]*?\*\//g, "");
   const hide = [...css.matchAll(/([^{}]*\.z0[^{}]*)\{[^}]*display:\s*none/g)].flatMap((m) => m[1].split(",")).map((x) => x.trim()).filter((x) => x.includes("::after"));
   assert.ok(hide.length, "a .z0 rule hides ::after");
-  const waiting = specificity('.pl .cell[data-state="waiting"] .dot::after');
+  const waiting = specificity('.plan-root .cell[data-state="waiting"] .dot::after');
   for (const sel of hide) {
     const [a, b] = specificity(sel);
     assert.ok(a > waiting[0] || (a === waiting[0] && b >= waiting[1]), `${sel} outranks the waiting glyph`);

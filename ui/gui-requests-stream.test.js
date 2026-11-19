@@ -163,9 +163,24 @@ function harness({ tabs = [], reply = () => [], host = "mac" } = {}) {
   const overlay = run("requestsStream");
   const click = (selectors) => overlay.listeners.click({ target: { closest: (sel) => selectors[sel] ?? null } });
   const entry = (id) => ({ "[data-rqs-entry]": { dataset: { rqsEntry: id } } });
-  /** A scroll of the list to its end (or not). */
-  const scroll = (atEnd = true) => overlay.listeners.scroll({ target: { closest: (sel) => (sel === "[data-rqs-list]" ? {} : null), scrollTop: atEnd ? 900 : 0, clientHeight: 100, scrollHeight: 1000 } });
-  return { context, run, log, els, overlay, click, entry, scroll };
+  /** The list element: a fresh one (scrolled to 0) on each redraw, 100 high per entry plus 200, in a 100 high box. */
+  const list = { scrollTop: 0, clientHeight: 100, scrollHeight: 0, closest: (sel) => (sel === "[data-rqs-list]" ? list : null) };
+  let drawn = "";
+  Object.defineProperty(overlay, "innerHTML", {
+    get: () => drawn,
+    set: (value) => {
+      drawn = value;
+      list.scrollTop = 0;
+      list.scrollHeight = (value.match(/data-rqs-entry=/g) ?? []).length * 100 + 200;
+    },
+  });
+  overlay.querySelector = (sel) => (sel === "[data-rqs-list]" && drawn ? list : null);
+  /** A scroll of the list to its top (or to the middle). */
+  const scroll = (atTop = true) => {
+    list.scrollTop = atTop ? 10 : 250;
+    overlay.listeners.scroll({ target: list });
+  };
+  return { context, run, log, els, overlay, click, entry, scroll, list };
 }
 
 const anchorTab = (requests) => ({ key: "mac:tab-1", machine: "mac", view: { id: "tab-1", orchestrator_global: true, requests, plans: [] } });
@@ -227,14 +242,14 @@ test("the earlier conversation shows as one entry named Earlier conversation, Do
   assert.doesNotMatch(html, /whatever the host named it/);
 });
 
-test("scrolling to the end asks for older requests before the oldest opened_at, and stops on an empty page", async () => {
+test("scrolling to the top asks for older requests before the oldest opened_at, and stops on an empty page", async () => {
   const tabs = [anchorTab([glance("a", { opened_at: 3000 }), glance("b", { opened_at: 2000 }), glance("c", { opened_at: 1000 })])];
   const pages = [[glance("d", { opened_at: 500 }), glance("e", { opened_at: 400 })], []];
   const h = harness({ tabs, reply: (call) => (call.cmd === "user_requests" ? pages.shift() : null) });
   open(h);
   h.scroll(false);
   await flush();
-  assert.deepEqual(h.log.calls, [], "not at the end yet");
+  assert.deepEqual(h.log.calls, [], "not at the top yet");
   h.scroll();
   await flush();
   assert.deepEqual(h.log.calls, [["mac", { cmd: "user_requests", before: 1000 }]]);
@@ -258,6 +273,45 @@ test("an error while paging ends the list with no banner", async () => {
   await flush();
   assert.equal(h.log.calls.length, 1);
   assert.deepEqual(h.log.told, []);
+});
+
+const threeTabs = () => [anchorTab([glance("a", { opened_at: 3000 }), glance("b", { opened_at: 2000 }), glance("c", { opened_at: 1000 })])];
+
+test("9r6 item 2: opening All activity scrolls the list to its newest end", () => {
+  const h = harness({ tabs: threeTabs() });
+  open(h);
+  assert.equal(h.list.scrollHeight, 500);
+  assert.equal(h.list.scrollTop, 500);
+  assert.deepEqual(h.log.calls, [], "opening at the bottom pages nothing");
+});
+
+test("9r6 item 2: a request that arrives while the user is at the bottom keeps the list at the bottom, and one that arrives while reading higher leaves the place", () => {
+  const tabs = threeTabs();
+  const h = harness({ tabs });
+  open(h);
+  tabs[0].view.requests.unshift(glance("d", { opened_at: 4000 }));
+  h.run("renderStream()");
+  assert.equal(h.list.scrollHeight, 600);
+  assert.equal(h.list.scrollTop, 600, "followed the new request");
+  h.list.scrollTop = 250;
+  tabs[0].view.requests.unshift(glance("e", { opened_at: 5000 }));
+  h.run("renderStream()");
+  assert.equal(h.list.scrollHeight, 700);
+  assert.equal(h.list.scrollTop, 250, "the reader's place is kept");
+});
+
+test("9r6 item 2: older requests page in at the top and the reader's place does not jump", async () => {
+  const pages = [[glance("d", { opened_at: 500 }), glance("e", { opened_at: 400 })]];
+  const h = harness({ tabs: threeTabs(), reply: (call) => (call.cmd === "user_requests" ? pages.shift() : null) });
+  open(h);
+  h.scroll(false);
+  await flush();
+  assert.deepEqual(h.log.calls, [], "the middle of the list pages nothing");
+  h.scroll(true);
+  await flush();
+  assert.deepEqual(h.log.calls, [["mac", { cmd: "user_requests", before: 1000 }]]);
+  assert.equal(h.list.scrollHeight, 700, "two older entries were added above");
+  assert.equal(h.list.scrollTop, 210, "10 above the old top, now 200 lower");
 });
 
 test("an old host that errors on user_requests leaves All activity doing nothing, with no banner", async () => {

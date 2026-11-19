@@ -104,7 +104,7 @@ function harness({ reply, ...extra } = {}) {
   run(fn(orchestratorSrc, "threadRequestGlance"));
   run(fn(orchestratorSrc, "threadRequestPlans"));
   run(planSrc);
-  const click = (sel, dataset = {}) => listeners.click({ target: { closest: (s) => (s === sel ? { dataset } : s === ".pl" ? { dataset: {} } : null) } });
+  const click = (sel, dataset = {}) => listeners.click({ target: { closest: (s) => (s === sel ? { dataset } : s === ".plan-root" ? { dataset: {} } : null) } });
   const push = () => models.forEach((f) => f());
   const html = () => log.shown.at(-1) ?? "";
   /** Opens the Plan surface on `tab` and draws it. */

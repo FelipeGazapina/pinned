@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
@@ -713,6 +713,39 @@ test("9r5 A: the card's pill row is the Captains first, then the links, and empt
   const one = [{ machine: "mac", path: "/s", project: "storefront", machine_name: "Mac" }];
   assert.deepEqual(pills(has(one, ["PR #212 merged", "Ticket SUP-88"])), ["Captain storefront", "PR #212 merged", "Ticket SUP-88"]);
   assert.doesNotMatch(has([], []), /rc-links/);
+});
+
+test("9r6 item 1: no stylesheet styles the bare class .pl (the composers' mirror lines carry it), and the plan panel's root has its own class", () => {
+  const files = readdirSync(new URL("./", import.meta.url)).filter((f) => f.endsWith(".css") && !/^(gui-)?composer/.test(f));
+  assert.ok(files.includes("gui-plan.css") && files.includes("gui-requests-new.css"), "the sweep covers the plan and NewRequest sheets");
+  const bare = [];
+  for (const file of files) {
+    for (const m of cssOf(file).matchAll(/([^{}]+)\{/g)) {
+      for (const sel of m[1].split(",")) if (/\.pl(?![\w-])/.test(sel)) bare.push(`${file}: ${sel.trim()}`);
+    }
+  }
+  assert.deepEqual(bare, [], "no selector names the bare .pl class");
+  const js = read("gui-plan.js");
+  assert.equal((js.match(/showPanel\(`<div class="plan-root"/g) ?? []).length, 3, "the three panel roots carry plan-root");
+  assert.doesNotMatch(js, /class="pl"/, "and none carries .pl");
+  assert.match(js, /closest\("\.plan-root"\)/, "a click is matched inside the plan-root");
+});
+
+test("9r6 item 3: a glance with no captains list draws no Captain pill and no crash", () => {
+  const html = h0().run(`requestCardFrom({ id: "q", title: "t", last_who: "captain", opened_at: 1 }, { view: { stands: { asked: 'a', done: 'b', left: 'c', needs: '', links: ["PR #1"] } } })`);
+  const pills = [...html.matchAll(/<span class="rc-link">([^<]*)<\/span>/g)].map((m) => m[1]);
+  assert.deepEqual(pills, ["PR #1"]);
+  assert.equal(h0().run(`requestLastWho({ last_who: "captain" }, "Orchestrator")`), "Captain");
+});
+
+test("9r6 item 3: a Captain with no project is named by its machine, and one with neither draws nothing", () => {
+  const card = (captains) => {
+    const html = h0().run(`requestCardFrom(${JSON.stringify(glance("q", { captains }))}, { view: { stands: { asked: 'a', done: 'b', left: 'c', needs: '', links: [] } } })`);
+    return [...html.matchAll(/<span class="rc-link">([^<]*)<\/span>/g)].map((m) => m[1]);
+  };
+  assert.deepEqual(card([{ machine: "mac", path: "/s", project: "", machine_name: "MacBook" }]), ["Captain on MacBook"]);
+  assert.deepEqual(card([{ machine: "mac", path: "/s", project: "", machine_name: "" }]), []);
+  assert.deepEqual(card([{ machine: "mac", path: "/s", project: "storefront", machine_name: "MacBook" }, { machine: "mac", path: "/t", project: "", machine_name: "" }]), ["Captain storefront"]);
 });
 
 test("9r5 B: 'kept up to date by the Orchestrator' shows in the card's title while the Plan is closed, and hides while it is open", () => {

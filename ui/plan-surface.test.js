@@ -104,7 +104,7 @@ function harness(extra = {}) {
   run(planSrc);
   const listen = (type, target) => listeners[type]({ target });
   /** A click on an element matching `sel` (a selector gui-plan.js queries) inside the plan body. */
-  const click = (sel, dataset = {}) => listen("click", { closest: (s) => (s === sel ? { dataset } : s === ".pl" ? { dataset: {} } : null) });
+  const click = (sel, dataset = {}) => listen("click", { closest: (s) => (s === sel ? { dataset } : s === ".plan-root" ? { dataset: {} } : null) });
   const push = () => models.forEach((fn) => fn());
   const html = () => log.shown.at(-1) ?? "";
   return { context, log, run, click, push, html, listeners, models, tabs };

@@ -540,7 +540,9 @@ test("9r5 item 2: a mirror line is a block of its own, so tags stay inline and t
   const mirror = h.run("nrMirror").innerHTML;
   assert.equal(mirror, '<div class="pl"><span class="tag project">#billing-api</span> <span class="tag machine">@studio</span> the monthly export is missing refunds. Find out why.</div>');
   const css = cssOfNew("gui-requests-new.css");
-  assert.match(ruleOfNew(css, "#new-request .nr-mirror .pl"), /display:\s*block;[^}]*flex:\s*none/, "the plan tree's .pl (flex column) does not reach the mirror's lines");
+  assert.doesNotMatch(css, /\.nr-mirror \.pl\b(?!-)/, "9r6: no per-screen override of the mirror's .pl line is left");
+  const plan = cssOfNew("gui-plan.css");
+  assert.match(ruleOfNew(plan, ".plan-root"), /display:\s*flex;\s*flex-direction:\s*column/, "the flex column is the plan panel's own class, so the mirror's .pl lines stay blocks");
 });
 
 test("9r5 item 3: the preview header carries no New chip", () => {
