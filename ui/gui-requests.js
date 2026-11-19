@@ -91,7 +91,11 @@ function requestCtx(glance, tabViews) {
 const requestStateOf = (glance, tabViews = requestTabViews()) => requestState(glance, requestCtx(glance, tabViews));
 
 /** The glance of the request a tab is, or null for any other tab. */
-const requestOf = (tab) => (tab?.view?.request ? requestGlances().find((g) => g.id === tab.view.request) ?? null : null);
+function requestOf(tab) {
+  if (!tab?.view?.request) return null;
+  const found = (typeof threadRequestGlance === "function" ? threadRequestGlance(tab) : null) ?? (rawGlances() ?? []).find((g) => g.id === tab.view.request);
+  return found ? patchedGlance(found) : null;
+}
 const requestHere = (tab) => (requestsOn() ? requestOf(tab) : null);
 
 /** The number on the Orchestrator row: requests that need you, or null while the screens are off. */

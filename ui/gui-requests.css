@@ -1,0 +1,76 @@
+/* The Requests column beside a global tab, a request thread's header and card, and the composer
+   footer's line. Colours come from the theme tokens; the board's hard-coded dark values map to them. */
+
+/* The column sits at the chat's left edge; the chat keeps its own layout behind a left padding. */
+#requests-column { position: absolute; top: 0; bottom: 0; left: 0; z-index: 6; display: flex; flex-direction: column; box-sizing: border-box; width: 340px;
+  border-right: 1px solid var(--g-border); background: var(--g-bg); color: var(--g-fg); font-size: 13px; }
+#requests-column[hidden] { display: none; }
+#chat[data-requests] { padding-left: 340px; }
+#chat[data-requests] #composer { left: 340px; }
+#chat[data-requests] #scroll-end { left: calc(50% + 170px); }
+#chat[data-requests][data-rail] #scroll-end { left: calc(50% + 22px); }
+
+#requests-column .rq-head { display: flex; flex: none; align-items: center; gap: 8px; height: var(--topbar); padding: 0 14px; }
+#requests-column .rq-head h1 { margin: 0; font-size: 14px; font-weight: 600; }
+#requests-column .spacer { flex: 1; }
+#requests-column .rq-all { padding: 5px 8px; border-radius: 7px; font-size: 12px; color: color-mix(in srgb, var(--g-link) 75%, white); }
+#requests-column .rq-all:hover { background: var(--g-hover); }
+#requests-column .rq-new { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 8px; background: var(--g-primary);
+  color: var(--g-on-primary); font-size: 12px; font-weight: 600; }
+#requests-column .rq-new:hover { background: var(--g-primary-hover); }
+#requests-column .rq-new .i { width: 12px; height: 12px; }
+
+#requests-column .rq-filters { display: flex; flex: none; flex-wrap: wrap; gap: 6px; padding: 0 12px 10px; }
+#requests-column .rq-filter { height: 26px; padding: 0 10px; border: 1px solid rgb(var(--g-ink-rgb) / 0.1); border-radius: 13px; font-size: 12px; color: var(--g-muted); }
+#requests-column .rq-filter[aria-pressed="true"] { border-color: rgb(var(--g-ink-rgb) / 0.16); background: rgb(var(--g-ink-rgb) / 0.1); color: var(--g-fg); }
+#requests-column .rq-filter .n { opacity: 0.7; }
+
+#requests-column .rq-list { display: flex; flex: 1; flex-direction: column; gap: 2px; min-height: 0; padding: 0 6px 12px; overflow-y: auto; }
+#requests-column .rq-empty { margin: 24px 12px; font-size: 13px; color: var(--g-muted); }
+#requests-column .rq-row { display: flex; flex: none; align-items: flex-start; gap: 10px; width: 100%; padding: 10px; border-radius: 10px; text-align: left; }
+#requests-column .rq-row:hover { background: var(--g-hover); }
+#requests-column .rq-row[aria-current="true"] { background: rgb(var(--g-ink-rgb) / 0.09); }
+#requests-column [data-state="needs"], #chat-head .crumb [data-state="needs"] { --rq-tone: var(--g-warning); }
+#requests-column [data-state="working"], #chat-head .crumb [data-state="working"] { --rq-tone: var(--g-blue); }
+#requests-column [data-state="done"], #chat-head .crumb [data-state="done"] { --rq-tone: var(--g-success); }
+#requests-column .rq-row .dot { flex: none; width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: var(--rq-tone); }
+#requests-column .rq-row .body { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
+#requests-column .rq-row .top { display: flex; align-items: baseline; gap: 8px; }
+#requests-column .rq-row .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 600; }
+#requests-column .rq-row .when { flex: none; font-size: 11px; color: var(--g-muted); }
+#requests-column .rq-row .last { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--g-muted); }
+#requests-column .rq-row .meta { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+#requests-column .rq-row .state { font-size: 11px; color: var(--rq-tone); }
+#requests-column .rq-row[data-state="done"] .state { color: var(--g-muted); }
+#requests-column .rq-row .steps { font-size: 11px; color: var(--g-muted); }
+#requests-column .rq-row .unread { min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 9px; background: var(--g-primary); color: var(--g-on-primary);
+  font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; }
+
+/* The #project chip, in the column, the header and the footer. */
+.rq-project { flex: none; padding: 1px 6px; border-radius: 4px; background: color-mix(in srgb, var(--g-blue) 16%, transparent); color: var(--g-blue); font-size: 11px; }
+
+/* The thread's header: Scripts, Open in and Git act on a checkout, which a request is not. */
+#chat-head:has(.request-dot) :is(#scripts-control, #open-in, #git-action) { display: none; }
+#chat-head .crumb .request-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--rq-tone); }
+#chat-head .crumb .request-title { flex: 0 1 auto; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; font-size: 14px; font-weight: 600; }
+#chat-head .crumb .request-state { flex: none; font-size: 12px; color: var(--rq-tone); }
+#chat-head .crumb .request-state[data-state="done"] { color: var(--g-muted); }
+
+/* "Where this stands". */
+.request-card { display: flex; flex-direction: column; gap: 10px; margin: 0 0 16px; padding: 14px 16px; border: 1px solid rgb(var(--g-ink-rgb) / 0.08); border-radius: 12px;
+  background: var(--g-raised); font-size: 13px; }
+.request-card .rc-head { display: flex; align-items: center; gap: 8px; }
+.request-card .rc-title { font-size: 12.5px; font-weight: 600; }
+.request-card .rc-note { margin-left: auto; font-size: 11px; color: var(--g-muted); }
+.request-card .rc-grid { display: grid; grid-template-columns: 76px 1fr; gap: 6px 12px; line-height: 1.5; }
+.request-card .rc-k { color: var(--g-muted); }
+.request-card .rc-v { min-width: 0; overflow-wrap: anywhere; }
+.request-card .rc-v[data-needs="true"] { color: var(--g-warning); }
+.request-card .rc-links { display: flex; flex-wrap: wrap; gap: 6px; }
+.request-card .rc-link { padding: 3px 8px; border: 1px solid rgb(var(--g-ink-rgb) / 0.1); border-radius: 7px; font-size: 12px; color: rgb(var(--g-fg-rgb) / 0.85); }
+.request-card .rc-loading { margin: 0; font-size: 12px; color: var(--g-muted); }
+
+/* The composer footer in a request thread. */
+.request-foot { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; font-size: 12px; color: var(--g-muted); }
+.request-foot .new-request { margin-left: auto; padding: 0; font-size: 12px; color: color-mix(in srgb, var(--g-link) 75%, white); }
+.request-foot .new-request:hover { text-decoration: underline; }

@@ -242,12 +242,15 @@ function needsYouItem(tab) {
 
 const needsYouItems = () => tabs.map(needsYouItem).filter((i) => i && (i.ask || !snoozedNow(i.tab))).sort((a, b) => (b.since ?? 0) - (a.since ?? 0));
 
-/** The Captains' reports in the global orchestrator's thread since the user last saw it there. */
+/** The Captains' reports in every global orchestrator thread (the anchor and each request's) since the user last saw it there. */
 function unseenReports() {
-  const global = tabs.find(isGlobalOrchestratorTab);
-  if (!global || global === active) return 0;
-  const seen = seenAt[threadKey(global)] ?? 0;
-  return threadOf(global).items.filter((i) => i.kind === "user" && unixOf(i.at) > seen).reduce((n, i) => n + reportBlocks(i.text).length, 0);
+  let count = 0;
+  for (const global of tabs.filter(isGlobalOrchestratorTab)) {
+    if (global === active) continue;
+    const seen = seenAt[threadKey(global)] ?? 0;
+    count += threadOf(global).items.filter((i) => i.kind === "user" && unixOf(i.at) > seen).reduce((n, i) => n + reportBlocks(i.text).length, 0);
+  }
+  return count;
 }
 
 /** The `which` window ("five_hour", "seven_day") of `account` on `machine` while it still holds. */
@@ -303,7 +306,7 @@ visibleInterval(fetchReviews, REVIEWS_EVERY_MS);
 function navCounts() {
   return {
     needsYou: agentConfirmations.length + needsYouItems().filter((i) => i.kind !== "review").length,
-    orchestrator: unseenReports(),
+    orchestrator: (typeof requestsBadge === "function" ? requestsBadge() : null) ?? unseenReports(),
     reviews: reviewCount,
     usage: usageNow(),
     ...machineCounts(),

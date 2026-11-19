@@ -33,6 +33,8 @@ visibleInterval(() => {
  * The name keeps the title's menu. */
 const ORCHESTRATOR_GLYPH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="8" width="16" height="12" rx="2"></rect><path d="M12 8V4"></path><path d="M9 14v2"></path><path d="M15 14v2"></path></svg>`;
 function orchestratorCrumbHtml(tab) {
+  const request = typeof requestCrumbHtml === "function" ? requestCrumbHtml(tab) : "";
+  if (request) return request;
   const name = projectName(tab);
   const host = globalHostMachine();
   const where = host ? `Runs on ${machineName(host)} · ${machines.get(host)?.view.online ? "all projects" : "offline"}` : "";
