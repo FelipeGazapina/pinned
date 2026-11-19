@@ -2639,8 +2639,10 @@ impl Machine {
             return self.tab(tab, |t| t.cwd.display().to_string()).map(Some);
         };
         // What a restart kept for this start goes with it.
-        if let Some(request) = crate::user_requests::of_env(&env) {
-            self.requests.lock().unwrap().clear_held(request);
+        match crate::user_requests::of_env(&env) {
+            Some(request) => self.requests.lock().unwrap().clear_held(request),
+            None if global::is_global(&env) => self.requests.lock().unwrap().clear_anchor_held(),
+            None => {}
         }
         let mut args = args;
         let mut prompt = vec![];
@@ -2705,8 +2707,13 @@ impl Machine {
             t.held.extend(line.map(str::to_owned));
             (changed, crate::user_requests::of_env(&t.env).map(str::to_owned))
         })?;
-        if let (Some(request), Some(line)) = (request, line) {
-            self.requests.lock().unwrap().hold(&request, line);
+        // Only global tabs wait for room: one with no request is the anchor.
+        if let Some(line) = line {
+            let mut requests = self.requests.lock().unwrap();
+            match request {
+                Some(request) => requests.hold(&request, line),
+                None => requests.hold_for_anchor(line),
+            }
         }
         Ok(changed)
     }
@@ -3240,8 +3247,8 @@ impl Machine {
                     }
                     s.write(data).map_err(|e| e.to_string())?
                 }
-                // A start under way has given it no process yet.
-                None if t.starting => t.keys.extend_from_slice(data),
+                // A start under way has given it no process yet; one held at the cap starts with them.
+                None if t.starting || t.asleep => t.keys.extend_from_slice(data),
                 None => {}
             }
             Ok::<_, String>((submitted, mode_unknown))
@@ -3616,14 +3623,22 @@ impl Machine {
     /// After a restart, each request that waited for room to start rests again with the lines
     /// held for it, in its restored tab, on its session, or new, and starts on them once there is room.
     fn reopen_held_requests(&self) {
-        let waiting = self.requests.lock().unwrap().held();
+        let (waiting, anchor) = {
+            let requests = self.requests.lock().unwrap();
+            (requests.held(), requests.anchor_held())
+        };
         let mut opened = false;
-        for (id, started, lines) in waiting {
+        let tabs = waiting.into_iter().map(|(id, started, lines)| {
             let tab = match self.request_tab(&id) {
                 Some(tab) => Ok(tab),
                 None if started => self.open_request_tab(&id),
                 None => self.new_request_tab(&id),
             };
+            (tab, lines)
+        });
+        // The anchor held lines only while it had no session, so no saved tab restored it.
+        let anchor = (!anchor.is_empty()).then(|| (self.open_global_orchestrator(), anchor));
+        for (tab, lines) in tabs.chain(anchor) {
             let Ok(tab) = tab else { continue };
             let _ = self.tab(&tab, |t| {
                 if t.session.is_none() && !t.starting && t.held.is_empty() {
@@ -6980,7 +6995,7 @@ impl Machine {
         if !self.parent_idle(tab) {
             // A sleeping session starts for its news, and a later pass types it.
             // A request tab that waited for room rests with its first prompt held.
-            if self.tab(tab, |t| t.asleep).unwrap_or(false) && (self.delegates.has_news(tab) || self.tab(tab, |t| !t.held.is_empty()).unwrap_or(false)) {
+            if self.tab(tab, |t| t.asleep).unwrap_or(false) && (self.delegates.has_news(tab) || self.tab(tab, |t| !t.held.is_empty() || !t.keys.is_empty()).unwrap_or(false)) {
                 // A global session waits for room under the live cap; a later pass looks again.
                 if let Err(error) = self.awake(tab, None) {
                     eprintln!("pinned: could not wake {tab} for its news: {error}");

@@ -255,6 +255,9 @@ struct Saved {
     /// The old single conversation became a request, or there was none.
     #[serde(default)]
     migrated: bool,
+    /// Reports held for the anchor's first session at the cap, as `UserRequest::held`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    anchor_held: Vec<String>,
 }
 
 #[derive(Default)]
@@ -329,6 +332,24 @@ impl UserRequests {
     pub fn hold(&mut self, id: &str, line: &str) {
         if let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id) {
             r.held.push(line.to_owned());
+            self.save();
+        }
+    }
+
+    /// `line` waits for the anchor's first session to start, at the cap.
+    pub fn hold_for_anchor(&mut self, line: &str) {
+        self.saved.anchor_held.push(line.to_owned());
+        self.save();
+    }
+
+    pub fn anchor_held(&self) -> Vec<String> {
+        self.saved.anchor_held.clone()
+    }
+
+    /// The anchor's session started with what was held for it.
+    pub fn clear_anchor_held(&mut self) {
+        if !self.saved.anchor_held.is_empty() {
+            self.saved.anchor_held.clear();
             self.save();
         }
     }
