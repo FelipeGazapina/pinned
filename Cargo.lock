@@ -3457,6 +3457,7 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "uds_windows",
  "unicode-normalization",
+ "uuid",
  "vt100",
  "windows-native-keyring-store",
  "windows-sys 0.61.2",

@@ -25,6 +25,7 @@ tempfile = "3"
 flate2 = "1"
 dunce = "1"
 sha2 = "0.10"
+uuid = { version = "1", features = ["serde", "v4"] }
 # NFKC for the report scrubber, so look-alike characters cannot hide a private word.
 unicode-normalization = "0.1"
 # Bundled, so FTS5 is there and the musl and Windows builds need no system SQLite.
