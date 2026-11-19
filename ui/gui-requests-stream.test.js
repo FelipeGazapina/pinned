@@ -476,16 +476,17 @@ test("the side panel has Reply in this thread and Open full, and no Open thread"
   assert.match(html, /<input[^>]*id="rqs-reply"[^>]*data-rqs-reply="q1"[^>]*placeholder="Reply in this thread"/);
   assert.match(html, /<button[^>]*data-rqs-open="q1"[^>]*>Open full<\/button>/);
   assert.doesNotMatch(html, /Open thread/);
+  assert.doesNotMatch(html, /data-rqs-reply-send/, "the board's box has no send button: Enter sends");
 });
 
-test("a reply in the panel is a Prompt to the request's tab, then the panel reads the thread again", async () => {
+test("Enter in the panel's reply box sends a Prompt to the request's tab, then the panel reads the thread again", async () => {
   const tabs = [anchorTab([glance("q1", { tab: "tab-12" })]), requestTab("q1", "tab-12")];
   const h = harness({ tabs, reply: (call) => (call.cmd === "user_request" ? userView("q1") : null) });
   open(h);
   h.click(h.entry("q1"));
   await flush();
   typeReply(h, "q1", "Tell support: draft it.");
-  h.click({ "[data-rqs-reply-send]": { dataset: { rqsReplySend: "q1" } } });
+  enter(h, "[data-rqs-reply]", { dataset: { rqsReply: "q1" } });
   await flush();
   assert.deepEqual(h.log.calls.map(([, c]) => c.cmd), ["user_request", "prompt", "user_request"]);
   assert.deepEqual(h.log.calls[1], ["mac", { cmd: "prompt", tab: "tab-12", text: "Tell support: draft it." }]);
@@ -493,7 +494,7 @@ test("a reply in the panel is a Prompt to the request's tab, then the panel read
   assert.equal(h.log.activated.length, 0, "the panel stays; no tab is opened");
 });
 
-test("a reply to a request with no tab asks the host to open one first; Enter sends", async () => {
+test("a reply to a request with no tab asks the host to open one first", async () => {
   const h = harness({
     tabs: [anchorTab([glance("q1", { tab: null })])],
     reply: (call) => (call.cmd === "user_request" ? userView("q1") : call.cmd === "user_request_action" ? { tab: "tab-40" } : null),
@@ -502,7 +503,7 @@ test("a reply to a request with no tab asks the host to open one first; Enter se
   h.click(h.entry("q1"));
   await flush();
   typeReply(h, "q1", "Go on.");
-  enter(h, "[data-rqs-reply]", { dataset: { rqsReply: "q1" }, value: "Go on." });
+  enter(h, "[data-rqs-reply]", { dataset: { rqsReply: "q1" } });
   await flush();
   assert.deepEqual(h.log.calls.slice(1, 3).map(([, c]) => c), [{ cmd: "user_request_action", id: "q1", action: "open" }, { cmd: "prompt", tab: "tab-40", text: "Go on." }]);
 });
@@ -519,7 +520,7 @@ test("a reply that fails keeps the text and says why", async () => {
   h.click(h.entry("q1"));
   await flush();
   typeReply(h, "q1", "Go on.");
-  h.click({ "[data-rqs-reply-send]": { dataset: { rqsReplySend: "q1" } } });
+  enter(h, "[data-rqs-reply]", { dataset: { rqsReply: "q1" } });
   await flush();
   assert.equal(h.run("rqs.reply.get('q1')"), "Go on.");
   assert.match(h.log.told.join(""), /host is offline/);

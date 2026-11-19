@@ -292,7 +292,7 @@ test("a close match sends the paragraph as a Prompt in that request's tab, and n
   const h = harness({ tabs, glances: [gift, glance("q-closed", { title: "Add gift cards to checkout", closed_at: 5, tab: "tab-13" })] });
   h.type("#storefront add gift cards to the checkout page");
   const html = h.cards();
-  assert.match(html, /Looks like <b>Add gift cards to checkout<\/b>, add it there\?/);
+  assert.match(html, /Looks close to an open thread: <b>Add gift cards to checkout<\/b>/);
   h.click({ "[data-nr-join]": { dataset: { nrJoin: "0" } } });
   assert.match(h.cards(), /data-nr-join="0"[^>]*aria-pressed="true"/);
   assert.match(h.run("newRequestSendLabel()"), /^Send$/);
