@@ -1689,7 +1689,11 @@ impl Machine {
                 Ok(json!(views))
             }
             Call::Board { tab, task } => json(self.board(&tab, task.as_deref())?),
-            Call::Prompt { tab, text } => json(self.type_line(&tab, &text, true).map_err(NotTyped::for_person)?),
+            Call::Prompt { tab, text } => {
+                self.type_line(&tab, &text, true).map_err(NotTyped::for_person)?;
+                self.user_typed(&tab);
+                json(())
+            }
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
                 json(workspace::Workspace { scratch: cwd == self.scratch, ..workspace::of(&cwd) })
@@ -2088,6 +2092,7 @@ impl Machine {
         drop(plans);
         let mut views: Vec<TabView> = views.into_iter().map(|v| self.shown(v)).collect();
         views.sort_by_key(|v| v.opened);
+        self.carry_requests(&mut views);
         views
     }
 
@@ -2987,7 +2992,7 @@ impl Machine {
         for (tab, untouched, task) in quiet {
             let over = task.and_then(|task| self.delegates.get(&task)).is_some_and(|task| task.state.terminal() && task.thread.is_some_and(|thread| thread.runs));
             if (untouched || over) && !self.delegates.has_news(&tab) && self.delegates.running_under(&tab).is_empty() {
-                self.rest(&tab, over, now);
+                self.rest(&tab, over, false, now);
             }
         }
     }
@@ -2996,9 +3001,10 @@ impl Machine {
     /// or a client asked for it since it was found quiet; `used` says a session that took input
     /// before may still rest. The screen keeps its last frame, which a client that attaches later
     /// reads the session's mode from.
-    fn rest(&self, tab: &str, used: bool, now: SystemTime) {
+    /// `forced` rests a quiet session however recently it was used, to make room under the live cap.
+    fn rest(&self, tab: &str, used: bool, forced: bool, now: SystemTime) -> bool {
         let taken = self.tab(tab, |t| {
-            if !t.quiet() || !t.left_alone(now) || !(used || t.session.as_ref().is_some_and(pty::Session::untouched)) {
+            if !t.quiet() || (!forced && (!t.left_alone(now) || !(used || t.session.as_ref().is_some_and(pty::Session::untouched)))) {
                 return None;
             }
             let saved = t.saved()?;
@@ -3022,9 +3028,10 @@ impl Machine {
             t.screen.lock().unwrap().session += 1;
             Some(session)
         });
-        let Ok(Some(session)) = taken else { return };
+        let Ok(Some(session)) = taken else { return false };
         drop(session);
         self.emit_tabs();
+        true
     }
 
     /// Watches the session until it takes the terminal, then types the prompts held for it. The
@@ -3300,7 +3307,7 @@ impl Machine {
     pub fn open_global_orchestrator(&self) -> Result<TabId, String> {
         std::fs::create_dir_all(&self.global_dir).map_err(|e| format!("could not make {}: {e}", self.global_dir.display()))?;
         let folder = self.global_folder();
-        let open = self.tabs.lock().unwrap().iter().filter(|(_, t)| global::is_global(&t.env)).map(|(id, _)| id.clone()).min_by_key(|id| tab_number(id));
+        let open = self.tabs.lock().unwrap().iter().filter(|(_, t)| global::is_global(&t.env) && crate::user_requests::of_env(&t.env).is_none()).map(|(id, _)| id.clone()).min_by_key(|id| tab_number(id));
         if let Some(id) = open {
             return Ok(id);
         }
@@ -3313,25 +3320,238 @@ impl Machine {
         Ok(id)
     }
 
-    fn user_requests_page(&self, _before: Option<u64>) -> Vec<crate::user_requests::RequestGlance> {
-        vec![]
+    /// The tab request `r` runs in: the global tab its environment names, else the global tab on
+    /// its session, as the earlier conversation's anchor.
+    fn tab_of_request(views: &[TabView], r: &crate::user_requests::UserRequest) -> Option<TabId> {
+        let global = || views.iter().filter(|v| v.orchestrator_global);
+        global().find(|v| v.request.as_deref() == Some(r.id.as_str())).or_else(|| global().find(|v| r.session.is_some() && v.session == r.session)).map(|v| v.id.clone())
     }
 
-    fn user_request(&self, id: &str, _items: usize) -> Result<crate::user_requests::UserRequestView, String> {
-        Err(format!("No request {id}."))
+    fn request_tab(&self, id: &str) -> Option<TabId> {
+        let views = self.tabs();
+        let requests = self.requests.lock().unwrap();
+        requests.get(id).and_then(|r| Self::tab_of_request(&views, r))
     }
 
-    fn new_user_requests(&self, _items: Vec<crate::user_requests::NewRequest>) -> Result<Vec<crate::user_requests::Opened>, String> {
-        Err("not built yet".into())
+    /// Puts the requests' glances on one global tab: the anchor, else the newest request tab.
+    fn carry_requests(&self, views: &mut [TabView]) {
+        let anchor = views.iter().filter(|v| v.orchestrator_global && v.request.is_none()).min_by_key(|v| v.opened);
+        let carrier = anchor.or_else(|| views.iter().filter(|v| v.orchestrator_global).max_by_key(|v| v.opened)).map(|v| v.id.clone());
+        let Some(carrier) = carrier else { return };
+        let glances = {
+            let requests = self.requests.lock().unwrap();
+            let mut glances = requests.glances(crate::connectors::unix_millis(), |_| None);
+            for g in &mut glances {
+                g.tab = requests.get(&g.id).and_then(|r| Self::tab_of_request(views, r));
+            }
+            glances
+        };
+        if let Some(view) = views.iter_mut().find(|v| v.id == carrier) {
+            view.requests = glances;
+        }
     }
 
-    fn user_request_action(&self, id: &str, _action: crate::user_requests::RequestAction) -> Result<crate::user_requests::RequestGlance, String> {
-        Err(format!("No request {id}."))
+    fn user_requests_page(&self, before: Option<u64>) -> Vec<crate::user_requests::RequestGlance> {
+        let views = self.tabs();
+        self.requests.lock().unwrap().page(before, |r| Self::tab_of_request(&views, r))
+    }
+
+    fn request_glance(&self, id: &str) -> Result<crate::user_requests::RequestGlance, String> {
+        let views = self.tabs();
+        let requests = self.requests.lock().unwrap();
+        let r = requests.get(id).ok_or_else(|| format!("No request {id}."))?;
+        Ok(r.glance(Self::tab_of_request(&views, r)))
+    }
+
+    /// Request `id` with the last `items` things said in its session.
+    fn user_request(&self, id: &str, items: usize) -> Result<crate::user_requests::UserRequestView, String> {
+        let glance = self.request_glance(id)?;
+        let (stands, session) = self.requests.lock().unwrap().get(id).map(|r| (r.stands.clone(), r.session.clone())).ok_or_else(|| format!("No request {id}."))?;
+        let account = self.account_for(None, &self.global_folder())?;
+        let said = match session.and_then(|session| self.find_transcript(&account, &session)) {
+            Some(file) => thread_items(&reading::conversation(&reading::end_of(&file, items)?, items)),
+            None => vec![],
+        };
+        Ok(crate::user_requests::UserRequestView { glance, stands, items: said, plans: vec![] })
+    }
+
+    /// Opens a request and its Orchestrator tab per item and starts each session on the item's
+    /// text, typed as its first prompt once the session takes the terminal. A key opened before
+    /// answers its request; its text is typed again only while no session took it.
+    fn new_user_requests(&self, items: Vec<crate::user_requests::NewRequest>) -> Result<Vec<crate::user_requests::Opened>, String> {
+        use crate::user_requests::{Opened, StandsPatch, Start};
+        if items.is_empty() {
+            return Err("no request to open".into());
+        }
+        if items.iter().any(|item| item.key.trim().is_empty() || item.text.trim().is_empty()) {
+            return Err("each request needs a key and a text".into());
+        }
+        std::fs::create_dir_all(&self.global_dir).map_err(|e| format!("could not make {}: {e}", self.global_dir.display()))?;
+        let folder = self.global_folder();
+        let account = self.account_for(None, &folder)?;
+        if !account.provider.spec().harness {
+            return Err(format!("account {} runs {}, which can't be the global orchestrator", account.id, account.provider.spec().name));
+        }
+        let mut opened = vec![];
+        for item in items {
+            let (text, now) = (item.text.trim(), crate::connectors::unix_millis());
+            let (id, session) = {
+                let mut requests = self.requests.lock().unwrap();
+                let (id, new) = requests.open(&item.key, &item.title, item.project.as_deref(), now);
+                if new {
+                    requests.stands_update(&id, StandsPatch { asked: Some(text.to_owned()), ..Default::default() }, now)?;
+                }
+                let session = requests.get(&id).and_then(|r| r.session.clone());
+                (id, session)
+            };
+            // A tab that started, or waits for room, already has the text.
+            let handed = match self.request_tab(&id) {
+                Some(tab) => self.tab(&tab, |t| (t.session.is_some() || t.starting || !t.held.is_empty() || t.asleep).then_some(if t.session.is_none() && t.asleep { Start::Queued } else { Start::Started }))?.map(|start| (tab, start)),
+                None if session.is_some() => Some((self.open_request_tab(&id)?, Start::Started)),
+                None => None,
+            };
+            let (tab, handoff) = match handed {
+                Some(handed) => handed,
+                None => {
+                    let tab = match self.request_tab(&id) {
+                        Some(tab) => tab,
+                        None => {
+                            let mut env = global::env();
+                            env.push((crate::user_requests::ENV.to_owned(), id.clone()));
+                            self.add_tab(folder.clone(), account.clone(), vec![], env, false, None)
+                        }
+                    };
+                    let start = self.first_prompt(&tab, &id, text)?;
+                    (tab, start)
+                }
+            };
+            opened.push(Opened { key: item.key, id, tab, handoff });
+        }
+        self.emit_tabs();
+        Ok(opened)
+    }
+
+    /// Starts request `id`'s new tab and types `text` once the session takes the terminal. With
+    /// `MAX_LIVE_REQUESTS` sessions mid-turn, `text` waits in the tab's queue instead and the tab
+    /// starts on it once one of them rests.
+    fn first_prompt(&self, tab: &str, id: &str, text: &str) -> Result<crate::user_requests::Start, String> {
+        if !self.room_for(tab) {
+            self.delegates.queue_request(tab, None, text.to_owned(), format!("{id}/first"));
+            self.tab(tab, |t| t.asleep = true)?;
+            self.arm_delegate_pass();
+            return Ok(crate::user_requests::Start::Queued);
+        }
+        self.start_claude(tab, UNWATCHED.0, UNWATCHED.1)?;
+        self.type_prompt(tab, text).map_err(NotTyped::for_person)?;
+        Ok(crate::user_requests::Start::Started)
+    }
+
+    /// A resting tab on request `id`'s session. The earlier conversation's is the anchor, with no
+    /// request in its environment.
+    fn open_request_tab(&self, id: &str) -> Result<TabId, String> {
+        let (session, kind) = self.requests.lock().unwrap().get(id).map(|r| (r.session.clone(), r.kind)).ok_or_else(|| format!("No request {id}."))?;
+        let session = session.ok_or_else(|| format!("request {id} has no conversation yet"))?;
+        let folder = self.global_folder();
+        let account = self.account_for(None, &folder)?;
+        let mut env = global::env();
+        if kind != crate::user_requests::Kind::Earlier {
+            env.push((crate::user_requests::ENV.to_owned(), id.to_owned()));
+        }
+        let launch = crate::delegate::resume_args(account.provider, &session);
+        let tab = self.add_tab(folder, account, launch, env, false, Some(session));
+        self.tab(&tab, |t| t.asleep = true)?;
+        self.save_sessions();
+        Ok(tab)
+    }
+
+    /// Done closes the request's own tab, Reopen opens the request again, and Open adds a resting
+    /// tab on its session when none is open.
+    fn user_request_action(&self, id: &str, action: crate::user_requests::RequestAction) -> Result<crate::user_requests::RequestGlance, String> {
+        use crate::user_requests::{ClosedBy, RequestAction};
+        self.request_glance(id)?;
+        match action {
+            RequestAction::Done => {
+                self.requests.lock().unwrap().close(id, ClosedBy::User, crate::connectors::unix_millis());
+                let own: Vec<TabId> = self.tabs.lock().unwrap().iter().filter(|(_, t)| crate::user_requests::of_env(&t.env) == Some(id)).map(|(tab, _)| tab.clone()).collect();
+                for tab in own {
+                    self.close_tab(&tab);
+                }
+            }
+            RequestAction::Reopen => {
+                self.requests.lock().unwrap().reopen(id);
+            }
+            RequestAction::Open => {
+                if self.request_tab(id).is_none() {
+                    self.open_request_tab(id)?;
+                }
+            }
+        }
+        self.emit_tabs();
+        self.request_glance(id)
+    }
+
+    /// The user typed into `tab`: when it is a request's, nothing waits on them there any more.
+    fn user_typed(&self, tab: &str) {
+        let Some(id) = self.tab(tab, |t| crate::user_requests::of_env(&t.env).map(str::to_owned)).ok().flatten() else { return };
+        if self.requests.lock().unwrap().user_typed(&id, crate::connectors::unix_millis()) {
+            self.emit_tabs();
+        }
+    }
+
+    /// Whether `tab`'s global session may start: fewer than `MAX_LIVE_REQUESTS` other global
+    /// sessions run, or one of them ended its turn with nothing pending and rests now, the one
+    /// idle longest first.
+    fn room_for(&self, tab: &str) -> bool {
+        let (live, mut quiet) = {
+            let tabs = self.tabs.lock().unwrap();
+            let live: Vec<(&TabId, &Tab)> = tabs.iter().filter(|(id, t)| id.as_str() != tab && global::is_global(&t.env) && (t.session.is_some() || t.starting)).collect();
+            let quiet: Vec<(Option<u64>, u32, TabId)> = live.iter().filter(|(_, t)| t.session.is_some() && t.claude_session.is_some() && t.quiet()).map(|(id, t)| (t.updated, tab_number(id), (*id).clone())).collect();
+            (live.len(), quiet)
+        };
+        if live < MAX_LIVE_REQUESTS {
+            return true;
+        }
+        quiet.sort();
+        quiet.into_iter().map(|(_, _, id)| id).filter(|id| !self.delegates.has_news(id) && self.delegates.running_under(id).is_empty()).any(|id| self.rest(&id, true, true, SystemTime::now()))
     }
 
     /// Once ever, the global session from before user requests becomes the request "Earlier
-    /// conversation".
-    pub fn migrate_requests(&self) {}
+    /// conversation": the session of the global tab open with no request, else of the one
+    /// `sessions.json` keeps, else of the newest transcript in the global folder. Finding none
+    /// counts only once `restore_tabs` has run.
+    pub fn migrate_requests(&self) {
+        let session = self.old_global_session();
+        if session.is_none() && !self.restored.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.requests.lock().unwrap().migrate(session.as_deref(), crate::connectors::unix_millis()).is_some() {
+            self.emit_tabs();
+        }
+    }
+
+    fn old_global_session(&self) -> Option<String> {
+        let anchor = |env: &[(String, String)]| global::is_global(env) && crate::user_requests::of_env(env).is_none();
+        let open = self.tabs.lock().unwrap().iter().filter(|(_, t)| anchor(&t.env)).filter_map(|(id, t)| Some((tab_number(id), t.claude_session.clone()?))).min().map(|(_, session)| session);
+        let saved = || self.sessions_file.as_ref().and_then(|file| sessions::load(file).into_iter().find(|s| anchor(&s.env)).map(|s| s.session));
+        open.or_else(saved).or_else(|| self.newest_global_transcript())
+    }
+
+    /// The session of the newest transcript Claude Code keeps for the global folder, other than a
+    /// request's. Only its name and time are read.
+    fn newest_global_transcript(&self) -> Option<String> {
+        let folder = self.global_folder();
+        let account = self.account_for(None, &folder).ok()?;
+        let project: String = folder.display().to_string().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        let entries = std::fs::read_dir(self.accounts.home(&account).join("projects").join(project)).ok()?;
+        let requests = self.requests.lock().unwrap();
+        entries
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path().file_stem()?.to_string_lossy().into_owned())))
+            .filter(|(_, session)| requests.of_session(session).is_none())
+            .max()
+            .map(|(_, session)| session)
+    }
 
     /// A new tab, not yet started, that adjusts `scope`'s way of working: in the project folder
     /// `path`, or else in the folder for threads without a project. Its first prompt names the scope.
@@ -3534,6 +3754,17 @@ impl Machine {
             Some(_) => Ready::Busy,
         })?;
         let id = tab.to_owned();
+        if ready == Ready::Stopped && self.tab(tab, |t| global::is_global(&t.env))? && !self.room_for(tab) {
+            let session = self.tab(tab, |t| {
+                t.launch = t.claude_session.as_deref().map(|session| crate::delegate::resume_args(t.account.provider, session)).unwrap_or_default();
+                t.asleep = true;
+                t.claude_session.clone()
+            })?;
+            self.delegates.queue_request(tab, session, line.to_owned(), request_id.to_owned());
+            self.arm_delegate_pass();
+            self.emit_tabs();
+            return Ok(Handoff::Queued { position: sent.queued_on(tab) + 1, tab: id });
+        }
         match ready {
             Ready::Stopped | Ready::Fresh => {
                 self.tab(tab, |t| {
@@ -4091,6 +4322,11 @@ impl Machine {
     /// names no tab here when the act runs on another machine than the session's.
     fn act_for(&self, caller: &str, call: Value) -> Result<Value, String> {
         let call: Call = serde_json::from_value(call).map_err(|e| format!("act_for: {e}"))?;
+        if matches!(call, Call::UserRequests { .. } | Call::UserRequest { .. } | Call::NewUserRequests { .. } | Call::UserRequestAction { .. }) {
+            let cmd = surface::cmd_of(&call);
+            let about = surface::of_cmd(surface::Side::Node, &cmd).map(|action| action.about).unwrap_or_default();
+            return Err(format!("{cmd} is not open to agents: {about}"));
+        }
         if let Call::StartClaude { tab, cols, rows } = call {
             return json(self.start_for(caller, &tab, cols, rows)?);
         }
@@ -4911,6 +5147,8 @@ impl Machine {
         // A reloaded webview must not duplicate the tabs that are already open.
         let Some(file) = self.sessions_file.as_ref().filter(|_| self.tabs.lock().unwrap().is_empty()) else {
             self.delegates.end_unresumed();
+            self.restored.store(true, Ordering::SeqCst);
+            self.migrate_requests();
             return vec![];
         };
         let now = unix_now();
@@ -4964,6 +5202,8 @@ impl Machine {
         if self.delegates.has_pending() {
             self.arm_delegate_pass();
         }
+        self.restored.store(true, Ordering::SeqCst);
+        self.migrate_requests();
         ids
     }
 
@@ -6497,6 +6737,10 @@ impl Machine {
         if !self.parent_idle(tab) {
             // A sleeping session starts for its news, and a later pass types it.
             if self.tab(tab, |t| t.asleep).unwrap_or(false) && self.delegates.has_news(tab) {
+                // A global session waits for room under the live cap; a later pass looks again.
+                if self.tab(tab, |t| global::is_global(&t.env)).unwrap_or(false) && !self.room_for(tab) {
+                    return;
+                }
                 if let Err(error) = self.awake(tab) {
                     eprintln!("pinned: could not wake {tab} for its news: {error}");
                 }
@@ -6982,7 +7226,7 @@ impl Machine {
     /// Hooks report the session on every event, since /clear or /resume inside claude swaps it.
     /// True when the session is new to the tab.
     fn record_session(&self, tab: &str, session: String, reported_cwd: Option<&str>) -> bool {
-        let Ok((new, changed, task, old)) = self.tab(tab, |t| {
+        let Ok((new, changed, task, old, request)) = self.tab(tab, |t| {
             let new = t.claude_session.as_ref() != Some(&session);
             let mut old = None;
             if new {
@@ -6997,12 +7241,15 @@ impl Machine {
                 changed = true;
             }
             t.claude_session = Some(session.clone());
-            (new, changed, t.task.clone(), old)
+            (new, changed, t.task.clone(), old, crate::user_requests::of_env(&t.env).map(str::to_owned))
         }) else {
             return false;
         };
         if new {
             self.carry_plans(tab, old, &session);
+            if let Some(request) = request {
+                self.requests.lock().unwrap().set_session(&request, &session);
+            }
         }
         if let Some(task) = task {
             self.delegates.set_worker_session(&task, &session);
@@ -7679,6 +7926,34 @@ fn truncate(text: &str, max: usize, rest: &str) -> String {
         Some((cut, _)) => format!("{}\n[cut short: {rest}]", &text[..cut]),
         None => text.to_owned(),
     }
+}
+
+
+/// The most request sessions of the global orchestrator that run at once.
+const MAX_LIVE_REQUESTS: usize = 3;
+
+/// A request's said things from `reading::conversation`: the user's prompts, the Captains'
+/// reports typed into the session, and the Orchestrator's replies.
+fn thread_items(conversation: &Value) -> Vec<crate::user_requests::Item> {
+    use crate::user_requests::{Item, Who};
+    let at = |item: &Value| item["at"].as_u64().or_else(|| item["at"].as_str().and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()).map(|at| at.timestamp_millis().max(0) as u64)).unwrap_or_default();
+    conversation["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let text = item["text"].as_str()?.to_owned();
+            let (who, captain) = match item["kind"].as_str()? {
+                "user" | "steer" => match text.strip_prefix("[pinned] Capitão ") {
+                    Some(rest) => (Who::Captain, rest.split(" (").next().map(str::to_owned)),
+                    None => (Who::User, None),
+                },
+                "text" => (Who::Orchestrator, None),
+                _ => return None,
+            };
+            Some(Item { who, text, at: at(item), captain })
+        })
+        .collect()
 }
 
 /// Opening order: the number after the last `-`. `tab-1` and `tab-<boot>-1` both order as 1.

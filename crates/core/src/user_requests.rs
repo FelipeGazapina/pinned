@@ -337,7 +337,7 @@ impl UserRequests {
             let over = self.saved.sent.len().saturating_sub(SENT_KEEP);
             self.saved.sent.drain(..over);
         }
-        if let Some(r) = self.saved.requests.iter_mut().find(|r| r.session.as_deref() == Some(session)) {
+        if let Some(r) = self.saved.requests.iter_mut().find(|r| r.session.as_deref() == Some(session)).filter(|_| captain.path_ok()) {
             r.captains.retain(|c| !c.serves(&captain));
             r.captains.push(captain);
             let over = r.captains.len().saturating_sub(MAX_CAPTAINS);
@@ -385,7 +385,7 @@ impl UserRequests {
         let project = Some(captain.project.clone()).filter(|p| !p.is_empty());
         let key = format!("captain-reports/{}/{}/{now}", captain.machine, captain.path);
         let id = self.add(key, title, project, Kind::CaptainReports, now);
-        if let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id) {
+        if let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id).filter(|_| captain.path_ok()) {
             r.captains.push(CaptainRef { at: now, ..captain });
         }
         self.save();
@@ -669,7 +669,7 @@ impl CaptainRef {
     /// Each name one line of at most 60 characters. The path stays byte for byte, since it is
     /// the Captain tab's exact folder, which the app matches.
     fn cleaned(self) -> Self {
-        CaptainRef { machine: cut(&self.machine, MAX_NAME), path: cut(&self.path, MAX_WHAT), project: cut(&self.project, MAX_NAME), machine_name: cut(&self.machine_name, MAX_NAME), ..self }
+        CaptainRef { machine: cut(&self.machine, MAX_NAME), project: cut(&self.project, MAX_NAME), machine_name: cut(&self.machine_name, MAX_NAME), ..self }
     }
 
     /// A path with a control or line-separator character names no folder a tab runs in.
