@@ -427,10 +427,10 @@ function requestPlanHtml(t, s) {
 
 function renderPlanPanel(s) {
   const t = active;
-  if (isRequestThread(t)) return showPanel(`<div class="pl" data-view="plan">${requestPlanHtml(t, s)}</div>`);
-  if (!isPlanCaptain(t)) return showPanel(`<div class="pl"><div class="pl-empty"><p class="t">No plan here</p><p>Only a project's Captain keeps a plan.</p></div></div>`);
+  if (isRequestThread(t)) return showPanel(`<div class="plan-root" data-view="plan">${requestPlanHtml(t, s)}</div>`);
+  if (!isPlanCaptain(t)) return showPanel(`<div class="plan-root"><div class="pl-empty"><p class="t">No plan here</p><p>Only a project's Captain keeps a plan.</p></div></div>`);
   planDetectDropped(t);
-  showPanel(`<div class="pl" data-view="plan">${planBodyHtml(t, s)}</div>`);
+  showPanel(`<div class="plan-root" data-view="plan">${planBodyHtml(t, s)}</div>`);
 }
 
 // ---- clicks ----
@@ -438,7 +438,7 @@ function renderPlanPanel(s) {
 function onPlanClick(e) {
   const t = active;
   const s = t && shownSurface(t);
-  if (!s || s.kind !== "plan" || !e.target.closest(".pl")) return;
+  if (!s || s.kind !== "plan" || !e.target.closest(".plan-root")) return;
   const q = (sel) => e.target.closest(sel);
   let el;
   if ((el = q("[data-zoom]"))) s.zoom = Math.max(0, Math.min(2, (s.zoom ?? 1) + Number(el.dataset.zoom)));

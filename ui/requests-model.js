@@ -146,15 +146,16 @@ function closeTo(paragraph, openGlances) {
 function requestPlans(glance, tabsByMachine = {}) {
   const rows = [];
   const seen = new Set();
+  const captains = glance.captains ?? [];
   for (const [machine, tabs] of Object.entries(tabsByMachine ?? {})) {
     for (const tab of tabs ?? []) {
       const own = tab.request === glance.id;
-      const captain = glance.captains.findIndex((c) => c.machine === machine && c.path === tab.cwd);
+      const captain = captains.findIndex((c) => c.machine === machine && c.path === tab.cwd);
       for (const plan of tab.plans ?? []) {
         const key = `${machine}\n${tab.id}\n${plan.id}`;
         if (seen.has(key) || !(own || (plan.requests ?? []).includes(glance.id))) continue;
         seen.add(key);
-        const rank = own ? 0 : captain >= 0 ? 1 + captain : 1 + glance.captains.length;
+        const rank = own ? 0 : captain >= 0 ? 1 + captain : 1 + captains.length;
         rows.push({ rank, machine, tab, plan });
       }
     }

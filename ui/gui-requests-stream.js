@@ -7,6 +7,7 @@
 // Loaded after gui-requests.js and gui-requests-new.js, whose glances, state, tab choice and send it reuses.
 
 const STREAM_ITEMS = 20;
+/** How close to an end of the list counts as at that end. */
 const STREAM_END_PX = 48;
 const STREAM_EARLIER = "Earlier conversation";
 const STREAM_WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -20,6 +21,9 @@ const rqs = {
   older: [],
   end: false,
   paging: false,
+  /** Set on open and when older entries were added above: the next draw pins the list to the newest end, or keeps the reader's place. */
+  pin: false,
+  prepended: false,
   selected: null,
   /** Request id -> { view, at }: the `user_request` reply behind the side panel. */
   views: new Map(),
@@ -147,12 +151,21 @@ function renderStream() {
   if (rqs.composing) return;
   const html = requestsStreamHtml({ glances: streamGlances(), now: Date.now(), name: globalOrchestratorName(), tabViews: requestTabViews(), selected: rqs.selected, views: rqs.views, end: rqs.end, ask: rqs.ask });
   if (html !== rqs.drawn) {
-    const top = requestsStream.querySelector("[data-rqs-list]")?.scrollTop ?? 0;
+    const was = requestsStream.querySelector("[data-rqs-list]");
+    const top = was?.scrollTop ?? 0;
+    const height = was?.scrollHeight ?? 0;
+    const atBottom = !!was && top + was.clientHeight >= height - STREAM_END_PX;
     const focused = requestsStream.querySelector("input:focus");
     const keep = focused && { selector: focused.hasAttribute("data-rqs-ask") ? "[data-rqs-ask]" : "[data-rqs-reply]", from: focused.selectionStart, to: focused.selectionEnd };
     requestsStream.innerHTML = rqs.drawn = html;
     const list = requestsStream.querySelector("[data-rqs-list]");
-    if (list) list.scrollTop = top;
+    if (list) {
+      /* Oldest first: open at the newest end and follow it while the reader is there; older entries land above, so the place moves down by what they add. */
+      if (rqs.pin || atBottom) list.scrollTop = list.scrollHeight;
+      else list.scrollTop = rqs.prepended ? top + (list.scrollHeight - height) : top;
+      rqs.pin = false;
+      rqs.prepended = false;
+    }
     restoreStreamInputs();
     const input = keep && requestsStream.querySelector(keep.selector);
     if (input) {
@@ -167,7 +180,7 @@ function renderStream() {
 /** Opens All activity over the chat. An older host that answered `user_requests` with an error has none. */
 function openAllActivity() {
   if (!requestsOn() || rq.old?.host === requestHost()) return;
-  Object.assign(rqs, { open: true, key: active?.key ?? null, older: [], end: false, selected: null });
+  Object.assign(rqs, { open: true, key: active?.key ?? null, older: [], end: false, selected: null, pin: true, prepended: false });
   renderStream();
   renderRequests();
 }
@@ -182,8 +195,10 @@ async function streamOlder() {
     const page = await callOn(requestHost(), { cmd: "user_requests", before });
     const known = new Set(all.map((g) => g.id));
     const fresh = Array.isArray(page) ? page.filter((g) => !known.has(g.id)) : [];
-    if (fresh.length) rqs.older.push(...fresh);
-    else rqs.end = true;
+    if (fresh.length) {
+      rqs.older.push(...fresh);
+      rqs.prepended = true;
+    } else rqs.end = true;
   } catch {
     rqs.end = true;
   } finally {
@@ -294,7 +309,7 @@ requestsStream.addEventListener(
   "scroll",
   (e) => {
     const list = e.target;
-    if (list.closest?.("[data-rqs-list]") && list.scrollTop + list.clientHeight >= list.scrollHeight - STREAM_END_PX) streamOlder();
+    if (list.closest?.("[data-rqs-list]") && list.scrollTop <= STREAM_END_PX) streamOlder();
   },
   true,
 );

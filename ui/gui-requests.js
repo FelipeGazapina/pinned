@@ -124,8 +124,10 @@ async function refreshRequests() {
   renderRequests();
 }
 
+/** A Captain's pill: "Captain <project>", else "Captain on <machine>", else nothing. */
+const requestCaptainName = (c) => (c.project ? `Captain ${c.project}` : c.machine_name ? `Captain on ${c.machine_name}` : "");
 const requestLastWho = (glance, name) =>
-  ({ user: "You", orchestrator: name, captain: glance.captains.length === 1 ? `Captain ${glance.captains[0].project}` : "Captain" })[glance.last_who] ?? "";
+  ({ user: "You", orchestrator: name, captain: (glance.captains ?? []).length === 1 ? requestCaptainName(glance.captains[0]) || "Captain" : "Captain" })[glance.last_who] ?? "";
 const requestLastLine = (glance, name) => (glance.last_text ? `${requestLastWho(glance, name)}: ${glance.last_text}` : "");
 const requestWhen = (glance) => ago((glance.last_at ?? glance.opened_at) / 1000);
 const requestProjectChip = (glance) => (glance.project ? `<span class="rq-project">#${esc(tagSlug(glance.project))}</span>` : "");
@@ -185,7 +187,7 @@ function requestCardFrom(glance, have, { asked = true, kept = false } = {}) {
   const waiting = requestStateOf(glance) === "needs";
   const needs = waiting ? stands.needs || glance.needs || "Waiting on you." : "Nothing right now.";
   const row = (label, text, attr = "") => `<span class="rc-k">${label}</span><span class="rc-v"${attr}>${esc(text || "—")}</span>`;
-  const pills = [...glance.captains.map((c) => `Captain ${c.project}`), ...(stands.links ?? [])].filter((pill, i, all) => all.indexOf(pill) === i);
+  const pills = [...(glance.captains ?? []).map(requestCaptainName), ...(stands.links ?? [])].filter((pill, i, all) => pill && all.indexOf(pill) === i);
   const links = pills.map((link) => `<span class="rc-link">${esc(link)}</span>`).join("");
   const body = have
     ? `<div class="rc-grid">${asked ? row("You asked", stands.asked) : ""}${row("Done", stands.done)}${row("Left", stands.left)}${row("Needs you", needs, ` data-needs="${waiting}"`)}</div>${links ? `<div class="rc-links">${links}</div>` : ""}`

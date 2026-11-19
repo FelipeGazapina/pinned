@@ -53,8 +53,6 @@
 #new-request .nr-mirror:empty { display: none; }
 #new-request .nr-edit[data-tags="true"] .nr-text { position: relative; z-index: 1; color: transparent; caret-color: var(--g-fg); }
 #new-request .nr-edit[data-tags="true"] .nr-text::selection { color: transparent; background: rgb(var(--g-info-rgb) / 0.3); }
-/* The plan tree's `.pl` (a flex column) also matches the mirror's line divs; each line is a block so its tags stay inline. */
-#new-request .nr-mirror .pl { display: block; flex: none; min-height: 0; font-size: inherit; color: inherit; }
 #new-request .nr-mirror .tag { border-radius: 4px; }
 #new-request .nr-mirror .tag.project { color: var(--g-info); background: rgb(var(--g-info-rgb) / 0.16); }
 #new-request .nr-mirror .tag.machine { color: var(--g-success); background: color-mix(in srgb, var(--g-success) 16%, transparent); }

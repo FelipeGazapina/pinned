@@ -1,11 +1,11 @@
 /* #349 unit 5, redrawn by 0.18.8 unit 9r: the Plan surface (a Captain's, and a request thread's) in the right panel, beside gui-panel.css. Only the app's tokens (gui-theme.css). */
 #panel-body[data-kind="plan"] { overflow: hidden; display: flex; flex-direction: column; }
-.pl { display: flex; flex-direction: column; min-height: 0; flex: 1; font-size: 13px; color: var(--g-fg); }
-.pl [data-state="done"] { --tone: var(--g-success); }
-.pl [data-state="running"] { --tone: var(--g-blue); }
-.pl [data-state="failed"] { --tone: var(--g-error); }
-.pl [data-state="waiting"] { --tone: var(--g-warning-fg); }
-.pl [data-state="pending"] { --tone: var(--g-muted); }
+.plan-root { display: flex; flex-direction: column; min-height: 0; flex: 1; font-size: 13px; color: var(--g-fg); }
+.plan-root [data-state="done"] { --tone: var(--g-success); }
+.plan-root [data-state="running"] { --tone: var(--g-blue); }
+.plan-root [data-state="failed"] { --tone: var(--g-error); }
+.plan-root [data-state="waiting"] { --tone: var(--g-warning-fg); }
+.plan-root [data-state="pending"] { --tone: var(--g-muted); }
 
 /* header, zoom, progress */
 .pl-head { display: flex; flex: none; flex-direction: column; gap: 8px; padding: 12px 14px 10px; border-bottom: 1px solid var(--g-border); }
@@ -33,60 +33,60 @@
 [data-cstate="finished"] > .pl-cdot { background: var(--g-success); }
 
 /* body: the board's git graph (PlanTree). The trunk runs down the left, every lane branches off it with an elbow. */
-.pl { --pl-line: color-mix(in srgb, var(--g-muted) 38%, transparent); --pl-on-tone: var(--g-bg); }
+.plan-root { --pl-line: color-mix(in srgb, var(--g-muted) 38%, transparent); --pl-on-tone: var(--g-bg); }
 .pl-scroll { flex: 1; min-height: 0; overflow: auto; padding: 8px 14px 16px; }
-.pl .z0 { --d: 10px; --cy: 14px; }
-.pl .z1 { --d: 16px; --cy: 16px; }
-.pl .z2 { --d: 18px; --cy: 18px; }
-.pl .muted { color: var(--g-muted); }
-.pl button:focus-visible { outline: 2px solid var(--g-link); outline-offset: 2px; border-radius: 6px; }
-.pl .root-row { position: relative; display: flex; align-items: center; gap: 8px; height: 30px; padding-left: 26px; color: var(--g-muted); font-size: 12px; white-space: nowrap; }
-.pl .root-row::before { content: ""; position: absolute; left: 5px; top: 9px; width: 12px; height: 12px; border-radius: 50%; background: var(--g-fg); }
-.pl .root-row::after { content: ""; position: absolute; left: 10px; top: 50%; bottom: 0; width: 2px; background: var(--pl-line); }
-.pl .pl-lists { display: block; }
-.pl .lane { position: relative; }
-.pl .trunk { position: absolute; left: 10px; top: 0; width: 2px; background: var(--pl-line); }
-.pl .lane-head { height: 30px; }
-.pl .lane-head-in { position: sticky; left: 0; display: inline-flex; align-items: center; gap: 10px; height: 30px; padding-left: 26px; white-space: nowrap; }
-.pl .lane-toggle { display: inline-flex; align-items: center; gap: 6px; height: 28px; font-weight: 600; font-size: 13px; color: var(--g-fg); background: transparent; }
-.pl .chev { width: 6px; height: 6px; margin: 0 3px 3px 1px; border-right: 2px solid var(--g-muted); border-bottom: 2px solid var(--g-muted); transform: rotate(45deg); transition: transform 0.25s; }
-.pl .chev.shut { margin: 0 3px 0 1px; transform: rotate(-45deg); }
-.pl .segs { display: inline-flex; gap: 3px; }
-.pl .seg { width: 9px; height: 4px; border-radius: 2px; background: var(--tone); }
-.pl .seg[data-state="pending"] { background: var(--g-border); }
-.pl .lane-state { font-size: 12px; color: var(--g-muted); }
-.pl .lane-state[data-tone="ok"] { color: var(--g-success); }
-.pl .lane-state[data-tone="run"] { color: var(--g-blue); }
-.pl .lane-state[data-tone="fix"] { color: var(--g-warning-fg); }
-.pl .chip { height: 22px; padding: 0 8px; border: 1px solid rgb(var(--g-warning-rgb) / 0.45); border-radius: 11px; font-size: 11px; color: var(--g-warning-fg); background: transparent; }
-.pl .chip:hover { background: rgb(var(--g-warning-rgb) / 0.1); }
-.pl .track { position: relative; overflow: hidden; transition: height 0.5s cubic-bezier(0.2, 0.8, 0.2, 1), width 0.5s; }
-.pl .elbow { position: absolute; left: 10px; top: 0; width: 18px; height: calc(var(--cy) + 1px); box-sizing: border-box; border-left: 2px solid var(--pl-line); border-bottom: 2px solid var(--pl-line); border-bottom-left-radius: 10px; }
-.pl .base, .pl .prog { position: absolute; left: 28px; top: calc(var(--cy) - 1px); height: 2px; transition: width 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); }
-.pl .base { background: var(--pl-line); }
-.pl .prog { background: var(--g-success); }
-.pl .ubranch { position: absolute; box-sizing: border-box; border: 2px solid var(--g-warning-fg); border-top: 0; border-right-color: transparent; border-radius: 0 0 14px 14px; pointer-events: none; }
-.pl .ubranch.merged { border-color: var(--g-success); }
-.pl .cell { position: absolute; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: center; cursor: pointer; }
-.pl .dot { position: absolute; left: 50%; top: calc(var(--cy) - var(--d) / 2); width: var(--d); height: var(--d); margin-left: calc(var(--d) / -2); box-sizing: border-box; border-radius: 50%; border: 2px solid var(--g-muted); background: var(--g-bg); font-size: var(--d); transition: box-shadow 0.2s; }
-.pl .cell:hover .dot { box-shadow: 0 0 0 4px rgb(var(--g-ink-rgb) / 0.08); }
-.pl .cell.sel .dot { box-shadow: 0 0 0 2px var(--g-bg), 0 0 0 4px var(--g-fg); }
-.pl .cell:not([data-state="pending"]) .dot { border-color: var(--tone); background: var(--tone); }
-.pl .cell[data-state="done"] .dot::after { content: ""; position: absolute; left: 50%; top: 44%; width: 0.24em; height: 0.48em; border: solid var(--pl-on-tone); border-width: 0 2px 2px 0; transform: translate(-50%, -50%) rotate(45deg); }
-.pl .cell[data-state="failed"] .dot::before, .pl .cell[data-state="failed"] .dot::after { content: ""; position: absolute; left: 50%; top: 50%; width: 0.56em; height: 2px; background: var(--g-on-primary); transform: translate(-50%, -50%) rotate(45deg); }
-.pl .cell[data-state="failed"] .dot::after { transform: translate(-50%, -50%) rotate(-45deg); }
-.pl .cell[data-state="waiting"] .dot::after { content: "!"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 0.62em; font-weight: 700; line-height: 1; color: var(--pl-on-tone); }
-.pl .z0 .cell[data-state] .dot::before, .pl .z0 .cell[data-state] .dot::after { display: none; }
-.pl .lbl { position: absolute; left: 4px; right: 4px; top: calc(var(--cy) + var(--d) / 2 + 6px); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 11px; line-height: 14px; text-align: center; color: var(--g-muted); transition: opacity 0.3s; }
-.pl .z0 .lbl { opacity: 0; }
-.pl .z2 .lbl { font-size: 12px; line-height: 16px; }
-.pl .cell[data-state="done"] .lbl { color: var(--g-text); }
-.pl .cell[data-state="running"] .lbl { color: var(--g-fg); }
-.pl .cell[data-state="failed"] .lbl { color: var(--g-error); }
-.pl .cell[data-state="waiting"] .lbl { color: var(--g-warning-fg); }
-.pl .meta { display: none; position: absolute; left: 4px; right: 4px; top: calc(var(--cy) + var(--d) / 2 + 40px); font-size: 11px; text-align: center; color: var(--g-muted); font-variant-numeric: tabular-nums; }
-.pl .z2 .meta { display: block; }
-@media (prefers-reduced-motion: reduce) { .pl * { transition: none !important; } }
+.plan-root .z0 { --d: 10px; --cy: 14px; }
+.plan-root .z1 { --d: 16px; --cy: 16px; }
+.plan-root .z2 { --d: 18px; --cy: 18px; }
+.plan-root .muted { color: var(--g-muted); }
+.plan-root button:focus-visible { outline: 2px solid var(--g-link); outline-offset: 2px; border-radius: 6px; }
+.plan-root .root-row { position: relative; display: flex; align-items: center; gap: 8px; height: 30px; padding-left: 26px; color: var(--g-muted); font-size: 12px; white-space: nowrap; }
+.plan-root .root-row::before { content: ""; position: absolute; left: 5px; top: 9px; width: 12px; height: 12px; border-radius: 50%; background: var(--g-fg); }
+.plan-root .root-row::after { content: ""; position: absolute; left: 10px; top: 50%; bottom: 0; width: 2px; background: var(--pl-line); }
+.plan-root .pl-lists { display: block; }
+.plan-root .lane { position: relative; }
+.plan-root .trunk { position: absolute; left: 10px; top: 0; width: 2px; background: var(--pl-line); }
+.plan-root .lane-head { height: 30px; }
+.plan-root .lane-head-in { position: sticky; left: 0; display: inline-flex; align-items: center; gap: 10px; height: 30px; padding-left: 26px; white-space: nowrap; }
+.plan-root .lane-toggle { display: inline-flex; align-items: center; gap: 6px; height: 28px; font-weight: 600; font-size: 13px; color: var(--g-fg); background: transparent; }
+.plan-root .chev { width: 6px; height: 6px; margin: 0 3px 3px 1px; border-right: 2px solid var(--g-muted); border-bottom: 2px solid var(--g-muted); transform: rotate(45deg); transition: transform 0.25s; }
+.plan-root .chev.shut { margin: 0 3px 0 1px; transform: rotate(-45deg); }
+.plan-root .segs { display: inline-flex; gap: 3px; }
+.plan-root .seg { width: 9px; height: 4px; border-radius: 2px; background: var(--tone); }
+.plan-root .seg[data-state="pending"] { background: var(--g-border); }
+.plan-root .lane-state { font-size: 12px; color: var(--g-muted); }
+.plan-root .lane-state[data-tone="ok"] { color: var(--g-success); }
+.plan-root .lane-state[data-tone="run"] { color: var(--g-blue); }
+.plan-root .lane-state[data-tone="fix"] { color: var(--g-warning-fg); }
+.plan-root .chip { height: 22px; padding: 0 8px; border: 1px solid rgb(var(--g-warning-rgb) / 0.45); border-radius: 11px; font-size: 11px; color: var(--g-warning-fg); background: transparent; }
+.plan-root .chip:hover { background: rgb(var(--g-warning-rgb) / 0.1); }
+.plan-root .track { position: relative; overflow: hidden; transition: height 0.5s cubic-bezier(0.2, 0.8, 0.2, 1), width 0.5s; }
+.plan-root .elbow { position: absolute; left: 10px; top: 0; width: 18px; height: calc(var(--cy) + 1px); box-sizing: border-box; border-left: 2px solid var(--pl-line); border-bottom: 2px solid var(--pl-line); border-bottom-left-radius: 10px; }
+.plan-root .base, .plan-root .prog { position: absolute; left: 28px; top: calc(var(--cy) - 1px); height: 2px; transition: width 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.plan-root .base { background: var(--pl-line); }
+.plan-root .prog { background: var(--g-success); }
+.plan-root .ubranch { position: absolute; box-sizing: border-box; border: 2px solid var(--g-warning-fg); border-top: 0; border-right-color: transparent; border-radius: 0 0 14px 14px; pointer-events: none; }
+.plan-root .ubranch.merged { border-color: var(--g-success); }
+.plan-root .cell { position: absolute; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: center; cursor: pointer; }
+.plan-root .dot { position: absolute; left: 50%; top: calc(var(--cy) - var(--d) / 2); width: var(--d); height: var(--d); margin-left: calc(var(--d) / -2); box-sizing: border-box; border-radius: 50%; border: 2px solid var(--g-muted); background: var(--g-bg); font-size: var(--d); transition: box-shadow 0.2s; }
+.plan-root .cell:hover .dot { box-shadow: 0 0 0 4px rgb(var(--g-ink-rgb) / 0.08); }
+.plan-root .cell.sel .dot { box-shadow: 0 0 0 2px var(--g-bg), 0 0 0 4px var(--g-fg); }
+.plan-root .cell:not([data-state="pending"]) .dot { border-color: var(--tone); background: var(--tone); }
+.plan-root .cell[data-state="done"] .dot::after { content: ""; position: absolute; left: 50%; top: 44%; width: 0.24em; height: 0.48em; border: solid var(--pl-on-tone); border-width: 0 2px 2px 0; transform: translate(-50%, -50%) rotate(45deg); }
+.plan-root .cell[data-state="failed"] .dot::before, .plan-root .cell[data-state="failed"] .dot::after { content: ""; position: absolute; left: 50%; top: 50%; width: 0.56em; height: 2px; background: var(--g-on-primary); transform: translate(-50%, -50%) rotate(45deg); }
+.plan-root .cell[data-state="failed"] .dot::after { transform: translate(-50%, -50%) rotate(-45deg); }
+.plan-root .cell[data-state="waiting"] .dot::after { content: "!"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 0.62em; font-weight: 700; line-height: 1; color: var(--pl-on-tone); }
+.plan-root .z0 .cell[data-state] .dot::before, .plan-root .z0 .cell[data-state] .dot::after { display: none; }
+.plan-root .lbl { position: absolute; left: 4px; right: 4px; top: calc(var(--cy) + var(--d) / 2 + 6px); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 11px; line-height: 14px; text-align: center; color: var(--g-muted); transition: opacity 0.3s; }
+.plan-root .z0 .lbl { opacity: 0; }
+.plan-root .z2 .lbl { font-size: 12px; line-height: 16px; }
+.plan-root .cell[data-state="done"] .lbl { color: var(--g-text); }
+.plan-root .cell[data-state="running"] .lbl { color: var(--g-fg); }
+.plan-root .cell[data-state="failed"] .lbl { color: var(--g-error); }
+.plan-root .cell[data-state="waiting"] .lbl { color: var(--g-warning-fg); }
+.plan-root .meta { display: none; position: absolute; left: 4px; right: 4px; top: calc(var(--cy) + var(--d) / 2 + 40px); font-size: 11px; text-align: center; color: var(--g-muted); font-variant-numeric: tabular-nums; }
+.plan-root .z2 .meta { display: block; }
+@media (prefers-reduced-motion: reduce) { .plan-root * { transition: none !important; } }
 
 /* footer */
 .pl-foot { display: flex; flex: none; flex-direction: column; gap: 8px; padding: 12px 14px 14px; border-top: 1px solid var(--g-border); background: var(--g-bg); }
@@ -101,8 +101,8 @@
 .pl-foot .fact b { font-weight: 500; color: var(--g-text); overflow-wrap: anywhere; }
 .pl-foot .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .pl-foot-btns { display: flex; flex-wrap: wrap; gap: 8px; }
-.pl .btn { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid var(--g-border); border-radius: 7px; font-size: 13px; color: var(--g-text); background: transparent; }
-.pl .btn:hover { background: var(--g-hover); }
+.plan-root .btn { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid var(--g-border); border-radius: 7px; font-size: 13px; color: var(--g-text); background: transparent; }
+.plan-root .btn:hover { background: var(--g-hover); }
 
 /* empty, loading, dropped */
 .pl-empty { margin: auto; padding: 40px 24px; text-align: center; color: var(--g-muted); }
@@ -126,8 +126,8 @@
 
 /* Phone (gui-phone.js sets body[data-phone-screen] at 768px and below): every button is touch-sized, the Steps zoom scrolls the
    lanes sideways in .pl-scroll, and a cell's hit area grows to 44px around its dot. */
-body[data-phone-screen] .pl button { min-height: 44px; }
+body[data-phone-screen] .plan-root button { min-height: 44px; }
 body[data-phone-screen] .pl-zoom button { min-width: 44px; min-height: 44px; }
-body[data-phone-screen] .pl :is(.lane-head, .lane-head-in) { height: 44px; }
-body[data-phone-screen] .pl .cell { min-height: 0; }
-body[data-phone-screen] .pl .cell::before { content: ""; position: absolute; left: 50%; top: calc(var(--cy) - 22px); width: 44px; height: 44px; margin-left: -22px; }
+body[data-phone-screen] .plan-root :is(.lane-head, .lane-head-in) { height: 44px; }
+body[data-phone-screen] .plan-root .cell { min-height: 0; }
+body[data-phone-screen] .plan-root .cell::before { content: ""; position: absolute; left: 50%; top: calc(var(--cy) - 22px); width: 44px; height: 44px; margin-left: -22px; }
