@@ -129,26 +129,26 @@ function threadRequestPlans(tab) {
   return requestPlans(glance, byMachine);
 }
 
-/** The Captain a send went to and how many lists the request's plans hold there. The plans are
- * those on the tab the host answered with (and the step's machine, when it named one). With no tab
- * in the answer, they are the plans in a checkout of the glance's Captain whose project key is the
- * step's repo. A folder name never matches. `name` is that Captain's project when a plan matched
- * and its checkout is a glance Captain, else the step's own name. */
+/** The Captain a send went to, found in the glance's Captains, and how many lists the request's plans
+ * hold in its checkout. A `<machine>:<path>` project names its entry by exact machine and path; a
+ * repo by the project key of its last part (and the step's machine, when it named one), and more than
+ * one entry left is no Captain. The plans are those on a tab whose machine and `cwd` are the Captain's
+ * own, the key `requestPlans` ranks by. The Handoff's tab id is never read: a restart renumbers tabs,
+ * and a folder name is not a key. `name` is the Captain's project, else the step's own name. */
 function sentPlan(tab, sent) {
-  const glance = threadRequestGlance(tab);
   const none = { name: sent.name, lists: 0 };
+  const glance = threadRequestGlance(tab);
   if (!glance || sent.failed) return none;
-  const keyed = sent.tab ? [] : glance.captains.filter((c) => tagSlug(c.project) === tagSlug(sent.name) && (!sent.machine || c.machine === sent.machine));
-  const plans = threadRequestPlans(tab).filter(({ machine, tab: view }) =>
-    sent.tab ? view.id === sent.tab && (!sent.machine || machine === sent.machine) : keyed.some((c) => c.machine === machine && c.path === view.cwd),
+  const found = glance.captains.filter((c) =>
+    sent.path != null ? c.machine === sent.machine && c.path === sent.path : tagSlug(c.project) === tagSlug(sent.name) && (!sent.machine || c.machine === sent.machine),
   );
+  if (found.length !== 1) return none;
+  const [captain] = found;
   let lists = 0;
-  let name = sent.name;
-  for (const { machine, tab: view, plan } of plans) {
-    lists += plan.strips?.length ?? plan.lists?.length ?? 0;
-    name = glance.captains.find((c) => c.machine === machine && c.path === view.cwd)?.project ?? name;
+  for (const { machine, tab: view, plan } of threadRequestPlans(tab)) {
+    if (machine === captain.machine && view.cwd === captain.path) lists += plan.strips?.length ?? plan.lists?.length ?? 0;
   }
-  return { name: lists ? name : sent.name, lists };
+  return { name: captain.project, lists };
 }
 
 /** The "Sent to Captain X · how it went" divider of each `send_to_captain` step a request thread's
