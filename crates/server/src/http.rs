@@ -1374,11 +1374,15 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
                 | HubCall::MachineStates
                 | HubCall::ShareProject { .. }
                 | HubCall::SyncList { .. }
+                | HubCall::SyncChanges { .. }
                 | HubCall::SyncPush { .. }
                 | HubCall::SyncPull { .. }
                 | HubCall::SyncMarkExecutable { .. }
         ) =>
         {
+            if let HubCall::SyncChanges { project, .. } = &call {
+                account.hears_sync(&machine, socket, project);
+            }
             hub.hub_call(&account, call).await
         }
         // A thread opened with Chat to adjust changes the account's tastes, and the hub

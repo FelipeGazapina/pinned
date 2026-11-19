@@ -61,6 +61,12 @@ create table if not exists project_files (account uuid not null references accou
   path text not null, sha text not null, modified bigint not null, data bytea not null, executable boolean not null default false,
   primary key (account, project, path));
 alter table project_files add column if not exists executable boolean not null default false;
+-- A project's head: the revision its last write to `project_files` took (`SYNC_REVISIONS`).
+create table if not exists sync_revs (account uuid not null references accounts on delete cascade,
+  project text not null, rev bigint not null, primary key (account, project));
+-- The revision a row was last written at. 0 is a row from before revisions: a full read returns
+-- it and no delta does.
+alter table project_files add column if not exists rev bigint not null default 0;
 create table if not exists shared_projects (account uuid not null references accounts on delete cascade, key text not null,
   name text not null, repo text not null, updated timestamptz not null default now(), primary key (account, key));
 -- Without a cascade: an account whose boxes still run can't be deleted, which would orphan them.
@@ -874,6 +880,39 @@ async fn set_one_live_run(client: &Client) -> Result<Vec<(Uuid, String)>, tokio_
     Ok(clashing)
 }
 
+/// Gives every write to a `project_files` row its project's next revision, whichever statement or
+/// hub binary writes it, so a delta (`Db::sync_changes`) misses none. An insert that will conflict
+/// takes none: the update it turns into takes one if it writes, and a stale deletion skipped by
+/// `write_pushed`'s condition writes nothing and moves no head. A push of n files that land moves
+/// the head by n. The head's row lock is held to commit, so one project's writes take their
+/// revisions in commit order.
+const SYNC_REVISIONS: &str = "
+create or replace function project_files_rev() returns trigger language plpgsql as $$
+begin
+  if tg_op = 'INSERT' and exists (select 1 from project_files where account = new.account and project = new.project and path = new.path) then
+    return new;
+  end if;
+  insert into sync_revs as r (account, project, rev) values (new.account, new.project, 1)
+    on conflict (account, project) do update set rev = r.rev + 1
+    returning r.rev into new.rev;
+  return new;
+end $$;
+create trigger project_files_rev before insert or update on project_files for each row execute procedure project_files_rev()";
+
+/// Sets `SYNC_REVISIONS` unless it is there. A hub starting while another sets it waits on the
+/// table's lock and then finds it. Dropping `client` on an error rolls the transaction back.
+async fn set_sync_revisions(client: &Client) -> Result<(), tokio_postgres::Error> {
+    const FOUND: &str = "select exists (select 1 from pg_trigger where tgname = 'project_files_rev' and tgrelid = 'project_files'::regclass)";
+    if client.query_one(FOUND, &[]).await?.get(0) {
+        return Ok(());
+    }
+    client.batch_execute("begin; set local lock_timeout = 0; lock table project_files in share row exclusive mode").await?;
+    if !client.query_one(FOUND, &[]).await?.get::<_, bool>(0) {
+        client.batch_execute(SYNC_REVISIONS).await?;
+    }
+    client.batch_execute("commit").await
+}
+
 /// The row, or what deleting its box takes when its run is in a shape this hub can't read.
 fn box_row(r: &tokio_postgres::Row) -> Result<BoxRow, Remains> {
     let (id, machine, upstash): (String, Uuid, _) = (r.get(0), r.get(2), r.get::<_, Option<String>>(3).map(BoxId));
@@ -961,6 +1000,7 @@ pub type PushedFile = (sync::Entry, Vec<u8>, Option<String>, Option<String>);
 impl Db {
     pub async fn connect(url: &str, sealer: Sealer) -> Result<Db, String> {
         let connection = Connection::open(url, SCHEMA).await?;
+        set_sync_revisions(&open(url).await?).await.map_err(|e| format!("could not create the tables: {e}"))?;
         one_live_run_per_bot(url).await;
         Ok(Db { sealer, connection, transactions: Arc::default(), sync_space: SyncSpace::new(SyncLimits::default()) })
     }
@@ -1128,6 +1168,41 @@ impl Db {
             .iter()
             .map(|r| sync::Entry { path: r.get(0), sha: r.get(1), modified: r.get::<_, i64>(2) as u64, size: r.get::<_, i32>(3) as u64, executable: Some(r.get(4)) })
             .collect())
+    }
+
+    /// The project's head: the revision its last write took, 0 before any.
+    pub async fn sync_head(&self, account: Uuid, project: &str) -> Result<u64, String> {
+        let row = self
+            .client().await?
+            .query_one("select coalesce((select rev from sync_revs where account = $1 and project = $2), 0)", &[&account, &project])
+            .await
+            .map_err(err)?;
+        Ok(row.get::<_, i64>(0) as u64)
+    }
+
+    /// The project's files written since revision `since`, or every file, `full`, when it names
+    /// none or one past the head (a database restored to an older copy).
+    ///
+    /// A reader that sees head R also sees every row stamped at or below R. The trigger stamps a
+    /// row and moves the head in one statement, and holds the head's row to commit (`SYNC_REVISIONS`).
+    /// The head is read first, so a row stamped past it may come too; the next read since R
+    /// returns it again. A delta can't say a row is gone, so this rests on no row ever being
+    /// deleted: a deletion is a row with an empty sha. A change that deletes rows must make the
+    /// next read full.
+    pub async fn sync_changes(&self, account: Uuid, project: &str, since: Option<u64>) -> Result<sync::Changes, String> {
+        let head = self.sync_head(account, project).await?;
+        let full = since.is_none_or(|since| since > head);
+        let after: i64 = if full { -1 } else { since.unwrap_or_default() as i64 };
+        let rows = self
+            .client().await?
+            .query("select path, sha, modified, octet_length(data), executable from project_files where account = $1 and project = $2 and rev > $3", &[&account, &project, &after])
+            .await
+            .map_err(err)?;
+        let entries = rows
+            .iter()
+            .map(|r| sync::Entry { path: r.get(0), sha: r.get(1), modified: r.get::<_, i64>(2) as u64, size: r.get::<_, i32>(3) as u64, executable: Some(r.get(4)) })
+            .collect();
+        Ok(sync::Changes { head, full, entries })
     }
 
     /// Keeps the files, unless they would take the account past its limit, when one is set, or

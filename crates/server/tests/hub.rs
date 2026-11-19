@@ -23,7 +23,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use futures_util::future::BoxFuture;
 use std::time::{Duration, Instant};
@@ -14070,4 +14070,308 @@ fn act_cannot_set_the_reviewer_or_worker_profiles_for_any_role_and_the_user_can(
     let discarded = ana.hub(json!({ "cmd": "set_worker_profiles", "project": "github.com/acme/app", "profiles": approved["worker_profiles"]["projects"]["github.com/acme/app"], "drop_proposed": ["p2", "nobody"] })).unwrap();
     assert_eq!(names(&discarded), (3..=20).map(|n| format!("p{n}")).collect::<Vec<_>>(), "only the named row was dropped");
     assert_eq!(discarded["worker_profiles"]["projects"], approved["worker_profiles"]["projects"]);
+}
+
+fn note_file(path: &str, text: &str, modified: u64) -> Value {
+    json!({
+        "path": path,
+        "sha": sha256_hex(text.as_bytes()),
+        "modified": modified,
+        "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())),
+    })
+}
+
+fn changes_call(project: &str, since: Option<u64>) -> Value {
+    let mut call = json!({ "cmd": "sync_changes", "project": project });
+    if let Some(since) = since {
+        call["since"] = json!(since);
+    }
+    call
+}
+
+fn ask_changes(client: &mut Client, project: &str, since: Option<u64>) -> Value {
+    client.hub(changes_call(project, since)).unwrap()
+}
+
+fn take_changes(mirror: &mut BTreeMap<String, Value>, changes: &Value) {
+    if changes["full"].as_bool().unwrap_or(false) {
+        mirror.clear();
+    }
+    for entry in changes["entries"].as_array().unwrap() {
+        mirror.insert(entry["path"].as_str().unwrap().to_owned(), entry.clone());
+    }
+}
+
+fn listed_files(client: &mut Client, project: &str) -> BTreeMap<String, Value> {
+    let listed = client.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
+    listed.as_array().unwrap().iter().map(|entry| (entry["path"].as_str().unwrap().to_owned(), entry.clone())).collect()
+}
+
+fn sock_call(sock: &mut MachineSock, id: u64, call: Value) -> Value {
+    sock.send(json!({ "type": "call", "id": id, "call": call }));
+    loop {
+        let frame = sock.read_json();
+        if frame["type"] == "reply" && frame["id"] == id {
+            assert!(frame.get("err").is_none(), "{frame}");
+            return frame["ok"].clone();
+        }
+    }
+}
+
+fn online_machine(url: &str, token: &str, name: &str) -> (String, MachineSock) {
+    let (machine, machine_token) = account::register_machine(url, token, name, "linux").unwrap();
+    (machine.id, MachineSock::connect(url, &machine_token, "0.18.8"))
+}
+
+fn account_of(hub: &TestHub, id: &str) -> Arc<pinned_server::hub::Account> {
+    hub.runtime.block_on(hub.hub().account(uuid::Uuid::parse_str(id).unwrap())).unwrap()
+}
+
+#[test]
+fn a_delta_since_the_head_is_empty_and_a_push_shows_up_in_the_next_delta() {
+    let hub = TestHub::start("sync_delta");
+    let (_, _, mut ana) = signed_in(&hub.url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let first = ask_changes(&mut ana, project, None);
+    assert_eq!(first["head"], json!(0));
+    assert_eq!(first["full"], json!(true));
+    assert_eq!(first["entries"], json!([]));
+    let at_head = ask_changes(&mut ana, project, Some(0));
+    assert_eq!((at_head["full"].clone(), at_head["entries"].clone()), (json!(false), json!([])));
+
+    ana.hub(json!({ "cmd": "sync_push", "project": project, "files": [note_file("claude/memory/notes.md", "ship it", 5)] })).unwrap();
+    let delta = ask_changes(&mut ana, project, Some(0));
+    assert_eq!(delta["full"], json!(false));
+    assert_eq!(delta["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(delta["entries"][0]["path"], json!("claude/memory/notes.md"));
+    assert_eq!(delta["entries"][0]["sha"], json!(sha256_hex(b"ship it")));
+    let head = delta["head"].as_u64().unwrap();
+    assert!(head > 0, "{head}");
+    let empty = ask_changes(&mut ana, project, Some(head));
+    assert_eq!((empty["full"].clone(), empty["entries"].clone(), empty["head"].clone()), (json!(false), json!([]), json!(head)));
+}
+
+#[test]
+fn the_union_of_deltas_equals_the_list_under_concurrent_pushes() {
+    let hub = TestHub::start("sync_union");
+    let url = hub.url.clone();
+    let (token, _, mut ana) = signed_in(&url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let stop = Arc::new(AtomicBool::new(false));
+    let mirror = Arc::new(Mutex::new(BTreeMap::<String, Value>::new()));
+    let cursor = Arc::new(Mutex::new(None::<u64>));
+    let reader = {
+        let (url, token, stop, mirror, cursor) = (url.clone(), token.clone(), stop.clone(), mirror.clone(), cursor.clone());
+        let project = project.to_owned();
+        std::thread::spawn(move || {
+            let mut client = Client::connect(&url, &token);
+            client.wait("hello", |frame| frame["type"] == "hello");
+            while !stop.load(Ordering::SeqCst) {
+                let since = *cursor.lock().unwrap();
+                let changes = ask_changes(&mut client, &project, since);
+                take_changes(&mut mirror.lock().unwrap(), &changes);
+                *cursor.lock().unwrap() = changes["head"].as_u64();
+                if changes["entries"].as_array().unwrap().is_empty() && !changes["full"].as_bool().unwrap_or(false) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        })
+    };
+    let push = |prefix: &str| {
+        let (url, token, project) = (url.clone(), token.clone(), project.to_owned());
+        let prefix = prefix.to_owned();
+        std::thread::spawn(move || {
+            let mut client = Client::connect(&url, &token);
+            client.wait("hello", |frame| frame["type"] == "hello");
+            for n in 0..24 {
+                let path = format!("claude/{prefix}-{n}.md");
+                let text = format!("{prefix} line {n}");
+                client.hub(json!({ "cmd": "sync_push", "project": project, "files": [note_file(&path, &text, n + 1)] })).unwrap();
+            }
+        })
+    };
+    let (left, right) = (push("a"), push("b"));
+    left.join().unwrap();
+    right.join().unwrap();
+    stop.store(true, Ordering::SeqCst);
+    reader.join().unwrap();
+
+    let mut since = *cursor.lock().unwrap();
+    for _ in 0..8 {
+        let changes = ask_changes(&mut ana, project, since);
+        take_changes(&mut mirror.lock().unwrap(), &changes);
+        if !changes["full"].as_bool().unwrap_or(false) && changes["entries"].as_array().unwrap().is_empty() {
+            let again = ask_changes(&mut ana, project, changes["head"].as_u64());
+            assert!(again["entries"].as_array().unwrap().is_empty() && !again["full"].as_bool().unwrap_or(false), "a second empty delta still moved: {again}");
+            break;
+        }
+        since = changes["head"].as_u64();
+    }
+    assert_eq!(*mirror.lock().unwrap(), listed_files(&mut ana, project));
+}
+
+#[test]
+fn a_mark_bumps_the_head_and_a_skipped_stale_deletion_does_not() {
+    let hub = TestHub::start("sync_mark_stale");
+    let url = hub.url.clone();
+    let (token, _, mut ana) = signed_in(&url, "ana@example.test");
+    let (id, mut mac) = online_machine(&url, &token, "mac");
+    let _ = id;
+    let project = sync::PLUGINS_KEY;
+    sock_call(&mut mac, 1, changes_call(project, None));
+    let body = "#!/bin/sh\necho session-start\n";
+    ana.hub(json!({ "cmd": "sync_push", "project": project, "files": [note_file(HOOK_PATH, body, 3)] })).unwrap();
+    let notice = mac.read_json();
+    assert_eq!(notice["type"], json!("sync_changed"));
+    assert_eq!(notice["project"], json!(project));
+    let written = ask_changes(&mut ana, project, Some(0));
+    let head = written["head"].as_u64().unwrap();
+    assert!(head > 0);
+    assert_eq!(written["entries"][0]["executable"], json!(false));
+
+    ana.hub(json!({ "cmd": "sync_mark_executable", "project": project, "repairs": [{ "path": HOOK_PATH, "sha": sha256_hex(body.as_bytes()) }] })).unwrap();
+    let marked = mac.read_json();
+    assert_eq!(marked, json!({ "type": "sync_changed", "project": project }));
+    let delta = ask_changes(&mut ana, project, Some(head));
+    assert_eq!(delta["full"], json!(false));
+    assert_eq!(delta["entries"][0]["executable"], json!(true));
+    let bumped = delta["head"].as_u64().unwrap();
+    assert!(bumped > head, "a mark moves the head from {head} to {bumped}");
+
+    let stale = json!({ "path": HOOK_PATH, "sha": "", "modified": 9, "agreed": "not-the-sha" });
+    ana.hub(json!({ "cmd": "sync_push", "project": project, "files": [stale] })).unwrap();
+    let quiet = heard(&mut mac, Duration::from_millis(400));
+    assert!(quiet.iter().all(|frame| frame["type"] != "sync_changed"), "a skipped deletion notifies: {quiet:?}");
+    let after = ask_changes(&mut ana, project, Some(bumped));
+    assert_eq!((after["head"].as_u64(), after["entries"].as_array().map(|rows| rows.len())), (Some(bumped), Some(0)));
+    let listed = ana.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
+    let row = listed.as_array().unwrap().iter().find(|entry| entry["path"] == HOOK_PATH).unwrap();
+    assert_eq!(row["sha"], json!(sha256_hex(body.as_bytes())));
+}
+
+#[test]
+fn a_since_past_the_head_answers_full() {
+    let hub = TestHub::start("sync_since_past");
+    let (_, _, mut ana) = signed_in(&hub.url, "ana@example.test");
+    let project = "github.com/acme/site";
+    ana.hub(json!({ "cmd": "sync_push", "project": project, "files": [note_file("claude/memory/notes.md", "one", 1)] })).unwrap();
+    let head = ask_changes(&mut ana, project, None)["head"].as_u64().unwrap();
+    let full = ask_changes(&mut ana, project, Some(head + 10));
+    assert_eq!(full["full"], json!(true));
+    assert_eq!(full["head"], json!(head));
+    assert_eq!(full["entries"][0]["path"], json!("claude/memory/notes.md"));
+}
+
+#[test]
+fn a_row_from_before_revisions_is_in_a_full_read_and_in_no_delta() {
+    let hub = TestHub::start("sync_prerev");
+    let (_, _, mut ana) = signed_in(&hub.url, "ana@example.test");
+    let project = "github.com/acme/old";
+    admin_on(
+        &hub.database,
+        "alter table project_files disable trigger project_files_rev; \
+         insert into project_files (account, project, path, sha, modified, data) \
+         select id, 'github.com/acme/old', 'claude/old.md', 'oldsha', 1, convert_to('old', 'UTF8') \
+         from accounts where email = 'ana@example.test'; \
+         alter table project_files enable trigger project_files_rev",
+    );
+    let full = ask_changes(&mut ana, project, None);
+    assert_eq!(full["full"], json!(true));
+    assert_eq!(full["head"], json!(0));
+    assert_eq!(full["entries"][0]["path"], json!("claude/old.md"));
+    let delta = ask_changes(&mut ana, project, Some(0));
+    assert_eq!((delta["full"].clone(), delta["entries"].clone()), (json!(false), json!([])));
+
+    ana.hub(json!({ "cmd": "sync_push", "project": project, "files": [note_file("claude/new.md", "new", 2)] })).unwrap();
+    let next = ask_changes(&mut ana, project, Some(0));
+    assert_eq!(next["full"], json!(false));
+    let mut paths: Vec<&str> = next["entries"].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap()).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["claude/new.md"]);
+    let whole = ask_changes(&mut ana, project, None);
+    assert_eq!(whole["full"], json!(true));
+    let mut paths: Vec<&str> = whole["entries"].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap()).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["claude/new.md", "claude/old.md"]);
+}
+
+#[test]
+fn a_push_notifies_every_socket_that_asked_for_the_project_and_no_other() {
+    let hub = TestHub::start("sync_notify");
+    let url = hub.url.clone();
+    let (token, _, mut ana) = signed_in(&url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let other = "github.com/acme/other";
+    let (_, mut asked) = online_machine(&url, &token, "asked");
+    let (_, mut listed) = online_machine(&url, &token, "listed");
+    let (_, mut elsewhere) = online_machine(&url, &token, "elsewhere");
+    let (_, mut quiet) = online_machine(&url, &token, "quiet");
+    sock_call(&mut asked, 1, changes_call(project, None));
+    sock_call(&mut listed, 1, json!({ "cmd": "sync_list", "project": project }));
+    sock_call(&mut elsewhere, 1, changes_call(other, None));
+
+    ana.hub(json!({ "cmd": "sync_push", "project": project, "files": [note_file("claude/memory/notes.md", "from ana", 4)] })).unwrap();
+    assert_eq!(asked.read_json(), json!({ "type": "sync_changed", "project": project }));
+    for (name, sock) in [("listed", &mut listed), ("elsewhere", &mut elsewhere), ("quiet", &mut quiet)] {
+        let frames = heard(sock, Duration::from_millis(400));
+        assert!(frames.iter().all(|frame| frame["type"] != "sync_changed"), "{name} heard a notice: {frames:?}");
+    }
+}
+
+#[test]
+fn a_socket_registered_before_its_read_hears_every_later_push() {
+    let hub = TestHub::start("sync_register_first");
+    let url = hub.url.clone();
+    let (token, account_id, mut ana) = signed_in(&url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let (machine, mut mac) = online_machine(&url, &token, "mac");
+    let account = account_of(&hub, &account_id);
+    let socket = account.socket_of(&machine).expect("the machine is online");
+    account.hears_sync(&machine, socket, project);
+
+    ana.hub(json!({ "cmd": "sync_push", "project": project, "files": [note_file("claude/one.md", "one", 1)] })).unwrap();
+    ana.hub(json!({ "cmd": "sync_push", "project": project, "files": [note_file("claude/two.md", "two", 2)] })).unwrap();
+    assert_eq!(mac.read_json(), json!({ "type": "sync_changed", "project": project }));
+    assert_eq!(mac.read_json(), json!({ "type": "sync_changed", "project": project }));
+
+    let read = sock_call(&mut mac, 1, changes_call(project, None));
+    assert_eq!(read["full"], json!(true));
+    let mut paths: Vec<&str> = read["entries"].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap()).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["claude/one.md", "claude/two.md"]);
+}
+
+#[test]
+fn an_old_apps_sync_list_push_and_pull_still_answer() {
+    let hub = TestHub::start("sync_old_frames");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@example.test", "correct horse").unwrap();
+    let (_, machine_token) = account::register_machine(&url, &token, "raw", "linux").unwrap();
+    let project = "github.com/acme/site";
+    let body = b"notes from 0.18.7";
+    let packed = gzip_bytes(body);
+    let sha = sha256_hex(body);
+    let pushed = call_machine(
+        &url,
+        &machine_token,
+        json!({
+            "cmd": "sync_push",
+            "project": project,
+            "files": [{
+                "path": "claude/memory/notes.md",
+                "sha": sha,
+                "modified": 7,
+                "size": packed.len(),
+                "data": base64::engine::general_purpose::STANDARD.encode(&packed),
+            }],
+        }),
+    );
+    assert_eq!(pushed, json!(null));
+    let listed = call_machine(&url, &machine_token, json!({ "cmd": "sync_list", "project": project }));
+    let row = listed.as_array().unwrap().iter().find(|entry| entry["path"] == "claude/memory/notes.md").unwrap();
+    assert_eq!(row["sha"], json!(sha));
+    assert_eq!(row["size"], json!(packed.len()));
+    let pulled = call_machine(&url, &machine_token, json!({ "cmd": "sync_pull", "project": project, "paths": ["claude/memory/notes.md"] }));
+    let data = base64::engine::general_purpose::STANDARD.decode(pulled[0]["data"].as_str().unwrap()).unwrap();
+    assert_eq!(data, packed);
 }

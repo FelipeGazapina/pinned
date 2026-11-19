@@ -131,6 +131,7 @@ impl Labeled for ToMachine {
             ToMachine::Subscribe { .. } => "machine_subscribe",
             ToMachine::Unsubscribe { .. } => "machine_unsubscribe",
             ToMachine::WatchThreads { .. } => "machine_watch_threads",
+            ToMachine::SyncChanged { .. } => "machine_sync_changed",
         }
     }
 }

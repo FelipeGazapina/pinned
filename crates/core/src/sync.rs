@@ -67,6 +67,19 @@ pub struct File {
     pub base: Option<String>,
 }
 
+/// The hub's files of a project written since a revision, its answer to `HubCall::SyncChanges`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct Changes {
+    /// The project's revision these entries bring a reader up to. The next ask names it.
+    pub head: u64,
+    /// `entries` is every file the hub holds, as `SyncList` answers: the ask named no revision,
+    /// or one past the hub's head.
+    #[serde(default)]
+    pub full: bool,
+    /// Files written since the revision asked, a deleted one with an empty sha.
+    pub entries: Vec<Entry>,
+}
+
 /// Sets the executable bit on a file the hub already stores, without sending bytes.
 /// The hub applies it only while that file's sha is still `sha`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]

@@ -5754,6 +5754,31 @@
                 ]
               },
               {
+                "description": "From a machine: `sync::Changes`, the project's files written since revision `since`, every\nfile when it names none. From then on the hub sends that socket `ToMachine::SyncChanged`\nfor `project`. A hub from before 0.18.8 can't answer it, and the machine lists instead.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "sync_changes"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "since": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "project"
+                ]
+              },
+              {
                 "description": "The connector as stored.",
                 "type": "object",
                 "properties": {
@@ -18632,6 +18657,31 @@
                 ]
               },
               {
+                "description": "From a machine: `sync::Changes`, the project's files written since revision `since`, every\nfile when it names none. From then on the hub sends that socket `ToMachine::SyncChanged`\nfor `project`. A hub from before 0.18.8 can't answer it, and the machine lists instead.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "sync_changes"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "since": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "project"
+                ]
+              },
+              {
                 "description": "The connector as stored.",
                 "type": "object",
                 "properties": {
@@ -27647,6 +27697,31 @@
                   "cmd",
                   "project",
                   "repairs"
+                ]
+              },
+              {
+                "description": "From a machine: `sync::Changes`, the project's files written since revision `since`, every\nfile when it names none. From then on the hub sends that socket `ToMachine::SyncChanged`\nfor `project`. A hub from before 0.18.8 can't answer it, and the machine lists instead.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "sync_changes"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "since": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "project"
                 ]
               },
               {
@@ -37418,6 +37493,31 @@
                   "cmd",
                   "project",
                   "repairs"
+                ]
+              },
+              {
+                "description": "From a machine: `sync::Changes`, the project's files written since revision `since`, every\nfile when it names none. From then on the hub sends that socket `ToMachine::SyncChanged`\nfor `project`. A hub from before 0.18.8 can't answer it, and the machine lists instead.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "sync_changes"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "since": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "project"
                 ]
               },
               {
@@ -61821,6 +61921,148 @@
         ]
       }
     },
+    "SyncChanges": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Changes",
+        "description": "The hub's files of a project written since a revision, its answer to `HubCall::SyncChanges`.",
+        "type": "object",
+        "properties": {
+          "head": {
+            "description": "The project's revision these entries bring a reader up to. The next ask names it.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "full": {
+            "description": "`entries` is every file the hub holds, as `SyncList` answers: the ask named no revision,\nor one past the hub's head.",
+            "type": "boolean",
+            "default": false
+          },
+          "entries": {
+            "description": "Files written since the revision asked, a deleted one with an empty sha.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Entry"
+            }
+          }
+        },
+        "required": [
+          "head",
+          "full",
+          "entries"
+        ],
+        "$defs": {
+          "Entry": {
+            "description": "A file as the hub holds it. An empty `sha` marks a deleted one.",
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "sha": {
+                "type": "string"
+              },
+              "modified": {
+                "description": "Unix milliseconds the file last changed on the machine that sent it.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "size": {
+                "description": "Compressed bytes.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "default": 0
+              },
+              "executable": {
+                "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "path",
+              "sha",
+              "modified",
+              "size"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Changes",
+        "description": "The hub's files of a project written since a revision, its answer to `HubCall::SyncChanges`.",
+        "type": "object",
+        "properties": {
+          "head": {
+            "description": "The project's revision these entries bring a reader up to. The next ask names it.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "full": {
+            "description": "`entries` is every file the hub holds, as `SyncList` answers: the ask named no revision,\nor one past the hub's head.",
+            "type": "boolean",
+            "default": false
+          },
+          "entries": {
+            "description": "Files written since the revision asked, a deleted one with an empty sha.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Entry"
+            }
+          }
+        },
+        "required": [
+          "head",
+          "entries"
+        ],
+        "$defs": {
+          "Entry": {
+            "description": "A file as the hub holds it. An empty `sha` marks a deleted one.",
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "sha": {
+                "type": "string"
+              },
+              "modified": {
+                "description": "Unix milliseconds the file last changed on the machine that sent it.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "size": {
+                "description": "Compressed bytes.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "default": 0
+              },
+              "executable": {
+                "description": "Unix mode when the sender read one. Absent when the sender does not know the mode.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "path",
+              "sha",
+              "modified"
+            ]
+          }
+        }
+      }
+    },
     "SyncEntry": {
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -76187,6 +76429,23 @@
               "viewer",
               "tabs"
             ]
+          },
+          {
+            "description": "Someone wrote to `project` on the hub. Sent only on a socket that asked\n`HubCall::SyncChanges` for it, so an app that can't read it never gets it. It names no\nfiles: the machine asks for the changes.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "sync_changed"
+              },
+              "project": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "project"
+            ]
           }
         ],
         "$defs": {
@@ -81835,6 +82094,23 @@
               "type",
               "viewer",
               "tabs"
+            ]
+          },
+          {
+            "description": "Someone wrote to `project` on the hub. Sent only on a socket that asked\n`HubCall::SyncChanges` for it, so an app that can't read it never gets it. It names no\nfiles: the machine asks for the changes.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "sync_changed"
+              },
+              "project": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "project"
             ]
           }
         ],

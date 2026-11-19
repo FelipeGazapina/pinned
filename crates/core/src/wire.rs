@@ -1167,6 +1167,14 @@ pub enum HubCall {
     SyncPull { project: String, paths: Vec<String> },
     /// From a machine: `null`. Sets the executable bit when the hub still stores each sha. Sends no bytes.
     SyncMarkExecutable { project: String, repairs: Vec<sync::ModeRepair> },
+    /// From a machine: `sync::Changes`, the project's files written since revision `since`, every
+    /// file when it names none. From then on the hub sends that socket `ToMachine::SyncChanged`
+    /// for `project`. A hub from before 0.18.8 can't answer it, and the machine lists instead.
+    SyncChanges {
+        project: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since: Option<u64>,
+    },
     /// The connector as stored.
     SaveConnector { connector: Connector },
     DeleteConnector { id: String },
@@ -1841,6 +1849,10 @@ pub enum ToMachine {
     Unsubscribe { tab: TabId, viewer: String },
     /// Replace `viewer`'s set of tabs whose transcript changes it hears of. Empty removes that viewer.
     WatchThreads { viewer: String, tabs: Vec<TabId> },
+    /// Someone wrote to `project` on the hub. Sent only on a socket that asked
+    /// `HubCall::SyncChanges` for it, so an app that can't read it never gets it. It names no
+    /// files: the machine asks for the changes.
+    SyncChanged { project: String },
 }
 
 #[cfg(test)]
@@ -2509,6 +2521,9 @@ mod tests {
             json!({ "type": "watch_threads", "viewer": "client-4", "tabs": ["tab-1"] }),
         );
         round_trip(Call::WatchThreads { tabs: vec!["tab-1".into()] }, json!({ "cmd": "watch_threads", "tabs": ["tab-1"] }));
+        round_trip(ToMachine::SyncChanged { project: "github.com/acme/app".into() }, json!({ "type": "sync_changed", "project": "github.com/acme/app" }));
+        round_trip(HubCall::SyncChanges { project: "github.com/acme/app".into(), since: None }, json!({ "cmd": "sync_changes", "project": "github.com/acme/app" }));
+        round_trip(HubCall::SyncChanges { project: "github.com/acme/app".into(), since: Some(4182) }, json!({ "cmd": "sync_changes", "project": "github.com/acme/app", "since": 4182 }));
     }
 
     #[test]
