@@ -199,7 +199,7 @@ pageView.addEventListener("click", async (e) => {
   const { owner, name } = linkLanding.state.repo;
   showLinkState({ title: `Cloning ${owner}/${name}`, message: `On ${machineName(machine)}.` });
   try {
-    const path = hub ? await hub.hub({ cmd: "clone", machine: hubIdOf(machine), repo: `${owner}/${name}` }) : await invoke("clone_repo", { repo: `${owner}/${name}` });
+    const path = await cloneOn(machine, `${owner}/${name}`);
     const tab = await openThreadWith(machine, path, link);
     if (link.kind === "pull-request") {
       const url = `https://github.com/${owner}/${name}/pull/${link.pullRequest.number}`;

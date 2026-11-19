@@ -28,7 +28,7 @@ function showAccount() {
   const typing = settingsPage.querySelector(".new-password");
   if (typing && (typing.current.value || typing.password.value)) return;
   const state = document.body.dataset.hub;
-  const badge = state === "online" ? "Connected" : state === "refused" ? "Refused by the hub" : "Connecting…";
+  const badge = { online: "Connected", offline: "Can't reach the hub", refused: "Refused by the hub" }[state] ?? "Connecting…";
   const name = machines.get(LOCAL)?.hubView?.name;
   settingsPage.innerHTML = `<h2>Account</h2>
     <p class="hint">Your machines, their sessions and your workflows belong to this account.</p>
@@ -38,6 +38,7 @@ function showAccount() {
         <span class="badge" data-on="${state === "online"}">${badge}</span></div>
       ${document.body.dataset.version ? `<p class="hint">pinned ${esc(document.body.dataset.version)}</p>` : ""}
       ${TAURI ? `<p>This ${COMPUTER} is <b>${esc(name ?? "…")}</b> in the account. It stays signed in, with its sessions open to your other devices, until you sign out.</p>` : ""}
+      ${state === "offline" ? `<p>${esc(hubOutOfReach(account.hub, TAURI ? COMPUTER : null))}</p>` : ""}
       ${state === "refused" ? `<p class="error">The hub no longer accepts this sign-in. Sign out, then sign in again.</p>` : ""}
       <div class="actions"><button class="secondary" data-action="sign-out">Sign out</button></div>
     </div>
@@ -284,7 +285,7 @@ function showMachinesPage() {
       <div class="actions start"><button class="primary" data-action="go-account">Go to Account</button></div>`;
     return;
   }
-  const rows = [...machines.entries()].map(([id, m]) => machineEntryHtml(id, id === LOCAL ? m.hubView : m.view)).join("");
+  const rows = [...machines.entries()].map(([id, m]) => machineEntryHtml(id, id === LOCAL ? ownView(m) : m.view)).join("");
   const pair = machinesUi.pair;
   settingsPage.innerHTML = `<h2>Machines</h2>
     <p class="hint">Every machine signed into ${esc(account.email || "this account")}. Sessions on the ones online show up as tabs here.</p>
@@ -451,7 +452,7 @@ async function renameMachine(field) {
   const name = field.value.trim();
   machinesUi.renaming = null;
   const m = machines.get(id);
-  const current = id === LOCAL ? m.hubView : m.view;
+  const current = id === LOCAL ? ownView(m) : m.view;
   if (!name || name === current.name) return showMachinesPage();
   current.name = name;
   render();
@@ -471,7 +472,7 @@ Object.assign(actions, {
     if (!id) return;
     machinesUi.error = "";
     try {
-      await hub.call(id, { cmd: "update_self" });
+      await updateMachine(id);
     } catch (e) {
       machinesUi.error = String(e);
     }

@@ -23,6 +23,7 @@ function showMachinesContext() {
   const asked = [];
   const context = runSlice("function showMachines", "function disconnectHub");
   context.account = { machine_id: "this-mac" };
+  context.TAURI = {};
   context.viewListeners = [];
   context.page = "";
   context.machinesUi = { renaming: false };

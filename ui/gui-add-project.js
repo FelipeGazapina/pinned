@@ -150,7 +150,7 @@ async function cloneTo(dest) {
   palette.adding.cloning = true;
   renderPalette();
   try {
-    const path = hub ? await hub.hub({ cmd: "clone", machine: hubIdOf(machine), repo: remoteUrl, dest }) : await invoke("clone_repo", { repo: remoteUrl, dest });
+    const path = await cloneOn(machine, remoteUrl, dest);
     closePalette();
     await openProjectIn(machine, path);
   } catch (e) {

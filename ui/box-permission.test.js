@@ -59,6 +59,7 @@ test("an ask that arrives while the Upstash card is open is drawn", () => {
     addEventListener() {},
     account: { email: "ana@acme.dev" },
     load(key) { return key === "settings-page" ? "integrations" : null; },
+    hub: null,
     save() {},
     listen() {},
     agentAsking: () => null,

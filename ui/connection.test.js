@@ -7,6 +7,7 @@ const read = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8
 const connectionSrc = read("connection.js");
 const hubSrc = read("hub.js");
 const sidebarSrc = read("gui-sidebar.js");
+const agentsSrc = read("gui-agents.js");
 const accountSrc = read("account.js");
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -166,43 +167,92 @@ test("a machine that dropped is named in the sidebar by a note with its name and
   assert.equal(note.innerHTML, `<span class="dot"></span><span class="text"><b>mini</b> offline · seen 1 min ago</span>`);
 });
 
-test("the sidebar's timers stop where the hub link dropped and run again when it is back", () => {
-  const rows = [{ dataset: { since: "1000" }, textContent: "" }];
+test("with the hub link down a thread on another machine holds its timer and this computer's keeps counting", () => {
+  const timer = (remote) => ({ dataset: { since: "1000" }, textContent: "", closest: (selector) => (selector === "[data-remote]" && remote ? {} : null) });
+  const here = timer(false);
+  const away = timer(true);
   let now = 1600;
   const context = {
+    LOCAL: "local",
     nowS: () => now,
     durationLabel: (s) => `${s}s`,
-    threadList: { querySelectorAll: () => rows },
+    threadList: { querySelectorAll: () => [here, away] },
     document: { querySelectorAll: () => [] },
   };
   vm.createContext(context);
   vm.runInContext(`let linkDownAt = null;\n${fn(sidebarSrc, "noteHubLink")}\n${line(sidebarSrc, "const clockMs")}\n${fn(sidebarSrc, "tickDurations")}\nObject.assign(globalThis, { noteHubLink, tickDurations, clockMs });`, context);
   context.tickDurations();
-  assert.equal(rows[0].textContent, "600s");
+  assert.deepEqual([here.textContent, away.textContent], ["600s", "600s"]);
   context.noteHubLink(false);
   now = 1900;
   context.tickDurations();
-  assert.equal(rows[0].textContent, "600s", "held at the moment the link dropped");
+  assert.deepEqual([here.textContent, away.textContent], ["900s", "600s"], "the remote one held at the moment the link dropped");
   context.noteHubLink(false);
   now = 2000;
   context.tickDurations();
-  assert.equal(rows[0].textContent, "600s", "a second drop report doesn't move it");
+  assert.deepEqual([here.textContent, away.textContent], ["1000s", "600s"], "a second drop report doesn't move it");
   context.noteHubLink(true);
   context.tickDurations();
-  assert.equal(rows[0].textContent, "1000s");
+  assert.deepEqual([here.textContent, away.textContent], ["1000s", "1000s"]);
 });
 
-test("the thread's own timer reads the same held clock", () => {
-  const context = { nowS: () => 1900, Date: { now: () => 1_900_000 } };
+test("the open thread's timer holds at the drop only for a thread on another machine", () => {
+  const context = { LOCAL: "local", nowS: () => 1900, Date: { now: () => 1_900_000 } };
   vm.createContext(context);
   vm.runInContext(`let linkDownAt = null;\n${fn(sidebarSrc, "noteHubLink")}\n${line(sidebarSrc, "const clockMs")}\nObject.assign(globalThis, { noteHubLink, clockMs });`, context);
-  assert.equal(context.clockMs(), 1_900_000);
+  assert.equal(context.clockMs("mini"), 1_900_000);
   context.nowS = () => 1700;
   context.noteHubLink(false);
-  assert.equal(context.clockMs(), 1_700_000, "held at the drop, in ms");
+  assert.equal(context.clockMs("mini"), 1_700_000, "held at the drop, in ms");
+  assert.equal(context.clockMs("local"), 1_900_000, "this computer's thread keeps the real clock");
   context.noteHubLink(true);
-  assert.equal(context.clockMs(), 1_900_000);
-  assert.match(read("gui-timeline.js"), /ticking\(clockMs\(\) - Number\(ticker\.dataset\.since\)\)/);
+  assert.equal(context.clockMs("mini"), 1_900_000);
+  assert.match(read("gui-timeline.js"), /ticking\(clockMs\(ticker\.dataset\.machine \|\| active\?\.machine\) - Number\(ticker\.dataset\.since\)\)/);
+});
+
+test("a project's running badge is remote only while every running thread is on another machine", () => {
+  const context = { LOCAL: "local", phaseOf: (tab) => tab.phase };
+  vm.createContext(context);
+  vm.runInContext(`${fn(sidebarSrc, "projectRunsAway")}\nObject.assign(globalThis, { projectRunsAway });`, context);
+  const local = { machine: "local", phase: "working" };
+  const away = { machine: "mini", phase: "working" };
+  const done = { machine: "mini", phase: "done" };
+  assert.equal(context.projectRunsAway([away, done]), true);
+  assert.equal(context.projectRunsAway([local, away]), false);
+  assert.equal(context.projectRunsAway([done]), false);
+  assert.equal(context.projectRunsAway([away, { machine: "studio", phase: "delegating" }]), true);
+});
+
+test("a worker row takes its own machine's clock, and the summary stays live while any worker is on this Mac", () => {
+  const context = { LOCAL: "local" };
+  vm.createContext(context);
+  vm.runInContext(`${fn(agentsSrc, "workerMachine")}\n${fn(agentsSrc, "workersClock")}\nObject.assign(globalThis, { workerMachine, workersClock });`, context);
+  const parent = { machine: "mini" };
+  const here = { state: "working", tab: { machine: "local" } };
+  const away = { state: "working", tab: { machine: "studio" } };
+  const agent = { state: "working", tab: null };
+  const done = { state: "done", tab: { machine: "local" } };
+  assert.equal(context.workerMachine(parent, away), "studio");
+  assert.equal(context.workerMachine(parent, agent), "mini", "an agent worker runs inside the thread that shows it");
+  assert.equal(context.workersClock(parent, [away, here]), "local");
+  assert.equal(context.workersClock(parent, [away, agent]), "studio");
+  assert.equal(context.workersClock(parent, [done, agent]), "mini");
+  assert.match(agentsSrc, /tickerHtml\(row\.since, workerMachine\(tab, row\)\)/);
+  assert.match(agentsSrc, /tickerHtml\(s\.since, workersClock\(tab, all\)\)/);
+  assert.match(agentsSrc, /data-machine="\$\{esc\(machine\)\}"/);
+});
+
+test("the live states held still and dimmed with the hub link down are those of threads on other machines", () => {
+  const css = read("gui-sidebar.css") + read("gui-glyph.css");
+  const offline = css.split("\n").filter((rule) => rule.startsWith('body[data-hub="offline"]') && !rule.includes("#reconnect-bar"));
+  assert.deepEqual(offline, [
+    'body[data-hub="offline"] :is(.thread-row[data-remote] .stamp.status.info, .project-head[data-remote] .state.running, .thread-row[data-remote] .term-run) { opacity: 0.45; }',
+    'body[data-hub="offline"] :is(.thread-row[data-remote] .stamp.status.info .i, .thread-row[data-remote] .term-run .i, #thread[data-remote] .shimmer) { animation-play-state: paused; }',
+    'body[data-hub="offline"] #thread[data-remote] :is(.work.live, .live-tool) { opacity: 0.45; }',
+    'body[data-hub="offline"] #chat-sidebar-toggle .running[data-remote] { opacity: 0.45; }',
+    'body[data-hub="offline"] [data-remote] .status-glyph[data-glyph="working"] { opacity: 0.45; animation-play-state: paused; }',
+  ]);
+  assert.match(read("gui-glyph.css"), /^html\[data-shell="web"\] body\[data-hub="offline"\] \.status-glyph\[data-glyph="working"\],$/m, "the web app, where every thread is remote, dims them all");
 });
 
 /** hub.js on sockets the test closes itself. `draws` are the jitter draws in order; waits are what the
@@ -370,6 +420,54 @@ test("web sign-in with a wrong password shows the hub's words and no Retry", asy
   await context.loginWeb(false);
   assert.equal(error.textContent, "wrong email or password");
   assert.equal(retry.hidden, true);
+});
+
+function accountPage(state, TAURI = {}) {
+  const page = { innerHTML: "", querySelector: () => ({ current: { value: "" }, password: { value: "" } }) };
+  const context = {
+    URL,
+    TAURI,
+    COMPUTER: "Mac",
+    LOCAL: "local",
+    account: { email: "owner@example.test", hub: "https://hub.example.test" },
+    machines: new Map([["local", { hubView: { name: "owner-mbp" } }]]),
+    document: { body: { dataset: state ? { hub: state } : {} } },
+    settingsPage: page,
+    esc: (text) => String(text),
+    repoInsightHtml: () => "",
+    notificationsHtml: () => "",
+    invitesHtml: () => "",
+    bindRepoInsight() {},
+    loadInvites() {},
+    invitesUi: {},
+  };
+  vm.createContext(context);
+  vm.runInContext(`${connectionSrc}\n${fn(accountSrc, "showAccount")}\nshowAccount();`, context);
+  const text = page.innerHTML.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  return { badge: /<span class="badge"[^>]*>([^<]*)<\/span>/.exec(page.innerHTML)[1], text };
+}
+
+test("signed in with the hub out of reach, the Account page names the hub's host instead of Connecting forever", () => {
+  const offline = accountPage("offline");
+  assert.equal(offline.badge, "Can't reach the hub");
+  assert.ok(offline.text.includes("Can't reach the hub at hub.example.test. This Mac keeps working and reconnects once the hub answers."), offline.text);
+  assert.ok(accountPage("offline", null).text.includes("Can't reach the hub at hub.example.test. This page reconnects once the hub answers."));
+  assert.equal(accountPage(undefined).badge, "Connecting…", "before the socket's first event it is still connecting");
+  assert.ok(!accountPage(undefined).text.includes("Can't reach"));
+  assert.equal(accountPage("online").badge, "Connected");
+  assert.equal(accountPage("refused").badge, "Refused by the hub");
+});
+
+test("in the app the reconnect bar says this computer keeps working; the web page keeps its own words", () => {
+  const bar = (TAURI) => {
+    const el = { textContent: "Reconnecting… showing the last state" };
+    const context = { TAURI, COMPUTER: "Mac", document: { getElementById: (id) => (id === "reconnect-bar" ? el : null) } };
+    vm.createContext(context);
+    vm.runInContext(line(read("main.js"), 'if (TAURI) document.getElementById("reconnect-bar")'), context);
+    return el.textContent;
+  };
+  assert.equal(bar({}), "Can't reach the hub. This Mac keeps working.");
+  assert.equal(bar(null), "Reconnecting… showing the last state");
 });
 
 test("the reconnect bar and the Retry button are in the page, hidden until their state", () => {

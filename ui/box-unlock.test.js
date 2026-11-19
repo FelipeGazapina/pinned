@@ -5,6 +5,8 @@ import vm from "node:vm";
 
 const hubSrc = readFileSync(new URL("./hub.js", import.meta.url), "utf8");
 const settingsSrc = readFileSync(new URL("./settings.js", import.meta.url), "utf8");
+const mainSrc = readFileSync(new URL("./main.js", import.meta.url), "utf8");
+const hubUpSrc = mainSrc.slice(mainSrc.indexOf("const hubUp = "), mainSrc.indexOf("\n", mainSrc.indexOf("const hubUp = ")));
 const timelineSrc = readFileSync(new URL("./gui-timeline.js", import.meta.url), "utf8");
 const LOCKED = "unlock with your password in the app to do this";
 /** The hub calls only the owner makes on a locked login (`surface::owner_only`): the manifest's
@@ -64,6 +66,7 @@ function app(answers = {}, world = {}) {
   vm.createContext(context);
   vm.runInContext(hubSrc, context);
   vm.runInContext(`${settingsSrc}
+    ${hubUpSrc}
     var hub = new Hub("https://hub.example", "login", { locked: askOwnerPassword });
     globalThis.__card = upstashCardHtml;
     globalThis.__settings = settings;

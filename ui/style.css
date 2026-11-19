@@ -183,6 +183,8 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 #settings-page::-webkit-scrollbar { display: none; }
 #settings-page h2 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
 #settings-page p { margin: 6px 0; line-height: 1.45; }
+#settings-page fieldset.hub-out { min-width: 0; margin: 0; padding: 0; border: 0; }
+#settings-page fieldset.hub-out :is(button, .switch) { opacity: 0.5; cursor: default; }
 .hint { color: var(--muted); }
 .hint code { font: 11px ui-monospace, Menlo, monospace; color: var(--fg); word-break: break-all; }
 .error { color: var(--s-error, #ff6b6b); flex: 1; }

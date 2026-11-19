@@ -104,7 +104,11 @@ impl Shared {
         if out.send(Outgoing { text: serde_json::to_string(frame).unwrap(), wrote: Some(wrote) }).is_err() {
             return false;
         }
-        written.recv_timeout(Duration::from_secs(5)).is_ok()
+        // A timeout means the frame is still queued. False would emit it again, and a newer phase can pass the older one.
+        match written.recv_timeout(Duration::from_secs(5)) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => true,
+            Err(mpsc::RecvTimeoutError::Disconnected) => false,
+        }
     }
 
     /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline.
@@ -1579,6 +1583,29 @@ mod tests {
     fn an_offline_flush_returns_without_waiting() {
         let shared = Shared::default();
         assert!(!shared.send_flushed(&MachineFrame::Event { event: MachineEvent::Update { status: None } }));
+    }
+
+    #[test]
+    fn a_queued_flush_counts_once_the_writer_confirms_and_not_when_the_writer_drops_it() {
+        let frame = MachineFrame::Event { event: MachineEvent::Update { status: None } };
+        let shared = Shared::default();
+        let (out, mut incoming) = channel::unbounded_channel();
+        *shared.out.lock().unwrap() = Some(out);
+        let writer = std::thread::spawn(move || {
+            let outgoing = incoming.blocking_recv().unwrap();
+            outgoing.wrote.unwrap().send(()).unwrap();
+        });
+        assert!(shared.send_flushed(&frame));
+        writer.join().unwrap();
+
+        let (out, mut incoming) = channel::unbounded_channel();
+        *shared.out.lock().unwrap() = Some(out);
+        let writer = std::thread::spawn(move || {
+            let outgoing = incoming.blocking_recv().unwrap();
+            drop(outgoing.wrote);
+        });
+        assert!(!shared.send_flushed(&frame));
+        writer.join().unwrap();
     }
 
     #[test]

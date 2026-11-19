@@ -1,10 +1,32 @@
 function accountMachines() {
   const rows = [];
   for (const [id, machine] of machines) {
-    const view = id === LOCAL ? machine.hubView : machine.view;
+    const view = id === LOCAL ? ownView(machine) : machine.view;
     if (view?.id && view.id !== "local") rows.push(view);
   }
   return rows;
+}
+
+function ownView(machine) {
+  if (!TAURI || !account?.machine_id || machine.hubView) return machine.hubView;
+  return (machine.ownView ??= {
+    id: account.machine_id,
+    name: machine.view.name,
+    os: machine.view.os,
+    online: true,
+    last_seen: 0,
+    get version() {
+      return (document.body.dataset.version ?? "").replace(/^v/, "");
+    },
+  });
+}
+
+function noteOwnUpdate(status) {
+  const view = ownView(machines.get(LOCAL));
+  if (!view) return;
+  view.update = status;
+  for (const notify of viewListeners.slice()) notify();
+  if (settingsOpen() && page === "machines" && !machinesUi.renaming) showMachinesPage();
 }
 
 const FINAL = new Set(["up_to_date", "failed", "cannot"]);
@@ -49,6 +71,11 @@ function land(id, call) {
   });
 }
 
+function updateMachine(id) {
+  if (TAURI && id === account?.machine_id && !hubUp()) return invoke("install_update");
+  return hub.call(id, { cmd: "update_self" });
+}
+
 async function updateEveryMachine() {
   if (updateEveryMachine.busy) return;
   updateEveryMachine.busy = true;
@@ -56,8 +83,8 @@ async function updateEveryMachine() {
     const self = account?.machine_id ?? null;
     const online = accountMachines().filter((view) => view.online && !view.upstash_box);
     const others = online.filter((view) => view.id !== self);
-    await Promise.all(others.map((view) => land(view.id, hub.call(view.id, { cmd: "update_self" }))));
-    if (self && online.some((view) => view.id === self)) await land(self, hub.call(self, { cmd: "update_self" }));
+    await Promise.all(others.map((view) => land(view.id, updateMachine(view.id))));
+    if (self && online.some((view) => view.id === self)) await land(self, updateMachine(self));
   } finally {
     updateEveryMachine.busy = false;
   }

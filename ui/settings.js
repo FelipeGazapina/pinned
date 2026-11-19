@@ -139,9 +139,22 @@ let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [
 
 const settingsOpen = () => document.body.dataset.page === "settings";
 
-/** A call to the hub, or to this machine without one. The form that Approve on an agent's request
- * opened approves that request with it instead (`agentApproval`). */
-const connectorCall = (cmd, args = {}) => agentApproval({ cmd, ...args }) ?? (hub ? hub.hub({ cmd, ...args }) : invoke(cmd, args));
+const connectorCall = (cmd, args = {}) => agentApproval({ cmd, ...args }) ?? (!hub ? invoke(cmd, args) : hubUp() ? hub.hub({ cmd, ...args }) : Promise.reject(HUB_NEEDED));
+
+let settingsHub = null;
+function readOnlyWithoutHub(title, html) {
+  if (!hub || hubUp()) return html;
+  if (settingsHub !== hub) return `<h2>${title}</h2><div class="card"><p>${HUB_NEEDED}</p></div>`;
+  const at = html.startsWith("<h2>") ? html.indexOf("</h2>") + 5 : 0;
+  return `${html.slice(0, at)}<div class="card"><p>${HUB_NEEDED} These are the last settings it sent.</p></div><fieldset class="hub-out" disabled>${html.slice(at)}</fieldset>`;
+}
+
+async function pullSettings() {
+  const latest = await connectorCall("get_settings");
+  settings = latest;
+  if (hub) settingsHub = hub;
+  return latest;
+}
 
 async function toggleSettings() {
   if (settingsOpen()) return active ? activate(active) : delete document.body.dataset.page;
@@ -149,7 +162,7 @@ async function toggleSettings() {
   picker.hidden = true;
   renderSettingsNav();
   try {
-    settings = await connectorCall("get_settings");
+    await pullSettings();
   } catch (e) {
     console.warn("get_settings", e);
   }
@@ -158,6 +171,7 @@ async function toggleSettings() {
 
 function onHubSettings(latest) {
   settings = latest;
+  settingsHub = hub;
   if (!settingsOpen()) return;
   if (page === "integrations") {
     const asks = document.getElementById("box-asks");
@@ -501,7 +515,7 @@ async function resumeWorkflow() {
   const kind = pendingWorkflow?.kind;
   pendingWorkflow = null;
   try {
-    settings = await connectorCall("get_settings");
+    await pullSettings();
   } catch (e) {
     console.warn("get_settings", e);
   }
@@ -1635,8 +1649,8 @@ function refresh() {
 
 function redraw() {
   settingsPage.dataset.view = view.name;
-  settingsPage.innerHTML = connectorsHtml();
-  if (view.name === "edit") refresh();
+  settingsPage.innerHTML = readOnlyWithoutHub("Workflows", connectorsHtml());
+  if (view.name === "edit" && settingsPage.querySelector(".canvas")) refresh();
 }
 
 function edit(index, draft = clone(settings.connectors[index]), open = null) {
@@ -1824,7 +1838,7 @@ const actions = {
       const found = await connectorCall("connect_slack", { token });
       slackNote = found.added === false ? `Updated the token for @${found.name}` : `Added @${found.name} in ${found.team}`;
       slackAdding = false;
-      settings = await connectorCall("get_settings");
+      await pullSettings();
       if (pendingWorkflow && triggerReady(pendingWorkflow.kind)) return await resumeWorkflow();
       showPage("integrations");
     } catch (e) {
@@ -1958,7 +1972,7 @@ const actions = {
     try {
       await connectorCall("disconnect_slack", { bot });
       suggestions.channels = [];
-      settings = await connectorCall("get_settings");
+      await pullSettings();
     } catch (e) {
       slackRowErrors[bot] = String(e);
     }
@@ -2393,7 +2407,7 @@ settingsSection({ page: "general", label: "General", icon: "settings", show: () 
   { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },
   { title: "Send shortcut", terms: ["enter new line multiline cmd ctrl composer"] },
 ] });
-settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = integrationsHtml()), loadExternalAgents(), loadBoxLogins(), loadConvexProjects()), search: [
+settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = readOnlyWithoutHub("Connectors", integrationsHtml())), loadExternalAgents(), loadBoxLogins(), loadConvexProjects()), search: [
   { title: "External agents (MCP)", terms: ["mcp oauth grok external agent remote connector orchestrator captain capitao capitão token revoke"], id: "external-agents" },
   { title: "Linear", terms: ["api key issues labels connector"] },
   { title: "Slack", terms: ["bot token channels mentions connector"] },

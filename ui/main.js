@@ -39,6 +39,7 @@ const machines = new Map();
 const viewListeners = [];
 let account = null;
 let hub = null;
+const hubUp = () => hub?.online === true;
 
 const tabs = [];
 let active = null;
@@ -444,7 +445,7 @@ async function cloneFromGithub() {
     repos = await connectorCall("github_repos");
   } catch (e) {
     list.innerHTML = "";
-    document.getElementById("picker-error").textContent = /not connected/.test(e) ? "Connect GitHub under Settings → Connectors first." : String(e);
+    document.getElementById("picker-error").textContent = /^GitHub is not connected/.test(e) ? "Connect GitHub under Settings → Connectors first." : String(e);
     return;
   }
   const show = () => {
@@ -459,11 +460,18 @@ async function cloneFromGithub() {
   show();
 }
 
+function cloneOn(machine, repo, dest) {
+  if (hub && (machine !== LOCAL || hubUp())) return hub.hub({ cmd: "clone", machine: hubIdOf(machine), repo, dest });
+  const cloning = invoke("clone_repo", { repo, dest });
+  if (!hub) return cloning;
+  return cloning.catch((error) => Promise.reject(/authentication|could not read Username|terminal prompts disabled|\b40[13]\b/i.test(String(error?.message ?? error)) ? "A private repository needs the account's GitHub token on the hub." : error));
+}
+
 async function cloneAndOpen(machine, repo) {
   choices = [];
   picker.querySelector(".choices").innerHTML = `<p class="loading">Cloning ${esc(repo)} on ${esc(machineName(machine))}…</p><p class="error" id="picker-error"></p>`;
   try {
-    const path = hub ? await hub.hub({ cmd: "clone", machine: hubIdOf(machine), repo }) : await invoke("clone_repo", { repo });
+    const path = await cloneOn(machine, repo);
     if (await pickFolder(path)) closeProjects();
   } catch (e) {
     document.getElementById("picker-error").textContent = String(e);
@@ -1291,6 +1299,7 @@ function onMachineEvent(machine, event) {
   if (event.kind === "thread") return onThreadEvent(machine, event);
   if (event.kind === "skills-changed") return skillsChanged(machine);
   if (event.kind === "tastes-changed") return tastesChanged();
+  if (event.kind === "update" && machine === LOCAL) return noteOwnUpdate(event.status);
   if (event.kind === "usage") {
     machines.get(machine).usage[event.account ?? DEFAULT_ACCOUNT] = event.usage;
     return renderUsage();
@@ -1573,6 +1582,8 @@ if (!TAURI && window.visualViewport) {
   fitVisible();
 }
 
+if (TAURI) document.getElementById("reconnect-bar").textContent = `Can't reach the hub. This ${COMPUTER} keeps working.`;
+
 function connectHub(signedIn) {
   account = signedIn;
   hub = new Hub(signedIn.hub, signedIn.user_token, {
@@ -1598,6 +1609,7 @@ function connectHub(signedIn) {
       noteHubLink(on);
       if (on) retryUploadImages();
       if (settingsOpen() && page === "account") showAccount();
+      if (settingsOpen() && ["integrations", "connectors"].includes(page)) showPage(page);
     },
     refused: () => (TAURI ? (document.body.dataset.hub = "refused") : signOutWeb("You were signed out. Sign in again.")),
   });
@@ -1607,7 +1619,7 @@ function showMachines(list, tabsByMachine) {
   for (const view of list) {
     if (view.id === account.machine_id) {
       const first = !machines.get(LOCAL).hubView;
-      machines.get(LOCAL).hubView = view;
+      machines.get(LOCAL).hubView = TAURI ? { ...view, online: true } : view;
       if (first) refreshSyncStopped(LOCAL);
       continue;
     }
@@ -1647,6 +1659,7 @@ function disconnectHub() {
     machines.delete(id);
   }
   delete machines.get(LOCAL)?.hubView;
+  delete machines.get(LOCAL)?.ownView;
   delete machines.get(LOCAL)?.syncStopped;
   resetAgentSurface();
   render();

@@ -1103,7 +1103,7 @@ function turnHtml(tab, turn, change, live, first, t, latest, workers = "") {
     // The hooks' mark covers every compaction; a /compact prompt covers its own until the divider shows.
     const compacting = tab.view.compacting || (/^\/compact\b/.test(turn.user?.text ?? "") && !turn.dividers.some((d) => d.kind === "compaction"));
     const active = turn.steps.slice(turn.steps.findLastIndex((s) => s.kind === "text") + 1).filter((s) => (s.kind === "tool" || s.kind === "thinking") && !shown.includes(s));
-    const label = compacting ? `<span class="shimmer">Compacting…</span>` : `Working for <span class="ticker" data-since="${turn.start || Date.now()}">${ticking(turn.start ? clockMs() - turn.start : 0)}</span>`;
+    const label = compacting ? `<span class="shimmer">Compacting…</span>` : `Working for <span class="ticker" data-since="${turn.start || Date.now()}">${ticking(turn.start ? clockMs(tab.machine) - turn.start : 0)}</span>`;
     fold = `<details class="work live" data-turn="${esc(turn.id)}"${t.open.has(turn.id) ? " open" : ""}>
         <summary><span class="label">${label}</span></summary>
         <div class="steps">${steps}</div></details>
@@ -1232,6 +1232,7 @@ const resumeHtml = () => `<div class="resume-banner" role="alert">${icon("refres
 const leftAt = new Map();
 function renderThread() {
   const tab = active;
+  threadView.toggleAttribute("data-remote", !!tab && tab.machine !== LOCAL);
   const crumb = document.querySelector("#chat-head .crumb");
   if (!tab) {
     crumb.textContent = "";
@@ -1444,7 +1445,7 @@ threadView.addEventListener("scroll", () => {
 }, { passive: true });
 
 visibleInterval(() => {
-  for (const ticker of threadView.querySelectorAll(".ticker")) ticker.textContent = ticking(clockMs() - Number(ticker.dataset.since));
+  for (const ticker of threadView.querySelectorAll(".ticker")) ticker.textContent = ticking(clockMs(ticker.dataset.machine || active?.machine) - Number(ticker.dataset.since));
 }, 1000);
 
 

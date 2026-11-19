@@ -550,20 +550,21 @@ function drawThreadList(scope = projectGroups().find((g) => g.key === ui.project
   document.getElementById("new-thread").dataset.tipSub = projectCount() > 1 ? `New thread in current project: Shift+click (${MOD_LABEL}⇧N)` : "";
 }
 
-/** What the closed sidebar holds: how many things wait on you (agents' approvals and blocked
- * threads, as the Orchestrator's row counts them) and whether any thread is working. */
 function sidebarSummary() {
   let waiting = agentConfirmations.length;
   let running = false;
+  let runningHere = false;
   for (const tab of tabs) {
     if (waitingKindOf(tab.view)) waiting++;
-    if (["working", "delegating"].includes(phaseOf(tab))) running = true;
+    if (!["working", "delegating"].includes(phaseOf(tab))) continue;
+    running = true;
+    runningHere ||= tab.machine === LOCAL;
   }
-  return { waiting, running };
+  return { waiting, running, runningHere };
 }
 /** The chat header's sidebar toggle with a pill for what waits and a dot while something works. */
-function sidebarToggleHtml({ waiting, running }) {
-  return `<span class="glyph">${icon("panel-left")}${running ? `<span class="running" aria-hidden="true"></span>` : ""}</span>${waiting ? `<span class="count">${waiting}</span>` : ""}`;
+function sidebarToggleHtml({ waiting, running, runningHere }) {
+  return `<span class="glyph">${icon("panel-left")}${running ? `<span class="running"${runningHere ? "" : " data-remote"} aria-hidden="true"></span>` : ""}</span>${waiting ? `<span class="count">${waiting}</span>` : ""}`;
 }
 const sidebarToggleLabel = ({ waiting, running }) => `Toggle sidebar (${MOD_LABEL}B)${waiting ? `, ${waiting} waiting on you` : ""}${running ? ", something is working" : ""}`;
 let sidebarTouched = false;
@@ -730,6 +731,11 @@ function projectRows(list, kids, branch) {
 const projectMachinesHtml = (names) => names.map((name, i) => `<span class="m">${esc(name)}${i < names.length - 1 ? "," : ""}</span>`).join(" ");
 /** A thread's machine as its hover card names it: an icon, and the name as text when `named`. */
 const remoteMark = (name, named) => `<span class="remote${named ? " named" : ""}" title="${esc(name)}">${icon("monitor")}${named ? `<span class="name">${esc(name)}</span>` : ""}</span>`;
+function projectRunsAway(threads) {
+  const running = threads.filter((t) => ["working", "delegating"].includes(phaseOf(t)));
+  return running.length > 0 && running.every((t) => t.machine !== LOCAL);
+}
+
 /** A project's head: its icon and name, then in one line how many messages wait for its threads,
  * how many of its threads work and the machines they are on, with what they cost as that line's
  * tooltip. A project with no Captain offers to start one. */
@@ -752,6 +758,7 @@ function projectHead(key, roots, kids) {
   head.className = "project-head";
   head.dataset.project = key;
   head.dataset.headTab = roots[0].key;
+  head.toggleAttribute("data-remote", projectRunsAway(all));
   const captain = roots.some(isOrchestrator) || threadOf(roots[0]).workspace?.scratch
     ? ""
     : `<button type="button" class="head-act" data-head-act="captain" aria-label="Open the ${esc(name)} Captain" data-tip="Open the ${esc(name)} Captain">${icon("side-bot")}</button>`;
@@ -775,6 +782,7 @@ function rowShell(tab, cls) {
   row.setAttribute("role", "button");
   row.tabIndex = 0;
   row.dataset.tab = tab.key;
+  row.toggleAttribute("data-remote", tab.machine !== LOCAL);
   row.classList.toggle("active", tab === active);
   row.classList.toggle("selected", selected.has(tab.key));
   row.classList.toggle("titling", titling.has(tab.key));
@@ -1187,17 +1195,17 @@ function scheduleWake() {
   if (Number.isFinite(next)) wakeTimer = setTimeout(() => guiOn() && renderSidebar(), Math.min((next - nowS()) * 1000 + 50, 2 ** 31 - 1));
 }
 
-/** When the app's hub link dropped, in seconds, while it is down. The timers stop there, so a "Working 7m"
- * the app can no longer vouch for doesn't keep counting. */
 let linkDownAt = null;
 function noteHubLink(on) {
   linkDownAt = on ? null : (linkDownAt ?? nowS());
 }
-/** The time the timers show against, in milliseconds: now, or where the hub link dropped. */
-const clockMs = () => (linkDownAt === null ? Date.now() : linkDownAt * 1000);
+const clockMs = (machine) => (linkDownAt === null || machine === LOCAL ? Date.now() : linkDownAt * 1000);
 function tickDurations() {
-  const now = linkDownAt ?? nowS();
-  for (const el of threadList.querySelectorAll("[data-since]")) el.textContent = Number(el.dataset.since) ? durationLabel(Math.max(0, now - el.dataset.since)) : "";
+  const now = nowS();
+  for (const el of threadList.querySelectorAll("[data-since]")) {
+    const at = el.closest("[data-remote]") ? (linkDownAt ?? now) : now;
+    el.textContent = Number(el.dataset.since) ? durationLabel(Math.max(0, at - el.dataset.since)) : "";
+  }
   for (const el of document.querySelectorAll("[data-stats]")) {
     const tab = tabByKey(el.dataset.stats);
     for (const [part, text] of [[".long", statsLabel(tab)], [".usd", statsLabel(tab, true)]]) {

@@ -33,7 +33,7 @@ function whereOf(html) {
  * on `document` are kept, so a test can fire the signal the loader sends. */
 function sidebar() {
   const start = sidebarSrc.indexOf("function renderSidebar");
-  const end = sidebarSrc.indexOf("/** What the closed sidebar holds");
+  const end = sidebarSrc.indexOf("function sidebarSummary");
   const groupsStart = sidebarSrc.indexOf("function projectGroups(");
   const groupsEnd = sidebarSrc.indexOf("const projectFilter = document.getElementById");
   const listeners = {};

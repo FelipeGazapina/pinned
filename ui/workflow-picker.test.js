@@ -46,6 +46,7 @@ function load({ linear = null, bots = [], reply = () => ({}) } = {}) {
     accountsOf: async () => [],
     LOCAL: "local",
     account: { email: "test@example.test" },
+    hubUp: () => true,
     hub: {
       async hub(call) {
         calls.push(call);

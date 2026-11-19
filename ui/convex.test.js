@@ -51,6 +51,7 @@ function load({ signedIn = true, projects = [SHOP, SITE, BILLING], connections =
     TAURI: false,
     LOCAL: "local",
     account: signedIn ? { email: "ana@acme.dev" } : null,
+    hubUp: () => true,
     hub: {
       async hub(call) {
         calls.push(call);

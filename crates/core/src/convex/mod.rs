@@ -198,6 +198,7 @@ pub struct Offer {
 /// The refusal the machine retries at offer time: it reports a new tab just after it starts it.
 pub const UNKNOWN_TAB: &str = "the hub does not know this session's tab yet";
 pub const SIGNED_OUT: &str = "Convex needs pinned signed in: the hub keeps the deploy keys.";
+pub const HUB_DOWN: &str = "Convex reads through the hub, which can't be reached right now: it keeps the deploy keys.";
 pub const NO_ORIGIN: &str = "This folder has no git origin, so it cannot be connected to Convex yet.";
 
 pub const TOOLS: [&str; 4] = ["convex_tables", "convex_data", "convex_run", "convex_logs"];

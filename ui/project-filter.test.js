@@ -32,7 +32,7 @@ function labelMarks(html) {
 
 test("the project filter label keeps the full name as its title", () => {
   const start = sidebarSrc.indexOf("function renderSidebar");
-  const end = sidebarSrc.indexOf("/** What the closed sidebar holds");
+  const end = sidebarSrc.indexOf("function sidebarSummary");
   const whereStart = sidebarSrc.indexOf("function projectNameMark");
   const whereEnd = sidebarSrc.indexOf("const projectFilter = document.getElementById");
   const projectFilter = { innerHTML: "", setAttribute() {} };

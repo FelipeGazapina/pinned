@@ -379,15 +379,14 @@ body.dragging-row .settled-head.drop-target { color: var(--g-primary); }
 .global-row.disabled { opacity: 0.5; cursor: default; }
 .global-row.disabled:hover { background: transparent; }
 
-/* The app's own link to the hub is down: a thin bar over everything, and the live states held still and dimmed. */
 #reconnect-bar { display: none; flex: none; align-items: center; justify-content: center; gap: 8px; height: 24px; padding: 0 12px; font-size: 12px; font-weight: 600; white-space: nowrap;
   color: var(--g-warning-fg, #ffb900); background: rgb(var(--g-warning-rgb, 254 154 0) / 0.14); border-bottom: 1px solid rgb(var(--g-warning-rgb, 254 154 0) / 0.3); }
 body[data-hub="offline"] #reconnect-bar { display: flex; }
 #reconnect-bar .spin { width: 10px; height: 10px; flex: none; border-radius: 50%; border: 2px solid currentColor; border-top-color: transparent; animation: spin 0.8s linear infinite; }
 @media (prefers-reduced-motion: reduce) { #reconnect-bar .spin { animation: none; } }
-body[data-hub="offline"] :is(.thread-row .stamp.status.info, .project-head .state.running, .thread-row .term-run) { opacity: 0.45; }
-body[data-hub="offline"] :is(.thread-row .stamp.status.info .i, .thread-row .term-run .i, #thread .shimmer) { animation-play-state: paused; }
-body[data-hub="offline"] #thread :is(.work.live, .live-tool) { opacity: 0.45; }
+body[data-hub="offline"] :is(.thread-row[data-remote] .stamp.status.info, .project-head[data-remote] .state.running, .thread-row[data-remote] .term-run) { opacity: 0.45; }
+body[data-hub="offline"] :is(.thread-row[data-remote] .stamp.status.info .i, .thread-row[data-remote] .term-run .i, #thread[data-remote] .shimmer) { animation-play-state: paused; }
+body[data-hub="offline"] #thread[data-remote] :is(.work.live, .live-tool) { opacity: 0.45; }
 
 /* The chat header's sidebar toggle shows what the closed sidebar holds: a pill with how many threads wait on you, and a dot on the icon while anything runs. */
 #chat-sidebar-toggle .glyph { position: relative; display: grid; place-items: center; }
@@ -396,7 +395,7 @@ body[data-hub="offline"] #thread :is(.work.live, .live-tool) { opacity: 0.45; }
   color: var(--g-warning-fg); background: rgb(var(--g-warning-rgb) / 0.16); }
 body[data-sidebar="closed"] #chat-sidebar-toggle:has(.count) { display: flex !important; align-items: center; gap: 6px; width: auto; padding: 0 8px 0 6px; }
 @media (pointer: coarse) { #chat-sidebar-toggle:has(.count) { min-width: 40px; } }
-body[data-hub="offline"] #chat-sidebar-toggle .running { opacity: 0.45; }
+body[data-hub="offline"] #chat-sidebar-toggle .running[data-remote] { opacity: 0.45; }
 
 /* On a phone the build's version is not pinned over the page, where it sat on the last control. The drawer's brand row and Account carry it. */
 @media (max-width: 639px) {
