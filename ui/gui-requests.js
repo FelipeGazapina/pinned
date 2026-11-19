@@ -172,8 +172,10 @@ function requestCardKey(tab) {
  * Needs you row always draws. Every field is text. */
 function requestCardHtml(tab) {
   const glance = requestHere(tab);
-  if (!glance) return "";
-  const have = rq.views.get(glance.id);
+  return glance ? requestCardFrom(glance, rq.views.get(glance.id)) : "";
+}
+/** The card of `glance` from `have`, a `{ view }` read of its `user_request` or undefined while it loads. */
+function requestCardFrom(glance, have) {
   if (have && !have.view) return "";
   const stands = have?.view?.stands ?? {};
   const waiting = requestStateOf(glance) === "needs";
