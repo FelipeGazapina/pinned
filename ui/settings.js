@@ -139,11 +139,32 @@ let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [
 
 const settingsOpen = () => document.body.dataset.page === "settings";
 
-const connectorCall = (cmd, args = {}) => agentApproval({ cmd, ...args }) ?? (!hub ? invoke(cmd, args) : hubUp() ? hub.hub({ cmd, ...args }) : Promise.reject(HUB_NEEDED));
+function plainHubNeed(error) {
+  const text = String(error?.message ?? error);
+  return text === "needs the hub" || text === "needs the hub, which is off" ? HUB_NEEDED : error;
+}
+
+function connectorCall(cmd, args = {}) {
+  const call = { cmd, ...args };
+  const sent = agentApproval(call) ?? (hub && hubUp() ? hub.hub(call) : typeof TAURI !== "undefined" && TAURI ? invoke("local_call", { call }) : Promise.reject(HUB_NEEDED));
+  return Promise.resolve(sent).catch((error) => Promise.reject(plainHubNeed(error)));
+}
+
+let copyStatus = null;
+
+async function refreshCopy() {
+  if (typeof TAURI === "undefined" || !TAURI || !account || typeof invoke !== "function") return copyStatus;
+  try {
+    copyStatus = await invoke("account_copy");
+  } catch {
+    copyStatus = null;
+  }
+  return copyStatus;
+}
 
 let settingsHub = null;
 function readOnlyWithoutHub(title, html) {
-  if (!hub || hubUp()) return html;
+  if (!hub || hubUp() || (typeof TAURI !== "undefined" && TAURI)) return html;
   if (settingsHub !== hub) return `<h2>${title}</h2><div class="card"><p>${HUB_NEEDED}</p></div>`;
   const at = html.startsWith("<h2>") ? html.indexOf("</h2>") + 5 : 0;
   return `${html.slice(0, at)}<div class="card"><p>${HUB_NEEDED} These are the last settings it sent.</p></div><fieldset class="hub-out" disabled>${html.slice(at)}</fieldset>`;
@@ -919,11 +940,82 @@ async function fillRepo() {
   redraw();
 }
 
+function runnerLabel(id) {
+  if (!id) return "this Mac";
+  if (id === account?.machine_id) {
+    const named = machines.get(LOCAL)?.hubView?.name;
+    if (named) return named;
+    if (copyStatus?.machine_name) return copyStatus.machine_name;
+    return typeof machineName === "function" ? machineName(LOCAL) : "this Mac";
+  }
+  for (const [key, m] of machines) {
+    if (key === id || m.hubView?.id === id || m.view?.id === id) return m.hubView?.name || m.view?.name || (typeof machineName === "function" ? machineName(key) : id);
+  }
+  return "another Mac";
+}
+
+function offlineNotice() {
+  const copy = copyStatus;
+  if (!copy?.copied) return "";
+  if (copy.here && copy.runner === account.machine_id) {
+    return `<div class="card" id="workflow-notice"><p>The hub is off. This Mac checks Linear and Slack and runs the workflows itself. It hands everything back when the hub returns.</p></div>`;
+  }
+  if (copy.gone_secs != null && copy.runner && copy.runner !== account.machine_id) {
+    return `<div class="card" id="workflow-notice"><p>While the hub is off, workflows run on ${esc(runnerLabel(copy.runner))}. This Mac's sessions and settings work from its copy.</p></div>`;
+  }
+  if (copy.gone_secs == null && !copy.here) {
+    return `<div class="card" id="workflow-notice"><p>This Mac can't reach the hub. Workflows keep running on the hub for your other machines. This Mac's sessions and settings work from its copy.</p></div>`;
+  }
+  return "";
+}
+
+function heldNotice() {
+  const id = settings.workflows_held_for;
+  if (!id) return "";
+  const name = esc(runnerLabel(id));
+  return `<div class="card" id="workflow-hold"><p>Workflows wait for ${name}, which ran them while the hub was off, to hand them back</p>
+    <div class="actions"><button class="secondary" data-action="release-workflows">Run them on the hub now</button></div>
+    <p class="hint">Anything ${name} started while the hub was off may start again.</p></div>`;
+}
+
+function runnerChoices() {
+  const seen = new Set();
+  const choices = [];
+  const add = (id, name) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    choices.push([id, name]);
+  };
+  for (const [key, m] of machines) {
+    if (m.view?.upstash_box) continue;
+    const id = key === LOCAL ? account?.machine_id : m.hubView?.id || key;
+    add(id, m.hubView?.name || m.view?.name || runnerLabel(id));
+  }
+  if (settings.offline_runner) add(settings.offline_runner, runnerLabel(settings.offline_runner));
+  return choices;
+}
+
+function runnerPicker() {
+  const choices = runnerChoices();
+  if (!choices.length) return "";
+  const current = settings.offline_runner ?? "";
+  const options = choices.map(([id, name]) => `<option value="${esc(id)}"${id === current ? " selected" : ""}>${esc(name)}</option>`).join("");
+  return `<div class="card" id="offline-runner"><label>Offline runner <select id="offline-runner-pick">${options}</select></label>
+    <p class="hint">The machine that runs workflows when the hub is stopped.</p></div>`;
+}
+
+function workflowNotice() {
+  if (typeof hub === "undefined" || !hub || !account) return "";
+  if (hubUp()) return `${heldNotice()}${runnerPicker()}`;
+  return offlineNotice();
+}
+
 function connectorsHtml() {
   if (view.name === "edit") return workflowEditorHtml();
   if (view.name === "pick") return triggerChoiceHtml();
   const intro = `<h2>Workflows</h2>
-    <p class="hint">A workflow watches a connector and opens a Claude Code tab on its own when something happens, so the agent starts before you ask.</p>`;
+    <p class="hint">A workflow watches a connector and opens a Claude Code tab on its own when something happens, so the agent starts before you ask.</p>
+    ${workflowNotice()}`;
   if (!settings.linear && !hasSlack()) {
     return `${intro}<div class="card"><p>Connect Linear or Slack first.</p>
       <div class="actions"><button class="primary" data-action="go-integrations">Go to Connectors</button></div></div>`;
@@ -1813,6 +1905,18 @@ function showStep(id, focus) {
 
 const actions = {
   "go-integrations": () => showPage("integrations"),
+  async "release-workflows"() {
+    const name = runnerLabel(settings.workflows_held_for);
+    if (typeof confirm === "function" && !confirm(`Anything ${name} started while the hub was off may start again.`)) return;
+    try {
+      await hub.hub({ cmd: "release_workflows" });
+      settings.workflows_held_for = null;
+      if (page === "connectors") redraw();
+    } catch (e) {
+      const line = document.getElementById("checked");
+      if (line) line.textContent = String(e?.message ?? e);
+    }
+  },
   "open-linear-keys": () => (TAURI ? invoke("open_linear_keys") : window.open(LINEAR_KEYS, "_blank", "noopener")),
   async "connect-linear"() {
     const key = document.getElementById("linear-key").value;
@@ -2374,6 +2478,16 @@ settingsPage.addEventListener("input", (e) => {
 });
 
 settingsPage.addEventListener("change", async (e) => {
+  if (e.target.id === "offline-runner-pick") {
+    try {
+      await hub.hub({ cmd: "set_offline_runner", machine: e.target.value });
+      settings.offline_runner = e.target.value;
+    } catch (err) {
+      const line = document.getElementById("checked");
+      if (line) line.textContent = String(err?.message ?? err);
+    }
+    return;
+  }
   const path = e.target.dataset.bind;
   if (path in RESHAPES) return reshape((c) => RESHAPES[path](c, e.target.value));
   if (path === "folder") return fillRepo();
@@ -2417,7 +2531,12 @@ settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show:
   { title: "Convex", terms: ["database tables documents deploy key logs query connector"], id: "convex" },
 ] });
 settingsSection({ page: "projects", label: "Projects", icon: "folder", show: () => showProjectsPage(), search: [{ title: "Projects", terms: ["history turns changed files"] }] });
-settingsSection({ page: "connectors", label: "Workflows", icon: "workflow", show: () => redraw(), search: [{ title: "Workflows", terms: ["linear label slack mention automation trigger"] }] });
+settingsSection({ page: "connectors", label: "Workflows", icon: "workflow", show: () => {
+  redraw();
+  refreshCopy().then(() => {
+    if (page === "connectors") redraw();
+  });
+}, search: [{ title: "Workflows", terms: ["linear label slack mention automation trigger"] }] });
 settingsSection({ page: "account", label: "Account", icon: "circle-user", show: () => showAccount(), search: [{ title: "Password", terms: ["account change sign in out email"] }] });
 settingsSection({ page: "machines", label: "Machines", icon: "server", show: () => showMachinesAndRecheckSync(), search: [{ title: "Machines", terms: ["pair rename remove server node computer run in the background window"] }] });
 settingsSection({ page: "archive", label: "Archive", icon: "archive", show: () => showArchive(), search: [{ title: "Archive", terms: ["archived threads unarchive delete restore"] }] });

@@ -251,15 +251,24 @@ async function signInApp(create) {
 }
 
 actions["create-account"] = () => signInApp(true);
-actions["sign-out"] = async () => {
+async function signOutApp() {
   if (!TAURI) return signOutWeb();
+  let anyway = false;
+  try {
+    const copy = await invoke("account_copy");
+    if (copy?.holds_changes) {
+      if (!confirm("This Mac still has changes to hand back. Signing out drops them.")) return;
+      anyway = true;
+    }
+  } catch {}
   // A later sign-in registers this Mac anew, so the old entry would linger offline in the account.
   await hub?.hub({ cmd: "remove_machine", id: account.machine_id }).catch(console.warn);
-  await invoke("sign_out");
+  await invoke("sign_out", { anyway });
   disconnectHub();
-  settings = await invoke("get_settings");
+  settings = await connectorCall("get_settings");
   showAccount();
-};
+}
+actions["sign-out"] = () => signOutApp();
 
 let machinesUi = { renaming: null, removing: null, pair: null, error: "", background: null };
 

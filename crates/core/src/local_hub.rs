@@ -28,7 +28,7 @@ pub trait AccountSide: Send + Sync {
 
 /// The store, the machine, and when signed in the copy's taste file, that answer a hub call here.
 pub struct LocalHub<'a> {
-    pub connectors: &'a Arc<Connectors>,
+    pub connectors: &'a Connectors,
     pub machine: &'a Arc<crate::machine::Machine>,
     /// `local` signed out. The machine id once this machine runs the account's copy.
     pub place_as: &'a str,
@@ -361,6 +361,10 @@ impl LocalHub<'_> {
             | HubCall::StuckBoxes => Answer::Done(Err(NEEDS_THE_HUB_OFF.into())),
             HubCall::GenerateWorkflow { .. } => Answer::Done(Err("Generate with AI was removed: ask an agent to create the workflow".into())),
             HubCall::Team { op: crate::teams::TeamOp::AskPeople { .. }, .. } => Answer::Done(Err(NEEDS_THE_HUB.into())),
+            HubCall::DelegationStats { days } if self.account.is_none() => match crate::delegate::stats_days(Some(u64::from(days))) {
+                Ok(days) => done(Ok(self.machine.local_delegation_stats(days))),
+                Err(error) => Answer::Done(Err(error)),
+            },
             HubCall::Mirror { .. }
             | HubCall::Handback { .. }
             | HubCall::SetOfflineRunner { .. }
@@ -579,6 +583,7 @@ mod tests {
         let signed_out = LocalHub { connectors: &connectors, machine: &machine, place_as: "local", taste_dir: Some(&taste), account: None };
         let settings = serde_json::to_value(connectors.get_settings()).unwrap();
         assert_eq!(drive(&signed_out, HubCall::GetSettings), Answer::Done(Ok(settings)));
+        assert!(matches!(drive(&signed_out, HubCall::DelegationStats { days: 7 }), Answer::Done(Ok(_))));
         assert_eq!(drive(&signed_out, HubCall::ListMcpServers), Answer::Done(Err(SIGN_IN_MCP.into())));
         assert_eq!(drive(&signed_out, HubCall::LoadMcpServers), Answer::Done(Err(SIGN_IN_MCP.into())));
         assert_eq!(drive(&signed_out, HubCall::Machines), Answer::HubOnly);

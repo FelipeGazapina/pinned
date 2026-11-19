@@ -87,6 +87,10 @@ impl Account {
             user_token: creds.user_token.clone(),
         }
     }
+
+    pub(crate) fn standby(&self) -> Option<Arc<Standby>> {
+        self.signed_in.read().unwrap().as_ref().map(|signed_in| Arc::clone(&signed_in.standby))
+    }
 }
 
 fn copy_dir(dir: &Path, machine_id: &str) -> PathBuf {
@@ -284,6 +288,29 @@ pub async fn sign_out(app: AppHandle, anyway: Option<bool>) -> Result<(), String
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[derive(serde::Serialize)]
+pub struct CopyStatus {
+    copied: bool,
+    runner: Option<String>,
+    machine_name: String,
+    here: bool,
+    gone_secs: Option<u64>,
+    holds_changes: bool,
+}
+
+#[tauri::command]
+pub fn account_copy(app: AppHandle) -> Option<CopyStatus> {
+    let view = app.state::<Account>().standby()?.view();
+    Some(CopyStatus {
+        copied: view.copied,
+        runner: view.runner,
+        machine_name: view.machine_name,
+        here: matches!(view.authority, pinned_core::standby::Authority::Here { .. }),
+        gone_secs: view.gone_for.map(|gone| gone.as_secs()),
+        holds_changes: view.holds_changes,
+    })
 }
 
 fn import_when_empty(app: AppHandle) {
