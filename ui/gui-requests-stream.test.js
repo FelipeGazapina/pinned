@@ -193,7 +193,7 @@ test("requests group by their local day, newest first, and midnight splits a day
   ]);
 });
 
-test("an entry shows the ask at its opening time, the state, project, reply count and last line", () => {
+test("an entry shows the ask with no time, the state, project, reply count and last line", () => {
   const tabs = [anchorTab([
     glance("q-two", { title: "Why are login codes late?", opened_at: local(2026, 11, 18, 9, 5), replies: 2, last_who: "captain", last_text: "Tests are running", last_at: 5, captains: [{ machine: "mac", path: "/s", project: "storefront", machine_name: "Mac" }] }),
     glance("q-one", { opened_at: local(2026, 11, 18, 8, 0), replies: 1, last_who: "orchestrator", last_text: "On it", closed_at: 9 }),
@@ -204,7 +204,8 @@ test("an entry shows the ask at its opening time, the state, project, reply coun
   const html = h.overlay.innerHTML;
   const two = html.slice(html.indexOf('data-rqs-entry="q-two"') - 400, html.indexOf('data-rqs-entry="q-one"'));
   assert.match(two, /Why are login codes late\?/);
-  assert.match(two, /09:05/);
+  assert.doesNotMatch(two, /09:05/, "the ask bubble carries no time");
+  assert.doesNotMatch(two, /<time/, "the ask bubble carries no time element");
   assert.match(two, /Working/);
   assert.match(two, /#storefront/);
   assert.match(two, /2 replies/);
@@ -386,6 +387,30 @@ test("the footer is the Ask for something new composer, with no New request butt
   assert.match(html, /Each request opens its own thread/);
   assert.match(html, /<button[^>]*data-rqs-send[^>]*disabled/, "nothing typed: Send is off");
   assert.doesNotMatch(html, /data-rqs-new/);
+});
+
+test("the ask bubble holds the asked text and no time", () => {
+  const h = harness({ tabs: [anchorTab([glance("q-ask", { title: "Codes", asked: "Why are login codes late?", opened_at: local(2026, 11, 18, 9, 5) })])] });
+  open(h);
+  const html = h.overlay.innerHTML;
+  const ask = html.slice(html.indexOf('class="rqs-ask"'), html.indexOf("</div>", html.indexOf('class="rqs-ask"')));
+  assert.match(ask, /Why are login codes late\?/);
+  assert.doesNotMatch(ask, /<time|09:05/);
+});
+
+test("the footer and the panel head carry no New chip", async () => {
+  const g = glance("q1", { title: "Codes" });
+  const h = harness({ tabs: [anchorTab([g])], reply: (call) => (call.cmd === "user_request" ? userView("q1", { items: [] }) : null) });
+  open(h);
+  assert.match(h.overlay.innerHTML, /Each request opens its own thread/);
+  assert.doesNotMatch(h.overlay.innerHTML, /rqs-new|>New</, "footer");
+  h.click(h.entry("q1"));
+  await flush();
+  const html = h.overlay.innerHTML;
+  const head = html.slice(html.indexOf('class="rqs-phead"'), html.indexOf("</div>", html.indexOf('class="rqs-phead"')));
+  assert.match(head, /<h2>Codes<\/h2>/);
+  assert.doesNotMatch(head, /rqs-new|>New</, "panel head");
+  assert.doesNotMatch(html, /rqs-new|>New</, "anywhere");
 });
 
 test("the footer shows the preview only with two or more items or a close match", () => {
