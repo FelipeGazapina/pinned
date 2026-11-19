@@ -1057,6 +1057,13 @@ struct Store {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     change_retries: BTreeMap<String, BTreeMap<String, String>>,
     connectors: Vec<Connector>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    offline_runner: Option<MachineId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    held_for: Option<MachineId>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(with = "BTreeMap<String, String>")]
+    handbacks: BTreeMap<MachineId, uuid::Uuid>,
 }
 
 /// What a Linear change workflow's checks did not fire. Each count only grows.
@@ -1603,10 +1610,14 @@ pub struct Settings {
     /// The account's scheduled tasks. The hub fills it; a node's own store has none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schedules: Vec<schedule::Task>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offline_runner: Option<MachineId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflows_held_for: Option<MachineId>,
 }
 
 /// The integrations' keys, which never leave a store but by `export`.
-#[derive(Default, Debug, PartialEq)]
+#[derive(Default, PartialEq)]
 pub struct Keys {
     pub linear: Option<String>,
     /// The default Slack bot's token, the only one an app before several bots sends.
@@ -1615,6 +1626,14 @@ pub struct Keys {
     pub slack_bots: BTreeMap<String, String>,
     pub github: Option<String>,
     pub vercel: Option<String>,
+}
+
+impl std::fmt::Debug for Keys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tail = |key: &Option<String>| key.as_deref().map(crate::account_copy::secret_tail);
+        let bots = self.slack_bots.iter().map(|(id, key)| (id.as_str(), crate::account_copy::secret_tail(key))).collect::<BTreeMap<_, _>>();
+        f.debug_struct("Keys").field("linear", &tail(&self.linear)).field("slack", &tail(&self.slack)).field("slack_bots", &bots).field("github", &tail(&self.github)).field("vercel", &tail(&self.vercel)).finish()
+    }
 }
 
 /// A session a connector wants opened.
@@ -2269,6 +2288,12 @@ pub trait Storage: Send + Sync {
     fn release_fire(&self, _workflow: &str, _key: &str, _claimer: &str) -> Result<(), String> {
         Ok(())
     }
+    fn fires(&self) -> Vec<crate::account_copy::Fire> {
+        Vec::new()
+    }
+    fn replace_fires(&self, _fires: &[crate::account_copy::Fire]) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 pub struct FileStorage {
@@ -2377,6 +2402,19 @@ impl Storage for FileStorage {
         let Some(fires) = fired.as_mut() else { return Ok(()) };
         fires.retain(|fire| !(fire.workflow == workflow && fire.key == key && fire.claimer == claimer));
         replace_file(&self.dir, FIRES_FILE, &serde_json::to_vec(&*fires).map_err(|e| e.to_string())?)
+    }
+
+    fn fires(&self) -> Vec<crate::account_copy::Fire> {
+        let mut fired = self.fired.lock().unwrap();
+        let fires = fired.get_or_insert_with(|| std::fs::read(self.dir.join(FIRES_FILE)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default());
+        fires.iter().map(|fire| crate::account_copy::Fire { workflow: fire.workflow.clone(), key: fire.key.clone(), at: fire.at }).collect()
+    }
+
+    fn replace_fires(&self, fires: &[crate::account_copy::Fire]) -> Result<(), String> {
+        let stored: Vec<FileFire> = fires.iter().map(|fire| FileFire { workflow: fire.workflow.clone(), key: fire.key.clone(), claimer: "copy".into(), at: fire.at }).collect();
+        replace_file(&self.dir, FIRES_FILE, &serde_json::to_vec(&stored).map_err(|e| e.to_string())?)?;
+        *self.fired.lock().unwrap() = Some(stored);
+        Ok(())
     }
 }
 
@@ -2493,6 +2531,7 @@ pub struct Connectors {
     won: Mutex<HashMap<String, DateTime<Utc>>>,
     /// The loop guards of this account's Linear change triggers.
     guards: Mutex<Guards>,
+    admits: Mutex<Option<fn(&Connector) -> bool>>,
 }
 
 /// The app posts one scan of `workflow` took and left out of `channel` (by id).
@@ -2644,6 +2683,7 @@ impl Connectors {
             unsure: Mutex::new(std::collections::HashSet::new()),
             won: Mutex::new(HashMap::new()),
             guards: Mutex::new(Guards::default()),
+            admits: Mutex::new(None),
         }
     }
 
@@ -2689,7 +2729,7 @@ impl Connectors {
         admission.admit(event.clone()).await
     }
 
-    async fn release(&self, connector: &str, subject: &Subject) {
+    async fn release_place(&self, connector: &str, subject: &Subject) {
         if let Some(admission) = self.admission.get().cloned() {
             admission.release(connector.to_owned(), subject.clone()).await;
         }
@@ -2990,6 +3030,7 @@ impl Connectors {
         // A manual workflow has no poller: it runs only when someone runs it now.
         // On a hub's team, a message router is skipped: nothing of a message reaches Slack or a
         // model before the team admits it, and the router would sort and page at the check.
+        let admits = *self.admits.lock().unwrap();
         let team = self.admission.get().is_some();
         let watching: Vec<Connector> = self
             .store
@@ -2997,7 +3038,7 @@ impl Connectors {
             .unwrap()
             .connectors
             .iter()
-            .filter(|c| c.enabled && !matches!(c.trigger, Trigger::Manual) && !(team && c.sorts_messages_at_the_check()))
+            .filter(|c| c.enabled && !matches!(c.trigger, Trigger::Manual) && !(team && c.sorts_messages_at_the_check()) && admits.map_or(true, |admit| admit(c)))
             .cloned()
             .collect();
         // The Linear change triggers read the account's changes once, below. A hub's team keeps
@@ -3200,7 +3241,7 @@ impl Connectors {
         // hears of it.
         let (asks, enabled) = self.store.lock().unwrap().connectors.iter().find(|c| c.id == connector).map_or((false, false), |c| (c.ask.is_some(), c.enabled));
         if asks && !enabled {
-            self.release(&connector, &subject).await;
+            self.release_place(&connector, &subject).await;
             not_started();
             return self.keep_stopped(&connector, &subject);
         }
@@ -3212,7 +3253,7 @@ impl Connectors {
         let framed = self.framed(&connector) || shows_framed(&run);
         if framed {
             if let Err(why) = frame_trigger_text(&mut run) {
-                self.release(&connector, &subject).await;
+                self.release_place(&connector, &subject).await;
                 not_started();
                 return Err(self.unclaim_fire(&connector, &subject, &folder, &why, fire.as_ref()));
             }
@@ -3222,7 +3263,7 @@ impl Connectors {
             Ok(None) => {}
             Ok(Some((ask, answers))) => {
                 if stops(&ask, &answers).is_some() {
-                    self.release(&connector, &subject).await;
+                    self.release_place(&connector, &subject).await;
                     // Its model was asked: the claim stays, so a later read of the change does
                     // not ask again, and the model call is a start for the loop guards.
                     if let Some(fire) = &fire {
@@ -3235,7 +3276,7 @@ impl Connectors {
                 append_answers(&mut run, &ask, &answers);
             }
             Err(why) => {
-                self.release(&connector, &subject).await;
+                self.release_place(&connector, &subject).await;
                 not_started();
                 return Err(self.unclaim_fire(&connector, &subject, &folder, &why, fire.as_ref()));
             }
@@ -4917,6 +4958,11 @@ impl Connectors {
         Fut: Future<Output = R>,
         R: Taken,
     {
+        if let Some(machine) = self.held_for() {
+            let check = Check { at: chrono::Utc::now().to_rfc3339(), error: Some(copy::held_error(&machine)) };
+            *self.checked.lock().unwrap() = Some(check.clone());
+            return check;
+        }
         let _guard = self.lock_driving().await;
         let (work, mut error) = self.poll().await;
         if let Err(e) = self.run_granted(open).await {
@@ -5034,6 +5080,9 @@ impl Connectors {
         Fut: Future<Output = R>,
         R: Taken,
     {
+        if let Some(machine) = self.held_for() {
+            return Err(copy::held_error(&machine));
+        }
         self.note_tabs(machine, observed, after);
         if self.tab_drive_queued.swap(true, Ordering::AcqRel) {
             self.tab_drives_coalesced.fetch_add(1, Ordering::Relaxed);
@@ -5197,7 +5246,7 @@ impl Connectors {
                 }
                 self.holding.lock().unwrap().insert((connector, subject_key(&subject)));
             }
-            false => self.release(&connector, &subject).await,
+            false => self.release_place(&connector, &subject).await,
         }
         begun
     }
@@ -5211,7 +5260,7 @@ impl Connectors {
             return;
         }
         if !opened {
-            self.release(&run.connector, &run.subject).await;
+            self.release_place(&run.connector, &run.subject).await;
         }
     }
 
@@ -6058,6 +6107,8 @@ impl Connectors {
             ideas: Vec::new(),
             repo_insight: store.repo_insight.clone(),
             schedules: vec![],
+            offline_runner: store.offline_runner.clone(),
+            workflows_held_for: store.held_for.clone(),
         }
     }
 
@@ -6916,6 +6967,9 @@ impl Connectors {
     /// behind it. A workflow that only sorts Slack messages, or only answers threads another
     /// workflow hands it, has no session of its own to start, and is refused.
     pub fn run_now(&self, id: &str, by: &str) -> Result<Run, String> {
+        if let Some(machine) = self.held_for() {
+            return Err(copy::held_error(&machine));
+        }
         let workflow = self.store.lock().unwrap().connectors.iter().find(|c| c.id == id).cloned().ok_or_else(|| format!("this account has no workflow {id}"))?;
         match &workflow.trigger {
             Trigger::SlackMessage { .. } => {
@@ -7185,6 +7239,8 @@ impl Connectors {
         Some(convex_note(connection, step.tables.as_deref()))
     }
 }
+
+mod copy;
 
 #[cfg(test)]
 mod tests {

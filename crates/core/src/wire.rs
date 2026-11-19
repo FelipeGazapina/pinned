@@ -2468,7 +2468,7 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], ideas: vec![], repo_insight: Default::default(), schedules: vec![] } },
+            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], ideas: vec![], repo_insight: Default::default(), schedules: vec![], offline_runner: None, workflows_held_for: None } },
             json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
         let old: ToClient = serde_json::from_value(json!({ "type": "machines", "machines": [] })).unwrap();
