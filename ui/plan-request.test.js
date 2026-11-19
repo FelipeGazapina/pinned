@@ -126,6 +126,11 @@ const hub = (snapshots = [], glance = rglance()) => (machine, call) => {
 const planCalls = (h) => h.log.on.filter((c) => c.call.cmd === "plan").map((c) => `${c.machine}/${c.call.tab}/${c.call.plan}`).sort();
 /** Where a plan's first list sits in the html, by its (machine, tab, plan) scope; -1 when the plan is not drawn. */
 const place = (html, scope) => html.indexOf(`data-fold="${scope}|l1"`);
+/** The html of one section: from its heading to the next heading. */
+const under = (html, title) => {
+  const parts = html.split(/(?=<section class="pl-sec-group">)/);
+  return parts.find((part) => decode(part).includes(`>${title}</h3>`)) ?? "";
+};
 const sections = (html) => [...html.matchAll(/<h3 class="pl-sec">([^<]*)<\/h3>/g)].map((m) => decode(m[1]));
 
 test("two Captains give two sections, in captains order, with every plan fetched by (machine, tab, plan)", async () => {
@@ -144,6 +149,10 @@ test("two Captains give two sections, in captains order, with every plan fetched
   assert.ok(at("m1|tab-1|p1") > 0 && at("m1|tab-1|p2") > at("m1|tab-1|p1"), "the storefront section holds its two plans");
   assert.ok(at("m2|tab-7|p1") > at("m1|tab-1|p2"), "the billing section follows");
   assert.ok(html.includes("Plan m1/tab-1/p2"), "a section with two plans names each plan");
+  const storeHtml = under(html, "Captain storefront · Mac mini");
+  const billHtml = under(html, "Captain billing · Laptop");
+  assert.ok(place(storeHtml, "m1|tab-1|p1") >= 0 && place(storeHtml, "m1|tab-1|p2") >= 0 && place(storeHtml, "m2|tab-7|p1") < 0, "storefront's section holds only its own plans");
+  assert.ok(place(billHtml, "m2|tab-7|p1") >= 0 && place(billHtml, "m1|tab-1|p1") < 0, "billing's section holds only billing's plan");
 });
 
 test("the Orchestrator's own lanes come first, under the header Orchestrator", async () => {
