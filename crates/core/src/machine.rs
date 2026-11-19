@@ -2583,6 +2583,7 @@ impl Machine {
         if global::is_global(&env) {
             prompt.push(global::prompt(&settings.name, &crate::account::hostname(), tastes.as_ref().map_or(8, Tastes::boxes_limit)));
             prompt.extend(tastes.as_ref().map(|t| t.resolve(&TasteScope::Orchestrator).brief()));
+            prompt.extend(tastes.as_ref().and_then(Tastes::boxes_brief));
         }
         if let Some(role) = role {
             if !role.disallowed_tools().is_empty() {
@@ -2595,6 +2596,7 @@ impl Machine {
                 let scoped = tastes.as_ref().map(|t| t.resolve(&captain_scope(&cwd)));
                 prompt.extend(scoped.as_ref().map(taste::Taste::brief));
                 prompt.extend(scoped.map(|t| t.limits().hint()));
+                prompt.extend(tastes.as_ref().and_then(Tastes::boxes_brief));
                 prompt.push(global::captain_prompt(&settings.name, settings.reports));
             }
         }
@@ -6660,6 +6662,7 @@ impl Machine {
         let search = (!search.is_empty()).then_some(search);
         let mut answer = capabilities(&parent, &listed, search);
         answer["machines"] = self.machines_listed();
+        answer["boxes"] = Value::String(self.tastes().boxes_note());
         Ok(answer.to_string())
     }
 

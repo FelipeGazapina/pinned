@@ -183,16 +183,16 @@ pub struct Seen {
     pub state: Option<MachineState>,
     /// It has a checkout of the project, or can clone one.
     pub has_repo: bool,
-    /// It is an Upstash Box.
+    /// It is an Upstash Box, which placement never picks: a box runs only the work it was opened for.
     pub upstash_box: bool,
 }
 
 /// Places a worker for `caller` among `machines` at unix second `now`. `exclude` are machines
-/// that refused this worker already.
+/// that refused this worker already. A box is never placed on, nor listed as skipped.
 pub fn place(policy: &Placement, caller: &str, need: &Need, machines: &[Seen], exclude: &[String], now: i64) -> Placed {
     let mut fits: Vec<&Seen> = vec![];
     let mut skipped = vec![];
-    for machine in machines {
+    for machine in machines.iter().filter(|machine| !machine.upstash_box) {
         match skip(policy, need, machine, exclude, now) {
             Some((why, detail)) => skipped.push(Skip { machine: machine.id.clone(), machine_name: machine.name.clone(), why, detail }),
             None => fits.push(machine),

@@ -80,10 +80,9 @@ async fn place(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, repo: Option<
     let key = repo.as_deref().and_then(pinned_core::machine::repo_key);
     let lists = |machine: &str| key.as_deref().is_some_and(|key| account.last_listed(machine).iter().any(|project| project.repo.as_deref().is_some_and(|repo| repo.eq_ignore_ascii_case(key))));
     let mut machines = hub.machines(account).await?;
-    machines.retain(|machine| machine.upstash_box.is_none());
     // What a machine reported up to 20 s ago can miss an account it just signed in to, so a
     // machine is asked again before it is skipped for that.
-    for machine in machines.iter_mut().filter(|machine| machine.online) {
+    for machine in machines.iter_mut().filter(|machine| machine.online && machine.upstash_box.is_none()) {
         if machine.state.as_ref().is_some_and(|state| pinned_core::placement::lacks_account(&machine.name, need, state).is_some()) {
             if let Ok(fresh) = hub.call_machine(account, &machine.id, Call::State, LOOK_WAIT).await {
                 if let Ok(state) = serde_json::from_value::<pinned_core::load::MachineState>(fresh) {
