@@ -188,13 +188,44 @@ test("the fix toggle hides the ubranch and its cells, and the next step comes ba
   assert.equal(s.fixOpen["s3"], false);
 });
 
-test("the prog line ends at the last done main step", async () => {
+test("the prog line ends at the last non-pending main step", async () => {
   const { html } = await draw(lists());
   const lane = laneHtml(html)[0];
-  assert.equal(px(tags(lane, "prog")[0], "width"), 172 - 28, "s2 is the last done step, at x 172: the line runs from 28 to it");
+  assert.equal(px(tags(lane, "prog")[0], "width"), 268 - 28, "s3 failed is the last non-pending step, at x 268: the line runs from 28 to it");
   assert.equal(px(tags(lane, "base")[0], "width"), 556 - 28, "the base line runs to the last main step, past the fix cells");
-  const none = laneHtml((await draw([L("l1", "Build", [STEP({ id: "s1", state: "pending" })])])).html)[0];
-  assert.equal(px(tags(none, "prog")[0], "width"), 0, "no done step, no green line");
+  const running = laneHtml((await draw([L("l1", "Build", [STEP({ id: "a", state: "done" }), STEP({ id: "b", state: "done" }), STEP({ id: "c", state: "running" }), STEP({ id: "d", state: "pending" })])])).html)[0];
+  assert.equal(px(tags(running, "prog")[0], "width"), 268 - 28, "done, done, running, pending: the line ends at the running step");
+  const waiting = laneHtml((await draw([L("l1", "Build", [STEP({ id: "a", state: "done" }), STEP({ id: "b", state: "waiting" }), STEP({ id: "c", state: "pending" })])])).html)[0];
+  assert.equal(px(tags(waiting, "prog")[0], "width"), 172 - 28, "a waiting step extends the line too");
+  const none = laneHtml((await draw([L("l1", "Build", [STEP({ id: "s1", state: "pending" }), STEP({ id: "s2", state: "pending" })])])).html)[0];
+  assert.equal(px(tags(none, "prog")[0], "width"), 0, "an all-pending lane has no green line");
+});
+
+/** The text and data-tone of the first lane's head word. */
+const laneWord = async (steps) => {
+  const lane = laneHtml((await draw([L("l1", "Build", steps)])).html)[0];
+  const m = /<span class="lane-state" data-tone="([^"]*)">([^<]*)<\/span>/.exec(lane);
+  return m ? { tone: m[1], text: m[2] } : null;
+};
+const S = (state, over = {}) => STEP({ id: `s${Math.random()}`, state, ...over });
+const FIX = (state2) => [{ id: "f1", steps: [STEP({ id: "x1", state: "done" }), STEP({ id: "x2", state: state2 })] }];
+
+test("the lane head reads '<done> of <steps>' with the board's tail", async () => {
+  assert.deepEqual(await laneWord([S("done"), S("done"), S("running")]), { tone: "run", text: "2 of 3, running" });
+  assert.deepEqual(await laneWord([S("done"), S("waiting"), S("pending")]), { tone: "fix", text: "1 of 3, needs you" });
+  assert.deepEqual(await laneWord([S("done"), S("pending"), S("pending")]), { tone: "", text: "1 of 3" });
+});
+
+test("a finished lane reads Done, with the count of its fixes", async () => {
+  assert.deepEqual(await laneWord([S("done"), S("done")]), { tone: "ok", text: "Done" });
+  assert.deepEqual(await laneWord([S("done"), S("done", { fixes: FIX("done") })]), { tone: "ok", text: "Done, 1 fix" });
+  assert.deepEqual(await laneWord([S("done", { fixes: FIX("done") }), S("done", { fixes: FIX("done") })]), { tone: "ok", text: "Done, 2 fixes" });
+});
+
+test("a failed step reads failed, and fixing while its fix runs (the data's states, with no board word)", async () => {
+  assert.deepEqual(await laneWord([S("done"), S("failed"), S("pending")]), { tone: "fix", text: "1 of 3, failed" });
+  assert.deepEqual(await laneWord([S("done"), S("failed", { fixes: FIX("running") }), S("pending")]), { tone: "run", text: "1 of 3, fixing" });
+  assert.deepEqual(await laneWord([S("done"), S("failed", { fixes: FIX("failed") }), S("pending")]), { tone: "fix", text: "1 of 3, failed" });
 });
 
 test("the root row has its trunk dot", async () => {
