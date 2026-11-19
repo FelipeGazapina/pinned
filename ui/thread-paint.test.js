@@ -1202,6 +1202,28 @@ test("once a plan names the request, the divider reads plan with N lists, and on
   assert.deepEqual(dividers(paintLane([request, captain("tab-c2", "/w/other", [plan("p1", ["dd", "p"], ["q1"])])], request)), ["Sent to Captain site · delivered"], "nor does a plan of another Captain");
 });
 
+// The plan is found by the Captain's tab the send answered with, never by the checkout's folder name.
+test("the divider finds its plan by the Captain's tab, and names the Captain by the project the glance gives it", () => {
+  const FOLDER = "/Users/x/personal-harness";
+  const glance = { id: "q1", title: "Fix the login code delay", project: "pinned", opened_at: 1, kind: "asked", closed_at: null, needs: "", needs_at: null, last_user_at: null, last_who: null, last_text: "", last_at: null, replies: 0, captains: [{ machine: "m1", path: FOLDER, project: "pinned", machine_name: "M1" }], tab: "tab-r1" };
+  const plan = (strips) => ({ id: "p1", title: "Ship the fix", state: "working", done: 1, total: 4, strips, requests: ["q1"] });
+  const on = (machine, tab) => ({ ...tab, machine, key: `${machine}:${tab.view.id}` });
+  const captain = (machine, id, plans) => on(machine, { ...tabFor(id, "working"), view: { id, status: "working", cwd: FOLDER, message: "", role: "orchestrator", plans } });
+  const request = (project, result) => on("m1", globalTab("tab-r1", { request: "q1", requests: [glance] }, [askedItem(), ...sentSteps(project, result)]));
+  const line = (project, result, others) => dividers(paintLane([request(project, result), ...others], request(project, result)));
+  const entregue = { outcome: "entregue", tab: "tab-9" };
+
+  assert.deepEqual(line("m1:" + FOLDER, entregue, [captain("m1", "tab-9", [plan(["dd", "p"])])]), ["Sent to Captain pinned · plan with 2 lists"], "a folder that is not the project name");
+  assert.deepEqual(line("FelipeGazapina/pinned", entregue, [captain("m1", "tab-9", [plan(["dd", "p"])])]), ["Sent to Captain pinned · plan with 2 lists"], "a repo argument");
+  assert.deepEqual(line("m1:" + FOLDER, entregue, [captain("m1", "tab-8", [plan(["dd", "p"])])]), ["Sent to Captain personal-harness · delivered"], "another tab of the same folder is not counted");
+  assert.deepEqual(line("m1:" + FOLDER, entregue, [captain("m2", "tab-9", [plan(["dd", "p"])])]), ["Sent to Captain personal-harness · delivered"], "the same tab id on another machine is not counted");
+  assert.deepEqual(line("m1:" + FOLDER, { outcome: "entregue" }, [captain("m1", "tab-9", [plan(["dd", "p"])])]), ["Sent to Captain personal-harness · delivered"], "no tab and a folder name is not a match");
+  assert.deepEqual(line("FelipeGazapina/pinned", { outcome: "entregue" }, [captain("m1", "tab-9", [plan(["dd", "p", "-"])])]), ["Sent to Captain pinned · plan with 3 lists"], "no tab: the glance Captain's project key matches");
+  const failed = request("m1:" + FOLDER, undefined);
+  failed.thread.items = [askedItem(), ...sentSteps("m1:" + FOLDER, { outcome: "entregue", tab: "tab-9" }).map((i) => (i.kind === "result" ? { ...i, error: true, text: "no such Captain" } : i))];
+  assert.deepEqual(dividers(paintLane([failed, captain("m1", "tab-9", [plan(["dd"])])], failed)), ["Could not send to Captain personal-harness"]);
+});
+
 test("the anchor keeps today's Routed to line and draws no divider", () => {
   inSandbox(`laneCatalogNow = ${JSON.stringify(CATALOG)}`);
   const anchor = globalTab("tab-a1", {}, [askedItem("#site fix the login code delay"), ...sentSteps("github.com/o/site", { outcome: "entregue", tab: "tab-9" }), answerItem("Sent.")]);
