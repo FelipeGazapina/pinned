@@ -1461,6 +1461,7 @@ fn restore_var(name: &str, value: Option<String>) {
                 "mcp__pinned__repo_overview",
                 "mcp__pinned__repo_read",
                 "mcp__pinned__repo_search",
+                "mcp__pinned__request_update",
                 "mcp__pinned__taste_get",
                 "mcp__pinned__taste_set",
                 "mcp__pinned__taste_reset",
