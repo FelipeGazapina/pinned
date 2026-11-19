@@ -435,6 +435,33 @@ test("navCounts counts what waits, the unseen Captain reports, reviews once fetc
   assert.deepEqual({ ...p.run("navCounts().usage") }, { percent: 23.5, resetsAt: (S + 1200) * 1000, account: "Claude Code", provider: "Claude Code", week: null }, "with no thread open, the most used window that still holds, and its 7 days only while they hold");
 });
 
+test("the Orchestrator's count adds the unseen reports of every global tab, the open one apart", () => {
+  const report = (tabId, text) => `[pinned] Capitão pinned (mac-mini) [mini ${tabId}]: ${text}`;
+  const anchor = tab("Earlier conversation", { orchestrator_global: true }, { items: [user("2026-11-11T18:00:00Z", report("tab-1", "CI is green"))] });
+  const request = tab("Login codes", { orchestrator_global: true, request: "q1" }, { items: [user("2026-11-11T18:00:00Z", `${report("tab-1", "PR merged")}\n${report("tab-7", "Tests pass")}`)] });
+  const other = tab("Some thread", {});
+  const seenAt = { [anchor.key]: Date.parse("2026-11-11T17:00:00Z") / 1000 };
+  const p = page({ tabs: [anchor, request, other], active: other, seenAt });
+  assert.equal(p.run("unseenReports()"), 3, "the reports of the anchor and of the request tab both count");
+  p.context.active = request;
+  assert.equal(p.run("unseenReports()"), 1, "the open request tab counts for nothing");
+  p.context.active = anchor;
+  assert.equal(p.run("unseenReports()"), 2);
+});
+
+test("navCounts.orchestrator is the requests that need you once the Requests screen is on, else the unseen reports", () => {
+  const report = "[pinned] Capitão pinned (mac-mini) [mini tab-1]: CI is green";
+  const global = tab("Orchestrator", { orchestrator_global: true }, { items: [user("2026-11-11T18:00:00Z", report)] });
+  const p = page({ tabs: [global], active: null, seenAt: { [global.key]: 0 } });
+  assert.equal(p.run("navCounts().orchestrator"), 1, "with no Requests screen it is today's unseen reports");
+  p.context.requestsBadge = () => null;
+  assert.equal(p.run("navCounts().orchestrator"), 1, "a screen that is off answers null and the reports count");
+  p.context.requestsBadge = () => 2;
+  assert.equal(p.run("navCounts().orchestrator"), 2, "the requests that need you replace the reports");
+  p.context.requestsBadge = () => 0;
+  assert.equal(p.run("navCounts().orchestrator"), 0, "no request needs you is a zero, not the reports");
+});
+
 test("answerAsk answers a worker from its Captain without touching the Captain's composer", async () => {
   const w = captainWorld();
   const p = page({ tabs: Object.values(w), active: w.captain });
