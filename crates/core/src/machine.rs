@@ -2586,7 +2586,7 @@ impl Machine {
         if self.thread_task(tab, false).is_some_and(|task| self.delegates.get(&task).is_some_and(|t| t.thread.is_some_and(|thread| !thread.runs))) {
             return self.tab(tab, |t| t.cwd.display().to_string()).map(Some);
         }
-        let gate = self.tab(tab, |t| global::is_global(&t.env))?.then(|| self.request_starts.lock().unwrap());
+        let gate = (hold.is_some() || replace).then_some(()).and(self.tab(tab, |t| global::is_global(&t.env))?.then_some(())).map(|()| self.request_starts.lock().unwrap());
         // Decided under the gate: a pass may have rested the tab since the caller looked.
         if gate.is_some() && self.tab(tab, |t| t.session.is_none() && !t.starting)? && !self.room_for(tab) {
             let changed = self.hold_for_room(tab, hold)?;
