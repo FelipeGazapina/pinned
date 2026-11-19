@@ -378,3 +378,25 @@ test("a snapshot whose machine and exact path match no Captain goes to Ended pla
   assert.ok(ended.includes("Same machine, other path") && ended.includes("Other machine, same path"), "both sit under Ended plans");
   assert.ok(!under(html, "Captain storefront · Mac mini").includes("Same machine, other path"), "a path that only starts the same is not the Captain");
 });
+
+test("See the diff on a request thread: a live step with a task and a branch shows it, with its Captain as owner, and drawing calls only plan and user_request", async () => {
+  const live = view({ lists: [{ id: "l1", name: "Build", task: null, steps: [STEP({ id: "s2", name: "Wire the API", state: "running", task: "task-2", branch: "feat/wire-api" })] }] });
+  const h = harness({ reply: (machine, call) => (call.cmd === "plan" ? [live] : hub()(machine, call)) });
+  const store = captainTab("m1", "tab-1", "/work/storefront", [plan("p1")]);
+  const request = requestTab();
+  h.tabs.push(store, request);
+  await h.open(request);
+  assert.match(h.html(), /data-see-diff="task-2"[^>]*data-diff-machine="m1"[^>]*data-diff-tab="tab-1"/, "the Captain's machine and tab own the click");
+  assert.deepEqual([...new Set(h.log.on.map((c) => c.call.cmd))].sort(), ["plan", "user_request"], "no open_task while drawing");
+});
+
+test("See the diff: an ended snapshot never shows it, even with a task and a branch", async () => {
+  const old = view({ id: "p9", title: "Old plan", lists: [{ id: "l9", name: "Cleanup", task: null, steps: [STEP({ id: "s9", name: "Delete the flag", state: "running", task: "task-9", branch: "feat/old" })] }] });
+  const one = rglance({ captains: [CAPTAINS[0]] });
+  const h = harness({ reply: hub([{ machine: "m1", path: "/work/storefront", plan: old }], one) });
+  const request = requestTab({}, [], one);
+  h.tabs.push(request);
+  await h.open(request);
+  assert.ok(h.html().includes("Delete the flag"), "the snapshot draws");
+  assert.ok(!h.html().includes("data-see-diff") && !h.html().includes("See the diff"), "with no See the diff");
+});

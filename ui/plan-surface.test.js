@@ -407,11 +407,14 @@ test("the Captain panel counts fix steps with the main steps: 3 of 6 done", asyn
   assert.ok(h.html().includes('class="pl-progress"><span style="width:50%"'), "the bar uses the same numbers");
 });
 
-/** A Captain with the plan's steps s2 (task-2, running), s3 (waiting, no task); a worker tab for task-2 whose view is `worker`. */
-async function seeDiffHarness(workerView) {
-  const workerTab = { key: "m1:tab-9", machine: "m1", view: { id: "tab-9", role: "worker", session: "s9", plans: [], ...workerView }, panel: { open: false, surfaces: [], active: null, max: false } };
+/** A Captain with the plan's steps s2 (task-2, running, branch `branch`) and s3 (waiting, no task, but a branch); a tab for task-2 that open_task answers. */
+async function seeDiffHarness(branch) {
+  const workerTab = { key: "m1:tab-9", machine: "m1", view: { id: "tab-9", role: "worker", session: "s9", plans: [] }, panel: { open: false, surfaces: [], active: null, max: false } };
+  const withBranch = plan();
+  withBranch.lists[0].steps[1].branch = branch;
+  withBranch.lists[1].steps[0].branch = "feat/no-task";
   const h = harness();
-  h.context.reply = (call) => (call.cmd === "open_task" ? "tab-9" : [plan()]);
+  h.context.reply = (call) => (call.cmd === "open_task" ? "tab-9" : [withBranch]);
   const tab = captain([glance()]);
   h.tabs.push(tab, workerTab);
   h.context.active = tab;
@@ -430,30 +433,50 @@ async function seeDiffHarness(workerView) {
   return { h, workerTab, tab, pick };
 }
 
-test("See the diff: shown for a step whose worker tab has a branch", async () => {
-  const { h, pick } = await seeDiffHarness({ workspace: { branch: "feat/wire-api" } });
+test("See the diff: shown for a step with a task and a branch, from the step alone", async () => {
+  const { h, pick } = await seeDiffHarness("feat/wire-api");
   const html = await pick("s2");
-  assert.match(html, /data-see-diff="m1:tab-9"/, "the button names the worker's tab");
+  assert.match(html, /data-see-diff="task-2"/, "the button names the step's task");
+  assert.match(html, /data-diff-machine="m1"/, "and the owner's machine");
+  assert.match(html, /data-diff-tab="tab-1"/, "and the owner's tab");
   assert.ok(html.includes("See the diff"), "with the board's words");
-  assert.deepEqual(h.log.calls.filter((c) => c.cmd === "open_task").map((c) => plain(c)), [{ cmd: "open_task", tab: "tab-1", task: "task-2" }], "the worker is found the way Open thread finds it");
+  assert.deepEqual(h.log.calls.filter((c) => c.cmd === "open_task"), [], "no worker is looked up to draw it");
 });
 
-test("See the diff: absent for a step with no task, and for a worker tab with no branch", async () => {
-  const noTask = await seeDiffHarness({ workspace: { branch: "feat/wire-api" } });
+test("See the diff: absent for a step with no task, and for a step with no branch", async () => {
+  const noTask = await seeDiffHarness("feat/wire-api");
   const html = await noTask.pick("s3");
   assert.ok(!html.includes("data-see-diff") && !html.includes("See the diff"), "a step with no task has no button");
-  assert.deepEqual(noTask.h.log.calls.filter((c) => c.cmd === "open_task"), [], "and looks no worker up");
 
-  const noBranch = await seeDiffHarness({ workspace: {} });
-  const html2 = await noBranch.pick("s2");
-  assert.ok(html2.includes("data-open-task") && !html2.includes("data-see-diff"), "a worker tab with no branch keeps Open thread only");
+  for (const branch of [undefined, null, ""]) {
+    const noBranch = await seeDiffHarness(branch);
+    const html2 = await noBranch.pick("s2");
+    assert.ok(html2.includes("data-open-task") && !html2.includes("data-see-diff"), `branch ${JSON.stringify(branch)} keeps Open thread only`);
+  }
 });
 
-test("See the diff: a click opens the worker tab's diff surface on its branch", async () => {
-  const { h, workerTab, tab, pick } = await seeDiffHarness({ workspace: { branch: "feat/wire-api" } });
-  await pick("s2");
-  h.click("[data-see-diff]", { seeDiff: "m1:tab-9" });
+test("drawing a plan whose live step has a task and a branch makes no host call", async () => {
+  const { h, tab } = await seeDiffHarness("feat/wire-api");
+  h.log.calls.length = 0;
+  h.log.diff.length = 0;
+  h.run("renderPlanPanel(shownSurface(active))");
   await flush();
+  h.run("renderPlanPanel(shownSurface(active))");
+  await flush();
+  assert.ok(h.html().includes("data-see-diff"), "the live step draws the button");
+  assert.deepEqual(plain(h.log.calls), [], "drawing calls nothing");
+  assert.deepEqual(h.log.opened, [], "and opens nothing");
+  assert.ok(!tab.panel.surfaces.some((x) => x.kind === "diff"), "and adds no surface");
+});
+
+test("See the diff: a click opens the task once, then the diff surface on the tab it answers", async () => {
+  const { h, workerTab, tab, pick } = await seeDiffHarness("feat/wire-api");
+  await pick("s2");
+  h.log.calls.length = 0;
+  h.click("[data-see-diff]", { seeDiff: "task-2", diffMachine: "m1", diffTab: "tab-1" });
+  await flush();
+  await flush();
+  assert.deepEqual(plain(h.log.calls), [{ cmd: "open_task", tab: "tab-1", task: "task-2" }], "one open_task, the call Open thread makes");
   assert.deepEqual(plain(h.log.diff), [{ tab: "m1:tab-9", change: { scope: "base", base: null } }], "the branch against its base");
   assert.equal(workerTab.panel.active, "diff", "the worker's panel shows the diff surface");
   assert.deepEqual(plain(workerTab.panel.surfaces.map((x) => x.kind)), ["diff"]);
