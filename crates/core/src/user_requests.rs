@@ -62,9 +62,13 @@ pub struct UserRequest {
     #[serde(default)]
     pub kind: Kind,
     /// Reports held for its first session while the cap kept it from starting, kept here so a
-    /// restart still types them. Cleared once its session starts.
+    /// restart still types them. Each is cleared once it is typed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub held: Vec<String>,
+    /// Its tab closed with lines held: they wait for the next tab opened on it, and nothing opens
+    /// one by itself.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parked: bool,
 }
 
 /// "Where this stands": each text one line of at most 300 characters.
@@ -258,6 +262,9 @@ struct Saved {
     /// Reports held for the anchor's first session at the cap, as `UserRequest::held`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     anchor_held: Vec<String>,
+    /// The anchor's tab closed with `anchor_held`, as `UserRequest::parked`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    anchor_parked: bool,
 }
 
 #[derive(Default)]
@@ -323,7 +330,6 @@ impl UserRequests {
     pub fn set_session(&mut self, id: &str, session: &str) -> bool {
         let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id) else { return false };
         r.session = Some(session.to_owned());
-        r.held.clear();
         self.save();
         true
     }
@@ -346,26 +352,70 @@ impl UserRequests {
         self.saved.anchor_held.clone()
     }
 
-    /// The anchor's session started with what was held for it.
-    pub fn clear_anchor_held(&mut self) {
-        if !self.saved.anchor_held.is_empty() {
-            self.saved.anchor_held.clear();
+    /// The first `typed` lines held for the anchor were typed into its session.
+    pub fn clear_anchor_held(&mut self, typed: usize) {
+        let typed = typed.min(self.saved.anchor_held.len());
+        if typed > 0 {
+            self.saved.anchor_held.drain(..typed);
             self.save();
         }
     }
 
-    /// Request `id`'s session started with what was held for it.
-    pub fn clear_held(&mut self, id: &str) {
-        if let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id && !r.held.is_empty()) {
-            r.held.clear();
+    /// The first `typed` lines held for request `id` were typed into its session.
+    pub fn clear_held(&mut self, id: &str, typed: usize) {
+        if let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id && !r.held.is_empty() && typed > 0) {
+            r.held.drain(..typed.min(r.held.len()));
             self.save();
         }
+    }
+
+    /// Request `id`'s tab closed with lines held for it, or the anchor's when `id` is None.
+    pub fn park(&mut self, id: Option<&str>) {
+        match id {
+            Some(id) => {
+                if let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id && !r.held.is_empty() && !r.parked) {
+                    r.parked = true;
+                    self.save();
+                }
+            }
+            None if !self.saved.anchor_held.is_empty() && !self.saved.anchor_parked => {
+                self.saved.anchor_parked = true;
+                self.save();
+            }
+            None => {}
+        }
+    }
+
+    /// A tab opened on request `id`, or the anchor when None: the lines its closed tab left, or
+    /// none when it was not parked.
+    pub fn unpark(&mut self, id: Option<&str>) -> Vec<String> {
+        let lines = match id {
+            Some(id) => match self.saved.requests.iter_mut().find(|r| r.id == id && r.parked) {
+                Some(r) => {
+                    r.parked = false;
+                    r.held.clone()
+                }
+                None => return vec![],
+            },
+            None if self.saved.anchor_parked => {
+                self.saved.anchor_parked = false;
+                self.saved.anchor_held.clone()
+            }
+            None => return vec![],
+        };
+        self.save();
+        lines
+    }
+
+    /// The anchor's held lines a restart gives a new anchor tab: none while its closed tab parked them.
+    pub fn anchor_waiting(&self) -> Vec<String> {
+        if self.saved.anchor_parked { vec![] } else { self.anchor_held() }
     }
 
     /// Each open request waiting for a place to start, whether its session started before, with
-    /// the lines held for it.
+    /// the lines held for it. A parked request waits for its tab to be opened instead.
     pub fn held(&self) -> Vec<(String, bool, Vec<String>)> {
-        self.saved.requests.iter().filter(|r| r.closed.is_none() && !r.held.is_empty()).map(|r| (r.id.clone(), r.session.is_some(), r.held.clone())).collect()
+        self.saved.requests.iter().filter(|r| r.closed.is_none() && !r.held.is_empty() && !r.parked).map(|r| (r.id.clone(), r.session.is_some(), r.held.clone())).collect()
     }
 
     /// Marks the request Done. False for an unknown id.
@@ -532,6 +582,7 @@ impl UserRequests {
             replies: 0,
             kind,
             held: vec![],
+            parked: false,
         });
         self.trim();
         self.save();
