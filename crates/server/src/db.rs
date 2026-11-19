@@ -10,6 +10,7 @@ use chacha20poly1305::aead::{Aead, AeadCore, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand_core::{OsRng, RngCore};
 use pinned_core::account::{DictationEngine, DictationFeedback, DictationRating};
+use pinned_core::account_copy::{Fire, Item, Recorded};
 use pinned_core::agent::Subject;
 use pinned_core::connectors::BoxSize;
 use pinned_core::delegate::TaskRecord;
@@ -246,6 +247,11 @@ create table if not exists trigger_fires (account uuid not null references accou
 create index if not exists trigger_fires_at on trigger_fires (at);
 -- The `Connectors` that claimed the fire: its retry of a claim whose insert timed out wins.
 alter table trigger_fires add column if not exists claimer text;
+-- The hub's last heartbeat, on the database clock (`Db::beat`, `Db::beat_age`).
+create table if not exists hub_beat (one boolean primary key default true check (one), at timestamptz not null);
+-- The hash of a version a machine handed back, never the version (`Db::keep_offline_edits`).
+create table if not exists offline_edits (account uuid not null references accounts on delete cascade,
+  item text not null, recorded jsonb not null, primary key (account, item));
 ";
 /// How long the hub keeps a trigger's claimed fire, in days: `connectors::FIRES_KEPT`.
 const FIRES_FOR_DAYS: u64 = 7;
@@ -1631,6 +1637,77 @@ impl Db {
             .execute("delete from trigger_fires where account = $1 and workflow = $2 and key = $3 and claimer = $4", &[&account, &workflow, &key, &claimer])
             .await
             .map_err(err)?;
+        Ok(())
+    }
+
+    /// Records that this process is serving, on the database clock.
+    pub async fn beat(&self) -> Result<(), String> {
+        self.client().await?.execute("insert into hub_beat (one, at) values (true, now()) on conflict (one) do update set at = now()", &[]).await.map_err(err).map(drop)
+    }
+
+    /// How long ago `beat` last wrote, or none when this database has no row. A clock step back reads as none waited.
+    pub async fn beat_age(&self) -> Result<Option<Duration>, String> {
+        let row = self.client().await?.query_opt("select extract(epoch from (now() - at))::bigint from hub_beat", &[]).await.map_err(err)?;
+        let Some(row) = row else { return Ok(None) };
+        let secs: i64 = row.get(0);
+        Ok(Some(Duration::from_secs(secs.max(0) as u64)))
+    }
+
+    /// The account's fires claimed within `within`.
+    pub async fn recent_fires(&self, account: Uuid, within: Duration) -> Result<Vec<Fire>, String> {
+        let secs = within.as_secs_f64();
+        let rows = self
+            .client().await?
+            .query(
+                "select workflow, key, extract(epoch from at)::bigint from trigger_fires where account = $1 and at >= now() - make_interval(secs => $2::float8)",
+                &[&account, &secs],
+            )
+            .await
+            .map_err(err)?;
+        Ok(rows.iter().map(|row| Fire { workflow: row.get(0), key: row.get(1), at: row.get(2) }).collect())
+    }
+
+    /// Keeps a fire a copy handed back. One stored already stays, including its claimer.
+    pub async fn keep_fire(&self, account: Uuid, workflow: &str, key: &str, at: i64) -> Result<(), String> {
+        let at = at as f64;
+        self.client()
+            .await?
+            .execute(
+                "insert into trigger_fires (account, workflow, key, at, claimer) values ($1, $2, $3, to_timestamp($4), 'copy') on conflict do nothing",
+                &[&account, &workflow, &key, &at],
+            )
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
+    /// The stamps of versions machines handed back. The version itself stays in the sealed account.
+    pub async fn offline_edits(&self, account: Uuid) -> Result<BTreeMap<Item, Recorded>, String> {
+        let rows = self.client().await?.query("select item, recorded from offline_edits where account = $1", &[&account]).await.map_err(err)?;
+        let mut recorded = BTreeMap::new();
+        for row in rows {
+            let item = Item::try_from(row.get::<_, String>(0))?;
+            let stamp: Recorded = serde_json::from_value(row.get(1)).map_err(|e| format!("account {account} has an unreadable offline edit: {e}"))?;
+            recorded.insert(item, stamp);
+        }
+        Ok(recorded)
+    }
+
+    /// Replaces the account's stamps with `recorded`. An empty map deletes them.
+    pub async fn keep_offline_edits(&self, account: Uuid, recorded: &BTreeMap<Item, Recorded>) -> Result<(), String> {
+        let items: Vec<String> = recorded.keys().map(|item| item.as_str().to_owned()).collect();
+        let client = self.client().await?;
+        client.execute("delete from offline_edits where account = $1 and not (item = any($2))", &[&account, &items]).await.map_err(err)?;
+        for (item, stamp) in recorded {
+            let stamp = serde_json::to_value(stamp).map_err(|e| e.to_string())?;
+            client
+                .execute(
+                    "insert into offline_edits (account, item, recorded) values ($1, $2, $3) on conflict (account, item) do update set recorded = excluded.recorded",
+                    &[&account, &item.as_str(), &stamp],
+                )
+                .await
+                .map_err(err)?;
+        }
         Ok(())
     }
 

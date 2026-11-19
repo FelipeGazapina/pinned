@@ -3616,6 +3616,16 @@ impl Machine {
         global::overview(&here)
     }
 
+    /// This machine's id on the hub, its hostname until the hub's hello.
+    pub fn listed_id(&self) -> String {
+        self.machine_ids().0
+    }
+
+    /// The folder this machine keeps `taste.json` in.
+    pub fn taste_dir(&self) -> Option<&Path> {
+        self.orchestration_dir.as_deref()
+    }
+
     /// This machine's id and name on the hub, each its hostname until the hub's hello.
     fn machine_ids(&self) -> (String, String) {
         let host = crate::account::hostname();

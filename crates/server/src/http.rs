@@ -1301,6 +1301,18 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
             return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, Err(refused))));
         }
     }
+    if matches!(call, HubCall::Mirror { .. } | HubCall::Handback { .. }) {
+        let _hold = hub.copies.answer_hold();
+        let result = match call {
+            HubCall::Mirror { have, login } => crate::hub::copies::mirror(&hub, &account, &machine, &have, &login, boxed).await.and_then(|mirrored| serde_json::to_value(mirrored).map_err(|e| e.to_string())),
+            HubCall::Handback { changes, login } => crate::hub::copies::handback(&hub, &account, &machine, &changes, &login, boxed).await.and_then(|taken| serde_json::to_value(taken).map_err(|e| e.to_string())),
+            _ => unreachable!(),
+        };
+        if let Err(e) = &result {
+            eprintln!("pinned-server: machine {machine}'s account copy failed: {e}");
+        }
+        return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+    }
     if matches!(call, HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } | HubCall::RemoteAsked { .. } | HubCall::Place { .. }) {
         let result = crate::remote::serve(&hub, &account, &machine, call).await;
         if let Err(e) = &result {

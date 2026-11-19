@@ -3,15 +3,20 @@ use pinned_core::connectors::{self, Connectors, Keys};
 use pinned_core::link::{self, Link};
 use pinned_core::login_store::{self, LoginStore};
 use pinned_core::machine::{Event, Listener, Machine};
+use pinned_core::standby::Standby;
 use pinned_core::wire::HubCall;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+/// What sign-out answers while this Mac still owes the hub a handback.
+const HELD_SIGN_OUT: &str = "this Mac still has changes to hand back";
+
 pub struct Account {
     dir: PathBuf,
+    exe: String,
     /// Holds the login where this system has a credential store; `account.json` keeps the rest.
     store: Option<Box<dyn LoginStore>>,
     /// A connector callback holds a read lock while the hub answers, so signing out waits for it.
@@ -22,6 +27,7 @@ pub struct Account {
 struct SignedIn {
     creds: Credentials,
     link: Link,
+    standby: Arc<Standby>,
 }
 
 #[derive(serde::Serialize, Default)]
@@ -35,16 +41,17 @@ pub struct View {
 }
 
 impl Account {
-    pub fn start(app: &AppHandle, dir: PathBuf, machine: Arc<Machine>) -> Account {
+    pub fn start(app: &AppHandle, dir: PathBuf, machine: Arc<Machine>, exe: String) -> Account {
         let store = login_store::system();
-        let signed_in = Credentials::load_app(&dir, store.as_deref()).map(|creds| SignedIn { link: connect(&creds, machine.clone()), creds });
+        let signed_in = Credentials::load_app(&dir, store.as_deref()).map(|creds| begin(app, &dir, &exe, creds, machine.clone()));
         let watcher = signed_in.is_none().then(|| watch_connectors(app.clone(), machine));
-        Account { dir, store, signed_in: RwLock::new(signed_in), watcher: Mutex::new(watcher) }
+        Account { dir, exe, store, signed_in: RwLock::new(signed_in), watcher: Mutex::new(watcher) }
     }
 
-    /// Stops the link and ends its login: on disk, in the store, then at the hub.
-    fn forget(&self, SignedIn { creds, link }: SignedIn) {
+    /// Stops the link and ends its login: the copy, then on disk, in the store, then at the hub.
+    fn forget(&self, SignedIn { creds, link, standby }: SignedIn) {
         link.stop();
+        standby.forget();
         creds.remove_app(&self.dir, self.store.as_deref());
         if let Err(e) = account::logout(&creds.hub, &creds.user_token) {
             eprintln!("pinned: sign out: {e}");
@@ -70,7 +77,7 @@ impl Account {
     }
 
     fn view(&self) -> View {
-        let Some(SignedIn { creds, link }) = &*self.signed_in.read().unwrap() else { return View::default() };
+        let Some(SignedIn { creds, link, .. }) = &*self.signed_in.read().unwrap() else { return View::default() };
         View {
             signed_in: true,
             online: link.online(),
@@ -80,10 +87,33 @@ impl Account {
             user_token: creds.user_token.clone(),
         }
     }
+
+    pub(crate) fn standby(&self) -> Option<Arc<Standby>> {
+        self.signed_in.read().unwrap().as_ref().map(|signed_in| Arc::clone(&signed_in.standby))
+    }
 }
 
-fn connect(creds: &Credentials, machine: Arc<Machine>) -> Link {
-    link::spawn(creds.clone(), machine, env!("CARGO_PKG_VERSION"))
+fn copy_dir(dir: &Path, machine_id: &str) -> PathBuf {
+    dir.join("account-copy").join(machine_id)
+}
+
+/// The copy owes a handback, and this sign-out was not told to drop it.
+fn owes_handback(standby: &Standby, anyway: bool) -> bool {
+    standby.holds_changes() && !anyway
+}
+
+fn begin(app: &AppHandle, dir: &Path, exe: &str, creds: Credentials, machine: Arc<Machine>) -> SignedIn {
+    let standby = Arc::new(Standby::open(
+        copy_dir(dir, &creds.machine_id),
+        pinned_core::standby::Signer { machine: creds.machine_id.clone(), name: computer_name(), login: creds.user_token.clone() },
+        machine.clone(),
+        exe.to_owned(),
+    ));
+    let local: Arc<dyn link::Local> = standby.clone();
+    let link = link::spawn_with(creds.clone(), machine, env!("CARGO_PKG_VERSION"), Some(local));
+    let emit = app.clone();
+    standby.follow(link.handle(), Box::new(move |check| drop(emit.emit("connectors-checked", check))));
+    SignedIn { creds, link, standby }
 }
 
 fn watch_connectors(app: AppHandle, machine: Arc<Machine>) -> JoinHandle<()> {
@@ -191,6 +221,9 @@ pub fn account(account: State<Account>) -> View {
 pub async fn sign_in(app: AppHandle, hub: String, email: String, password: String, create: bool, invite: Option<String>) -> Result<View, String> {
     // The account calls block on their own HTTP client, which must not run on an async worker.
     tauri::async_runtime::spawn_blocking(move || {
+        if app.state::<Account>().signed_in.read().unwrap().as_ref().is_some_and(|signed| owes_handback(&signed.standby, false)) {
+            return Err(HELD_SIGN_OUT.into());
+        }
         let hub = hub.trim().trim_end_matches('/').to_owned();
         let (user_token, view) = if create { account::signup_invited(&hub, &email, &password, invite.as_deref())? } else { account::login(&hub, &email, &password)? };
         let (machine, machine_token) = account::register_machine(&hub, &user_token, &computer_name(), std::env::consts::OS)?;
@@ -204,8 +237,9 @@ pub async fn sign_in(app: AppHandle, hub: String, email: String, password: Strin
         if let Some(watcher) = state.watcher.lock().unwrap().take() {
             watcher.abort();
         }
-        let link = connect(&creds, app.state::<Arc<Machine>>().inner().clone());
-        *state.signed_in.write().unwrap() = Some(SignedIn { creds, link });
+        let machine = app.state::<Arc<Machine>>().inner().clone();
+        let signed_in = begin(&app, &state.dir, &state.exe, creds, machine);
+        *state.signed_in.write().unwrap() = Some(signed_in);
         import_when_empty(app.clone());
         Ok(state.view())
     })
@@ -235,13 +269,18 @@ pub async fn dictation_feedback(app: AppHandle, feedback: account::DictationFeed
 }
 
 /// Disconnects this Mac and forgets the credentials; the app's own connectors take over again.
+/// Refuses while the copy holds changes the hub has not taken, unless `anyway`, which deletes that copy.
 /// The webview removes this machine from the account first, while its login still works. Run in
 /// the background goes off with the login, since no web app can reach this Mac without one.
 #[tauri::command]
-pub async fn sign_out(app: AppHandle) -> Result<(), String> {
+pub async fn sign_out(app: AppHandle, anyway: Option<bool>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<Account>();
         let Some(signed_in) = state.signed_in.write().unwrap().take() else { return Ok(()) };
+        if owes_handback(&signed_in.standby, anyway.unwrap_or(false)) {
+            *state.signed_in.write().unwrap() = Some(signed_in);
+            return Err(HELD_SIGN_OUT.into());
+        }
         state.forget(signed_in);
         let machine = app.state::<Arc<Machine>>().inner().clone();
         *state.watcher.lock().unwrap() = Some(watch_connectors(app.clone(), machine));
@@ -249,6 +288,29 @@ pub async fn sign_out(app: AppHandle) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[derive(serde::Serialize)]
+pub struct CopyStatus {
+    copied: bool,
+    runner: Option<String>,
+    machine_name: String,
+    here: bool,
+    gone_secs: Option<u64>,
+    holds_changes: bool,
+}
+
+#[tauri::command]
+pub fn account_copy(app: AppHandle) -> Option<CopyStatus> {
+    let view = app.state::<Account>().standby()?.view();
+    Some(CopyStatus {
+        copied: view.copied,
+        runner: view.runner,
+        machine_name: view.machine_name,
+        here: matches!(view.authority, pinned_core::standby::Authority::Here { .. }),
+        gone_secs: view.gone_for.map(|gone| gone.as_secs()),
+        holds_changes: view.holds_changes,
+    })
 }
 
 fn import_when_empty(app: AppHandle) {
@@ -266,7 +328,7 @@ fn import_when_empty(app: AppHandle) {
             return;
         }
         let signed_in = state.signed_in.read().unwrap();
-        let Some(SignedIn { link, creds }) = signed_in.as_ref() else { return };
+        let Some(SignedIn { link, creds, .. }) = signed_in.as_ref() else { return };
         // Their folders are on this Mac, so they keep running here while it's online.
         for connector in store["connectors"].as_array_mut().into_iter().flatten() {
             if connector["machine"].as_str().unwrap_or_default().is_empty() {
@@ -282,6 +344,11 @@ fn import_when_empty(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pinned_core::connectors::{Connector, FileStorage};
+    use pinned_core::machine::{refuse_real_home, Launch};
+    use pinned_core::standby::Signer;
+    use serde_json::json;
+    use std::collections::BTreeMap;
 
     #[test]
     fn the_pretty_hostname_is_read_from_machine_info() {
@@ -289,5 +356,88 @@ mod tests {
         assert_eq!(pretty_hostname("PRETTY_HOSTNAME=studio\n").as_deref(), Some("studio"));
         assert_eq!(pretty_hostname("PRETTY_HOSTNAME=\"\"\nCHASSIS=desktop\n"), None);
         assert_eq!(pretty_hostname("CHASSIS=desktop\n"), None);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pinned-account-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn machine_in(dir: &Path) -> Arc<Machine> {
+        let launch = Launch {
+            exe: dir.join("pinned"),
+            bins: BTreeMap::new(),
+            path_env: None,
+            settings: dir.join("claude-settings.json"),
+            mcp_config: None,
+            reminders: false,
+            plugin_dir: dir.join("plugin"),
+            tutorial_helper: dir.join("helper"),
+            sock: dir.join("sock"),
+            vector_search: false,
+            first_run_wait: Duration::from_millis(1),
+            starting_limit: Duration::from_secs(1),
+            claude_home: Some(dir.join("claude")),
+        };
+        Machine::new(launch, Some(dir.join("machine")), None, |_| {})
+    }
+
+    fn workflow(instructions: &str) -> Connector {
+        serde_json::from_value(json!({
+            "name": "Triage",
+            "enabled": true,
+            "trigger": {"kind": "manual"},
+            "folder": "/work",
+            "model": "",
+            "effort": "medium",
+            "permissionMode": "acceptEdits",
+            "worktree": false,
+            "instructions": instructions,
+            "graph": {
+                "nodes": [
+                    {"id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": {"kind": "manual"}},
+                    {"id": "s", "name": "Do", "position": [1, 0], "type": "session"}
+                ],
+                "edges": [{"from": "t", "port": "out", "to": "s"}]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn sign_out_keeps_a_copy_that_holds_changes_until_anyway() {
+        refuse_real_home();
+        let root = scratch("sign-out");
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let machine = machine_in(&home);
+        let copy = root.join("copy");
+        let exe = home.join("pinned").display().to_string();
+        let connectors = Connectors::new(FileStorage::new(copy.clone()), exe.clone());
+        let saved = connectors.save_connector(workflow("one")).unwrap();
+        let (items, _, _) = connectors.copy_parts();
+        std::fs::write(copy.join("standby.json"), serde_json::to_vec_pretty(&json!({ "copy": { "tag": "base", "at": 1 }, "base": items })).unwrap()).unwrap();
+        let mut again = saved;
+        again.instructions = "two".into();
+        connectors.save_connector(again).unwrap();
+        drop(connectors);
+
+        let standby = Standby::open(copy.clone(), Signer { machine: machine.listed_id(), name: "MacBook".into(), login: "user-token".into() }, machine, exe);
+        assert!(owes_handback(&standby, false));
+        assert!(copy.join("standby.json").is_file());
+        assert!(!owes_handback(&standby, true));
+        standby.forget();
+        assert!(!copy.exists(), "signing out with anyway deletes the copy folder");
+
+        let empty = root.join("empty");
+        let machine = machine_in(&home);
+        let standby = Standby::open(empty.clone(), Signer { machine: machine.listed_id(), name: "MacBook".into(), login: "user-token".into() }, machine, home.join("pinned").display().to_string());
+        assert!(!owes_handback(&standby, false));
+        standby.forget();
+        assert!(!empty.exists());
+        assert_eq!(copy_dir(Path::new("cfg"), "m1"), PathBuf::from("cfg/account-copy/m1"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

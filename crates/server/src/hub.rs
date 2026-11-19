@@ -30,6 +30,9 @@ use crate::store_writes::{self, Landed, Writes};
 use tokio::sync::{mpsc, oneshot, OnceCell};
 use uuid::Uuid;
 
+#[path = "copies.rs"]
+pub mod copies;
+
 const MACHINE_CALL_WAIT: Duration = Duration::from_secs(300);
 /// Longer than a machine's `claude setup-token` waits for the user's approval in the browser.
 const MINT_WAIT: Duration = Duration::from_secs(pinned_core::setup_token::WAIT.as_secs() + 30);
@@ -334,6 +337,8 @@ pub struct Hub {
     pub hold_backstop: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     /// Every account's `PgStorage` state, for the census and the flush on stop.
     persisted: Mutex<HashMap<Uuid, Arc<Persisted>>>,
+    /// Copies handed to desktops, and the mirrors waiting on the next one.
+    pub copies: copies::Copies,
     /// Reporting an issue from the app: pinned's GitHub repository and what the hub keeps about it.
     pub(crate) reports: crate::reports::Reports,
     /// `hub --dev`'s time scale. Timers it shortens call `dev.scale`; `Dev::OFF` otherwise.
@@ -486,7 +491,7 @@ impl Hub {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
         let reports = crate::reports::Reports::start(&db, reports).await;
-        Ok(Arc::new_cyclic(|me| Hub { me: me.clone(), db, public_url, signup, boxes, team_policy, team_join_fails: Mutex::default(), convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), hold_backstop: Mutex::default(), persisted: Mutex::default(), reports, dev }))
+        Ok(Arc::new_cyclic(|me| Hub { me: me.clone(), db, public_url, signup, boxes, team_policy, team_join_fails: Mutex::default(), convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), hold_backstop: Mutex::default(), persisted: Mutex::default(), copies: copies::Copies::new(), reports, dev }))
     }
 
     /// Tells every socket to close with a going away frame. The hub stops serving afterwards.
@@ -1246,6 +1251,30 @@ impl Hub {
             // A team op runs only on the app's own path, `http::client_frame`, which reads the op
             // and checks the unlock on it first; a team box's ask goes through `teams::machine_call`.
             // An agent's act, a team's own call or any other path that lands here runs none.
+            HubCall::Mirror { .. } | HubCall::Handback { .. } => return Err("only a signed-in desktop keeps a copy of the account".into()),
+            HubCall::SetOfflineRunner { machine } => {
+                let machine = match machine {
+                    Some(id) => {
+                        let parsed = Uuid::parse_str(&id).map_err(|_| format!("this account has no machine {id}"))?;
+                        if self.db.machine_name(account.id, parsed).await?.is_none() {
+                            return Err(format!("this account has no machine {id}"));
+                        }
+                        Some(id)
+                    }
+                    None => None,
+                };
+                c().await?.set_runner(machine)?;
+                self.push_settings(account).await;
+                return Ok(Value::Null);
+            }
+            HubCall::ReleaseWorkflows => {
+                let connectors = c().await?;
+                connectors.release()?;
+                connectors.wake();
+                self.watch(account).await?;
+                self.push_settings(account).await;
+                return Ok(Value::Null);
+            }
             HubCall::Team { .. } => return Err(TEAM_CALL_ELSEWHERE.into()),
         };
         if changed {
@@ -1447,6 +1476,7 @@ impl Hub {
     }
 
     async fn push_settings(&self, account: &Account) {
+        self.copies.changed(account.id);
         if let Ok(settings) = self.settings(account).await {
             account.broadcast(&ToClient::Settings { settings });
         }
@@ -2315,6 +2345,31 @@ impl Storage for PgStorage {
                 .map_err(|_| "could not give back the fire: the database did not answer".to_owned())?
         };
         wait_on_fires(fires, release)
+    }
+
+    fn fires(&self) -> Vec<pinned_core::account_copy::Fire> {
+        let Some(fires) = &self.0.fires else { return Vec::new() };
+        let within = pinned_core::connectors::CATCH_UP + pinned_core::account_copy::COPY_EVERY;
+        let read = fires.db.recent_fires(fires.account, within);
+        match wait_on_fires(fires, read) {
+            Ok(fires) => fires,
+            Err(e) => {
+                eprintln!("pinned-server: could not read the account's fires: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    fn replace_fires(&self, incoming: &[pinned_core::account_copy::Fire]) -> Result<(), String> {
+        let Some(fires) = &self.0.fires else { return Err("no database to keep the fires in".into()) };
+        let incoming = incoming.to_vec();
+        let write = async {
+            for fire in &incoming {
+                fires.db.keep_fire(fires.account, &fire.workflow, &fire.key, fire.at).await?;
+            }
+            Ok(())
+        };
+        wait_on_fires(fires, write)
     }
 }
 

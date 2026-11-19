@@ -15,7 +15,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 schemars = "=1.2.3"
 # The binary installs rustls's ring provider before the first request.
 reqwest = { version = "0.13", default-features = false, features = ["json", "blocking", "rustls-no-provider"] }
-tokio = { version = "1", features = ["time", "sync", "rt", "net", "macros"] }
+tokio = { version = "1", features = ["time", "sync", "rt", "rt-multi-thread", "net", "macros"] }
 # The binary installs rustls's ring provider, as for reqwest. The Go statusline installs it too.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
@@ -25,6 +25,7 @@ tempfile = "3"
 flate2 = "1"
 dunce = "1"
 sha2 = "0.10"
+uuid = { version = "1", features = ["serde", "v4"] }
 # NFKC for the report scrubber, so look-alike characters cannot hide a private word.
 unicode-normalization = "0.1"
 # Bundled, so FTS5 is there and the musl and Windows builds need no system SQLite.

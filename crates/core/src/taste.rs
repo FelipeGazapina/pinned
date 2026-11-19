@@ -1138,12 +1138,123 @@ pub fn save(tastes: &Tastes, dir: Option<&Path>) -> Result<(), String> {
     std::fs::rename(&partial, dir.join(FILE)).map_err(|e| e.to_string())
 }
 
+impl Tastes {
+    /// One item per orchestrator and Captains field, per project patch, plus placement, the
+    /// Reviewer and the worker profiles. An empty project patch is absent: the project inherits.
+    pub fn copy_items(&self) -> BTreeMap<crate::account_copy::Item, crate::account_copy::Version> {
+        use crate::account_copy::{Item, Version};
+        let mut items = BTreeMap::new();
+        let bare = |value: Value| Version { value, secrets: BTreeMap::new() };
+        for (scope, taste) in [("orchestrator", &self.orchestrator), ("captains", &self.captains)] {
+            let Ok(value) = serde_json::to_value(taste) else { continue };
+            let Some(object) = value.as_object() else { continue };
+            for field in crate::account_copy::TASTE_FIELDS {
+                if let Some(field_value) = object.get(*field) {
+                    items.insert(Item::taste(&format!("{scope}/{field}")), bare(field_value.clone()));
+                }
+            }
+        }
+        for (repo, patch) in &self.projects {
+            if patch.is_empty() {
+                continue;
+            }
+            if let Ok(value) = serde_json::to_value(patch) {
+                items.insert(Item::taste(&format!("project/{repo}")), bare(value));
+            }
+        }
+        if let Ok(value) = serde_json::to_value(&self.placement) {
+            items.insert(Item::taste("placement"), bare(value));
+        }
+        if let Ok(value) = serde_json::to_value(&self.reviewer) {
+            items.insert(Item::taste("reviewer"), bare(value));
+        }
+        if let Ok(value) = serde_json::to_value(&self.worker_profiles) {
+            items.insert(Item::taste("worker-profiles"), bare(value));
+        }
+        items
+    }
+
+    /// Writes each taste item onto this account. Items that are not tastes are left alone. A project
+    /// whose patch is empty is removed, so it inherits again.
+    pub fn apply_copy_items(&mut self, items: &BTreeMap<crate::account_copy::Item, crate::account_copy::Version>) -> Result<(), String> {
+        let mut orchestrator = serde_json::to_value(&self.orchestrator).map_err(|e| e.to_string())?;
+        let mut captains = serde_json::to_value(&self.captains).map_err(|e| e.to_string())?;
+        for (item, version) in items {
+            if !item.is_taste() {
+                continue;
+            }
+            let path = item.as_str().trim_start_matches("taste/");
+            if let Some(field) = path.strip_prefix("orchestrator/") {
+                set_taste_field(&mut orchestrator, field, version.value.clone())?;
+            } else if let Some(field) = path.strip_prefix("captains/") {
+                set_taste_field(&mut captains, field, version.value.clone())?;
+            } else if let Some(repo) = path.strip_prefix("project/") {
+                let patch: TastePatch = serde_json::from_value(version.value.clone()).map_err(|e| e.to_string())?;
+                if patch.is_empty() {
+                    self.projects.remove(repo);
+                } else {
+                    self.projects.insert(repo.to_owned(), patch);
+                }
+            } else if path == "placement" {
+                self.placement = serde_json::from_value(version.value.clone()).map_err(|e| e.to_string())?;
+            } else if path == "reviewer" {
+                self.reviewer = serde_json::from_value(version.value.clone()).map_err(|e| e.to_string())?;
+            } else if path == "worker-profiles" {
+                self.worker_profiles = serde_json::from_value(version.value.clone()).map_err(|e| e.to_string())?;
+            }
+        }
+        self.orchestrator = serde_json::from_value(orchestrator).map_err(|e| e.to_string())?;
+        self.captains = serde_json::from_value(captains).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// The tastes those items are, starting from the defaults so a project the copy does not name
+    /// is gone.
+    pub fn from_copy_items(items: &BTreeMap<crate::account_copy::Item, crate::account_copy::Version>) -> Result<Tastes, String> {
+        let mut tastes = Tastes::default();
+        tastes.apply_copy_items(items)?;
+        Ok(tastes)
+    }
+
+    /// The item as the current taste types read it. A value that does not read stays as it arrived.
+    pub fn normalize_copy_item(item: &crate::account_copy::Item, version: &crate::account_copy::Version) -> crate::account_copy::Version {
+        let mut items = BTreeMap::new();
+        items.insert(item.clone(), version.clone());
+        let Ok(tastes) = Tastes::from_copy_items(&items) else { return version.clone() };
+        let Some(found) = tastes.copy_items().remove(item) else { return version.clone() };
+        crate::account_copy::Version { secrets: version.secrets.clone(), ..found }
+    }
+}
+
+fn set_taste_field(taste: &mut Value, field: &str, value: Value) -> Result<(), String> {
+    taste.as_object_mut().ok_or_else(|| "a taste is an object".to_owned())?.insert(field.to_owned(), value);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
     const SITE: &str = "github.com/acme/site";
+
+    #[test]
+    fn copy_items_round_trip_a_field_a_project_and_the_account_pieces() {
+        let mut tastes = Tastes::default();
+        tastes.set(&TasteScope::Captains, TastePatch { parallel: Some(2), ..TastePatch::default() }).unwrap();
+        tastes.set(&site(), TastePatch { parallel: Some(3), ..TastePatch::default() }).unwrap();
+        let items = tastes.copy_items();
+        let captains = crate::account_copy::Item::try_from("taste/captains/parallel".to_owned()).unwrap();
+        let project = crate::account_copy::Item::try_from(format!("taste/project/{SITE}")).unwrap();
+        assert_eq!(items.get(&captains).unwrap().value, json!(2));
+        assert!(items.contains_key(&project));
+        assert!(items.contains_key(&crate::account_copy::Item::try_from("taste/placement".to_owned()).unwrap()));
+        assert!(items.contains_key(&crate::account_copy::Item::try_from("taste/reviewer".to_owned()).unwrap()));
+        assert!(items.contains_key(&crate::account_copy::Item::try_from("taste/worker-profiles".to_owned()).unwrap()));
+        assert_eq!(Tastes::from_copy_items(&items).unwrap(), tastes);
+        let broken = crate::account_copy::Version { value: json!("nope"), secrets: BTreeMap::new() };
+        assert_eq!(Tastes::normalize_copy_item(&captains, &broken).value, json!("nope"));
+    }
 
     fn site() -> TasteScope {
         TasteScope::Project { repo: SITE.into() }

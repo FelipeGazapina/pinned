@@ -86,6 +86,16 @@ struct Shared {
     sync_thread: std::sync::OnceLock<std::thread::Thread>,
     refusals: watch::Sender<Refusals>,
     refused_span: RefusedSpan,
+    /// True while a socket is accepted. `Standby::follow` waits on this instead of polling.
+    up: watch::Sender<bool>,
+    /// What the last dial of the hub's address showed. `Gone` is kept across a disconnect until a
+    /// hello replaces it, so the outage's start does not move every time the socket drops.
+    reach: watch::Sender<Reach>,
+    /// The desktop's copy. A box and a signed-out app have none.
+    local: Mutex<Option<Arc<dyn Local>>>,
+    /// A 404 before the first hello of this process is not [`Reach::Gone`]: the process has not
+    /// seen that address serve the hub.
+    had_hello: AtomicBool,
 }
 
 impl Shared {
@@ -117,13 +127,22 @@ impl Shared {
         }
     }
 
-    /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline.
+    /// Asks the hub, blocking up to 60 seconds for the answer. A copy that still owes a handback
+    /// answers its reads, and the callbacks of runs it started, without leaving the machine. A
+    /// call the hub never received falls back to the copy. A timeout or a dropped socket does not:
+    /// the hub may have run it.
     fn call(&self, call: HubCall) -> Result<Value, String> {
+        if let Some(answer) = self.from_copy(&call, true) {
+            return answer;
+        }
         let id = self.next_call.fetch_add(1, Ordering::Relaxed);
         let (answer, answered) = mpsc::channel();
         self.pending.lock().unwrap().insert(id, answer);
-        if !self.send(&MachineFrame::Call { id, call }) {
+        if !self.send(&MachineFrame::Call { id, call: call.clone() }) {
             self.pending.lock().unwrap().remove(&id);
+            if let Some(answer) = self.from_copy(&call, false) {
+                return answer;
+            }
             return Err(OFFLINE.into());
         }
         match answered.recv_timeout(CALL_WAIT) {
@@ -134,6 +153,17 @@ impl Shared {
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(DROPPED.into()),
         }
+    }
+
+    /// `owed` limits a copy that still holds changes: while the hub is up it answers only its
+    /// reads and its own callbacks. False asks the copy for anything it answers, which is how a
+    /// call the hub never received is handled.
+    fn from_copy(&self, call: &HubCall, owed: bool) -> Option<Result<Value, String>> {
+        let local = self.local.lock().unwrap().clone()?;
+        if owed && !(local.holds_changes() && (!self.online() || copy_answers_while_up(call, local.as_ref()))) {
+            return None;
+        }
+        local.answer(call)
     }
 
     fn online(&self) -> bool {
@@ -147,8 +177,51 @@ impl Shared {
         }
     }
 
+    fn connect_out(&self, out: channel::UnboundedSender<Outgoing>) {
+        *self.out.lock().unwrap() = Some(out);
+        self.up.send_replace(true);
+        self.reach.send_replace(Reach::Up);
+    }
+
+    /// The socket is gone. A `Gone` reach stays, with the instant it started.
+    fn mark_down(&self) {
+        self.up.send_replace(false);
+        let _ = self.reach.send_if_modified(|reach| {
+            if matches!(reach, Reach::Gone { .. }) {
+                return false;
+            }
+            let change = !matches!(reach, Reach::Unreachable);
+            *reach = Reach::Unreachable;
+            change
+        });
+    }
+
+    /// The address answered HTTP with no hub behind it. Before the first hello that is only
+    /// unreachable: this process has not seen the hub there. After it, the first such answer
+    /// starts `Gone` and a later one keeps that instant.
+    fn saw_gone(&self) {
+        if !self.had_hello.load(Ordering::SeqCst) {
+            let _ = self.reach.send_if_modified(|reach| {
+                if matches!(reach, Reach::Unreachable) {
+                    return false;
+                }
+                *reach = Reach::Unreachable;
+                true
+            });
+            return;
+        }
+        let _ = self.reach.send_if_modified(|reach| {
+            if matches!(reach, Reach::Gone { .. }) {
+                return false;
+            }
+            *reach = Reach::Gone { since: tokio::time::Instant::now() };
+            true
+        });
+    }
+
     fn disconnected(&self, machine: &Machine) {
         *self.out.lock().unwrap() = None;
+        self.mark_down();
         self.pending.lock().unwrap().clear();
         for (tab, viewer) in self.subscribed.lock().unwrap().drain() {
             machine.detach(&tab, &viewer);
@@ -160,7 +233,16 @@ impl Shared {
 /// Connects `machine` to the hub `creds` names, and keeps it connected until `Link::stop`.
 /// `version` is the binary's, which the hub logs.
 pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
+    spawn_with(creds, machine, version, None)
+}
+
+/// [`spawn`] with the copy that answers while the hub cannot. While that copy owes a handback it
+/// also keeps its reads, and the callbacks of runs it started, even though the hub is up.
+pub fn spawn_with(creds: Credentials, machine: Arc<Machine>, version: &str, local: Option<Arc<dyn Local>>) -> Link {
     let shared = Arc::new(Shared::default());
+    if let Some(local) = local {
+        *shared.local.lock().unwrap() = Some(local);
+    }
     let flushing = shared.clone();
     machine.set_flusher(Arc::new(move |event| flushing.send_flushed(&MachineFrame::Event { event: event.clone() })));
     let (stop, stopped) = watch::channel(false);
@@ -186,7 +268,84 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
     Link { shared, stop, thread, syncing }
 }
 
-/// What a hub call answers while the link is down.
+/// What the hub's address last showed this process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// The hub accepted this machine.
+    Up,
+    /// The address answers HTTP with no hub behind it, and has since `since`. A stopped Railway
+    /// service answers 404. Set only after a hello from that hub in this process.
+    Gone { since: tokio::time::Instant },
+    /// Nothing answered. This Mac has no path; other machines may.
+    Unreachable,
+    /// The hub refused this machine's token.
+    Refused,
+}
+
+impl Default for Reach {
+    fn default() -> Self {
+        Reach::Unreachable
+    }
+}
+
+/// What a machine answers from its own copy when the hub cannot (`standby::Standby`).
+pub trait Local: Send + Sync {
+    /// The copy's answer, or none when only the hub answers this call.
+    fn answer(&self, call: &HubCall) -> Option<Result<Value, String>>;
+    /// The copy holds work the hub has not taken. Reads then stay on the copy until the handback.
+    fn holds_changes(&self) -> bool;
+    /// A callback for a run this copy's watcher started.
+    fn own_callback(&self, call: &HubCall) -> bool {
+        let _ = call;
+        false
+    }
+}
+
+/// While the hub is up, a copy that owes a handback answers these and nothing else. A callback for
+/// a run the hub owns is not among them, so it still reaches the hub.
+fn copy_answers_while_up(call: &HubCall, local: &dyn Local) -> bool {
+    match call {
+        HubCall::GetSettings | HubCall::ListMcpServers | HubCall::LoadMcpServers | HubCall::GetTastes => true,
+        HubCall::Stage { .. } | HubCall::SlackReply { .. } | HubCall::LinearCreate { .. } | HubCall::LinearTake { .. } | HubCall::RunSet { .. } => {
+            local.own_callback(call)
+        }
+        _ => false,
+    }
+}
+
+/// A cheap handle for the copy's loop.
+#[derive(Clone)]
+pub struct Handle {
+    shared: Arc<Shared>,
+    stopped: watch::Receiver<bool>,
+}
+
+impl Handle {
+    pub fn call_hub(&self, call: HubCall) -> Result<Value, String> {
+        self.shared.call(call)
+    }
+
+    pub fn online(&self) -> bool {
+        self.shared.online()
+    }
+
+    pub fn reach(&self) -> Reach {
+        self.shared.reach.borrow().clone()
+    }
+
+    pub fn state(&self) -> watch::Receiver<bool> {
+        self.shared.up.subscribe()
+    }
+
+    pub fn reach_watch(&self) -> watch::Receiver<Reach> {
+        self.shared.reach.subscribe()
+    }
+
+    pub fn stopped(&self) -> watch::Receiver<bool> {
+        self.stopped.clone()
+    }
+}
+
 pub const OFFLINE: &str = "not connected to the hub";
 /// What a hub call that waited out `CALL_WAIT` fails with: the hub may still be working on it.
 pub const HUB_TIMEOUT: &str = "the hub did not answer within 60 seconds";
@@ -228,6 +387,20 @@ impl Link {
 
     pub fn online(&self) -> bool {
         self.shared.online()
+    }
+
+    /// Whether a socket to the hub is up. Changes when the socket is accepted and when it ends.
+    pub fn state(&self) -> watch::Receiver<bool> {
+        self.shared.up.subscribe()
+    }
+
+    pub fn reach(&self) -> Reach {
+        self.shared.reach.borrow().clone()
+    }
+
+    /// A cheap handle for the copy's loop.
+    pub fn handle(&self) -> Handle {
+        Handle { shared: self.shared.clone(), stopped: self.stop.subscribe() }
     }
 
     /// Resolves when the hub refuses this machine's token (close code `UNAUTHORIZED`) at or after
@@ -669,7 +842,13 @@ async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, ver
                 backoff.ended(up, false);
                 eprintln!("pinned: hub link: {e}; retrying");
             }
+            Some(Err(Fault::Gone)) => {
+                shared.saw_gone();
+                backoff.ended(up, false);
+                eprintln!("pinned: hub link: the hub's address answers with no hub behind it; retrying");
+            }
             Some(Err(Fault::Refused(e) | Fault::Unauthorized(e))) => {
+                shared.reach.send_replace(Reach::Refused);
                 backoff.ended(up, false);
                 eprintln!("pinned: hub link: {e}; retrying");
                 crate::boot::refuse();
@@ -688,7 +867,11 @@ async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, ver
 /// does when it restarts. `accepted` is set to the moment the hub accepted the machine.
 async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Machine>, version: &str, accepted: &mut Option<Instant>) -> Result<(), Fault> {
     let url = ws_url(&creds.hub).map_err(Fault::Transport)?;
-    let (mut sink, mut stream) = dial(&url).await.map_err(Fault::Transport)?.split();
+    let (mut sink, mut stream) = match dial(&url).await {
+        Ok(socket) => socket.split(),
+        Err(DialError::Gone) => return Err(Fault::Gone),
+        Err(DialError::Other(error)) => return Err(Fault::Transport(error)),
+    };
     let auth = MachineFrame::Auth {
         token: creds.machine_token.clone(),
         name: crate::account::hostname(),
@@ -700,6 +883,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     let hello = accept_hello(hello)?;
     shared.watch.connected();
     *accepted = Some(Instant::now());
+    shared.had_hello.store(true, Ordering::SeqCst);
     shared.note(Outcome::Accepted);
     machine.set_hub_id(hello.id, hello.name);
     if crate::boot::commit_when_ready().await == crate::boot::AfterHello::Leaving {
@@ -707,7 +891,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     }
 
     let (out, mut incoming) = channel::unbounded_channel();
-    *shared.out.lock().unwrap() = Some(out.clone());
+    shared.connect_out(out.clone());
     let calls = in_order(shared.clone(), machine.clone());
     eprintln!("pinned: connected to {}", creds.hub);
     let (sharing, reporting) = (machine.clone(), shared.clone());
@@ -755,16 +939,33 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     }
 }
 
+/// Why `dial` failed. `Gone` is an HTTP answer with no hub behind it (a stopped Railway service
+/// answers 404). Anything else is `Other`, whose text still starts with `could not connect to`.
+#[derive(Debug)]
+enum DialError {
+    Gone,
+    Other(String),
+}
+
 /// Opens the machine's socket to the hub at `url`, giving up once the TCP, TLS and WebSocket
 /// handshakes together take longer than `DIAL_WAIT`.
-async fn dial(url: &str) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, String> {
+async fn dial(url: &str) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, DialError> {
     let config = WebSocketConfig::default().max_message_size(Some(sync::MESSAGE_LIMIT)).max_frame_size(Some(sync::MESSAGE_LIMIT));
     let connecting = tokio_tungstenite::connect_async_with_config(url, Some(config), false);
-    let (socket, _) = tokio::time::timeout(DIAL_WAIT, connecting)
-        .await
-        .map_err(|_| format!("could not connect to {url}: no answer within {}s", DIAL_WAIT.as_secs()))?
-        .map_err(|e| format!("could not connect to {url}: {e}"))?;
-    Ok(socket)
+    match tokio::time::timeout(DIAL_WAIT, connecting).await {
+        Err(_) => Err(DialError::Other(format!("could not connect to {url}: no answer within {}s", DIAL_WAIT.as_secs()))),
+        Ok(Err(error)) if http_gone(&error) => Err(DialError::Gone),
+        Ok(Err(error)) => Err(DialError::Other(format!("could not connect to {url}: {error}"))),
+        Ok(Ok((socket, _))) => Ok(socket),
+    }
+}
+
+/// 404, 502, 503 and 504 on the upgrade: the address answered and there is no hub behind it.
+fn http_gone(error: &tokio_tungstenite::tungstenite::Error) -> bool {
+    match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => matches!(response.status().as_u16(), 404 | 502 | 503 | 504),
+        _ => false,
+    }
 }
 
 /// A thread that answers the connection's calls one after another, so input typed fast reaches
@@ -785,14 +986,17 @@ enum Fault {
     Refused(String),
     /// The hub closed the socket with `UNAUTHORIZED`: it does not know the token.
     Unauthorized(String),
+    /// The address answered HTTP with no hub behind it.
+    Gone,
 }
 
 impl Fault {
     /// What this fault means for the span `Link::refused_for` measures. Only `UNAUTHORIZED` counts.
+    /// A missing hub is not a refusal of this machine's token.
     fn outcome(&self) -> Outcome {
         match self {
             Fault::Unauthorized(_) => Outcome::Unauthorized,
-            Fault::Refused(_) | Fault::Transport(_) => Outcome::Other,
+            Fault::Refused(_) | Fault::Transport(_) | Fault::Gone => Outcome::Other,
         }
     }
 }
@@ -964,6 +1168,24 @@ mod tests {
     }
 
     #[test]
+    fn the_link_is_up_only_while_its_socket_is_and_gone_survives_the_drop() {
+        let shared = Shared::default();
+        assert!(!*shared.up.subscribe().borrow());
+        assert_eq!(*shared.reach.subscribe().borrow(), Reach::Unreachable);
+        let (out, _incoming) = channel::unbounded_channel();
+        shared.connect_out(out);
+        assert!(*shared.up.subscribe().borrow());
+        assert_eq!(*shared.reach.subscribe().borrow(), Reach::Up);
+        shared.mark_down();
+        assert!(!*shared.up.subscribe().borrow());
+        assert_eq!(*shared.reach.subscribe().borrow(), Reach::Unreachable);
+        let since = tokio::time::Instant::now();
+        shared.reach.send_replace(Reach::Gone { since });
+        shared.mark_down();
+        assert_eq!(*shared.reach.subscribe().borrow(), Reach::Gone { since });
+    }
+
+    #[test]
     fn failed_attempts_double_the_wait_up_to_the_cap() {
         let mut backoff = Backoff::new();
         assert_eq!(waits(&mut backoff, 8), [1, 2, 4, 8, 16, 30, 30, 30]);
@@ -1033,7 +1255,7 @@ mod tests {
         let machine = Machine::new(crate::machine::tests::launch(), Some(dir.clone()), None, |_| {});
         let shared = Shared::default();
         let (out, _frames) = channel::unbounded_channel();
-        *shared.out.lock().unwrap() = Some(out);
+        shared.connect_out(out);
         let mut syncer = Syncer::default();
         syncer.cycle(&shared, &shared, &machine, &file);
         assert_eq!(std::fs::read(&file).unwrap(), b"", "a stopped sync leaves the file as it was");
@@ -1058,7 +1280,7 @@ mod tests {
         let machine = Machine::new(crate::machine::tests::launch(), Some(dir.clone()), None, |_| {});
         let shared = Shared::default();
         let (out, frames) = channel::unbounded_channel();
-        *shared.out.lock().unwrap() = Some(out);
+        shared.connect_out(out);
         (dir, file, machine, shared, frames)
     }
 
@@ -1206,7 +1428,165 @@ mod tests {
         });
         let dialed = tokio::time::timeout(Duration::from_secs(60), dial(&url)).await.expect("the dial never ended");
         let err = dialed.expect_err("the dial succeeded although the hub never answered");
+        let DialError::Other(err) = err else { panic!("a silent hub counted as gone") };
         assert!(err.starts_with(&format!("could not connect to {url}: ")), "{err}");
+    }
+
+    /// Serves one HTTP status on a fresh port and returns the `ws://` URL of that port.
+    async fn http_status(status: u16) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else { return };
+            let mut buf = [0u8; 2048];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+            let response = format!("HTTP/1.1 {status} status\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes()).await;
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn a_stopped_hub_answers_404_and_a_refused_connection_does_not() {
+        for status in [404u16, 502, 503, 504] {
+            let url = http_status(status).await;
+            let err = dial(&url).await.expect_err("the upgrade succeeded");
+            assert!(matches!(err, DialError::Gone), "{status} counted as {err:?}");
+        }
+        let url = http_status(401).await;
+        let err = dial(&url).await.expect_err("the upgrade succeeded");
+        let DialError::Other(message) = err else { panic!("401 counted as gone") };
+        assert!(message.starts_with(&format!("could not connect to {url}: ")), "{message}");
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let url = format!("ws://{closed}");
+        let err = dial(&url).await.expect_err("the dial succeeded");
+        let DialError::Other(message) = err else { panic!("a refused connection counted as gone") };
+        assert!(message.starts_with(&format!("could not connect to {url}: ")), "{message}");
+    }
+
+    #[test]
+    fn a_404_before_the_first_hello_is_unreachable_and_gone_after() {
+        let shared = Shared::default();
+        shared.saw_gone();
+        assert_eq!(*shared.reach.subscribe().borrow(), Reach::Unreachable);
+        shared.had_hello.store(true, Ordering::SeqCst);
+        let before = tokio::time::Instant::now();
+        shared.saw_gone();
+        let since = match shared.reach.subscribe().borrow().clone() {
+            Reach::Gone { since } => since,
+            other => panic!("a 404 after a hello was {other:?}"),
+        };
+        assert!(since >= before);
+        shared.mark_down();
+        shared.saw_gone();
+        assert_eq!(*shared.reach.subscribe().borrow(), Reach::Gone { since });
+        shared.reach.send_replace(Reach::Refused);
+        shared.saw_gone();
+        assert!(matches!(*shared.reach.subscribe().borrow(), Reach::Gone { .. }));
+    }
+
+    /// A copy that owes a handback. `own` is the connector whose callbacks this copy started.
+    struct Held {
+        holds: bool,
+        own: &'static str,
+        answered: Mutex<Vec<String>>,
+    }
+
+    impl Local for Held {
+        fn answer(&self, call: &HubCall) -> Option<Result<Value, String>> {
+            let name = match call {
+                HubCall::Machines => return None,
+                HubCall::GetTastes => "get_tastes",
+                HubCall::GetSettings => "get_settings",
+                HubCall::Stage { .. } => "stage",
+                HubCall::DisconnectLinear => "disconnect_linear",
+                _ => "other",
+            };
+            self.answered.lock().unwrap().push(name.into());
+            Some(Ok(Value::String(name.into())))
+        }
+
+        fn holds_changes(&self) -> bool {
+            self.holds
+        }
+
+        fn own_callback(&self, call: &HubCall) -> bool {
+            matches!(call, HubCall::Stage { connector, .. } if connector == self.own)
+        }
+    }
+
+    fn stage(connector: &str) -> HubCall {
+        HubCall::Stage {
+            connector: connector.into(),
+            subject: crate::agent::Subject::LinearIssue { issue: "i1".into() },
+            stage: crate::agent::Stage::Coding,
+        }
+    }
+
+    fn wait_frame(incoming: &mut channel::UnboundedReceiver<Outgoing>) -> Value {
+        let start = Instant::now();
+        loop {
+            match incoming.try_recv() {
+                Ok(outgoing) => return serde_json::from_str(&outgoing.text).unwrap(),
+                Err(channel::error::TryRecvError::Empty) if start.elapsed() < Duration::from_secs(2) => std::thread::sleep(Duration::from_millis(10)),
+                Err(error) => panic!("the call never left the machine: {error}"),
+            }
+        }
+    }
+
+    fn answer_hub(shared: &Shared, frame: &Value) {
+        let id = frame["id"].as_u64().unwrap();
+        let waiting = shared.pending.lock().unwrap().remove(&id).expect("nobody was waiting on the hub");
+        waiting.send(Ok(Value::String("hub".into()))).unwrap();
+    }
+
+    #[test]
+    fn a_hub_owned_stage_reaches_the_hub_while_the_copy_holds_an_edit() {
+        let shared = Arc::new(Shared::default());
+        let copy = Arc::new(Held { holds: true, own: "mine", answered: Mutex::new(vec![]) });
+        *shared.local.lock().unwrap() = Some(copy.clone());
+        let (out, mut incoming) = channel::unbounded_channel();
+        shared.connect_out(out);
+
+        let calling = shared.clone();
+        let sent = std::thread::spawn(move || calling.call(stage("hub-run")));
+        let frame = wait_frame(&mut incoming);
+        assert_eq!(frame["call"]["cmd"], "stage");
+        assert_eq!(frame["call"]["connector"], "hub-run");
+        answer_hub(&shared, &frame);
+        assert_eq!(sent.join().unwrap(), Ok(Value::String("hub".into())));
+        assert!(copy.answered.lock().unwrap().is_empty(), "the copy answered a run the hub owns");
+
+        let calling = shared.clone();
+        let (done, finished) = mpsc::channel();
+        std::thread::spawn(move || drop(done.send(calling.call(stage("mine")))));
+        assert_eq!(finished.recv_timeout(Duration::from_secs(2)).expect("the copy's own stage waited on the hub"), Ok(Value::String("stage".into())));
+        assert!(incoming.try_recv().is_err(), "the copy's own stage left the machine");
+
+        let calling = shared.clone();
+        let (done, finished) = mpsc::channel();
+        std::thread::spawn(move || drop(done.send(calling.call(HubCall::GetTastes))));
+        assert_eq!(finished.recv_timeout(Duration::from_secs(2)).expect("a read waited on the hub"), Ok(Value::String("get_tastes".into())));
+        assert!(incoming.try_recv().is_err(), "a read left the machine while the copy holds an edit");
+
+        let calling = shared.clone();
+        let sent = std::thread::spawn(move || calling.call(HubCall::DisconnectLinear));
+        let frame = wait_frame(&mut incoming);
+        assert_eq!(frame["call"]["cmd"], "disconnect_linear");
+        answer_hub(&shared, &frame);
+        assert_eq!(sent.join().unwrap(), Ok(Value::String("hub".into())));
+        assert_eq!(copy.answered.lock().unwrap().as_slice(), ["stage", "get_tastes"]);
+    }
+
+    #[test]
+    fn an_offline_call_is_answered_by_the_copy() {
+        let shared = Shared::default();
+        let copy = Arc::new(Held { holds: false, own: "mine", answered: Mutex::new(vec![]) });
+        *shared.local.lock().unwrap() = Some(copy.clone());
+        assert_eq!(shared.call(HubCall::GetSettings), Ok(Value::String("get_settings".into())));
+        assert_eq!(shared.call(HubCall::Machines), Err(OFFLINE.into()));
+        *shared.local.lock().unwrap() = Some(Arc::new(Held { holds: true, own: "mine", answered: Mutex::new(vec![]) }));
+        assert_eq!(shared.call(stage("hub-run")), Ok(Value::String("stage".into())));
     }
 
     #[test]
@@ -1304,6 +1684,7 @@ mod tests {
         assert_eq!(outcome(Some(Ok(Frame::Binary(vec![1, 2].into())))), Outcome::Other);
         assert_eq!(outcome(None), Outcome::Other);
         assert_eq!(Fault::Transport("the hub did not answer the sign in".into()).outcome(), Outcome::Other);
+        assert_eq!(Fault::Gone.outcome(), Outcome::Other);
         assert_eq!(outcome(hello_frame()), Outcome::Accepted);
     }
 
@@ -1661,7 +2042,7 @@ mod tests {
         let frame = MachineFrame::Event { event: MachineEvent::Update { status: None } };
         let shared = Shared::default();
         let (out, mut incoming) = channel::unbounded_channel();
-        *shared.out.lock().unwrap() = Some(out);
+        shared.connect_out(out);
         let writer = std::thread::spawn(move || {
             let outgoing = incoming.blocking_recv().unwrap();
             outgoing.wrote.unwrap().send(()).unwrap();
@@ -1670,7 +2051,7 @@ mod tests {
         writer.join().unwrap();
 
         let (out, mut incoming) = channel::unbounded_channel();
-        *shared.out.lock().unwrap() = Some(out);
+        shared.connect_out(out);
         let writer = std::thread::spawn(move || {
             let outgoing = incoming.blocking_recv().unwrap();
             drop(outgoing.wrote);
@@ -1709,7 +2090,7 @@ mod tests {
         machine.set_installer(Arc::new(ArmsRestart { restarted: restarted.clone() }));
         let shared = Arc::new(Shared::default());
         let (out, mut incoming) = channel::unbounded_channel();
-        *shared.out.lock().unwrap() = Some(out);
+        shared.connect_out(out);
         let at_write = restarted.clone();
         let writer = std::thread::spawn(move || {
             let outgoing = incoming.blocking_recv().unwrap();
@@ -1793,7 +2174,7 @@ mod tests {
         }));
         let shared = Arc::new(Shared::default());
         let (out, mut incoming) = channel::unbounded_channel();
-        *shared.out.lock().unwrap() = Some(out);
+        shared.connect_out(out);
         let writer = std::thread::spawn(move || {
             while let Some(outgoing) = incoming.blocking_recv() {
                 if let Some(wrote) = outgoing.wrote {

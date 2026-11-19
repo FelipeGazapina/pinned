@@ -88,7 +88,7 @@ function mcpFromHtml(from) {
 }
 
 function mcpPageHtml() {
-  if (!hub || !account) {
+  if (!account) {
     return `<h2>MCP servers</h2>
       <p class="hint">Sign in under Account to keep MCP servers that every session pinned starts loads, on every machine.</p>
       <div class="actions start"><button class="primary" data-action="go-account">Go to Account</button></div>`;
@@ -171,7 +171,8 @@ async function mcpSave() {
   const button = document.querySelector("#mcp-form button.primary");
   if (button) button.disabled = true;
   try {
-    await (agentApproval(call) ?? hub.hub(call));
+    const { cmd, ...args } = call;
+    await connectorCall(cmd, args);
     mcpUi.form = null;
     await loadMcpServers();
   } catch (e) {
@@ -183,7 +184,7 @@ async function mcpSave() {
 
 async function mcpEnable(id, enabled) {
   try {
-    const changed = await hub.hub({ cmd: "enable_mcp_server", id, enabled });
+    const changed = await connectorCall("enable_mcp_server", { id, enabled });
     mcpUi.list = mcpUi.list.map((entry) => (entry.id === id ? changed : entry));
     mcpUi.error = "";
   } catch (e) {
@@ -193,9 +194,9 @@ async function mcpEnable(id, enabled) {
 }
 
 async function loadMcpServers() {
-  if (!hub) return drawMcpPage();
+  if (!account) return drawMcpPage();
   try {
-    mcpUi.list = await hub.hub({ cmd: "list_mcp_servers" });
+    mcpUi.list = await connectorCall("list_mcp_servers");
     mcpUi.error = "";
   } catch (e) {
     mcpUi.error = `Couldn't load the MCP servers: ${e}`;
@@ -264,7 +265,7 @@ async function openMcpApproval(c) {
 function showMcpServers() {
   drawMcpPage();
   loadMcpServers();
-  if (hub && account) loadMcpRepos();
+  if (account) loadMcpRepos();
 }
 
 Object.assign(actions, {
@@ -294,7 +295,7 @@ Object.assign(actions, {
     const id = mcpUi.removing;
     mcpUi.removing = null;
     try {
-      await hub.hub({ cmd: "remove_mcp_server", id });
+      await connectorCall("remove_mcp_server", { id });
     } catch (e) {
       mcpUi.error = String(e);
     }

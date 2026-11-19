@@ -60,6 +60,12 @@ impl Keys {
     }
 }
 
+impl std::fmt::Debug for Keys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Keys").field("api_key", &hint(&self.api_key)).field("claude_token", &hint(&self.claude_token)).finish()
+    }
+}
+
 pub(crate) fn hint(secret: &str) -> String {
     let tail: String = secret.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
     format!("…{tail}")

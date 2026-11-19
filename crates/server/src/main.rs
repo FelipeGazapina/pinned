@@ -168,6 +168,7 @@ fn hub(args: &[String]) -> Result<(), String> {
         let ended = match ended {
             Some(ended) => ended,
             None => {
+                pinned_server::hub::copies::stop(&hub).await;
                 hub.going_away();
                 server.await
             }

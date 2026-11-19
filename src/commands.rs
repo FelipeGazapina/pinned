@@ -1,50 +1,39 @@
-use pinned_core::connectors::{Connector, Connectors, Settings, Suggestions};
+use pinned_core::connectors::Connectors;
+use pinned_core::github;
+use pinned_core::linear;
+use pinned_core::link::Local;
+use pinned_core::local_hub::{Answer, LocalHub, NEEDS_THE_HUB_OFF};
 use pinned_core::machine::Machine;
-use pinned_core::wire::Call;
-use pinned_core::{github, linear, process, slack, vercel};
+use pinned_core::process;
+use pinned_core::wire::HubCall;
 use serde_json::Value;
 use std::sync::Arc;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::DialogExt;
 
+/// What this Mac answers from its copy while signed in, and from its own store while signed out.
 #[tauri::command]
-pub fn get_settings(connectors: State<Connectors>) -> Settings {
-    connectors.get_settings()
+pub async fn local_call(app: AppHandle, call: HubCall) -> Result<Value, String> {
+    if let Some(standby) = app.state::<crate::account::Account>().standby() {
+        return tauri::async_runtime::spawn_blocking(move || match standby.answer(&call) {
+            Some(result) => result,
+            None => Err(NEEDS_THE_HUB_OFF.into()),
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    let connectors = app.state::<Connectors>();
+    let machine = app.state::<Arc<Machine>>();
+    let hub = LocalHub { connectors: connectors.inner(), machine: machine.inner(), place_as: "local", taste_dir: None, account: None };
+    match hub.answer(call).await {
+        Answer::Done(result) => result,
+        Answer::HubOnly => Err(NEEDS_THE_HUB_OFF.into()),
+    }
 }
 
 #[tauri::command]
 pub fn open_linear_keys() -> Result<(), String> {
     open(linear::KEY_PAGE)
-}
-
-#[tauri::command]
-pub async fn connect_linear(connectors: State<'_, Connectors>, key: String) -> Result<linear::Account, String> {
-    connectors.connect_linear(&key).await
-}
-
-#[tauri::command]
-pub fn disconnect_linear(connectors: State<Connectors>) -> Result<(), String> {
-    connectors.disconnect_linear()
-}
-
-#[tauri::command]
-pub async fn linear_suggestions(connectors: State<'_, Connectors>) -> Result<Suggestions, String> {
-    connectors.linear_suggestions().await
-}
-
-#[tauri::command]
-pub async fn connect_slack(connectors: State<'_, Connectors>, token: String) -> Result<slack::Connected, String> {
-    connectors.connect_slack(&token).await
-}
-
-#[tauri::command]
-pub fn disconnect_slack(connectors: State<Connectors>, bot: Option<String>) -> Result<(), String> {
-    connectors.disconnect_slack(bot.as_deref().unwrap_or_default())
-}
-
-#[tauri::command]
-pub async fn slack_suggestions(connectors: State<'_, Connectors>, bot: Option<String>) -> Result<Vec<String>, String> {
-    connectors.slack_suggestions(bot.as_deref().unwrap_or_default()).await
 }
 
 #[tauri::command]
@@ -58,68 +47,6 @@ pub fn open_url(url: String) -> Result<(), String> {
 #[tauri::command]
 pub fn open_github_tokens() -> Result<(), String> {
     open(github::TOKEN_PAGE)
-}
-
-#[tauri::command]
-pub async fn connect_github(connectors: State<'_, Connectors>, token: String) -> Result<github::Account, String> {
-    connectors.connect_github(&token).await
-}
-
-#[tauri::command]
-pub fn disconnect_github(connectors: State<Connectors>) -> Result<(), String> {
-    connectors.disconnect_github()
-}
-
-#[tauri::command]
-pub async fn github_repos(connectors: State<'_, Connectors>) -> Result<Vec<github::Repo>, String> {
-    connectors.github_repos().await
-}
-
-#[tauri::command]
-pub async fn connect_vercel(connectors: State<'_, Connectors>, key: String) -> Result<vercel::Account, String> {
-    connectors.connect_vercel(&key).await
-}
-
-#[tauri::command]
-pub fn disconnect_vercel(connectors: State<Connectors>) -> Result<(), String> {
-    connectors.disconnect_vercel()
-}
-
-#[tauri::command]
-pub async fn vercel_models(connectors: State<'_, Connectors>) -> Result<Vec<vercel::Model>, String> {
-    connectors.vercel_models().await
-}
-
-#[tauri::command]
-pub async fn clone_repo(connectors: State<'_, Connectors>, machine: State<'_, Arc<Machine>>, repo: String, dest: Option<String>) -> Result<Value, String> {
-    let repo = github::clone_url(&repo);
-    let token = connectors.github_token().filter(|_| github::hosts(&repo));
-    let machine = machine.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || machine.call(Call::Clone { repo, token, dest })).await.map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub fn save_connector(connectors: State<Connectors>, connector: Connector) -> Result<Connector, String> {
-    connectors.save_connector(connector)
-}
-
-/// Runs a saved workflow now on this Mac while it's signed out, held to its project's limits here.
-#[tauri::command]
-pub async fn run_workflow(connectors: State<'_, Connectors>, machine: State<'_, Arc<Machine>>, id: String) -> Result<pinned_core::wire::RunStarted, String> {
-    let run = connectors.run_now(&id, "the account's owner, from Settings › Workflows")?;
-    if matches!(run.runs_on, pinned_core::connectors::RunsOn::FreshBox(_)) {
-        return Err("this workflow runs in an Upstash Box, which needs pinned signed in".into());
-    }
-    let spec = run.spec();
-    let title = pinned_core::connectors::run_now_title(&spec);
-    let machine = machine.inner().clone();
-    let tab = pinned_core::connectors::off_worker(move || machine.run_now(&spec, &title, None)).await?;
-    Ok(pinned_core::wire::RunStarted { workflow: id, machine: "local".into(), machine_name: String::new(), tab })
-}
-
-#[tauri::command]
-pub fn delete_connector(connectors: State<Connectors>, id: String) -> Result<(), String> {
-    connectors.delete_connector(&id)
 }
 
 #[tauri::command]

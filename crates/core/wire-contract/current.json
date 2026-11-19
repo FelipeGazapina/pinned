@@ -7785,6 +7785,82 @@
                   "team",
                   "op"
                 ]
+              },
+              {
+                "description": "From a desktop that signed in: `account_copy::Mirrored`. `have` is the tag of the copy it\nholds; `login` is the user token that proves the owner's login.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mirror"
+                  },
+                  "have": {
+                    "type": "string"
+                  },
+                  "login": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "have",
+                  "login"
+                ]
+              },
+              {
+                "description": "From that desktop: `account_copy::Taken`, the account as it is once `changes` landed. A\nrepeat of `changes.id` answers the current copy and replays no run variables.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "handback"
+                  },
+                  "changes": {
+                    "$ref": "#/$defs/Changes"
+                  },
+                  "login": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "changes",
+                  "login"
+                ]
+              },
+              {
+                "description": "The machine that runs the account's workflows while the hub is off, or none to clear it.\nOnly the owner, in the app.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_offline_runner"
+                  },
+                  "machine": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine"
+                ]
+              },
+              {
+                "description": "The owner's release, in the app, of a hold that waits for the offline runner to hand back.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "release_workflows"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -12986,6 +13062,289 @@
               "in_doubt",
               "on_limit",
               "on_failure"
+            ]
+          },
+          "Changes": {
+            "description": "What a machine hands back when it reaches the hub again.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "default": "00000000-0000-0000-0000-000000000000"
+              },
+              "edits": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Edit"
+                },
+                "default": {}
+              },
+              "progress": {
+                "$ref": "#/$defs/Progress",
+                "default": {
+                  "workflows": {},
+                  "slack_threads": {},
+                  "fires": [],
+                  "change_retries": {},
+                  "apps_seen": {},
+                  "linear_changes_from": null
+                }
+              },
+              "runs": {
+                "type": "array",
+                "items": true,
+                "default": []
+              },
+              "run_sets": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/RunSet"
+                },
+                "default": []
+              },
+              "took_over_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              }
+            },
+            "required": [
+              "id",
+              "edits",
+              "progress",
+              "runs",
+              "run_sets",
+              "took_over_at"
+            ]
+          },
+          "Edit": {
+            "description": "One item this machine changed on its copy.",
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "base": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Version"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ours": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Version"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "at",
+              "base",
+              "ours"
+            ]
+          },
+          "Version": {
+            "description": "An item as one machine has it. Secrets are keyed by their role (`key`, `env:<NAME>`, `header:<NAME>`).",
+            "type": "object",
+            "properties": {
+              "value": true,
+              "secrets": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "value"
+            ]
+          },
+          "Progress": {
+            "description": "What the account's watchers did. Each part only grows, so [`Progress::join`] takes any two in any order.",
+            "type": "object",
+            "properties": {
+              "workflows": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/WorkflowProgress"
+                },
+                "default": {}
+              },
+              "slack_threads": {
+                "description": "The bot that claimed each Slack thread, by `<channel>:<ts>`. The first claim stays.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {}
+              },
+              "fires": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/Fire"
+                },
+                "default": []
+              },
+              "change_retries": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "default": {}
+              },
+              "apps_seen": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {}
+              },
+              "linear_changes_from": {
+                "description": "None when the two sides disagree, so the next check reads from the watermark again.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "workflows",
+              "slack_threads",
+              "fires",
+              "change_retries",
+              "apps_seen",
+              "linear_changes_from"
+            ]
+          },
+          "WorkflowProgress": {
+            "type": "object",
+            "properties": {
+              "since": {
+                "type": "string"
+              },
+              "handled": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string"
+                }
+              },
+              "created": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Filed"
+                }
+              },
+              "followed": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Followed"
+                }
+              },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                }
+              }
+            },
+            "required": [
+              "since",
+              "handled",
+              "created",
+              "followed",
+              "paged"
+            ]
+          },
+          "Fire": {
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "type": "string"
+              },
+              "key": {
+                "type": "string"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "workflow",
+              "key",
+              "at"
+            ]
+          },
+          "RunSet": {
+            "description": "A `pinned run set` for a run the hub owns, kept until the hub can take it.",
+            "type": "object",
+            "properties": {
+              "connector": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "connector",
+              "name",
+              "value"
+            ],
+            "anyOf": [
+              {
+                "title": "LinearIssue",
+                "description": "Linear's id for the issue, which `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "issue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issue"
+                ]
+              },
+              {
+                "title": "SlackThread",
+                "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "thread": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "channel",
+                  "thread"
+                ]
+              }
             ]
           },
           "Target4": {
@@ -20670,6 +21029,81 @@
                   "cmd",
                   "op"
                 ]
+              },
+              {
+                "description": "From a desktop that signed in: `account_copy::Mirrored`. `have` is the tag of the copy it\nholds; `login` is the user token that proves the owner's login.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mirror"
+                  },
+                  "have": {
+                    "type": "string"
+                  },
+                  "login": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "have",
+                  "login"
+                ]
+              },
+              {
+                "description": "From that desktop: `account_copy::Taken`, the account as it is once `changes` landed. A\nrepeat of `changes.id` answers the current copy and replays no run variables.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "handback"
+                  },
+                  "changes": {
+                    "$ref": "#/$defs/Changes"
+                  },
+                  "login": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "changes",
+                  "login"
+                ]
+              },
+              {
+                "description": "The machine that runs the account's workflows while the hub is off, or none to clear it.\nOnly the owner, in the app.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_offline_runner"
+                  },
+                  "machine": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The owner's release, in the app, of a hold that waits for the offline runner to hand back.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "release_workflows"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -25676,6 +26110,271 @@
               "on_failure"
             ]
           },
+          "Changes": {
+            "description": "What a machine hands back when it reaches the hub again.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "default": "00000000-0000-0000-0000-000000000000"
+              },
+              "edits": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Edit"
+                },
+                "default": {}
+              },
+              "progress": {
+                "$ref": "#/$defs/Progress",
+                "default": {
+                  "workflows": {},
+                  "slack_threads": {},
+                  "fires": [],
+                  "change_retries": {},
+                  "apps_seen": {},
+                  "linear_changes_from": null
+                }
+              },
+              "runs": {
+                "type": "array",
+                "items": true,
+                "default": []
+              },
+              "run_sets": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/RunSet"
+                },
+                "default": []
+              },
+              "took_over_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              }
+            }
+          },
+          "Edit": {
+            "description": "One item this machine changed on its copy.",
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "base": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Version"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ours": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Version"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "at"
+            ]
+          },
+          "Version": {
+            "description": "An item as one machine has it. Secrets are keyed by their role (`key`, `env:<NAME>`, `header:<NAME>`).",
+            "type": "object",
+            "properties": {
+              "value": true,
+              "secrets": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "value"
+            ]
+          },
+          "Progress": {
+            "description": "What the account's watchers did. Each part only grows, so [`Progress::join`] takes any two in any order.",
+            "type": "object",
+            "properties": {
+              "workflows": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/WorkflowProgress"
+                },
+                "default": {}
+              },
+              "slack_threads": {
+                "description": "The bot that claimed each Slack thread, by `<channel>:<ts>`. The first claim stays.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {}
+              },
+              "fires": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/Fire"
+                },
+                "default": []
+              },
+              "change_retries": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "default": {}
+              },
+              "apps_seen": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {}
+              },
+              "linear_changes_from": {
+                "description": "None when the two sides disagree, so the next check reads from the watermark again.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            }
+          },
+          "WorkflowProgress": {
+            "type": "object",
+            "properties": {
+              "since": {
+                "type": "string"
+              },
+              "handled": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string"
+                }
+              },
+              "created": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Filed"
+                }
+              },
+              "followed": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Followed"
+                }
+              },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                }
+              }
+            },
+            "required": [
+              "since",
+              "handled",
+              "created",
+              "followed",
+              "paged"
+            ]
+          },
+          "Fire": {
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "type": "string"
+              },
+              "key": {
+                "type": "string"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "workflow",
+              "key",
+              "at"
+            ]
+          },
+          "RunSet": {
+            "description": "A `pinned run set` for a run the hub owns, kept until the hub can take it.",
+            "type": "object",
+            "properties": {
+              "connector": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "connector",
+              "name",
+              "value"
+            ],
+            "anyOf": [
+              {
+                "title": "LinearIssue",
+                "description": "Linear's id for the issue, which `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "issue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issue"
+                ]
+              },
+              {
+                "title": "SlackThread",
+                "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "thread": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "channel",
+                  "thread"
+                ]
+              }
+            ]
+          },
           "Target4": {
             "type": "object",
             "properties": {
@@ -29730,6 +30429,82 @@
                   "cmd",
                   "team",
                   "op"
+                ]
+              },
+              {
+                "description": "From a desktop that signed in: `account_copy::Mirrored`. `have` is the tag of the copy it\nholds; `login` is the user token that proves the owner's login.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mirror"
+                  },
+                  "have": {
+                    "type": "string"
+                  },
+                  "login": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "have",
+                  "login"
+                ]
+              },
+              {
+                "description": "From that desktop: `account_copy::Taken`, the account as it is once `changes` landed. A\nrepeat of `changes.id` answers the current copy and replays no run variables.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "handback"
+                  },
+                  "changes": {
+                    "$ref": "#/$defs/Changes"
+                  },
+                  "login": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "changes",
+                  "login"
+                ]
+              },
+              {
+                "description": "The machine that runs the account's workflows while the hub is off, or none to clear it.\nOnly the owner, in the app.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_offline_runner"
+                  },
+                  "machine": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "machine"
+                ]
+              },
+              {
+                "description": "The owner's release, in the app, of a hold that waits for the offline runner to hand back.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "release_workflows"
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               }
             ]
@@ -35657,6 +36432,289 @@
               "on_limit",
               "on_failure"
             ]
+          },
+          "Changes": {
+            "description": "What a machine hands back when it reaches the hub again.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "default": "00000000-0000-0000-0000-000000000000"
+              },
+              "edits": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Edit"
+                },
+                "default": {}
+              },
+              "progress": {
+                "$ref": "#/$defs/Progress",
+                "default": {
+                  "workflows": {},
+                  "slack_threads": {},
+                  "fires": [],
+                  "change_retries": {},
+                  "apps_seen": {},
+                  "linear_changes_from": null
+                }
+              },
+              "runs": {
+                "type": "array",
+                "items": true,
+                "default": []
+              },
+              "run_sets": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/RunSet"
+                },
+                "default": []
+              },
+              "took_over_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              }
+            },
+            "required": [
+              "id",
+              "edits",
+              "progress",
+              "runs",
+              "run_sets",
+              "took_over_at"
+            ]
+          },
+          "Edit": {
+            "description": "One item this machine changed on its copy.",
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "base": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Version"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ours": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Version"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "at",
+              "base",
+              "ours"
+            ]
+          },
+          "Version": {
+            "description": "An item as one machine has it. Secrets are keyed by their role (`key`, `env:<NAME>`, `header:<NAME>`).",
+            "type": "object",
+            "properties": {
+              "value": true,
+              "secrets": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "value"
+            ]
+          },
+          "Progress": {
+            "description": "What the account's watchers did. Each part only grows, so [`Progress::join`] takes any two in any order.",
+            "type": "object",
+            "properties": {
+              "workflows": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/WorkflowProgress"
+                },
+                "default": {}
+              },
+              "slack_threads": {
+                "description": "The bot that claimed each Slack thread, by `<channel>:<ts>`. The first claim stays.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {}
+              },
+              "fires": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/Fire"
+                },
+                "default": []
+              },
+              "change_retries": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "default": {}
+              },
+              "apps_seen": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {}
+              },
+              "linear_changes_from": {
+                "description": "None when the two sides disagree, so the next check reads from the watermark again.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "workflows",
+              "slack_threads",
+              "fires",
+              "change_retries",
+              "apps_seen",
+              "linear_changes_from"
+            ]
+          },
+          "WorkflowProgress": {
+            "type": "object",
+            "properties": {
+              "since": {
+                "type": "string"
+              },
+              "handled": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string"
+                }
+              },
+              "created": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Filed"
+                }
+              },
+              "followed": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Followed"
+                }
+              },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                }
+              }
+            },
+            "required": [
+              "since",
+              "handled",
+              "created",
+              "followed",
+              "paged"
+            ]
+          },
+          "Fire": {
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "type": "string"
+              },
+              "key": {
+                "type": "string"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "workflow",
+              "key",
+              "at"
+            ]
+          },
+          "RunSet": {
+            "description": "A `pinned run set` for a run the hub owns, kept until the hub can take it.",
+            "type": "object",
+            "properties": {
+              "connector": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "connector",
+              "name",
+              "value"
+            ],
+            "anyOf": [
+              {
+                "title": "LinearIssue",
+                "description": "Linear's id for the issue, which `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "issue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issue"
+                ]
+              },
+              {
+                "title": "SlackThread",
+                "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "thread": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "channel",
+                  "thread"
+                ]
+              }
+            ]
           }
         }
       },
@@ -39508,6 +40566,81 @@
                 "required": [
                   "cmd",
                   "op"
+                ]
+              },
+              {
+                "description": "From a desktop that signed in: `account_copy::Mirrored`. `have` is the tag of the copy it\nholds; `login` is the user token that proves the owner's login.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "mirror"
+                  },
+                  "have": {
+                    "type": "string"
+                  },
+                  "login": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "have",
+                  "login"
+                ]
+              },
+              {
+                "description": "From that desktop: `account_copy::Taken`, the account as it is once `changes` landed. A\nrepeat of `changes.id` answers the current copy and replays no run variables.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "handback"
+                  },
+                  "changes": {
+                    "$ref": "#/$defs/Changes"
+                  },
+                  "login": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "changes",
+                  "login"
+                ]
+              },
+              {
+                "description": "The machine that runs the account's workflows while the hub is off, or none to clear it.\nOnly the owner, in the app.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_offline_runner"
+                  },
+                  "machine": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The owner's release, in the app, of a hold that waits for the offline runner to hand back.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "release_workflows"
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               }
             ]
@@ -45225,6 +46358,271 @@
               "in_doubt",
               "on_limit",
               "on_failure"
+            ]
+          },
+          "Changes": {
+            "description": "What a machine hands back when it reaches the hub again.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "default": "00000000-0000-0000-0000-000000000000"
+              },
+              "edits": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Edit"
+                },
+                "default": {}
+              },
+              "progress": {
+                "$ref": "#/$defs/Progress",
+                "default": {
+                  "workflows": {},
+                  "slack_threads": {},
+                  "fires": [],
+                  "change_retries": {},
+                  "apps_seen": {},
+                  "linear_changes_from": null
+                }
+              },
+              "runs": {
+                "type": "array",
+                "items": true,
+                "default": []
+              },
+              "run_sets": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/RunSet"
+                },
+                "default": []
+              },
+              "took_over_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              }
+            }
+          },
+          "Edit": {
+            "description": "One item this machine changed on its copy.",
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "base": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Version"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ours": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Version"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "at"
+            ]
+          },
+          "Version": {
+            "description": "An item as one machine has it. Secrets are keyed by their role (`key`, `env:<NAME>`, `header:<NAME>`).",
+            "type": "object",
+            "properties": {
+              "value": true,
+              "secrets": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "value"
+            ]
+          },
+          "Progress": {
+            "description": "What the account's watchers did. Each part only grows, so [`Progress::join`] takes any two in any order.",
+            "type": "object",
+            "properties": {
+              "workflows": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/WorkflowProgress"
+                },
+                "default": {}
+              },
+              "slack_threads": {
+                "description": "The bot that claimed each Slack thread, by `<channel>:<ts>`. The first claim stays.",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {}
+              },
+              "fires": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/Fire"
+                },
+                "default": []
+              },
+              "change_retries": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "default": {}
+              },
+              "apps_seen": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {}
+              },
+              "linear_changes_from": {
+                "description": "None when the two sides disagree, so the next check reads from the watermark again.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            }
+          },
+          "WorkflowProgress": {
+            "type": "object",
+            "properties": {
+              "since": {
+                "type": "string"
+              },
+              "handled": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string"
+                }
+              },
+              "created": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Filed"
+                }
+              },
+              "followed": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Followed"
+                }
+              },
+              "paged": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Paged"
+                }
+              }
+            },
+            "required": [
+              "since",
+              "handled",
+              "created",
+              "followed",
+              "paged"
+            ]
+          },
+          "Fire": {
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "type": "string"
+              },
+              "key": {
+                "type": "string"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "workflow",
+              "key",
+              "at"
+            ]
+          },
+          "RunSet": {
+            "description": "A `pinned run set` for a run the hub owns, kept until the hub can take it.",
+            "type": "object",
+            "properties": {
+              "connector": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "connector",
+              "name",
+              "value"
+            ],
+            "anyOf": [
+              {
+                "title": "LinearIssue",
+                "description": "Linear's id for the issue, which `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "issue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issue"
+                ]
+              },
+              {
+                "title": "SlackThread",
+                "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "thread": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "channel",
+                  "thread"
+                ]
+              }
             ]
           }
         }
@@ -56440,6 +57838,18 @@
             "items": {
               "$ref": "#/$defs/Task"
             }
+          },
+          "offline_runner": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workflows_held_for": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -59043,6 +60453,18 @@
             "items": {
               "$ref": "#/$defs/Task"
             }
+          },
+          "offline_runner": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workflows_held_for": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -68563,6 +69985,18 @@
                 "items": {
                   "$ref": "#/$defs/Task"
                 }
+              },
+              "offline_runner": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "workflows_held_for": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -73337,6 +74771,18 @@
                 "items": {
                   "$ref": "#/$defs/Task"
                 }
+              },
+              "offline_runner": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "workflows_held_for": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [

@@ -195,12 +195,19 @@ pub struct Spec {
 }
 
 /// The secret values of a server, by name: never in an answer, a list, an audit row or an error.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Eq, schemars::JsonSchema)]
 pub struct Secrets {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for Secrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tail = |map: &BTreeMap<String, String>| -> BTreeMap<String, String> { map.iter().map(|(name, value)| (name.clone(), crate::account_copy::secret_tail(value))).collect() };
+        f.debug_struct("Secrets").field("env", &tail(&self.env)).field("headers", &tail(&self.headers)).finish()
+    }
 }
 
 impl Secrets {

@@ -379,7 +379,11 @@ pub fn hub_rule(call: &HubCall) -> Rule {
         | HubCall::ReportIssue { .. }
         // The password, and a team inside a team.
         | HubCall::Unlock { .. }
-        | HubCall::Team { .. } => (Gate::Never, false),
+        | HubCall::Team { .. }
+        | HubCall::Mirror { .. }
+        | HubCall::Handback { .. }
+        | HubCall::SetOfflineRunner { .. }
+        | HubCall::ReleaseWorkflows => (Gate::Never, false),
     };
     Rule { gate, unlock }
 }
@@ -499,6 +503,10 @@ mod tests {
             json!({ "cmd": "set_reviewer", "patch": { "rounds": 3 } }),
             json!({ "cmd": "set_worker_profiles", "profiles": [], "drop_proposed": ["scout"] }),
             json!({ "cmd": "propose_worker_profile", "tab": "tab-1", "profile": { "name": "scout" } }),
+            json!({ "cmd": "mirror", "have": "", "login": "user-token" }),
+            json!({ "cmd": "handback", "changes": {}, "login": "user-token" }),
+            json!({ "cmd": "set_offline_runner" }),
+            json!({ "cmd": "release_workflows" }),
         ];
         for call in never {
             for role in [Role::Owner, Role::Member] {

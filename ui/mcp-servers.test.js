@@ -50,7 +50,10 @@ function app({ answer = async () => [], onMachine = async () => [] } = {}) {
     LOCAL: "local",
     account: { machine_id: "this-mac", email: "ana@acme.dev" },
     machines: new Map([["local", { view: { online: true, name: "MacBook" }, hubView: { name: "MacBook" }, accounts: [{ id: "claude", provider: "claude", name: "Claude" }] }]]),
-    hub: { hub: (call) => (calls.push(call), answer(call)) },
+    hub: { online: true, hub: (call) => (calls.push(call), answer(call)) },
+    hubUp: () => context.hub.online !== false,
+    TAURI: {},
+    invoke: (cmd, args) => Promise.reject(`${cmd} ${args?.call?.cmd ?? ""} should stay on the hub in this test`),
     callOn: async (machine, call) => (machineCalls.push({ machine, call }), onMachine(call)),
     accountsOf: async (machine) => context.machines.get(machine).accounts,
     picker: {},
@@ -200,4 +203,28 @@ test("the form shows the hub's refusal of a server that carries a key, and keeps
   assert.deepEqual(here(calls.find((c) => c.cmd === "save_mcp_server").server), { name: "files", transport: { type: "stdio", command: "files-mcp", args: ["--token", "3f9a8c1e77d2"], env: [] } });
   assert.match(dom["settings-page"].innerHTML, new RegExp(`<p class="error" id="mcp-form-error">${refusal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</p>`));
   assert.equal(state("mcpUi.form.server.transport.command"), "files-mcp", "the form stays open with the server as typed");
+});
+
+test("signed out, the MCP page still says to sign in under Account", () => {
+  const { context, dom } = app();
+  vm.runInContext(`account = null; page = "mcp-servers"; showMcpServers()`, context);
+  assert.match(dom["settings-page"].innerHTML, /Sign in under Account to keep MCP servers that every session pinned starts loads, on every machine\./);
+});
+
+test("the MCP page renders from local_call while the hub is down", async () => {
+  const servers = [{ id: "mcp-1", enabled: true, server: ctx }];
+  const { context, calls, dom } = app();
+  const local = [];
+  context.hub.online = false;
+  context.invoke = (cmd, args) => {
+    local.push([cmd, args.call.cmd]);
+    return Promise.resolve(args.call.cmd === "list_mcp_servers" ? servers : []);
+  };
+  vm.runInContext(`page = "mcp-servers"`, context);
+  context.showMcpServers();
+  await flush();
+  assert.deepEqual(calls, []);
+  assert.deepEqual(local, [["local_call", "list_mcp_servers"]]);
+  assert.match(dom["settings-page"].innerHTML, /<b>ctx<\/b>/);
+  assert.doesNotMatch(dom["settings-page"].innerHTML, /Sign in under Account to keep MCP servers/);
 });

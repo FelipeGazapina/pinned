@@ -1594,6 +1594,20 @@ pub enum HubCall {
         team: Option<String>,
         op: crate::teams::TeamOp,
     },
+    /// From a desktop that signed in: `account_copy::Mirrored`. `have` is the tag of the copy it
+    /// holds; `login` is the user token that proves the owner's login.
+    Mirror { have: String, login: String },
+    /// From that desktop: `account_copy::Taken`, the account as it is once `changes` landed. A
+    /// repeat of `changes.id` answers the current copy and replays no run variables.
+    Handback { changes: crate::account_copy::Changes, login: String },
+    /// The machine that runs the account's workflows while the hub is off, or none to clear it.
+    /// Only the owner, in the app.
+    SetOfflineRunner {
+        #[serde(default)]
+        machine: Option<MachineId>,
+    },
+    /// The owner's release, in the app, of a hold that waits for the offline runner to hand back.
+    ReleaseWorkflows,
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -2468,7 +2482,7 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], ideas: vec![], repo_insight: Default::default(), schedules: vec![] } },
+            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], ideas: vec![], repo_insight: Default::default(), schedules: vec![], offline_runner: None, workflows_held_for: None } },
             json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
         let old: ToClient = serde_json::from_value(json!({ "type": "machines", "machines": [] })).unwrap();
