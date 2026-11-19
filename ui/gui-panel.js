@@ -228,7 +228,7 @@ function addMenu() {
     { label: "Linked pull requests", icon: "link-2", kbd: "L", disabled: !tab, run: () => addSurface(tab, { id: "prs", kind: "prs" }) },
     { label: "Device", icon: "smartphone", kbd: "M", disabled: !tab, run: () => addSurface(tab, panelOf(tab).surfaces.find((x) => x.kind === "device") ?? { id: `device:${Date.now().toString(36)}`, kind: "device" }) },
     { label: isGlobalOrchestratorTab(tab) ? `${globalOrchestratorName()}'s memory` : "Memory", icon: "book-open", kbd: "Y", disabled: !hasProject(tab), hint: hasProject(tab) ? "" : "This thread is not in a project", run: () => addSurface(tab, { id: "memory", kind: "memory" }) },
-    ...(isPlanCaptain(tab) ? [{ label: "Plan", icon: "git-branch", kbd: "N", run: () => addSurface(tab, { id: "plan", kind: "plan", title: "Plan" }) }] : []),
+    ...(hasPlanSurface(tab) ? [{ label: "Plan", icon: "git-branch", kbd: "N", run: () => addSurface(tab, { id: "plan", kind: "plan", title: "Plan" }) }] : []),
   ];
 }
 

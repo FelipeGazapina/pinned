@@ -124,6 +124,8 @@ const hub = (snapshots = [], glance = rglance()) => (machine, call) => {
   throw new Error(`unexpected ${call.cmd}`);
 };
 const planCalls = (h) => h.log.on.filter((c) => c.call.cmd === "plan").map((c) => `${c.machine}/${c.call.tab}/${c.call.plan}`).sort();
+/** Where a plan's first list sits in the html, by its (machine, tab, plan) scope; -1 when the plan is not drawn. */
+const place = (html, scope) => html.indexOf(`data-fold="${scope}|l1"`);
 const sections = (html) => [...html.matchAll(/<h3 class="pl-sec">([^<]*)<\/h3>/g)].map((m) => decode(m[1]));
 
 test("two Captains give two sections, in captains order, with every plan fetched by (machine, tab, plan)", async () => {
@@ -138,9 +140,10 @@ test("two Captains give two sections, in captains order, with every plan fetched
   assert.deepEqual(planCalls(h), ["m1/tab-1/p1", "m1/tab-1/p2", "m2/tab-7/p1"], "one plan call per plan, on that plan's machine and tab");
   assert.deepEqual(sections(h.html()), ["Captain storefront · Mac mini", "Captain billing · Laptop"], "one section per Captain, in glance.captains order");
   const html = h.html();
-  const at = (text) => html.indexOf(text);
-  assert.ok(at("Plan m1/tab-1/p1") > 0 && at("Plan m1/tab-1/p2") > at("Plan m1/tab-1/p1"), "the storefront section holds its two plans");
-  assert.ok(at("Plan m2/tab-7/p1") > at("Plan m1/tab-1/p2"), "the billing section follows");
+  const at = (scope) => place(html, scope);
+  assert.ok(at("m1|tab-1|p1") > 0 && at("m1|tab-1|p2") > at("m1|tab-1|p1"), "the storefront section holds its two plans");
+  assert.ok(at("m2|tab-7|p1") > at("m1|tab-1|p2"), "the billing section follows");
+  assert.ok(html.includes("Plan m1/tab-1/p2"), "a section with two plans names each plan");
 });
 
 test("the Orchestrator's own lanes come first, under the header Orchestrator", async () => {
@@ -153,7 +156,7 @@ test("the Orchestrator's own lanes come first, under the header Orchestrator", a
   assert.deepEqual(sections(h.html()), ["Orchestrator", "Captain storefront · Mac mini", "Captain billing · Laptop"], "Orchestrator first, then each Captain");
   assert.ok(planCalls(h).includes("m1/tab-20/p1"), "the own plan is fetched on the request's tab");
   const html = h.html();
-  assert.ok(html.indexOf("Plan m1/tab-20/p1") < html.indexOf("Plan m1/tab-1/p1"), "the own plan draws above the Captain's");
+  assert.ok(place(html, "m1|tab-20|p1") > 0 && place(html, "m1|tab-20|p1") < place(html, "m1|tab-1|p1"), "the own plan draws above the Captain's");
 });
 
 test("a plan named in two requests appears only in the request being viewed", async () => {
@@ -164,7 +167,7 @@ test("a plan named in two requests appears only in the request being viewed", as
   await h.open(request);
 
   assert.deepEqual(planCalls(h), ["m1/tab-1/p1"], "only the plan that names q1 is fetched");
-  assert.ok(h.html().includes("Plan m1/tab-1/p1") && !h.html().includes("Plan m1/tab-1/p2"), "the other request's plan is not drawn");
+  assert.ok(place(h.html(), "m1|tab-1|p1") > 0 && place(h.html(), "m1|tab-1|p2") < 0, "the other request's plan is not drawn");
 });
 
 test("a snapshot plan draws without a fetch, marked ended, in its Captain's section", async () => {
@@ -254,7 +257,7 @@ test("a host that answers user_request with an error still draws the plans, with
   const request = requestTab();
   h.tabs.push(store, request);
   await h.open(request);
-  assert.ok(h.html().includes("Plan m1/tab-1/p1"), "the live plan still draws");
+  assert.ok(place(h.html(), "m1|tab-1|p1") > 0, "the live plan still draws");
   assert.ok(!/could not|error|failed/i.test(decode(h.html())), "nothing reports the missing call");
 });
 
@@ -276,4 +279,21 @@ test("the add menu offers Plan on a request thread", () => {
   assert.ok(labels.includes("Plan"), "a request thread offers Plan");
   h.context.active = requestTab({ request: undefined });
   assert.ok(!h.run("addMenu()").map((m) => m.label).includes("Plan"), "the anchor does not");
+});
+
+test("a plan goes to its Captain by machine and path, never by folder or project name", async () => {
+  // The checkout folder is personal-harness, the project is pinned.
+  const captains = [{ machine: "m1", path: "/Users/x/personal-harness", project: "pinned", machine_name: "Mac mini" }];
+  const glance = rglance({ captains });
+  const h = harness({ reply: hub([], glance) });
+  const tab = captainTab("m1", "tab-1", "/Users/x/personal-harness", [plan("p1")]);
+  const stranger = captainTab("m1", "tab-2", "/Users/x/pinned", [plan("p2")]);
+  const request = requestTab({}, [], glance);
+  h.tabs.push(tab, stranger, request);
+  await h.open(request);
+  const html = h.html();
+  assert.deepEqual(sections(html).slice(0, 1), ["Captain pinned · Mac mini"], "the section is headed with the project key");
+  assert.ok(place(html, "m1|tab-1|p1") > html.indexOf("Captain pinned"), "the plan on that path draws under it");
+  assert.equal(sections(html).length, 2, "a tab on a folder that merely carries the project name is its own section");
+  assert.equal(sections(html)[1], "Other Captain · pinned", "and is not taken for the Captain");
 });
