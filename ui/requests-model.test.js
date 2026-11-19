@@ -81,31 +81,40 @@ const board = [
 ];
 const ctx = (g) => (g.id === "needs-new" ? { tabWaits: true } : {});
 
-test("requestCounts counts every request by state", () => {
-  assert.deepEqual(requestCounts(board, ctx), { all: 6, needs: 2, working: 2, done: 2 });
-  assert.deepEqual(requestCounts([]), { all: 0, needs: 0, working: 0, done: 0 });
+test("requestCounts counts the open, needs-you and done requests", () => {
+  assert.deepEqual(requestCounts(board, ctx), { open: 4, needs: 2, done: 2 });
+  assert.deepEqual(requestCounts([]), { open: 0, needs: 0, done: 0 });
 });
 
-test("requestFilter all lists needs first, then working, then done, newest activity first in each", () => {
-  assert.deepEqual(requestFilter(board, "all", ctx).map((g) => g.id), [
+test("requestFilter open lists needs first, then working, newest activity first in each, and leaves done out", () => {
+  assert.deepEqual(requestFilter(board, "open", ctx).map((g) => g.id), [
     "needs-new",
     "needs-old",
     "working-new",
     "working-old",
-    "done-new",
-    "done-old",
   ]);
 });
 
-test("requestFilter narrows to one state and keeps the order", () => {
+test("requestFilter needs and done narrow to one state and keep the order", () => {
   assert.deepEqual(requestFilter(board, "needs", ctx).map((g) => g.id), ["needs-new", "needs-old"]);
-  assert.deepEqual(requestFilter(board, "working", ctx).map((g) => g.id), ["working-new", "working-old"]);
   assert.deepEqual(requestFilter(board, "done", ctx).map((g) => g.id), ["done-new", "done-old"]);
+});
+
+test("with one request each in needs, working and done: Open holds the needs one then the working one, Needs you one, Done one", () => {
+  const one = [
+    glance("r-done", { opened_at: 1, closed_at: 9 }),
+    glance("r-work", { opened_at: 2, last_at: 900 }),
+    glance("r-needs", { opened_at: 3, needs: "Pick one", needs_at: 5, last_at: 100 }),
+  ];
+  assert.deepEqual(requestFilter(one, "open").map((g) => g.id), ["r-needs", "r-work"]);
+  assert.deepEqual(requestFilter(one, "needs").map((g) => g.id), ["r-needs"]);
+  assert.deepEqual(requestFilter(one, "done").map((g) => g.id), ["r-done"]);
+  assert.deepEqual(requestCounts(one), { open: 2, needs: 1, done: 1 });
 });
 
 test("requestFilter does not reorder the list it was given", () => {
   const before = board.map((g) => g.id);
-  requestFilter(board, "all", ctx);
+  requestFilter(board, "open", ctx);
   assert.deepEqual(board.map((g) => g.id), before);
 });
 

@@ -141,7 +141,7 @@ const hrefs = (html) => [...html.matchAll(/\bhref\s*=\s*("[^"]*"|'[^']*'|[^\s>]+
 const rowIds = (html) => [...html.matchAll(/data-request="([^"]*)"/g)].map((m) => m[1]);
 
 /** requestsColumnHtml with the page's defaults filled in. */
-const draw = (h, over = {}) => h.run(`requestsColumnHtml(${JSON.stringify({ glances: [], filter: "all", seen: {}, current: null, name: "Orchestrator", tabViews: {}, ...over })})`);
+const draw = (h, over = {}) => h.run(`requestsColumnHtml(${JSON.stringify({ glances: [], filter: "open", seen: {}, current: null, name: "Orchestrator", tabViews: {}, ...over })})`);
 
 const board = () => [
   glance("q-done", { title: "Pause the workers", closed_at: 900, last_who: "orchestrator", last_text: "Paused, nothing was lost", last_at: 900 }),
@@ -154,11 +154,8 @@ test("the column draws the filters with their counts and one row per request", (
   const h = harness();
   const html = draw(h, { glances: board(), tabViews: planTabs });
   assert.match(html, />\s*Requests\s*</, "the heading");
-  assert.match(html, />All\s*<span[^>]*>3</);
-  assert.match(html, />Needs you\s*<span[^>]*>1</);
-  assert.match(html, />Working\s*<span[^>]*>1</);
-  assert.match(html, />Done\s*<span[^>]*>1</);
-  assert.match(html, /aria-pressed="true"[^>]*>All/);
+  assert.deepEqual([...html.matchAll(/data-rq-filter="([^"]*)"[^>]*>([^<]*?)\s*<span[^>]*>(\d+)</g)].map((m) => [m[1], m[2], m[3]]), [["open", "Open", "2"], ["needs", "Needs you", "1"], ["done", "Done", "1"]]);
+  assert.match(html, /aria-pressed="true"[^>]*>Open/);
   const work = html.slice(html.indexOf('data-request="q-work"'), html.indexOf('data-request="q-done"'));
   assert.match(work, /Add gift cards/);
   assert.match(work, /#storefront/);
@@ -171,12 +168,11 @@ test("the column draws the filters with their counts and one row per request", (
   assert.match(html, /All activity/);
 });
 
-test("a request that needs you shows first, then working, then done", () => {
+test("Open shows needs you then working, Needs you and Done one each", () => {
   const h = harness();
   const ids = (filter) => rowIds(draw(h, { glances: board(), filter }));
-  assert.deepEqual(ids("all"), ["q-needs", "q-work", "q-done"]);
+  assert.deepEqual(ids("open"), ["q-needs", "q-work"]);
   assert.deepEqual(ids("needs"), ["q-needs"]);
-  assert.deepEqual(ids("working"), ["q-work"]);
   assert.deepEqual(ids("done"), ["q-done"]);
   assert.match(draw(h, { glances: board(), filter: "needs" }), /aria-pressed="true"[^>]*>Needs you/);
 });
@@ -239,7 +235,7 @@ test("with no tab carrying requests the screen asks user_requests, and draws its
   h.context.active = h.context.tabs[0];
   h.run("renderRequests()");
   assert.equal(h.column.hidden, false);
-  assert.deepEqual(rowIds(h.column.innerHTML), ["q-needs", "q-work", "q-done"]);
+  assert.deepEqual(rowIds(h.column.innerHTML), ["q-needs", "q-work"]);
 });
 
 test("when user_requests errors the single chat shows, with no banner and no message", async () => {
@@ -347,6 +343,15 @@ test("the column shows only beside a global tab, on a wide screen, in the app vi
   h.context.guiOn = () => true;
   h.run("renderRequests()");
   assert.equal(h.column.hidden, false);
+});
+
+test("the column opens on the Open filter, as the board does", () => {
+  const anchor = anchorTab(board());
+  const h = harness({ tabs: [anchor] });
+  h.context.active = anchor;
+  h.run("renderRequests()");
+  assert.deepEqual(rowIds(h.column.innerHTML), ["q-needs", "q-work"]);
+  assert.match(h.column.innerHTML, /aria-pressed="true"[^>]*>Open/);
 });
 
 test("a filter button redraws the column with that filter", () => {
