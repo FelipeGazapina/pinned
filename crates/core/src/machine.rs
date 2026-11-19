@@ -3560,6 +3560,25 @@ impl Machine {
         }
     }
 
+    /// After a restart, each request that waited for room to start rests again in a tab of its
+    /// own with the lines held for it, and starts on them once there is room.
+    fn reopen_held_requests(&self) {
+        let waiting = self.requests.lock().unwrap().unstarted();
+        let mut opened = false;
+        for (id, lines) in waiting.into_iter().filter(|(id, _)| self.request_tab(id).is_none()) {
+            let Ok(tab) = self.new_request_tab(&id) else { continue };
+            let _ = self.tab(&tab, |t| {
+                t.held = lines;
+                t.asleep = true;
+            });
+            opened = true;
+        }
+        if opened {
+            self.arm_delegate_pass();
+            self.emit_tabs();
+        }
+    }
+
     fn old_global_session(&self) -> Option<String> {
         let anchor = |env: &[(String, String)]| global::is_global(env) && crate::user_requests::of_env(env).is_none();
         let open = self.tabs.lock().unwrap().iter().filter(|(_, t)| anchor(&t.env)).filter_map(|(id, t)| Some((tab_number(id), t.claude_session.clone()?))).min().map(|(_, session)| session);
@@ -3764,10 +3783,11 @@ impl Machine {
         };
         let mut first = None;
         for route in routes {
-            let handoff = match self.unstarted_request(&route) {
-                Some(id) => self.start_request(&id, &report.line(), &sent)?,
-                None => self.hand_to(&self.tab_of_route(&route)?, &report.line(), request_id, BusyPolicy::Queue, &sent)?,
+            let tab = match self.unstarted_request(&route) {
+                Some(id) => self.new_request_tab(&id)?,
+                None => self.tab_of_route(&route)?,
             };
+            let handoff = self.hand_to(&tab, &report.line(), request_id, BusyPolicy::Queue, &sent)?;
             self.requests.lock().unwrap().delivered(request_id, &route);
             first.get_or_insert(handoff);
         }
@@ -3789,9 +3809,10 @@ impl Machine {
         (fresh && self.request_tab(id).is_none()).then(|| id.clone())
     }
 
-    /// Opens request `id`'s own tab with `line` as its first prompt, held under the cap of live
-    /// request sessions like any first prompt. It never resumes the anchor.
-    fn start_request(&self, id: &str, line: &str, sent: &global::Ledger) -> Result<Handoff, String> {
+    /// A new stopped tab of its own for request `id`, which has no conversation yet. A line handed
+    /// to it starts a new session, held under the cap of live request sessions; it never resumes
+    /// the anchor.
+    fn new_request_tab(&self, id: &str) -> Result<TabId, String> {
         std::fs::create_dir_all(&self.global_dir).map_err(|e| format!("could not make {}: {e}", self.global_dir.display()))?;
         let folder = self.global_folder();
         let account = self.account_for(None, &folder)?;
@@ -3800,13 +3821,7 @@ impl Machine {
         }
         let mut env = global::env();
         env.push((crate::user_requests::ENV.to_owned(), id.to_owned()));
-        let tab = self.add_tab(folder, account, vec![], env, false, None);
-        let start = self.first_prompt(&tab, line)?;
-        self.emit_tabs();
-        Ok(match start {
-            crate::user_requests::Start::Started => Handoff::Started { tab },
-            crate::user_requests::Start::Queued => Handoff::Queued { position: sent.queued_on(&tab) + 1, tab },
-        })
+        Ok(self.add_tab(folder, account, vec![], env, false, None))
     }
 
     /// The tab a report routed to `route` is typed into: the request's own, opened on its session
@@ -3844,14 +3859,18 @@ impl Machine {
         let id = tab.to_owned();
         if ready == Ready::Stopped && self.tab(tab, |t| global::is_global(&t.env))? && !self.room_for(tab) {
             // A session that never started reads no queue, so its line is held for its start.
-            let session = self.tab(tab, |t| {
+            let (session, request) = self.tab(tab, |t| {
                 t.launch = t.claude_session.as_deref().map(|session| crate::delegate::resume_args(t.account.provider, session)).unwrap_or_default();
                 t.asleep = true;
                 if t.claude_session.is_none() {
                     t.held.push(line.to_owned());
                 }
-                t.claude_session.clone()
+                (t.claude_session.clone(), crate::user_requests::of_env(&t.env).map(str::to_owned))
             })?;
+            // A request's held line outlives a restart in its record; the tab's own does not.
+            if let (None, Some(request)) = (&session, request) {
+                self.requests.lock().unwrap().hold(&request, line);
+            }
             if session.is_some() {
                 self.delegates.queue_request(tab, session, line.to_owned(), request_id.to_owned());
             }
@@ -20594,6 +20613,29 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(handoff, Handoff::Delivered { tab: tab.clone() });
         assert!(!heard(&m, &anchor, "Shipped."));
         assert!(!heard(&m, &tab, "Shipped."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_report_held_at_the_cap_is_typed_after_a_restart() {
+        let dir = temp("req-route-held");
+        let site = dir.join("site");
+        std::fs::create_dir_all(&site).unwrap();
+        let claude = typing_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let path = m.open_project(site).display().to_string();
+        ask_new(&m, &[("k-1", "First ask."), ("k-2", "Second ask."), ("k-3", "Third ask.")]).unwrap();
+        let handoff = m.deliver_report("report:1", &report_of(&path, "Unasked news.", &[])).unwrap();
+        assert!(matches!(handoff, Handoff::Queued { .. }), "three request sessions are live: {handoff:?}");
+        let id = m.view(handoff.tab()).unwrap().request.expect("a request tab");
+        m.quit();
+        drop(m);
+        let again = requests_machine(&dir, &claude);
+        again.restore_tabs();
+        let tab = again.request_tab(&id).expect("the reports thread rests in a tab again");
+        let typed = || std::fs::read_to_string(format!("{}.typed.{tab}", claude.display())).unwrap_or_default();
+        wait_for("the held report", || typed().contains("Unasked news."));
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -59,6 +59,10 @@ pub struct UserRequest {
     pub replies: u32,
     #[serde(default)]
     pub kind: Kind,
+    /// Reports held for its first session while the cap kept it from starting, kept here so a
+    /// restart still types them. Cleared once its session starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<String>,
 }
 
 /// "Where this stands": each text one line of at most 300 characters.
@@ -314,8 +318,22 @@ impl UserRequests {
     pub fn set_session(&mut self, id: &str, session: &str) -> bool {
         let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id) else { return false };
         r.session = Some(session.to_owned());
+        r.held.clear();
         self.save();
         true
+    }
+
+    /// `line` waits for request `id`'s first session, which has not started.
+    pub fn hold(&mut self, id: &str, line: &str) {
+        if let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id && r.session.is_none()) {
+            r.held.push(line.to_owned());
+            self.save();
+        }
+    }
+
+    /// Each open request still waiting to start, with the lines held for it.
+    pub fn unstarted(&self) -> Vec<(String, Vec<String>)> {
+        self.saved.requests.iter().filter(|r| r.closed.is_none() && r.session.is_none() && !r.held.is_empty()).map(|r| (r.id.clone(), r.held.clone())).collect()
     }
 
     /// Marks the request Done. False for an unknown id.
@@ -476,6 +494,7 @@ impl UserRequests {
             last_user_at: None,
             replies: 0,
             kind,
+            held: vec![],
         });
         self.trim();
         self.save();
