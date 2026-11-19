@@ -17,6 +17,8 @@ const PLAN_ORDER = { needs_you: 0, fixing: 1, working: 2, idle: 3, finished: 4, 
 const planAfterFix = (step) => step.state === "done" && /^after /.test(step.why ?? "");
 const planStepWord = (step) => (planAfterFix(step) ? "Done, after one fix" : PLAN_STEP_WORD[step.state]);
 const planMains = (plan) => plan.lists.flatMap((list) => list.steps);
+/** Every step the board counts: the main steps and the steps of their fix branches. */
+const planAllSteps = (plan) => planMains(plan).flatMap((step) => [step, ...step.fixes.flatMap((f) => f.steps)]);
 /** `scope` prefixes every id the surface keeps (fold, picked step, fix branch): "" for a Captain's one plan, a plan's
  * `machine|tab|plan|` where one panel draws several plans whose list and step ids repeat. */
 const planFixOpen = (s, step, scope = "") => s.fixOpen?.[scope + step.id] ?? step.state === "failed";
@@ -230,14 +232,14 @@ function requestRefresh(t) {
 
 /** The sections of a request's Plan: its own lanes under "Orchestrator", then one section per Captain of
  * `glance.captains`, in that order, and a section for a plan on a tab whose machine and path are none of them. A snapshot (a plan whose
- * Captain tab is gone) joins its Captain's section when the request has one Captain, else the last section "Ended".
+ * Captain tab is gone) joins the section of the Captain with its machine and exact path, else the last section "Ended plans".
  * A block is { scope, glance, cache, view, ended }; `view` is null until the plan's fetch lands. */
 function requestPlanSections(glance, entries, snapshots) {
   const own = [];
   const captains = glance.captains.map(() => []);
   const others = new Map();
   for (const e of entries) {
-    const block = { scope: planScope(e), glance: e.plan, cache: requestPlanCache.get(planScope(e)), view: requestPlanCache.get(planScope(e))?.view ?? null, ended: false };
+    const block = { scope: planScope(e), glance: e.plan, cache: requestPlanCache.get(planScope(e)), view: requestPlanCache.get(planScope(e))?.view ?? null, ended: false, owner: { machine: e.machine, tab: e.tab.id } };
     const at = glance.captains.findIndex((c) => c.machine === e.machine && c.path === e.tab.cwd);
     if (e.tab.request === glance.id) own.push(block);
     else if (at >= 0) captains[at].push(block);
@@ -248,15 +250,17 @@ function requestPlanSections(glance, entries, snapshots) {
     }
   }
   const live = new Set(entries.map((e) => `${e.plan.id}\n${e.plan.title}`));
-  const ended = snapshots
-    .filter((v) => !live.has(`${v.id}\n${v.title}`))
-    .map((view) => ({ scope: `ended|${glance.id}|${view.id}|`, glance: view, cache: null, view, ended: true }));
+  const stray = [];
+  for (const snap of snapshots) {
+    if (live.has(`${snap.plan.id}\n${snap.plan.title}`)) continue;
+    const block = { scope: `ended|${glance.id}|${snap.machine}|${snap.path}|${snap.plan.id}|`, glance: snap.plan, cache: null, view: snap.plan, ended: true, owner: null };
+    const at = glance.captains.findIndex((c) => c.machine === snap.machine && c.path === snap.path);
+    (at >= 0 ? captains[at] : stray).push(block);
+  }
   const sections = [];
   if (own.length) sections.push({ title: "Orchestrator", blocks: own });
-  const captainSections = glance.captains.map((c, i) => ({ title: `Captain ${c.project} · ${c.machine_name}`, blocks: captains[i] }));
-  sections.push(...captainSections, ...others.values());
-  if (ended.length && captainSections.length === 1) captainSections[0].blocks.push(...ended);
-  else if (ended.length) sections.push({ title: "Ended plans", blocks: ended });
+  sections.push(...glance.captains.map((c, i) => ({ title: `Captain ${c.project} · ${c.machine_name}`, blocks: captains[i] })), ...others.values());
+  if (stray.length) sections.push({ title: "Ended plans", blocks: stray });
   return sections;
 }
 
@@ -328,17 +332,41 @@ function planListHtml(list, s, zoom, scope = "") {
   return `<section class="pl-list${fixes.length ? " has-fix" : ""}">${head}${track}</section>`;
 }
 
-function planFootHtml(plan, s) {
+const planWorkers = new Map(); // machine|tab|task|state -> { key: the worker's tab key, once found }
+
+/** The worker tab of a step's task, found the way Open thread finds it: `open_task` answers the tab that already holds
+ * the task's conversation, or opens one. One call per task and step state; a failed call tries again when the state moves. */
+function planWorkerTab(owner, step) {
+  const id = `${owner.machine}|${owner.tab}|${step.task}|${step.state}`;
+  let c = planWorkers.get(id);
+  if (!c) {
+    c = { key: null };
+    planWorkers.set(id, c);
+    callOn(owner.machine, { cmd: "open_task", tab: owner.tab, task: step.task }).then(
+      async (created) => {
+        await refreshTabs(owner.machine);
+        c.key = keyOf(owner.machine, created);
+        planRerender();
+      },
+      () => {},
+    );
+  }
+  return (c.key && tabByKey(c.key)) || null;
+}
+
+function planFootHtml(plan, s, owner = null) {
   const live = planLiveStep(plan);
   const hit = (s.step && planFindStep(plan, s.step)) || (live && planFindStep(plan, live.id));
   if (!hit) return "";
   const { step, list, under, fix } = hit;
   const why = step.why && !planAfterFix(step) ? `<p class="pl-why">${esc(step.why)}</p>` : "";
   const branch = under ? `Fix ${esc(fix.id)}, under “${esc(under.name)}”` : "Main line";
+  const worker = step.task && owner ? planWorkerTab(owner, step) : null;
+  const diff = worker?.view.workspace?.branch ? ` <button type="button" class="outline pl-open" data-see-diff="${esc(worker.key)}">${icon("git-branch")}See the diff</button>` : "";
   return `<div class="pl-foot" data-state="${step.state}"><p class="pl-foot-state"><span class="pl-dot"></span>${s.step ? planStepWord(step) : `Live now · ${planStepWord(step)}`}</p>
       <p class="pl-foot-name">${esc(step.name)}</p>${step.what ? `<p class="pl-foot-what">${esc(step.what)}</p>` : ""}${why}
       <dl class="pl-facts"><dt>List</dt><dd>${esc(list.name)}</dd><dt>Run by</dt><dd>${esc(planRunBy(step))}</dd><dt>Branch</dt><dd>${branch}</dd><dt>Cost</dt><dd>${esc(planCost(step.cost)) || "None yet"}</dd></dl>
-      ${step.task ? `<button type="button" class="outline pl-open" data-open-task="${esc(step.task)}">${icon("arrow-up-right")}Open thread</button>` : ""}</div>`;
+      ${step.task ? `<button type="button" class="outline pl-open" data-open-task="${esc(step.task)}">${icon("arrow-up-right")}Open thread</button>${diff}` : ""}</div>`;
 }
 
 /** The body of the surface for the active Captain: dropped line, switcher, header, the plan's lists, footer. */
@@ -353,13 +381,13 @@ function planBodyHtml(t, s) {
   if (!plan) return `${dropped}<div class="pl-empty"><p class="t">The Captain is writing its plan</p><p>Each part of the work shows up here as a list of steps.</p></div>`;
   const zoom = s.zoom ?? 1;
   const chips = glances.length > 1 ? planChipsHtml(glances, plan) : "";
-  const ms = planMains(plan);
+  const ms = planAllSteps(plan);
   const done = ms.filter((x) => x.state === "done").length;
   const head = `<div class="pl-head"><span class="pl-count">${done} of ${ms.length} done</span>${planZoomHtml(zoom)}</div>${planProgressHtml(done, ms.length)}`;
   const at = plan.closed ? `Closed: ${esc(plan.closed)}` : plan.finished_at ? `Finished at ${planClock(plan.finished_at)}` : `Plan, from your message at ${planClock(plan.asked_at)}`;
   const root = `<p class="pl-root">${icon("message-circle")}<span><b>${esc(plan.title)}</b><span class="pl-root-at">${at}</span></span></p>`;
   const lists = plan.lists.map((l) => planListHtml(l, s, zoom)).join("");
-  return `${dropped}${chips}${head}<div class="pl-scroll">${root}<div class="pl-lists">${lists}</div></div>${planFootHtml(plan, s)}`;
+  return `${dropped}${chips}${head}<div class="pl-scroll">${root}<div class="pl-lists">${lists}</div></div>${planFootHtml(plan, s, { machine: t.machine, tab: t.view.id })}`;
 }
 
 
@@ -368,9 +396,9 @@ const planPlural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 /** The footer of a request's panel: the picked step of whichever plan holds it, else the plan's live step, first plan first. */
 function requestFootHtml(blocks, s) {
   const hold = s.step && blocks.find((b) => b.view && s.step.startsWith(b.scope) && planFindStep(b.view, s.step.slice(b.scope.length)));
-  if (hold) return planFootHtml(hold.view, { ...s, step: s.step.slice(hold.scope.length) });
+  if (hold) return planFootHtml(hold.view, { ...s, step: s.step.slice(hold.scope.length) }, hold.owner);
   const live = blocks.find((b) => b.view && planLiveStep(b.view));
-  return live ? planFootHtml(live.view, { ...s, step: null }) : "";
+  return live ? planFootHtml(live.view, { ...s, step: null }, live.owner) : "";
 }
 
 function requestBlockHtml(b, s, zoom, many) {
@@ -390,11 +418,11 @@ function requestPlanHtml(t, s) {
   const zoom = s.zoom ?? 1;
   const views = blocks.map((b) => b.view).filter(Boolean);
   const lists = views.reduce((n, v) => n + v.lists.length, 0);
-  const mains = views.flatMap(planMains);
-  const done = mains.filter((x) => x.state === "done").length;
-  const fixes = mains.reduce((n, x) => n + x.fixes.length, 0);
-  const summary = [planPlural(lists, "list"), `${done} of ${planPlural(mains.length, "step")}`, fixes ? planPlural(fixes, "fix branch").replace("branchs", "branches") : ""].filter(Boolean).join(", ");
-  const head = `<div class="pl-head"><span class="pl-title">Plan</span><span class="pl-count">${esc(summary)}</span>${planZoomHtml(zoom)}</div>${planProgressHtml(done, mains.length)}`;
+  const steps = views.flatMap(planAllSteps);
+  const done = steps.filter((x) => x.state === "done").length;
+  const fixes = views.flatMap(planMains).reduce((n, x) => n + x.fixes.length, 0);
+  const summary = [planPlural(lists, "list"), `${done} of ${planPlural(steps.length, "step")}`, fixes ? planPlural(fixes, "fix branch").replace("branchs", "branches") : ""].filter(Boolean).join(", ");
+  const head = `<div class="pl-head"><span class="pl-title">Plan</span><span class="pl-count">${esc(summary)}</span>${planZoomHtml(zoom)}</div>${planProgressHtml(done, steps.length)}`;
   const root = `<p class="pl-root-row">Plan, from your request at ${planClock(model.glance.opened_at)}</p>`;
   const body = model.sections
     .map((sec) => `<section class="pl-sec-group"><h3 class="pl-sec">${esc(sec.title)}</h3>${sec.blocks.map((b) => requestBlockHtml(b, s, zoom, sec.blocks.length > 1)).join("") || `<p class="pl-loading">No plan from this Captain yet.</p>`}</section>`)
@@ -437,9 +465,20 @@ function onPlanClick(e) {
     s.step = null;
   } else if (q("[data-dismiss-dropped]")) panelOf(t).dropped = null;
   else if ((el = q("[data-open-task]"))) return openDelegated(el.dataset.openTask);
+  else if ((el = q("[data-see-diff]"))) return planSeeDiff(el.dataset.seeDiff);
   else return;
   savePanel(t);
   planRerender();
+}
+
+/** The worker's own diff surface, on its branch against its base, in front. */
+async function planSeeDiff(key) {
+  const worker = tabByKey(key);
+  if (!worker) return;
+  setDiffState(worker, { scope: "base", base: null });
+  addSurface(worker, { id: "diff", kind: "diff" });
+  activate(worker);
+  await startTab(worker);
 }
 
 panelBody.addEventListener("click", onPlanClick);
