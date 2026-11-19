@@ -86,6 +86,11 @@ struct Shared {
     sync_thread: std::sync::OnceLock<std::thread::Thread>,
     refusals: watch::Sender<Refusals>,
     refused_span: RefusedSpan,
+    /// True while a socket is accepted. `Standby::follow` waits on this instead of polling.
+    up: watch::Sender<bool>,
+    /// What the last dial of the hub's address showed. `Gone` is kept across a disconnect until a
+    /// hello replaces it, so the outage's start does not move every time the socket drops.
+    reach: watch::Sender<Reach>,
 }
 
 impl Shared {
@@ -147,8 +152,28 @@ impl Shared {
         }
     }
 
+    fn connect_out(&self, out: channel::UnboundedSender<Outgoing>) {
+        *self.out.lock().unwrap() = Some(out);
+        self.up.send_replace(true);
+        self.reach.send_replace(Reach::Up);
+    }
+
+    /// The socket is gone. A `Gone` reach stays, with the instant it started.
+    fn mark_down(&self) {
+        self.up.send_replace(false);
+        let _ = self.reach.send_if_modified(|reach| {
+            if matches!(reach, Reach::Gone { .. }) {
+                return false;
+            }
+            let change = !matches!(reach, Reach::Unreachable);
+            *reach = Reach::Unreachable;
+            change
+        });
+    }
+
     fn disconnected(&self, machine: &Machine) {
         *self.out.lock().unwrap() = None;
+        self.mark_down();
         self.pending.lock().unwrap().clear();
         for (tab, viewer) in self.subscribed.lock().unwrap().drain() {
             machine.detach(&tab, &viewer);
@@ -186,7 +211,72 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
     Link { shared, stop, thread, syncing }
 }
 
-/// What a hub call answers while the link is down.
+/// What the hub's address last showed this process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// The hub accepted this machine.
+    Up,
+    /// The address answers HTTP with no hub behind it, and has since `since`. A stopped Railway
+    /// service answers 404. Set only after a hello from that hub in this process.
+    Gone { since: tokio::time::Instant },
+    /// Nothing answered. This Mac has no path; other machines may.
+    Unreachable,
+    /// The hub refused this machine's token.
+    Refused,
+}
+
+impl Default for Reach {
+    fn default() -> Self {
+        Reach::Unreachable
+    }
+}
+
+/// What a machine answers from its own copy when the hub cannot (`standby::Standby`).
+pub trait Local: Send + Sync {
+    /// The copy's answer, or none when only the hub answers this call.
+    fn answer(&self, call: &HubCall) -> Option<Result<Value, String>>;
+    /// The copy holds work the hub has not taken. Reads then stay on the copy until the handback.
+    fn holds_changes(&self) -> bool;
+    /// A callback for a run this copy's watcher started.
+    fn own_callback(&self, call: &HubCall) -> bool {
+        let _ = call;
+        false
+    }
+}
+
+/// A cheap handle for the copy's loop.
+#[derive(Clone)]
+pub struct Handle {
+    shared: Arc<Shared>,
+    stopped: watch::Receiver<bool>,
+}
+
+impl Handle {
+    pub fn call_hub(&self, call: HubCall) -> Result<Value, String> {
+        self.shared.call(call)
+    }
+
+    pub fn online(&self) -> bool {
+        self.shared.online()
+    }
+
+    pub fn reach(&self) -> Reach {
+        self.shared.reach.borrow().clone()
+    }
+
+    pub fn state(&self) -> watch::Receiver<bool> {
+        self.shared.up.subscribe()
+    }
+
+    pub fn reach_watch(&self) -> watch::Receiver<Reach> {
+        self.shared.reach.subscribe()
+    }
+
+    pub fn stopped(&self) -> watch::Receiver<bool> {
+        self.stopped.clone()
+    }
+}
+
 pub const OFFLINE: &str = "not connected to the hub";
 /// What a hub call that waited out `CALL_WAIT` fails with: the hub may still be working on it.
 pub const HUB_TIMEOUT: &str = "the hub did not answer within 60 seconds";
@@ -228,6 +318,20 @@ impl Link {
 
     pub fn online(&self) -> bool {
         self.shared.online()
+    }
+
+    /// Whether a socket to the hub is up. Changes when the socket is accepted and when it ends.
+    pub fn state(&self) -> watch::Receiver<bool> {
+        self.shared.up.subscribe()
+    }
+
+    pub fn reach(&self) -> Reach {
+        self.shared.reach.borrow().clone()
+    }
+
+    /// A cheap handle for the copy's loop.
+    pub fn handle(&self) -> Handle {
+        Handle { shared: self.shared.clone(), stopped: self.stop.subscribe() }
     }
 
     /// Resolves when the hub refuses this machine's token (close code `UNAUTHORIZED`) at or after
@@ -707,7 +811,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     }
 
     let (out, mut incoming) = channel::unbounded_channel();
-    *shared.out.lock().unwrap() = Some(out.clone());
+    shared.connect_out(out.clone());
     let calls = in_order(shared.clone(), machine.clone());
     eprintln!("pinned: connected to {}", creds.hub);
     let (sharing, reporting) = (machine.clone(), shared.clone());
@@ -964,6 +1068,24 @@ mod tests {
     }
 
     #[test]
+    fn the_link_is_up_only_while_its_socket_is_and_gone_survives_the_drop() {
+        let shared = Shared::default();
+        assert!(!*shared.up.subscribe().borrow());
+        assert_eq!(*shared.reach.subscribe().borrow(), Reach::Unreachable);
+        let (out, _incoming) = channel::unbounded_channel();
+        shared.connect_out(out);
+        assert!(*shared.up.subscribe().borrow());
+        assert_eq!(*shared.reach.subscribe().borrow(), Reach::Up);
+        shared.mark_down();
+        assert!(!*shared.up.subscribe().borrow());
+        assert_eq!(*shared.reach.subscribe().borrow(), Reach::Unreachable);
+        let since = tokio::time::Instant::now();
+        shared.reach.send_replace(Reach::Gone { since });
+        shared.mark_down();
+        assert_eq!(*shared.reach.subscribe().borrow(), Reach::Gone { since });
+    }
+
+    #[test]
     fn failed_attempts_double_the_wait_up_to_the_cap() {
         let mut backoff = Backoff::new();
         assert_eq!(waits(&mut backoff, 8), [1, 2, 4, 8, 16, 30, 30, 30]);
@@ -1033,7 +1155,7 @@ mod tests {
         let machine = Machine::new(crate::machine::tests::launch(), Some(dir.clone()), None, |_| {});
         let shared = Shared::default();
         let (out, _frames) = channel::unbounded_channel();
-        *shared.out.lock().unwrap() = Some(out);
+        shared.connect_out(out);
         let mut syncer = Syncer::default();
         syncer.cycle(&shared, &shared, &machine, &file);
         assert_eq!(std::fs::read(&file).unwrap(), b"", "a stopped sync leaves the file as it was");
@@ -1058,7 +1180,7 @@ mod tests {
         let machine = Machine::new(crate::machine::tests::launch(), Some(dir.clone()), None, |_| {});
         let shared = Shared::default();
         let (out, frames) = channel::unbounded_channel();
-        *shared.out.lock().unwrap() = Some(out);
+        shared.connect_out(out);
         (dir, file, machine, shared, frames)
     }
 
@@ -1661,7 +1783,7 @@ mod tests {
         let frame = MachineFrame::Event { event: MachineEvent::Update { status: None } };
         let shared = Shared::default();
         let (out, mut incoming) = channel::unbounded_channel();
-        *shared.out.lock().unwrap() = Some(out);
+        shared.connect_out(out);
         let writer = std::thread::spawn(move || {
             let outgoing = incoming.blocking_recv().unwrap();
             outgoing.wrote.unwrap().send(()).unwrap();
@@ -1670,7 +1792,7 @@ mod tests {
         writer.join().unwrap();
 
         let (out, mut incoming) = channel::unbounded_channel();
-        *shared.out.lock().unwrap() = Some(out);
+        shared.connect_out(out);
         let writer = std::thread::spawn(move || {
             let outgoing = incoming.blocking_recv().unwrap();
             drop(outgoing.wrote);
@@ -1709,7 +1831,7 @@ mod tests {
         machine.set_installer(Arc::new(ArmsRestart { restarted: restarted.clone() }));
         let shared = Arc::new(Shared::default());
         let (out, mut incoming) = channel::unbounded_channel();
-        *shared.out.lock().unwrap() = Some(out);
+        shared.connect_out(out);
         let at_write = restarted.clone();
         let writer = std::thread::spawn(move || {
             let outgoing = incoming.blocking_recv().unwrap();
@@ -1793,7 +1915,7 @@ mod tests {
         }));
         let shared = Arc::new(Shared::default());
         let (out, mut incoming) = channel::unbounded_channel();
-        *shared.out.lock().unwrap() = Some(out);
+        shared.connect_out(out);
         let writer = std::thread::spawn(move || {
             while let Some(outgoing) = incoming.blocking_recv() {
                 if let Some(wrote) = outgoing.wrote {

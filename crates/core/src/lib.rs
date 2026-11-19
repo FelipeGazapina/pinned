@@ -71,6 +71,7 @@ pub mod shell;
 pub mod setup_token;
 pub mod skills;
 pub mod slack;
+pub mod standby;
 pub mod stats;
 pub mod subagents;
 pub mod surface;
