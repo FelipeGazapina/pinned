@@ -1162,6 +1162,9 @@ pub struct Machine {
     /// Every message handed to a Capitão or to the global orchestrator here. Never locked while
     /// holding `tabs`.
     sent: Mutex<global::Ledger>,
+    /// Held from the check for a free place under `MAX_LIVE_REQUESTS` until the start that takes
+    /// it, so two request sessions never both take the last one.
+    request_starts: Mutex<()>,
     /// The ledger's projects in flight, which a tab's view reads while a hand-off holds `sent`.
     turns: global::Turns,
     /// The questionnaires agents put to the user here. Takes no other lock while held.
@@ -1368,6 +1371,7 @@ impl Machine {
             global_dir,
             turns: sent.turns(),
             sent: Mutex::new(sent),
+            request_starts: Mutex::new(()),
             questions: Mutex::new(crate::questions::Questions::load(dir.as_deref())),
             plans: Mutex::new(crate::plan_store::PlanStore::load(dir.as_deref())),
             requests: Mutex::new(crate::user_requests::UserRequests::load(dir.as_deref())),
@@ -1698,9 +1702,21 @@ impl Machine {
             }
             Call::Board { tab, task } => json(self.board(&tab, task.as_deref())?),
             Call::Prompt { tab, text } => {
-                self.type_line(&tab, &text, true).map_err(NotTyped::for_person)?;
+                // A resting request's session starts under the cap like any other: at the cap the
+                // user's text is held for its start, which comes once a place is free.
+                let resting = self.tab(&tab, |t| t.asleep && t.session.is_none() && !t.starting && global::is_global(&t.env))?;
+                let gate = resting.then(|| self.request_starts.lock().unwrap());
+                let waits = gate.is_some() && !self.room_for(&tab);
+                if waits {
+                    self.tab(&tab, |t| t.held.push(text.clone()))?;
+                    drop(gate);
+                    self.arm_delegate_pass();
+                } else {
+                    self.type_line(&tab, &text, true).map_err(NotTyped::for_person)?;
+                    drop(gate);
+                }
                 self.user_typed(&tab);
-                json(())
+                json(waits.then_some(WAITS_FOR_ROOM))
             }
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
@@ -3449,15 +3465,18 @@ impl Machine {
     /// `MAX_LIVE_REQUESTS` sessions mid-turn, the tab rests with `text` held instead, and starts
     /// on it once one of them rests.
     fn first_prompt(&self, tab: &str, text: &str) -> Result<crate::user_requests::Start, String> {
+        let gate = self.request_starts.lock().unwrap();
         if !self.room_for(tab) {
             self.tab(tab, |t| {
                 t.held.push(text.to_owned());
                 t.asleep = true;
             })?;
+            drop(gate);
             self.arm_delegate_pass();
             return Ok(crate::user_requests::Start::Queued);
         }
         self.start_claude(tab, UNWATCHED.0, UNWATCHED.1)?;
+        drop(gate);
         self.type_prompt(tab, text).map_err(NotTyped::for_person)?;
         Ok(crate::user_requests::Start::Started)
     }
@@ -3800,7 +3819,10 @@ impl Machine {
             Some(_) => Ready::Busy,
         })?;
         let id = tab.to_owned();
-        if ready == Ready::Stopped && self.tab(tab, |t| global::is_global(&t.env))? && !self.room_for(tab) {
+        // Held until the start below, so another start never takes the place this one found.
+        let gate = (ready == Ready::Stopped && self.tab(tab, |t| global::is_global(&t.env))?).then(|| self.request_starts.lock().unwrap());
+        if gate.is_some() && !self.room_for(tab) {
+            drop(gate);
             // A session that never started reads no queue, so its line is held for its start.
             let session = self.tab(tab, |t| {
                 t.launch = t.claude_session.as_deref().map(|session| crate::delegate::resume_args(t.account.provider, session)).unwrap_or_default();
@@ -3833,6 +3855,7 @@ impl Machine {
                 } else {
                     self.start_claude(tab, UNWATCHED.0, UNWATCHED.1)?;
                 }
+                drop(gate);
                 Ok(Handoff::Started { tab: id })
             }
             Ready::Idle if self.write_notice(tab, line) == Ok(true) => Ok(Handoff::Delivered { tab: id }),
@@ -6864,12 +6887,14 @@ impl Machine {
             // A request tab that waited for room rests with its first prompt held.
             if self.tab(tab, |t| t.asleep).unwrap_or(false) && (self.delegates.has_news(tab) || self.tab(tab, |t| !t.held.is_empty()).unwrap_or(false)) {
                 // A global session waits for room under the live cap; a later pass looks again.
-                if self.tab(tab, |t| global::is_global(&t.env)).unwrap_or(false) && !self.room_for(tab) {
+                let gate = self.tab(tab, |t| global::is_global(&t.env)).unwrap_or(false).then(|| self.request_starts.lock().unwrap());
+                if gate.is_some() && !self.room_for(tab) {
                     return;
                 }
                 if let Err(error) = self.awake(tab) {
                     eprintln!("pinned: could not wake {tab} for its news: {error}");
                 }
+                drop(gate);
                 self.arm_delegate_pass();
             }
             return;
@@ -8063,6 +8088,8 @@ fn truncate(text: &str, max: usize, rest: &str) -> String {
 
 /// The most request sessions of the global orchestrator that run at once.
 const MAX_LIVE_REQUESTS: usize = 3;
+/// What `Call::Prompt` answers when the user's text waits in a resting request for a free place.
+const WAITS_FOR_ROOM: &str = "waits for a free place";
 
 /// A request's said things from `reading::conversation`: the user's prompts, the Captains'
 /// reports typed into the session, and the Orchestrator's replies.
@@ -20776,10 +20803,34 @@ Have another model review a risky change before it goes ahead.";
         let report = global::CaptainReport { machine: "m1".into(), machine_name: "Mini".into(), project: "site".into(), path: "/p/site".into(), tab: "tab-c".into(), text: "Shipped.".into(), answers: vec![sent] };
         m.deliver_report("report:wake-1", &report).unwrap();
         let args = started(&claude, &tabs[1]);
-        let prompt = args.last().unwrap();
+        let prompt = args.iter().find(|a| a.contains("Shipped.")).expect("the report is a launch argument");
         assert!(prompt.starts_with("[pinned] Open threads:\n") && prompt.contains(&format!("{} · Ask k-1", ids[0])) && prompt.ends_with(&report.line()), "{prompt:?}");
         assert!(!prompt.contains(&format!("{} ·", ids[1])), "its own request is left out: {prompt:?}");
         assert!(!m.tab(&tabs[1], |t| t.digest_due).unwrap(), "the digest went with the launch, once");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_users_prompt_into_a_resting_request_at_the_cap_is_held_not_started() {
+        let dir = temp("req-user-cap");
+        let claude = typing_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let asks = [("k-1", "First ask."), ("k-2", "Second ask."), ("k-3", "Third ask."), ("k-4", "Fourth ask.")];
+        let opened = ask_new(&m, &asks).unwrap();
+        let tabs: Vec<String> = opened.as_array().unwrap().iter().map(|o| o["tab"].as_str().unwrap().to_owned()).collect();
+        let typed = |tab: &str| std::fs::read_to_string(format!("{}.typed.{tab}", claude.display())).unwrap_or_default();
+        for (tab, (_, text)) in tabs.iter().zip(&asks).take(3) {
+            wait_for("the first prompt", || typed(tab).contains(text));
+        }
+        m.record_event(AgentEvent { session: Some("s-k2".into()), ..hook(&tabs[1], AgentStatus::Done) });
+        wait_for("the fourth's first prompt", || typed(&tabs[3]).contains("Fourth ask."));
+        assert_eq!(m.call(Call::Prompt { tab: tabs[1].clone(), text: "Any news?".into() }), Ok(json!("waits for a free place")));
+        assert_eq!(live_global(&m), 3, "the user's prompt took no fourth place");
+        assert!(!m.view(&tabs[1]).unwrap().alive);
+        m.record_event(AgentEvent { session: Some("s-k1".into()), ..hook(&tabs[0], AgentStatus::Done) });
+        wait_for("the held prompt", || typed(&tabs[1]).contains("Any news?"));
+        assert_eq!(live_global(&m), 3);
         let _ = std::fs::remove_dir_all(dir);
     }
 
