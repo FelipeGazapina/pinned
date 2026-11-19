@@ -284,6 +284,7 @@ pub const ACTIONS: &[Action] = &[
     h("shared_projects", Read, "The account's synced projects, most recently shared first.").wired(),
     h("share_project", Write, "Offers a project, {key, name, repo}, to the account's other machines to clone.").wired().sends(&["project.key"]),
     h("sync_list", Excluded, SYNC),
+    h("sync_changes", Excluded, SYNC),
     h("sync_push", Excluded, SYNC),
     h("sync_pull", Excluded, SYNC),
     h("sync_mark_executable", Excluded, SYNC),

@@ -321,6 +321,7 @@ pub fn hub_rule(call: &HubCall) -> Rule {
         | HubCall::SharedProjects { .. }
         | HubCall::ShareProject { .. }
         | HubCall::SyncList { .. }
+        | HubCall::SyncChanges { .. }
         | HubCall::SyncPush { .. }
         | HubCall::SyncPull { .. }
         | HubCall::SyncMarkExecutable { .. }

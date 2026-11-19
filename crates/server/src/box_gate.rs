@@ -47,6 +47,7 @@ pub fn box_may_send(call: &HubCall) -> Result<(), String> {
         | HubCall::VercelModels
         | HubCall::SharedProjects
         | HubCall::SyncList { .. }
+        | HubCall::SyncChanges { .. }
         | HubCall::SyncPull { .. }
         | HubCall::ListSchedules
         | HubCall::ScheduleRuns { .. }

@@ -999,6 +999,7 @@ impl Hub {
             HubCall::SharedProjects => return json(self.db.shared_projects(account.id).await?),
             HubCall::ShareProject { project } => return json(self.db.share_project(account.id, &project).await?),
             HubCall::SyncList { project } => return json(self.db.sync_list(account.id, &project).await?),
+            HubCall::SyncChanges { project, since } => return json(self.db.sync_changes(account.id, &project, since).await?),
             HubCall::SyncPush { project, files } => {
                 let mut kept = vec![];
                 for file in files {

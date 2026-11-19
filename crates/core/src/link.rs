@@ -853,7 +853,7 @@ fn answer(shared: &Arc<Shared>, machine: &Arc<Machine>, out: &channel::Unbounded
             shared.subscribed.lock().unwrap().remove(&(tab, viewer));
         }
         Ok(ToMachine::WatchThreads { viewer, tabs }) => machine.set_watched_threads(&viewer, &tabs),
-        Ok(ToMachine::Hello { .. }) => {}
+        Ok(ToMachine::Hello { .. } | ToMachine::SyncChanged { .. }) => {}
         Err(e) => {
             let value: Value = serde_json::from_str(frame).unwrap_or_default();
             if let (Some("call"), Some(id)) = (value["type"].as_str(), value["id"].as_u64()) {

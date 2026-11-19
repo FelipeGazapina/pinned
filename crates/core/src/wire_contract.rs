@@ -90,6 +90,7 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("Connector".into(), schemas::<Connector>());
     outbound.insert("SyncProject".into(), schemas::<sync::Project>());
     outbound.insert("SyncEntry".into(), schemas::<sync::Entry>());
+    outbound.insert("SyncChanges".into(), schemas::<sync::Changes>());
     outbound.insert("SyncFile".into(), schemas::<sync::File>());
     outbound.insert("GithubAccount".into(), schemas::<github::Account>());
     outbound.insert("GithubRepo".into(), schemas::<github::Repo>());

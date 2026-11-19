@@ -1374,6 +1374,7 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
                 | HubCall::MachineStates
                 | HubCall::ShareProject { .. }
                 | HubCall::SyncList { .. }
+                | HubCall::SyncChanges { .. }
                 | HubCall::SyncPush { .. }
                 | HubCall::SyncPull { .. }
                 | HubCall::SyncMarkExecutable { .. }
