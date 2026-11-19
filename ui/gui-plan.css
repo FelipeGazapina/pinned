@@ -99,3 +99,13 @@
 .pl-dropped > .i { width: 14px; height: 14px; margin-top: 1px; flex: none; }
 .pl-dropped > span { flex: 1; }
 .pl-dropped button.icon { width: 20px; height: 20px; flex: none; }
+
+/* a request thread's Plan: one tree, a section per owner */
+.pl-title { font-size: 14px; font-weight: 600; flex: none; }
+.pl-head .pl-count { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-root-row { margin: 6px 12px 4px; font-size: 12px; color: var(--g-muted); }
+.pl-sec-group { margin-top: 6px; }
+.pl-sec { margin: 8px 12px 4px; font-size: 12.5px; font-weight: 600; color: var(--g-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-plan { margin: 6px 12px 2px; font-size: 12px; color: var(--g-muted); }
+.pl-plan b { font-weight: 500; color: var(--g-fg); }
+.pl-ended { display: inline-block; margin-left: 4px; padding: 0 6px; border: 1px solid var(--g-border); border-radius: 6px; font-size: 11px; color: var(--g-muted); }
