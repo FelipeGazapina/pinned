@@ -196,7 +196,7 @@ pub struct GlanceCaptain {
 }
 
 /// Where a report goes: a request, or a global session no request holds, such as the anchor
-/// before migration.
+/// before migration. An empty session is the anchor that sent before its session started.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "to", content = "id", rename_all = "snake_case")]
 pub enum Route {
@@ -224,7 +224,7 @@ pub struct StandsPatch {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct SentId {
     id: String,
-    /// The global session that sent it; empty for a request tab whose session had not started.
+    /// The global session that sent it; empty when the tab's session had not started.
     #[serde(default)]
     session: String,
     /// The request whose tab sent it. A request keeps its id when its session changes, as after
@@ -404,7 +404,7 @@ impl UserRequests {
         for sent in answers.iter().filter_map(|a| self.saved.sent.iter().find(|s| &s.id == a)) {
             let route = match (sent.request.as_deref().and_then(|id| self.get(id)), self.of_session(&sent.session)) {
                 (Some(r), _) | (None, Some(r)) => Route::Request(r.id.clone()),
-                (None, None) if !sent.session.is_empty() => Route::Session(sent.session.clone()),
+                (None, None) if sent.request.is_none() || !sent.session.is_empty() => Route::Session(sent.session.clone()),
                 (None, None) => continue,
             };
             if !to.contains(&route) {

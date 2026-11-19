@@ -3920,18 +3920,14 @@ impl Machine {
     }
 
     /// Records that `from` sent `request_id` to `captain`: by its request when a request tab sent
-    /// it, so a later session of that request still hears back, else by its session.
+    /// it, so a later session of that request still hears back, else by its session, which is
+    /// empty for the anchor before its session started.
     fn record_sent(&self, from: Sender, request_id: &str, captain: impl FnOnce() -> CaptainRef) {
+        let captain = captain();
+        let mut requests = self.requests.lock().unwrap();
         match from {
-            Sender { request: Some(request), session } => {
-                let captain = captain();
-                self.requests.lock().unwrap().record_request_send(&request, session.as_deref(), request_id, captain);
-            }
-            Sender { request: None, session: Some(session) } => {
-                let captain = captain();
-                self.requests.lock().unwrap().record_send(&session, request_id, captain);
-            }
-            Sender { request: None, session: None } => {}
+            Sender { request: Some(request), session } => requests.record_request_send(&request, session.as_deref(), request_id, captain),
+            Sender { request: None, session } => requests.record_send(session.as_deref().unwrap_or_default(), request_id, captain),
         }
     }
 
