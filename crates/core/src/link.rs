@@ -3,7 +3,7 @@
 use crate::account::Credentials;
 use crate::agent::Message;
 use crate::machine::{Machine, ViewerId};
-use crate::{skills, sync};
+use crate::{mirror, skills, sync};
 use crate::wire::{Bytes, Call, HubCall, MachineEvent, MachineFrame, MachineView, Reply, TabId, ToMachine};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -35,6 +35,9 @@ const BACKOFF_STABLE: Duration = Duration::from_secs(30);
 const BACKOFF_JITTER: f64 = 0.25;
 const SYNC_FIRST: Duration = Duration::from_secs(5);
 const SYNC_EVERY: Duration = Duration::from_secs(20);
+/// Notices of one push come in a burst, one per batch. The loop waits this long after the first
+/// before it runs, so one cycle takes them all.
+const SETTLE: Duration = Duration::from_secs(2);
 /// After the hub refuses a push at the account's limit, the account's pushes that grow what the hub
 /// holds wait this long, twice as long after each refused probe, up to `PUSH_HOLD_MAX`.
 const PUSH_HOLD_MIN: Duration = SYNC_EVERY;
@@ -78,6 +81,9 @@ struct Shared {
     next_call: AtomicU64,
     subscribed: Mutex<HashSet<(TabId, ViewerId)>>,
     sync_now: AtomicBool,
+    watch: mirror::Watch,
+    /// The sync thread, which a notice unparks. Set once by `spawn`, before the socket starts.
+    sync_thread: std::sync::OnceLock<std::thread::Thread>,
     refusals: watch::Sender<Refusals>,
     refused_span: RefusedSpan,
 }
@@ -130,6 +136,13 @@ impl Shared {
         self.out.lock().unwrap().is_some()
     }
 
+    /// Unparks the sync loop. It does not end a push hold: only the user's sync now does.
+    fn wake_sync(&self) {
+        if let Some(thread) = self.sync_thread.get() {
+            thread.unpark();
+        }
+    }
+
     fn disconnected(&self, machine: &Machine) {
         *self.out.lock().unwrap() = None;
         self.pending.lock().unwrap().clear();
@@ -150,6 +163,7 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
     let (synced, synced_machine, sync_stopped) = (shared.clone(), machine.clone(), stopped.clone());
     let syncing = std::thread::spawn(move || sync_projects(&synced, &synced_machine, &sync_stopped));
     let (waking, sync_thread) = (shared.clone(), syncing.thread().clone());
+    let _ = shared.sync_thread.set(sync_thread.clone());
     machine.set_sync_waker(Arc::new(move || {
         waking.sync_now.store(true, Ordering::SeqCst);
         sync_thread.unpark();
@@ -243,6 +257,16 @@ impl sync::Hub for Shared {
     }
 }
 
+impl mirror::Source for Shared {
+    fn changes(&self, project: &str, since: Option<u64>) -> Result<Option<sync::Changes>, String> {
+        match self.call(HubCall::SyncChanges { project: project.into(), since }) {
+            Ok(value) => decode(value).map(Some),
+            Err(err) if is_unknown_command(&err) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+}
+
 impl sync::Hub for Link {
     fn list(&self, project: &str) -> Result<Vec<sync::Entry>, String> {
         sync::Hub::list(self.shared.as_ref(), project)
@@ -283,6 +307,7 @@ struct Syncer {
     shared_projects: HashSet<String>,
     reported_old_hub: bool,
     backoff: PushBackoff,
+    mirrors: mirror::Mirrors,
 }
 
 /// Holds back the machine's pushes once the hub refused one at a sync limit. The usual cause is
@@ -418,23 +443,54 @@ impl PushBackoff {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Wake {
+    Tick,
+    Notice,
+    Now,
+}
+
 impl Syncer {
     fn run(mut self, shared: &Shared, machine: &Machine, file: Option<&Path>, stopped: &watch::Receiver<bool>) {
         let mut wait = SYNC_FIRST;
+        let mut seen = 0;
         'run: loop {
             let until = Instant::now() + wait;
+            let mut why = Wake::Tick;
             while let Some(left) = until.checked_duration_since(Instant::now()) {
                 if *stopped.borrow() || stopped.has_changed().is_err() {
                     break 'run;
                 }
-                if shared.sync_now.load(Ordering::SeqCst) && shared.online() {
+                if shared.online() && shared.sync_now.load(Ordering::SeqCst) {
+                    why = Wake::Now;
+                    break;
+                }
+                if shared.online() && shared.watch.notices() != seen {
+                    why = Wake::Notice;
                     break;
                 }
                 std::thread::park_timeout(left);
             }
+            if why == Wake::Notice {
+                let settle = Instant::now() + SETTLE;
+                while let Some(left) = settle.checked_duration_since(Instant::now()) {
+                    if *stopped.borrow() || stopped.has_changed().is_err() {
+                        break 'run;
+                    }
+                    if shared.sync_now.load(Ordering::SeqCst) {
+                        why = Wake::Now;
+                        break;
+                    }
+                    std::thread::park_timeout(left);
+                }
+            }
             wait = SYNC_EVERY;
             if shared.online() {
-                report_state(shared, machine);
+                if why == Wake::Tick {
+                    report_state(shared, machine);
+                }
+                // Taken before the cycle, so a notice during it wakes the next one.
+                seen = shared.watch.notices();
                 match file {
                     Some(file) => self.cycle(shared, shared, machine, file),
                     None => shared.sync_now.store(false, Ordering::SeqCst),
@@ -450,7 +506,7 @@ impl Syncer {
         machine.hold_sync_limit(None);
     }
 
-    fn cycle(&mut self, shared: &Shared, hub: &impl sync::Hub, machine: &Machine, file: &Path) {
+    fn cycle(&mut self, shared: &Shared, hub: &impl mirror::Source, machine: &Machine, file: &Path) {
         // A user action ends every hold, so the refused pushes go out in this cycle.
         if shared.sync_now.swap(false, Ordering::SeqCst) {
             self.backoff.end();
@@ -478,6 +534,7 @@ impl Syncer {
             self.backoff.end();
         }
         self.backoff.begin(Instant::now());
+        let feed = mirror::Feed::new(hub, &shared.watch, &mut self.mirrors, Instant::now());
         for checkout in checkouts {
             if !shared.online() {
                 self.backoff.skipped();
@@ -487,7 +544,7 @@ impl Syncer {
             if !self.shared_projects.contains(&key) && shared.call(HubCall::ShareProject { project: checkout.project.clone() }).is_ok() {
                 self.shared_projects.insert(key.clone());
             }
-            match self.backoff.sync(hub, state, &checkout, Instant::now()) {
+            match self.backoff.sync(&feed, state, &checkout, Instant::now()) {
                 Ok(done) => {
                     machine.skills_changed(&skills::pulled_by_project_sync(&checkout, &done.pulled));
                     if !done.pushed.is_empty() || !done.pulled.is_empty() {
@@ -505,7 +562,7 @@ impl Syncer {
                 self.backoff.skipped();
                 break;
             }
-            match self.backoff.sync_plugins(hub, state, &share, Instant::now()) {
+            match self.backoff.sync_plugins(&feed, state, &share, Instant::now()) {
                 Ok(done) => {
                     self.reported_old_hub = false;
                     machine.skills_changed(&skills::pulled_by_plugin_sync(&share, &done.pulled));
@@ -628,6 +685,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     sink.send(text(&auth)).await.map_err(transport)?;
     let hello = tokio::time::timeout(HELLO_WAIT, stream.next()).await.map_err(|_| Fault::Transport("the hub did not answer the sign in".into()))?;
     let hello = accept_hello(hello)?;
+    shared.watch.connected();
     *accepted = Some(Instant::now());
     shared.note(Outcome::Accepted);
     machine.set_hub_id(hello.id, hello.name);
@@ -853,7 +911,11 @@ fn answer(shared: &Arc<Shared>, machine: &Arc<Machine>, out: &channel::Unbounded
             shared.subscribed.lock().unwrap().remove(&(tab, viewer));
         }
         Ok(ToMachine::WatchThreads { viewer, tabs }) => machine.set_watched_threads(&viewer, &tabs),
-        Ok(ToMachine::Hello { .. } | ToMachine::SyncChanged { .. }) => {}
+        Ok(ToMachine::SyncChanged { project }) => {
+            shared.watch.heard(&project);
+            shared.wake_sync();
+        }
+        Ok(ToMachine::Hello { .. }) => {}
         Err(e) => {
             let value: Value = serde_json::from_str(frame).unwrap_or_default();
             if let (Some("call"), Some(id)) = (value["type"].as_str(), value["id"].as_u64()) {
@@ -1754,6 +1816,12 @@ mod tests {
         }
     }
 
+    impl mirror::Source for FullHub {
+        fn changes(&self, _: &str, _: Option<u64>) -> Result<Option<sync::Changes>, String> {
+            Ok(None)
+        }
+    }
+
     fn full_checkout(name: &str) -> (std::path::PathBuf, sync::Checkout, std::path::PathBuf) {
         project_checkout("github.com/acme/app", name)
     }
@@ -1928,6 +1996,12 @@ mod tests {
         }
         fn mark_executable(&self, _: &str, _: Vec<sync::ModeRepair>) -> Result<(), String> {
             Ok(())
+        }
+    }
+
+    impl mirror::Source for AccountHub {
+        fn changes(&self, _: &str, _: Option<u64>) -> Result<Option<sync::Changes>, String> {
+            Ok(None)
         }
     }
 
@@ -2343,6 +2417,204 @@ mod tests {
         }
         assert_eq!(syncer.backoff.limit.as_ref().map(|limit| limit.wait), Some(PUSH_HOLD_MAX), "the steps reach the cap");
         assert!(holds.iter().all(|seconds| *seconds <= PUSH_HOLD_MAX.as_secs()), "no hold is longer than {PUSH_HOLD_MAX:?}: {holds:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_notice_does_not_end_the_push_hold() {
+        let (dir, file, machine, shared, _app) = refused_project("notice-hold");
+        let hub = FullHub::default();
+        let mut syncer = Syncer { shared_projects: HashSet::from(["github.com/acme/app".to_owned()]), ..Syncer::default() };
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(hub.pushes.get(), 1, "the hub refuses the first push");
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(hub.pushes.get(), 1, "the refused push waits out its hold");
+        shared.watch.heard("github.com/acme/app");
+        assert!(!shared.sync_now.load(Ordering::SeqCst), "a notice is not a user's sync now");
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(hub.pushes.get(), 1, "a notice leaves the hold on");
+        assert!(syncer.backoff.limited());
+        shared.sync_now.store(true, Ordering::SeqCst);
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(hub.pushes.get(), 2, "the user's sync now sends the refused push");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    enum Say {
+        Notice(String),
+        Close,
+    }
+
+    /// A hub that records each call as (connection, cmd) and answers `answer`. `Say` goes to the
+    /// connection it has now.
+    fn scripted_hub(answer: impl Fn(&str) -> Result<Value, String> + Send + 'static) -> (String, tokio::sync::mpsc::UnboundedSender<Say>, mpsc::Receiver<(u64, String)>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let (say, mut said) = tokio::sync::mpsc::unbounded_channel();
+        let (calls, called) = mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let mut epoch = 0u64;
+                loop {
+                    let (socket, _) = tokio::select! {
+                        accepted = listener.accept() => accepted.unwrap(),
+                        cmd = said.recv() => {
+                            if cmd.is_none() {
+                                return;
+                            }
+                            continue;
+                        }
+                    };
+                    epoch += 1;
+                    let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                    socket.next().await;
+                    let hello = r#"{"type":"hello","machine":{"id":"m-1","name":"mac","os":"macos","online":true,"last_seen":0}}"#;
+                    socket.send(Frame::Text(hello.into())).await.unwrap();
+                    let _ = calls.send((epoch, "hello".into()));
+                    let (mut sink, mut stream) = socket.split();
+                    loop {
+                        tokio::select! {
+                            frame = stream.next() => {
+                                match frame {
+                                    Some(Ok(Frame::Text(text))) => {
+                                        let sent: Value = serde_json::from_str(&text).unwrap_or_default();
+                                        if sent["type"] != "call" {
+                                            continue;
+                                        }
+                                        let cmd = sent["call"]["cmd"].as_str().unwrap_or("").to_owned();
+                                        let id = sent["id"].as_u64().unwrap_or(0);
+                                        let _ = calls.send((epoch, cmd.clone()));
+                                        let reply = serde_json::to_string(&ToMachine::Reply(Reply::new(id, answer(&cmd)))).unwrap();
+                                        if sink.send(Frame::Text(reply.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Some(Ok(Frame::Ping(payload))) => {
+                                        if sink.send(Frame::Pong(payload)).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Some(Ok(Frame::Close(_))) | None => break,
+                                    Some(Ok(_)) => {}
+                                    Some(Err(_)) => break,
+                                }
+                            }
+                            cmd = said.recv() => {
+                                match cmd {
+                                    Some(Say::Notice(project)) => {
+                                        let notice = serde_json::to_string(&ToMachine::SyncChanged { project }).unwrap();
+                                        if sink.send(Frame::Text(notice.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Some(Say::Close) | None => {
+                                        let _ = sink.send(Frame::Close(None)).await;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        });
+        (url, say, called)
+    }
+
+    fn until_quiet(calls: &mpsc::Receiver<(u64, String)>, must: &str) -> Vec<(u64, String)> {
+        let start = Instant::now();
+        let mut last = Instant::now();
+        let mut out = vec![];
+        while start.elapsed() < Duration::from_secs(12) {
+            match calls.recv_timeout(Duration::from_millis(40)) {
+                Ok(item) => {
+                    out.push(item);
+                    last = Instant::now();
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) if out.iter().any(|(_, cmd)| cmd == must) && last.elapsed() >= Duration::from_millis(400) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        out
+    }
+
+    fn open_app(dir: &Path) -> Arc<Machine> {
+        let app = dir.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", "git@github.com:acme/app.git"]] {
+            assert!(std::process::Command::new("git").arg("-C").arg(&app).args(args).status().unwrap().success());
+        }
+        let machine = Machine::new(crate::machine::tests::launch(), Some(dir.to_path_buf()), None, |_| {});
+        machine.open_project(app);
+        machine
+    }
+
+    fn wait_call(calls: &mpsc::Receiver<(u64, String)>, cmd: &str) -> (u64, String) {
+        let start = Instant::now();
+        loop {
+            let item = calls.recv_timeout(Duration::from_secs(12)).unwrap_or_else(|err| panic!("{cmd} never arrived: {err}"));
+            if item.1 == cmd {
+                return item;
+            }
+            assert!(start.elapsed() < Duration::from_secs(12), "timed out waiting for {cmd}");
+        }
+    }
+
+    #[test]
+    fn a_notice_wakes_the_sync_within_the_settle_time() {
+        let dir = std::env::temp_dir().join(format!("pinned-link-{}-notice-wake", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let machine = open_app(&dir);
+        let (url, say, calls) = scripted_hub(|_| Ok(Value::Null));
+        let link = spawn(creds(url), machine, "0.0.0-test");
+        wait_call(&calls, "hello");
+        let noticed = Instant::now();
+        say.send(Say::Notice("github.com/acme/app".into())).unwrap();
+        let (_, cmd) = wait_call(&calls, "share_project");
+        assert_eq!(cmd, "share_project");
+        assert!(noticed.elapsed() < SETTLE + Duration::from_secs(1), "the notice woke the sync after {:?}, past the settle", noticed.elapsed());
+        link.stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unknown_sync_changes_reply_switches_the_connection_to_listing() {
+        let dir = std::env::temp_dir().join(format!("pinned-link-{}-old-hub", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let machine = open_app(&dir);
+        let (url, say, calls) = scripted_hub(|cmd| match cmd {
+            "sync_changes" => Err("this hub runs pinned 0.18.7, which can't answer that: sync_changes".into()),
+            "sync_list" => Ok(Value::Array(vec![])),
+            _ => Ok(Value::Null),
+        });
+        let link = spawn(creds(url), machine, "0.0.0-test");
+        wait_call(&calls, "hello");
+        say.send(Say::Notice("github.com/acme/app".into())).unwrap();
+        let first = until_quiet(&calls, "sync_list");
+        let cmds: Vec<&str> = first.iter().map(|(_, cmd)| cmd.as_str()).collect();
+        let changes = cmds.iter().position(|cmd| *cmd == "sync_changes").expect("the first cycle asks sync_changes");
+        let listed = cmds.iter().position(|cmd| *cmd == "sync_list").expect("an unknown sync_changes falls back to sync_list");
+        assert!(changes < listed, "the list follows the unknown changes: {cmds:?}");
+        assert!(first.iter().all(|(epoch, _)| *epoch == 1), "{first:?}");
+
+        say.send(Say::Notice("github.com/acme/app".into())).unwrap();
+        let second = until_quiet(&calls, "sync_list");
+        assert!(second.iter().any(|(_, cmd)| cmd == "sync_list"), "the next cycle lists: {second:?}");
+        assert!(second.iter().all(|(_, cmd)| cmd != "sync_changes"), "that connection does not ask sync_changes again: {second:?}");
+
+        say.send(Say::Close).unwrap();
+        let (epoch, _) = wait_call(&calls, "hello");
+        assert_eq!(epoch, 2, "the machine reconnects");
+        say.send(Say::Notice("github.com/acme/app".into())).unwrap();
+        let third = until_quiet(&calls, "sync_changes");
+        assert!(third.iter().any(|(epoch, cmd)| *epoch == 2 && cmd == "sync_changes"), "a new connection asks sync_changes again: {third:?}");
+        link.stop();
         let _ = std::fs::remove_dir_all(dir);
     }
 }
