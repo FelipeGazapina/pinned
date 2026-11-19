@@ -670,10 +670,11 @@ test("9r4 item 3: the Requests crumb is the theme's link colour", () => {
   assert.match(ruleOf(cssOf("gui-requests.css"), "#chat-head .crumb .request-back"), /color:\s*var\(--g-link\)/);
 });
 
-test("9r5 item 1: the footer facts are a three-column grid that wraps, Cost under List, and nothing is cut with an ellipsis", () => {
+test("9r7 item 10 (was 9r5 item 1): the footer facts flow in a row and wrap only when the next fact does not fit; a value stays whole and nothing is cut with an ellipsis", () => {
   const css = cssOf("gui-plan.css");
-  assert.match(ruleOf(css, ".pl-foot .facts"), /display:\s*grid;[^}]*grid-template-columns:\s*repeat\(3,/);
-  assert.doesNotMatch(ruleOf(css, ".pl-foot .facts"), /nowrap/);
+  assert.match(ruleOf(css, ".pl-foot .facts"), /display:\s*flex;[^}]*flex-wrap:\s*wrap/);
+  assert.doesNotMatch(ruleOf(css, ".pl-foot .facts"), /grid|nowrap/);
+  assert.match(ruleOf(css, ".pl-foot .fact"), /flex:\s*none;[^}]*max-width:\s*100%/, "a fact keeps its own width, and wraps inside itself only when it alone is wider than the footer");
   assert.doesNotMatch(ruleOf(css, ".pl-foot .fact b"), /text-overflow|nowrap/);
   assert.doesNotMatch(css, /\.pl-foot \.fact:last-child/);
 });
@@ -778,4 +779,27 @@ test("9r5 C: the Requests crumb shows only while the column is hidden: Plan open
 
 test("9r4 item 5: the minimap sits at the thread's left edge, not over the Requests column", () => {
   assert.match(ruleOf(cssOf("gui-requests.css"), "#chat[data-requests] #minimap"), /left:\s*340px/);
+});
+
+// ---- 0.18.8 unit 9r7 ----
+test("9r7 item 5: the Requests column hides while New request is the view, and comes back when it closes", () => {
+  const g = board();
+  g[1].tab = "tab-21";
+  const tab = requestTab("q-work", "tab-21");
+  const h = harness({ tabs: [anchorTab(g), tab] });
+  h.context.active = tab;
+  h.context.nr = { open: false, from: null };
+  h.run("renderRequests()");
+  assert.equal(h.column.hidden, false, "New request closed: the column is there");
+  assert.equal(h.els.chat.attrs["data-requests"], "");
+  h.context.nr = { open: true, from: tab.key };
+  h.run("renderRequests()");
+  assert.equal(h.column.hidden, true, "New request open: the column is gone");
+  assert.equal("data-requests" in h.els.chat.attrs, false);
+  h.context.nr = { open: true, from: "mac:other" };
+  h.run("renderRequests()");
+  assert.equal(h.column.hidden, false, "a screen opened over another tab does not hide this one's column");
+  h.context.nr = { open: false, from: tab.key };
+  h.run("renderRequests()");
+  assert.equal(h.column.hidden, false, "closed: the column returns");
 });

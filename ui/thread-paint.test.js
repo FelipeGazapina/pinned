@@ -1341,3 +1341,36 @@ test("9r4 item 2: a request thread draws its two reports open on first paint, an
   const anchor = globalTab("tab-a1", {}, [user]);
   assert.match(paintLane([anchor]), /aria-expanded="false"/, "the anchor keeps its fold closed");
 });
+
+// ---- 0.18.8 unit 9r7 ----
+const reportsBlock = (html) => html.slice(html.indexOf('<section class="reports'), html.indexOf("</section>", html.indexOf('<section class="reports')));
+const twoReports = () => `${reportPrompt("site", "Mac mini", "m1", "Cause found.")}\n${reportPrompt("site", "Mac mini", "m1", "PR #212 merged.")}`;
+
+test("9r7 item 9: a request thread's reports header reads the count and the Captain with no time, and keeps its chevron", () => {
+  const user = { kind: "user", id: "u2", at: "2026-11-19T11:00:00Z", text: twoReports() };
+  const html = reportsBlock(paintLane([globalTab("tab-r1", { request: "q1" }, [askedItem(), user])]));
+  assert.match(html, /<span class="count">2 reports<\/span><span class="names">Captain site<\/span>/);
+  assert.doesNotMatch(html.slice(0, html.indexOf('<div class="report-row"')), /class="when"/, "no time in the header");
+  assert.match(html, /class="chev"/, "the chevron stays: it is the app's own fold control");
+  const anchor = reportsBlock(paintLane([globalTab("tab-a1", {}, [user])]));
+  assert.match(anchor, /<span class="names">Captain site · <span class="when"/, "the anchor chat keeps its time");
+});
+
+test("9r7 item 9: the request thread's report rows draw no divider line between them", () => {
+  const user = { kind: "user", id: "u2", at: "2026-11-19T11:00:00Z", text: twoReports() };
+  const request = reportsBlock(paintLane([globalTab("tab-r1", { request: "q1" }, [askedItem(), user])]));
+  assert.match(request, /^<section class="reports request-reports"/);
+  const css = readFileSync(new URL("./gui-orchestrator.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.match(css, /\.request-reports \.report-row:not\(:last-child\) \{[^}]*border-bottom:\s*0/);
+  assert.match(css, /\.report-row:not\(:last-child\) \{[^}]*border-bottom:\s*1px solid/, "the anchor chat keeps its dividers");
+});
+
+test("9r7 item 11: a report row in a request thread carries no time at all, hovered or not", () => {
+  const user = { kind: "user", id: "u2", at: "2026-11-19T11:00:00Z", text: twoReports() };
+  const html = reportsBlock(paintLane([globalTab("tab-r1", { request: "q1" }, [askedItem(), user])]));
+  const rows = blocks(html, '<div class="report-row"');
+  assert.equal(rows.length, 2);
+  for (const row of rows) assert.doesNotMatch(row, /class="when"/);
+  const anchor = reportsBlock(paintLane([globalTab("tab-a1", {}, [user])]));
+  assert.equal((anchor.match(/<div class="head">[^]*?class="when"/g) ?? []).length > 0, true, "the anchor chat's rows keep the hover time");
+});

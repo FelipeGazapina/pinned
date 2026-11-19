@@ -553,3 +553,50 @@ test("9r5 item 3: the preview header carries no New chip", () => {
   assert.doesNotMatch(html, />New</);
   assert.doesNotMatch(html, /nr-new/);
 });
+
+// ---- 0.18.8 unit 9r7 ----
+test("9r7 item 5: opening and closing New request redraws the Requests column, which hides while the screen is open", () => {
+  const h = harness();
+  let redraws = 0;
+  h.context.renderRequests = () => redraws++;
+  h.run("openNewRequest()");
+  assert.ok(redraws > 0, "opening asks the column to redraw");
+  const opened = redraws;
+  h.run("closeNewRequest()");
+  assert.ok(redraws > opened, "closing asks it to redraw");
+});
+
+test("9r7 item 5: the screen no longer leaves 340 px for the column", () => {
+  assert.doesNotMatch(cssOfNew("gui-requests-new.css"), /#chat\[data-requests\] #new-request/);
+});
+
+test("9r7 item 6: the text box grows with its text from a small minimum and has no resize handle", () => {
+  const rule = ruleOfNew(cssOfNew("gui-requests-new.css"), ":is(#new-request, #all-activity) .nr-text");
+  assert.match(rule, /resize:\s*none/);
+  assert.doesNotMatch(rule, /min-height:\s*110px/);
+  assert.match(rule, /min-height:\s*(?:[1-5]\d|6[0-4])px/, "a small minimum, at most 64 px");
+  const h = harness();
+  h.run("openNewRequest()");
+  h.run("nr.box.scrollHeight = 137");
+  h.type("#storefront add gift cards.\n\nSecond paragraph.");
+  assert.equal(h.run("nr.box.style.height"), "137px", "the box takes the height of its text");
+});
+
+test("9r7 item 7: Reply there instead is a plain text button in the link colour, with no border", () => {
+  const rule = ruleOfNew(cssOfNew("gui-requests-new.css"), ":is(#new-request, #all-activity) .nr-join");
+  assert.match(rule, /border:\s*0/);
+  assert.match(rule, /color:\s*var\(--g-link\)/);
+  assert.doesNotMatch(rule, /border-radius/);
+  const h = harness({ glances: [glance("q-gift", { title: "Add gift cards to checkout", tab: "tab-12" })] });
+  h.type("#storefront add gift cards to the checkout page");
+  assert.match(h.cards(), /<button type="button" class="nr-join" data-nr-join="0" aria-pressed="false">Reply there instead<\/button>/);
+});
+
+test("9r7 item 8: a card title starts with a capital letter; the title that is sent keeps the paragraph's own text", async () => {
+  const h = harness({ reply: sent(opened) });
+  h.type(TWO);
+  const titles = [...h.cards().matchAll(/<span class="nr-title">([^<]*)<\/span>/g)].map((m) => m[1]);
+  assert.deepEqual(titles, ["Show the delivery estimate on the cart page, before the…", "The monthly export is missing refunds"]);
+  await h.send();
+  assert.deepEqual(created(h).map((item) => item.title), ["show the delivery estimate on the cart page, before the…", "the monthly export is missing refunds"]);
+});

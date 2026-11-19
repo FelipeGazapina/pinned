@@ -344,11 +344,11 @@ test("choosing an entry opens the side panel with the card and the compact items
   assert.deepEqual(h.log.calls, [["mac", { cmd: "user_request", id: "q1", items: 20 }]]);
   const html = h.overlay.innerHTML;
   assert.match(html, /aria-label="Thread"/);
-  assert.match(html, /Where this stands/);
+  assert.match(html, /<section class="request-card"/);
   assert.match(html, /Cause found\./);
   assert.match(html, /Tell support\./);
   assert.match(html, /data-needs="true"[^>]*>Choose how support is told\./);
-  assert.match(html, /PR #212 merged/);
+  assert.doesNotMatch(html, /PR #212 merged/, "9r7: the side panel draws no pill row");
   assert.match(html, /You[\s\S]*Find out why\./);
   assert.match(html, /Captain storefront[\s\S]*The code expires after 10 minutes\./);
   assert.match(html, /Orchestrator[\s\S]*One thing is left for you\./);
@@ -385,9 +385,9 @@ test("closing the panel and All activity hides them", async () => {
   open(h);
   h.click(h.entry("q1"));
   await flush();
-  assert.match(h.overlay.innerHTML, /Where this stands/);
+  assert.match(h.overlay.innerHTML, /<section class="request-card"/);
   h.click({ "[data-rqs-panel-close]": {} });
-  assert.doesNotMatch(h.overlay.innerHTML, /Where this stands/);
+  assert.doesNotMatch(h.overlay.innerHTML, /<section class="request-card"/);
   h.click({ "[data-rqs-close]": {} });
   assert.equal(h.overlay.hidden, true);
 });
@@ -414,7 +414,7 @@ test("every field drawn from data is escaped: no img element and no javascript: 
   h.click(h.entry("q-x"));
   await flush();
   const html = h.overlay.innerHTML;
-  assert.match(html, /Where this stands/);
+  assert.match(html, /<section class="request-card"/);
   assert.equal(tagNames(html).includes("img"), false);
   assert.deepEqual(hrefs(html).filter((href) => /javascript:/i.test(href)), []);
   assert.doesNotMatch(html, /<img/i);
@@ -693,4 +693,79 @@ test("9r5 item 6: All activity hides the Requests column and gives the stream it
   const css = read("gui-requests-stream.css").replace(/\/\*[\s\S]*?\*\//g, "");
   assert.match(css, /#all-activity \{[^}]*left:\s*0/);
   assert.match(css, /#chat\[data-requests\] #all-activity \{[^}]*left:\s*340px/);
+});
+
+// ---- 0.18.8 unit 9r7: what r4 still shows against the boards ----
+const panelHtmlOf = async (items, over = {}) => {
+  const g = glance("q1", { title: "Codes", ...over });
+  const reply = (call) => (call.cmd === "user_request" ? userView("q1", { glance: g, items }) : null);
+  const h = harness({ tabs: [anchorTab([g])], reply });
+  open(h);
+  h.click(h.entry("q1"));
+  await flush();
+  return h.overlay.innerHTML;
+};
+
+test("9r7 item 1: the side panel's card has Done, Left and Needs you only: no heading and no pill row", async () => {
+  const html = await panelHtmlOf([]);
+  const card = html.slice(html.indexOf('<section class="request-card"'), html.indexOf("</section>", html.indexOf('<section class="request-card"')));
+  assert.ok(card.includes("request-card"), "the card is there");
+  assert.deepEqual([...card.matchAll(/<span class="rc-k">([^<]*)<\/span>/g)].map((m) => m[1]), ["Done", "Left", "Needs you"]);
+  assert.doesNotMatch(card, /Where this stands/);
+  assert.doesNotMatch(card, /rc-head|rc-title/);
+  assert.doesNotMatch(card, /rc-link/, "no pill row");
+  assert.doesNotMatch(card, /PR #212 merged/);
+});
+
+test("9r7 item 1: the thread view's card keeps the heading and the pill row", () => {
+  const h = harness();
+  const html = h.run(`requestCardFrom(${JSON.stringify(glance("q1"))}, { view: ${JSON.stringify(userView("q1"))} }, { kept: false })`);
+  assert.match(html, /<span class="rc-title">Where this stands<\/span>/);
+  assert.match(html, /<span class="rc-link">PR #212 merged<\/span>/);
+});
+
+test("9r7 item 2: the user's line has no time; the Captain's and the Orchestrator's keep theirs", async () => {
+  const html = await panelHtmlOf([
+    { who: "user", text: "Find out why.", at: local(2026, 11, 18, 13, 48), captain: null },
+    { who: "captain", text: "The code expires.", at: local(2026, 11, 18, 14, 2), captain: "storefront" },
+    { who: "orchestrator", text: "One thing is left.", at: local(2026, 11, 18, 14, 3), captain: null },
+  ]);
+  const items = html.split('<div class="rqs-item">').slice(1);
+  assert.equal(items.length, 3);
+  assert.equal(items[0].includes("<time"), false, "You carries no time");
+  assert.match(items[0], /<span class="name" data-who="user">You<\/span>/);
+  assert.match(items[1], /<span class="name" data-who="captain">Captain storefront<\/span><time>14:02<\/time>/);
+  assert.match(items[2], /<span class="name" data-who="orchestrator">Orchestrator<\/span><time>14:03<\/time>/);
+  assert.doesNotMatch(html, /13:48/);
+});
+
+test("9r7 item 2: only the Orchestrator's name takes the accent colour; You and Captain keep the text colour", () => {
+  const css = read("gui-requests-stream.css").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.match(css, /#all-activity \.rqs-item \.name\[data-who="orchestrator"\] \{[^}]*color:\s*color-mix\(in srgb, var\(--g-link\)/);
+  assert.doesNotMatch(css, /data-who="captain"/);
+  assert.doesNotMatch(css, /data-who="user"/);
+});
+
+test("9r7 item 3: the stream draws no 'That is everything.' line, at either end", () => {
+  const h = harness({ tabs: [anchorTab([glance("a", { opened_at: 3000 })])], reply: () => [] });
+  h.run("rqs.end = true");
+  open(h);
+  h.run("rqs.end = true");
+  h.run("renderStream()");
+  assert.equal(h.run("rqs.end"), true);
+  assert.doesNotMatch(h.overlay.innerHTML, /That is everything/);
+  assert.doesNotMatch(h.overlay.innerHTML, /rqs-end/);
+  assert.match(h.overlay.innerHTML, /data-rqs-entry="a"/, "the entry still draws");
+});
+
+test("9r7 item 4: a chip tail starts with a capital letter and only the first letter changes", () => {
+  const tabs = [anchorTab([
+    glance("a", { opened_at: local(2026, 11, 18, 9), last_who: "captain", last_text: "tests are running in a box" }),
+    glance("b", { opened_at: local(2026, 11, 18, 10), last_who: "orchestrator", last_text: "two options, pick one" }),
+    glance("c", { opened_at: local(2026, 11, 18, 11), last_who: "user", last_text: "#212 is merged" }),
+    glance("d", { opened_at: local(2026, 11, 18, 12), last_who: "user", last_text: "Already Capital" }),
+  ])];
+  const h = harness({ tabs });
+  open(h);
+  assert.deepEqual([...h.overlay.innerHTML.matchAll(/<span class="last">([^<]*)<\/span>/g)].map((m) => m[1]), ["Tests are running in a box", "Two options, pick one", "#212 is merged", "Already Capital"]);
 });
