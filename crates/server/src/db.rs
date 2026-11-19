@@ -288,7 +288,7 @@ const AGENT_BOXES_OPEN: &str = "select count(*) from boxes b where b.account = $
      and not coalesce(b.subject->>'issue' like 'run-now:%', false) \
      and (b.connector <> $2 or exists (select 1 from agent_boxes a where a.box = b.id and a.account = b.account))";
 
-const BOX_COLUMNS: &str ="id, account, machine, upstash, connector, subject, spec, size, phase, reason, extract(epoch from now() - created_at)::float8";
+const BOX_COLUMNS: &str = "id, account, machine, upstash, connector, subject, spec, size, phase, reason, extract(epoch from now() - created_at)::float8";
 /// How often a push reads again what synced projects take and the database's size.
 const SYNC_READ_EVERY: Duration = Duration::from_secs(60);
 /// How long after the last read of what synced projects take a push about to be refused for the

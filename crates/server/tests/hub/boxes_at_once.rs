@@ -194,6 +194,23 @@ fn a_captains_message_again_finds_its_box_when_boxes_at_once_is_full() {
 }
 
 #[test]
+fn a_workers_start_asked_again_finds_its_box_when_boxes_at_once_is_full_or_0() {
+    let mut fleet = Fleet::start("boxes_at_once_delegate_again");
+    fleet.ana.client.hub(json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": "sk-ant-oat01-bloomtoken" })).unwrap();
+    fleet.hub.boxes.state.lock().unwrap().hanging = true;
+    let caller = raw_caller(&fleet.hub, &mut fleet.ana.client, "caller", &[("mac", true), ("caller", true)]);
+    let to_box = json!({ "box": { "size": "small", "repo": "acme/site" }, "providerInstanceId": "bloom" });
+    fleet.boxes_at_once(1);
+    let first = caller.ask(delegate_call("task-1", to_box.clone(), SITE)).unwrap();
+    assert_eq!(first["workState"], "working", "{first}");
+    assert_eq!(caller.ask(delegate_call("task-2", to_box.clone(), SITE)), Err(ONE.to_owned()), "another task is a new box");
+    assert_eq!(caller.ask(delegate_call("task-1", to_box.clone(), SITE)), Ok(first.clone()), "full: the task's own box is no new one");
+    fleet.boxes_at_once(0);
+    assert_eq!(caller.ask(delegate_call("task-1", to_box, SITE)), Ok(first), "0: the task's own box is no new one");
+    assert_eq!(fleet.ana.rows(&fleet.hub), 1);
+}
+
+#[test]
 fn run_now_is_the_users_act_so_boxes_at_once_neither_refuses_nor_counts_it() {
     let mut fleet = Fleet::start("boxes_at_once_run_now");
     fleet.boxes_at_once(0);
