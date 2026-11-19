@@ -3488,7 +3488,7 @@ impl Machine {
     pub fn open_global_orchestrator(&self) -> Result<TabId, String> {
         std::fs::create_dir_all(&self.global_dir).map_err(|e| format!("could not make {}: {e}", self.global_dir.display()))?;
         let folder = self.global_folder();
-        let open = self.anchors().into_iter().map(|(id, _)| id).min_by_key(|id| tab_number(id));
+        let open = self.tabs.lock().unwrap().iter().filter(|(_, t)| global::is_global(&t.env) && crate::user_requests::of_env(&t.env).is_none()).map(|(id, _)| id.clone()).min_by_key(|id| tab_number(id));
         if let Some(id) = open {
             return Ok(id);
         }
