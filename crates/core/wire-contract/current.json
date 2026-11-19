@@ -3714,7 +3714,7 @@
                 "type": "string"
               },
               "answers": {
-                "description": "The `request_id`s of the orchestrator's messages whose turn this report ends. Empty for\n`tell_orchestrator`.",
+                "description": "The `request_id`s this report concerns. A turn's end answers the messages in flight; a\n`tell_orchestrator` names the ones its Capitão still serves without answering them.",
                 "type": "array",
                 "items": {
                   "type": "string"
@@ -16776,7 +16776,7 @@
                 "type": "string"
               },
               "answers": {
-                "description": "The `request_id`s of the orchestrator's messages whose turn this report ends. Empty for\n`tell_orchestrator`.",
+                "description": "The `request_id`s this report concerns. A turn's end answers the messages in flight; a\n`tell_orchestrator` names the ones its Capitão still serves without answering them.",
                 "type": "array",
                 "items": {
                   "type": "string"
@@ -32589,7 +32589,7 @@
                 "type": "string"
               },
               "answers": {
-                "description": "The `request_id`s of the orchestrator's messages whose turn this report ends. Empty for\n`tell_orchestrator`.",
+                "description": "The `request_id`s this report concerns. A turn's end answers the messages in flight; a\n`tell_orchestrator` names the ones its Capitão still serves without answering them.",
                 "type": "array",
                 "items": {
                   "type": "string"
@@ -42428,7 +42428,7 @@
                 "type": "string"
               },
               "answers": {
-                "description": "The `request_id`s of the orchestrator's messages whose turn this report ends. Empty for\n`tell_orchestrator`.",
+                "description": "The `request_id`s this report concerns. A turn's end answers the messages in flight; a\n`tell_orchestrator` names the ones its Capitão still serves without answering them.",
                 "type": "array",
                 "items": {
                   "type": "string"
@@ -81472,7 +81472,7 @@
                 "type": "string"
               },
               "answers": {
-                "description": "The `request_id`s of the orchestrator's messages whose turn this report ends. Empty for\n`tell_orchestrator`.",
+                "description": "The `request_id`s this report concerns. A turn's end answers the messages in flight; a\n`tell_orchestrator` names the ones its Capitão still serves without answering them.",
                 "type": "array",
                 "items": {
                   "type": "string"
@@ -87221,7 +87221,7 @@
                 "type": "string"
               },
               "answers": {
-                "description": "The `request_id`s of the orchestrator's messages whose turn this report ends. Empty for\n`tell_orchestrator`.",
+                "description": "The `request_id`s this report concerns. A turn's end answers the messages in flight; a\n`tell_orchestrator` names the ones its Capitão still serves without answering them.",
                 "type": "array",
                 "items": {
                   "type": "string"
