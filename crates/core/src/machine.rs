@@ -3543,8 +3543,7 @@ impl Machine {
     fn newest_global_transcript(&self) -> Option<String> {
         let folder = self.global_folder();
         let account = self.account_for(None, &folder).ok()?;
-        let project: String = folder.display().to_string().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-        let entries = std::fs::read_dir(self.accounts.home(&account).join("projects").join(project)).ok()?;
+        let entries = std::fs::read_dir(self.accounts.home(&account).join("projects").join(claude_slug(&folder))).ok()?;
         let requests = self.requests.lock().unwrap();
         entries
             .flatten()
@@ -20056,7 +20055,7 @@ Have another model review a risky change before it goes ahead.";
 
     #[cfg(unix)]
     fn requests_machine(dir: &Path, claude: &Path) -> Arc<Machine> {
-        Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.to_owned())]), ..launch() }, Some(dir.join("config")), None, |_| {})
+        Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.to_owned())]), claude_home: Some(dir.join(".claude")), ..launch() }, Some(dir.join("config")), None, |_| {})
     }
 
     fn ask_new(m: &Machine, items: &[(&str, &str)]) -> Result<Value, String> {
@@ -20079,8 +20078,7 @@ Have another model review a risky change before it goes ahead.";
         let folder = global_folder_of(dir);
         std::fs::create_dir_all(&folder).unwrap();
         let folder = dunce::canonicalize(folder).unwrap();
-        let munged: String = folder.display().to_string().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-        let project = m.accounts.home(&Account::builtin(Provider::Claude)).join("projects").join(munged);
+        let project = m.accounts.home(&Account::builtin(Provider::Claude)).join("projects").join(claude_slug(&folder));
         std::fs::create_dir_all(&project).unwrap();
         let transcript = project.join(format!("{session}.jsonl"));
         std::fs::write(&transcript, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"What runs where?\"},\"sessionId\":\"old\"}\n").unwrap();
