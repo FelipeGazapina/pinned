@@ -423,8 +423,10 @@ impl UserRequests {
     /// request, opened when there is none.
     fn fallback(&mut self, captain: &CaptainRef, now: u64) -> String {
         let captain = captain.clone().cleaned();
-        // One per Captain, by machine and exact path, even for a path no Captain record keeps.
-        let key = format!("captain-reports/{}/{}", captain.machine, captain.path);
+        // One per Captain, by machine and exact path. A path no Captain record keeps is no part
+        // of the key either: cutting it would break the match, so one per machine holds them.
+        let path = if captain.path_ok() { captain.path.as_str() } else { "" };
+        let key = format!("captain-reports/{}/{path}", captain.machine);
         let open_for = |kind: Kind| {
             self.saved
                 .requests
