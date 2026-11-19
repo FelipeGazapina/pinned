@@ -92,6 +92,17 @@ pub async fn start(config: Config) -> Result<Running, String> {
             eprintln!("pinned-server: could not finish the confirmations a stopped hub left: {e}");
         }
     });
+    hub::copies::hold_after_absence(&hub).await?;
+    let beating = hub.clone();
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            every.tick().await;
+            if let Err(e) = beating.db.beat().await {
+                eprintln!("pinned-server: could not record the hub's beat: {e}");
+            }
+        }
+    });
     hub.watch_all().await?;
     teams::spawn_tick(&hub);
     // Counts of what the hub holds, so memory that grows can be told apart by cause.
