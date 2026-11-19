@@ -14,22 +14,23 @@ const PLAN_ZOOMS = [
 const PLAN_LEFT = 28;
 
 /** The words a step and a Captain's plan show. Every surface that names a state reads them from here. */
-const PLAN_STEP_WORD = { done: "Done", running: "Running now", failed: "Failed", waiting: "Waiting for your go", pending: "Not started" };
+const PLAN_STEP_WORD = { done: "Done", running: "Running now", failed: "Failed", waiting: "Waiting on you", pending: "Not started" };
 const PLAN_CARD_WORD = { needs_you: "Needs you", fixing: "Fixing", working: "Working", idle: "Idle", finished: "Finished", closed: "Closed" };
 const PLAN_ORDER = { needs_you: 0, fixing: 1, working: 2, idle: 3, finished: 4, closed: 5 };
 
 const planAfterFix = (step) => step.state === "done" && /^after /.test(step.why ?? "");
-const planStepWord = (step) => (planAfterFix(step) ? "Done, after one fix" : PLAN_STEP_WORD[step.state]);
+const planFixRuns = (step) => step.fixes.some((f) => f.steps.some((y) => y.state === "running"));
+const planStepWord = (step) => (planAfterFix(step) ? "Done, after one fix" : step.state === "failed" && planFixRuns(step) ? "Failed, fix in progress" : PLAN_STEP_WORD[step.state]);
 const planMains = (plan) => plan.lists.flatMap((list) => list.steps);
 /** Every step the board counts: the main steps and the steps of their fix branches. */
 const planAllSteps = (plan) => planMains(plan).flatMap((step) => [step, ...step.fixes.flatMap((f) => f.steps)]);
 /** `scope` prefixes every id the surface keeps (fold, picked step, fix branch): "" for a Captain's one plan, a plan's
  * `machine|tab|plan|` where one panel draws several plans whose list and step ids repeat. */
-const planFixOpen = (s, step, scope = "") => s.fixOpen?.[scope + step.id] ?? step.state === "failed";
+const planFixOpen = (s, step, scope = "") => s.fixOpen?.[scope + step.id] ?? step.fixes.length > 0;
 /** Who runs a step: the worker's name when the hub gives one, else Worker for a delegated step, else the Captain. */
 const planRunBy = (step) => step.by ?? (step.task ? "Worker" : "Captain");
 const planCost = (cost) => (cost == null ? "" : `$${cost.toFixed(2)}`);
-const planClock = (ms) => new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+const planClock = (ms) => new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 
 /** A lane head's class and words, the board's formula (PlanTree): "<done> of <steps>", then "Done" (with "1 fix" or "N fixes") once every
  * step is done, else ", needs you" while a step waits, else ", running". The board has no word for the data's `failed` step or a
@@ -290,9 +291,23 @@ function planDroppedHtml(p) {
 }
 
 function planZoomHtml(zoom) {
-  return `<span class="pl-zoom" role="group" aria-label="Zoom"><button type="button" class="icon" data-zoom="-1" title="Zoom out" ${zoom === 0 ? "disabled" : ""}>${icon("minus")}</button><span class="pl-zoom-name">${PLAN_ZOOMS[zoom].name}</span><button type="button" class="icon" data-zoom="1" title="Zoom in" ${zoom === 2 ? "disabled" : ""}>${icon("plus")}</button></span>`;
+  return `<span class="pl-zoom" role="group" aria-label="Zoom"><button type="button" class="sq" data-zoom="-1" aria-label="Zoom out" title="Zoom out"${zoom === 0 ? " disabled" : ""}>−</button><span class="pl-zoom-name">${PLAN_ZOOMS[zoom].name}</span><button type="button" class="sq" data-zoom="1" aria-label="Zoom in" title="Zoom in"${zoom === 2 ? " disabled" : ""}>+</button></span>`;
 }
 const planProgressHtml = (done, total) => `<div class="pl-progress"><span style="width:${total ? (done / total) * 100 : 0}%"></span></div>`;
+
+/** The header both panels draw, the board's: "Plan", "N lists, X of Y steps, K fix branches", the zoom and the progress bar. */
+function planSummary(views) {
+  const steps = views.flatMap(planAllSteps);
+  const done = steps.filter((x) => x.state === "done").length;
+  const lists = views.reduce((n, v) => n + v.lists.length, 0);
+  const fixes = views.flatMap(planMains).reduce((n, x) => n + x.fixes.length, 0);
+  const summary = [planPlural(lists, "list"), `${done} of ${planPlural(steps.length, "step")}`, fixes ? planPlural(fixes, "fix branch").replace("branchs", "branches") : ""].filter(Boolean).join(", ");
+  return { done, total: steps.length, summary };
+}
+const planHeadHtml = (views, zoom) => {
+  const { done, total, summary } = planSummary(views);
+  return `<div class="pl-head"><div class="pl-head-row"><span class="pl-title">Plan</span><span class="pl-count">${esc(summary)}</span>${planZoomHtml(zoom)}</div>${planProgressHtml(done, total)}</div>`;
+};
 
 function planChipsHtml(glances, plan) {
   return `<div class="pl-chips" role="tablist">${glances
@@ -303,7 +318,7 @@ function planChipsHtml(glances, plan) {
 function planCellHtml(step, x, top, height, Z, zoom, s, scope, fix) {
   const sel = s.step === scope + step.id ? " sel" : "";
   const word = planStepWord(step);
-  const meta = zoom === 2 ? esc(planCost(step.cost) || (step.state === "pending" && !step.task ? "" : planRunBy(step))) : "";
+  const meta = zoom === 2 && step.state !== "pending" ? esc(planCost(step.cost) || planRunBy(step)) : "";
   return `<button type="button" class="cell${fix ? " fix" : ""}${sel}" data-step="${esc(scope + step.id)}" data-state="${step.state}" style="left:${x - Z.cell / 2}px;top:${top}px;width:${Z.cell}px;height:${height}px" title="${esc(step.name)} · ${esc(word)}" aria-label="${esc(step.name)}: ${esc(word)}"><span class="dot"></span><span class="lbl">${esc(step.name)}</span><span class="meta">${meta}</span></button>`;
 }
 
@@ -366,11 +381,9 @@ function planBodyHtml(t, s) {
   if (!plan) return `${dropped}<div class="pl-empty"><p class="t">The Captain is writing its plan</p><p>Each part of the work shows up here as a list of steps.</p></div>`;
   const zoom = s.zoom ?? 1;
   const chips = glances.length > 1 ? planChipsHtml(glances, plan) : "";
-  const ms = planAllSteps(plan);
-  const done = ms.filter((x) => x.state === "done").length;
-  const head = `<div class="pl-head"><span class="pl-count">${done} of ${ms.length} done</span>${planZoomHtml(zoom)}</div>${planProgressHtml(done, ms.length)}`;
-  const at = plan.closed ? `Closed: ${esc(plan.closed)}` : plan.finished_at ? `Finished at ${planClock(plan.finished_at)}` : `Plan, from your message at ${planClock(plan.asked_at)}`;
-  const root = `<div class="root-row"><b>${esc(plan.title)}</b><span>${at}</span></div>`;
+  const head = planHeadHtml([plan], zoom);
+  const at = plan.closed ? `Closed: ${esc(plan.closed)}` : plan.finished_at ? `Finished at ${planClock(plan.finished_at)}` : `Plan, from your request at ${planClock(plan.asked_at)}`;
+  const root = `<div class="root-row">${at}</div>`;
   return `${dropped}${chips}${head}<div class="pl-scroll">${root}${planListsHtml(plan.lists, s, zoom)}</div>${planFootHtml(plan, s, { machine: t.machine, tab: t.view.id })}`;
 }
 
@@ -400,16 +413,11 @@ function requestPlanHtml(t, s) {
   const blocks = model.sections.flatMap((x) => x.blocks);
   if (!blocks.length) return none;
   const zoom = s.zoom ?? 1;
-  const views = blocks.map((b) => b.view).filter(Boolean);
-  const lists = views.reduce((n, v) => n + v.lists.length, 0);
-  const steps = views.flatMap(planAllSteps);
-  const done = steps.filter((x) => x.state === "done").length;
-  const fixes = views.flatMap(planMains).reduce((n, x) => n + x.fixes.length, 0);
-  const summary = [planPlural(lists, "list"), `${done} of ${planPlural(steps.length, "step")}`, fixes ? planPlural(fixes, "fix branch").replace("branchs", "branches") : ""].filter(Boolean).join(", ");
-  const head = `<div class="pl-head"><span class="pl-title">Plan</span><span class="pl-count">${esc(summary)}</span>${planZoomHtml(zoom)}</div>${planProgressHtml(done, steps.length)}`;
+  const head = planHeadHtml(blocks.map((b) => b.view).filter(Boolean), zoom);
   const root = `<div class="root-row">Plan, from your request at ${planClock(model.glance.opened_at)}</div>`;
+  const plain = model.sections.length === 1 && blocks.length === 1 && !blocks[0].ended;
   const body = model.sections
-    .map((sec) => `<section class="pl-sec-group"><h3 class="pl-sec">${esc(sec.title)}</h3>${sec.blocks.map((b) => requestBlockHtml(b, s, zoom, sec.blocks.length > 1)).join("") || `<p class="pl-loading">No plan from this Captain yet.</p>`}</section>`)
+    .map((sec) => `<section class="pl-sec-group">${plain ? "" : `<h3 class="pl-sec">${esc(sec.title)}</h3>`}${sec.blocks.map((b) => requestBlockHtml(b, s, zoom, sec.blocks.length > 1)).join("") || `<p class="pl-loading">No plan from this Captain yet.</p>`}</section>`)
     .join("");
   return `${head}<div class="pl-scroll">${root}${body}</div>${requestFootHtml(blocks, s)}`;
 }

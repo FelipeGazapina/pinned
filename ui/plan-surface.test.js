@@ -151,7 +151,7 @@ test("opening Plan fetches once; a push with the same glance sends nothing; a ch
   await flush();
   assert.deepEqual(plain(h.log.calls), [{ cmd: "plan", tab: "tab-1" }], "opening sends one plan call");
   const html = h.html();
-  assert.ok(html.includes("Ship the signup form"), "the plan title renders");
+  assert.ok(/<div class="root-row">Plan, from your request at /.test(html) && !html.includes("Ship the signup form"), "the root row is the board's, with no plan title");
   assert.ok(html.includes("Build") && html.includes("Review"), "the list names render");
   assert.ok(html.includes("Draft the form") && html.includes("Copy review"), "the step names render");
 
@@ -403,7 +403,7 @@ test("the Captain panel counts fix steps with the main steps: 3 of 6 done", asyn
   tab.panel.active = "plan";
   h.run("renderPlanPanel(shownSurface(active))");
   await flush();
-  assert.ok(h.html().includes('<span class="pl-count">3 of 6 done</span>'), "done of all steps, fixes included");
+  assert.ok(h.html().includes('<span class="pl-count">1 list, 3 of 6 steps, 1 fix branch</span>'), "done of all steps, fixes included");
   assert.ok(h.html().includes('class="pl-progress"><span style="width:50%"'), "the bar uses the same numbers");
 });
 
