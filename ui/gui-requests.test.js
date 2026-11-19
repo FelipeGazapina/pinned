@@ -803,3 +803,23 @@ test("9r7 item 5: the Requests column hides while New request is the view, and c
   h.run("renderRequests()");
   assert.equal(h.column.hidden, false, "closed: the column returns");
 });
+
+// ---- 0.18.8 unit 9r8 ----
+test("9r8 item 2: the panel's 1 px left border takes from the footer's right padding, so its content is as wide as the board's", () => {
+  const rule = ruleOf(cssOf("gui-plan.css"), ".pl-foot");
+  assert.match(rule, /padding:\s*12px 13px 14px 14px/, "470 px panel: 470 - 1 border - 14 - 13 = 442 px, the board's 470 - 14 - 14 = 442 px");
+});
+
+test("9r8 item 5: with the Requests column beside the thread the header has no project chip; with the crumb it keeps the chip, as ThreadPlan does", () => {
+  const g = board();
+  g[1].tab = "tab-21";
+  const h = harness({ tabs: [anchorTab(g), requestTab("q-work", "tab-21")] });
+  const panel = { open: false, active: "plan", surfaces: [{ id: "plan", kind: "plan" }] };
+  h.context.panelOf = () => panel;
+  h.context.shownSurface = () => panel.surfaces[0];
+  const column = h.run("requestCrumbHtml(tabs[1])");
+  assert.doesNotMatch(column, /rq-project|#storefront/, "Main board: dot, title, state, Plan, Mark done");
+  assert.match(column, /<span class="request-state" data-state="working">Working<\/span><span class="orchestrator-actions">/);
+  panel.open = true;
+  assert.match(h.run("requestCrumbHtml(tabs[1])"), /<span class="request-state" data-state="working">Working<\/span><span class="rq-project">#storefront<\/span><span class="orchestrator-actions">/, "ThreadPlan board: the chip follows the state");
+});

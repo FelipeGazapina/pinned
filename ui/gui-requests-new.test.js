@@ -600,3 +600,14 @@ test("9r7 item 8: a card title starts with a capital letter; the title that is s
   await h.send();
   assert.deepEqual(created(h).map((item) => item.title), ["show the delivery estimate on the cart page, before the…", "the monthly export is missing refunds"]);
 });
+
+// ---- 0.18.8 unit 9r8 ----
+test("9r8 item 1: the New request column is 720 px of content, with the 24 px side room kept outside it", () => {
+  const rule = ruleOfNew(cssOfNew("gui-requests-new.css"), ":is(#new-request, #all-activity) .nr-main");
+  assert.match(rule, /box-sizing:\s*border-box/);
+  assert.match(rule, /width:\s*768px/, "720 px of content plus 24 px on each side");
+  assert.match(rule, /padding:\s*24px/);
+  assert.match(rule, /max-width:\s*100%/);
+  const stream = cssOfNew("gui-requests-stream.css");
+  assert.match(ruleOfNew(stream, "#all-activity .rqs-list > *"), /width:\s*680px/, "All activity keeps the Stream board's 680 px column");
+});

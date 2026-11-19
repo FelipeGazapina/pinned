@@ -769,3 +769,34 @@ test("9r7 item 4: a chip tail starts with a capital letter and only the first le
   open(h);
   assert.deepEqual([...h.overlay.innerHTML.matchAll(/<span class="last">([^<]*)<\/span>/g)].map((m) => m[1]), ["Tests are running in a box", "Two options, pick one", "#212 is merged", "Already Capital"]);
 });
+
+// ---- 0.18.8 unit 9r8 ----
+const streamRule = (selector) => {
+  const css = read("gui-requests-stream.css").replace(/\/\*[\s\S]*?\*\//g, "");
+  const at = css.indexOf(`${selector} {`);
+  assert.ok(at >= 0, `${selector} is a rule`);
+  return css.slice(at, css.indexOf("}", at));
+};
+
+test("9r8 item 3: the side panel's card uses the Stream board's grid: 68 px labels, 5px 10px gaps, 12px 14px padding, 12.5 px text", () => {
+  const card = streamRule("#all-activity .rqs-pbody .request-card");
+  assert.match(card, /padding:\s*12px 14px/);
+  assert.match(card, /font-size:\s*12\.5px/);
+  const grid = streamRule("#all-activity .rqs-pbody .rc-grid");
+  assert.match(grid, /grid-template-columns:\s*68px 1fr/);
+  assert.match(grid, /gap:\s*5px 10px/);
+  const thread = read("gui-requests.css");
+  assert.match(thread, /\.request-card \.rc-grid \{[^}]*grid-template-columns:\s*76px 1fr;\s*gap:\s*6px 12px/, "the thread view's card keeps Main's 76 px and 6px 12px");
+});
+
+test("9r8 item 4: a request bubble is 82% of the column plus its own padding and border, and the day head sits 8 px above its bubble", () => {
+  const ask = streamRule("#all-activity .rqs-ask");
+  assert.match(ask, /box-sizing:\s*content-box/, "the board's bubble has no box-sizing: 82% is of the content");
+  assert.match(ask, /max-width:\s*82%/);
+  assert.match(streamRule("#all-activity .rqs-entry"), /gap:\s*8px/);
+  const day = streamRule("#all-activity .rqs-day");
+  assert.doesNotMatch(day, /gap:\s*22px|margin-bottom/);
+  assert.match(streamRule("#all-activity .rqs-day > * + *"), /margin-top:\s*22px/, "entry to entry");
+  assert.match(streamRule("#all-activity .rqs-dayhead + .rqs-entry"), /margin-top:\s*8px/, "day head to bubble");
+  assert.match(streamRule("#all-activity .rqs-day + .rqs-day"), /margin-top:\s*22px/, "chip to the next day head");
+});
