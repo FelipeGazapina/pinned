@@ -7,6 +7,7 @@ const read = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8
 const connectionSrc = read("connection.js");
 const hubSrc = read("hub.js");
 const sidebarSrc = read("gui-sidebar.js");
+const agentsSrc = read("gui-agents.js");
 const accountSrc = read("account.js");
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -206,7 +207,39 @@ test("the open thread's timer holds at the drop only for a thread on another mac
   assert.equal(context.clockMs("local"), 1_900_000, "this computer's thread keeps the real clock");
   context.noteHubLink(true);
   assert.equal(context.clockMs("mini"), 1_900_000);
-  assert.match(read("gui-timeline.js"), /ticking\(clockMs\(active\?\.machine\) - Number\(ticker\.dataset\.since\)\)/);
+  assert.match(read("gui-timeline.js"), /ticking\(clockMs\(ticker\.dataset\.machine \|\| active\?\.machine\) - Number\(ticker\.dataset\.since\)\)/);
+});
+
+test("a project's running badge is remote only while every running thread is on another machine", () => {
+  const context = { LOCAL: "local", phaseOf: (tab) => tab.phase };
+  vm.createContext(context);
+  vm.runInContext(`${fn(sidebarSrc, "projectRunsAway")}\nObject.assign(globalThis, { projectRunsAway });`, context);
+  const local = { machine: "local", phase: "working" };
+  const away = { machine: "mini", phase: "working" };
+  const done = { machine: "mini", phase: "done" };
+  assert.equal(context.projectRunsAway([away, done]), true);
+  assert.equal(context.projectRunsAway([local, away]), false);
+  assert.equal(context.projectRunsAway([done]), false);
+  assert.equal(context.projectRunsAway([away, { machine: "studio", phase: "delegating" }]), true);
+});
+
+test("a worker row takes its own machine's clock, and the summary stays live while any worker is on this Mac", () => {
+  const context = { LOCAL: "local" };
+  vm.createContext(context);
+  vm.runInContext(`${fn(agentsSrc, "workerMachine")}\n${fn(agentsSrc, "workersClock")}\nObject.assign(globalThis, { workerMachine, workersClock });`, context);
+  const parent = { machine: "mini" };
+  const here = { state: "working", tab: { machine: "local" } };
+  const away = { state: "working", tab: { machine: "studio" } };
+  const agent = { state: "working", tab: null };
+  const done = { state: "done", tab: { machine: "local" } };
+  assert.equal(context.workerMachine(parent, away), "studio");
+  assert.equal(context.workerMachine(parent, agent), "mini", "an agent worker runs inside the thread that shows it");
+  assert.equal(context.workersClock(parent, [away, here]), "local");
+  assert.equal(context.workersClock(parent, [away, agent]), "studio");
+  assert.equal(context.workersClock(parent, [done, agent]), "mini");
+  assert.match(agentsSrc, /tickerHtml\(row\.since, workerMachine\(tab, row\)\)/);
+  assert.match(agentsSrc, /tickerHtml\(s\.since, workersClock\(tab, all\)\)/);
+  assert.match(agentsSrc, /data-machine="\$\{esc\(machine\)\}"/);
 });
 
 test("the live states held still and dimmed with the hub link down are those of threads on other machines", () => {

@@ -1445,7 +1445,7 @@ threadView.addEventListener("scroll", () => {
 }, { passive: true });
 
 visibleInterval(() => {
-  for (const ticker of threadView.querySelectorAll(".ticker")) ticker.textContent = ticking(clockMs(active?.machine) - Number(ticker.dataset.since));
+  for (const ticker of threadView.querySelectorAll(".ticker")) ticker.textContent = ticking(clockMs(ticker.dataset.machine || active?.machine) - Number(ticker.dataset.since));
 }, 1000);
 
 

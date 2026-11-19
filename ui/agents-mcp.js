@@ -153,7 +153,7 @@ function redrawAgentCards() {
 async function loadExternalAgents() {
   if (!account || !hub) return;
   try {
-    const found = await hub.hub({ cmd: "external_agents" });
+    const found = await connectorCall("external_agents");
     agentsUi.list = found.agents;
     agentsUi.endpoint = found.endpoint;
     agentsUi.error = "";
@@ -181,7 +181,7 @@ Object.assign(actions, {
   async "revoke-agent"(button) {
     button.disabled = true;
     try {
-      await hub.hub({ cmd: "revoke_agent", id: button.dataset.agent });
+      await connectorCall("revoke_agent", { id: button.dataset.agent });
     } catch (e) {
       agentsUi.error = String(e);
     }
@@ -196,7 +196,7 @@ Object.assign(actions, {
     if (!projects.length) return agentConsentError("Pick at least one project.");
     button.disabled = true;
     try {
-      const { redirect } = await hub.hub({ cmd: "approve_agent", request: c.request, scopes, projects });
+      const { redirect } = await connectorCall("approve_agent", { request: c.request, scopes, projects });
       forgetAgentRequest();
       location.assign(redirect);
     } catch (e) {
@@ -206,7 +206,7 @@ Object.assign(actions, {
   },
   async "deny-agent"() {
     try {
-      const { redirect } = await hub.hub({ cmd: "deny_agent", request: agentsUi.consent.request });
+      const { redirect } = await connectorCall("deny_agent", { request: agentsUi.consent.request });
       forgetAgentRequest();
       location.assign(redirect);
     } catch (e) {

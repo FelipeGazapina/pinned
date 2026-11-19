@@ -104,12 +104,12 @@ test("Update every machine updates this Mac through its own installer while the 
   assert.deepEqual(up.ran, []);
 });
 
-function cloning({ signed = true, up }) {
+function cloning({ signed = true, up, fail = null }) {
   const asked = [];
   const context = {
     LOCAL: "local",
     hubIdOf: (machine) => (machine === "local" ? "m-local" : machine),
-    invoke: (cmd, args) => (asked.push(["here", cmd, here(args)]), Promise.resolve("/Users/owner/code/site")),
+    invoke: (cmd, args) => (asked.push(["here", cmd, here(args)]), fail ? Promise.reject(fail) : Promise.resolve("/Users/owner/code/site")),
     hub: signed ? { online: up, hub: (call) => (asked.push(["hub", here(call)]), up ? Promise.resolve("/Users/owner/code/site") : Promise.reject("not connected to the hub")) } : null,
   };
   vm.createContext(context);
@@ -132,6 +132,17 @@ test("a clone on this Mac runs here while the hub doesn't answer, and through th
   assert.deepEqual(out.asked, [["here", "clone_repo", { repo: "acme/site" }]]);
 });
 
+test("a signed-in clone on this Mac names the hub's GitHub token when git asks for one, and keeps any other failure", async () => {
+  const auth = cloning({ up: false, fail: "could not read Username for 'https://github.com': terminal prompts disabled" });
+  await assert.rejects(auth.clone("local", "acme/private", "/Users/owner/code"), /A private repository needs the account's GitHub token on the hub\./);
+  const denied = cloning({ up: false, fail: "Authentication failed for 'https://github.com/acme/private/'" });
+  await assert.rejects(denied.clone("local", "acme/private"), /GitHub token on the hub/);
+  const missing = cloning({ up: false, fail: "The requested URL returned error: 404" });
+  await assert.rejects(missing.clone("local", "acme/missing"), /404/);
+  const signedOut = cloning({ signed: false, fail: "Authentication failed" });
+  await assert.rejects(signedOut.clone("local", "acme/private"), /^Authentication failed$/);
+});
+
 async function githubPicker(error) {
   const el = () => ({ innerHTML: "", textContent: "", focus() {} });
   const parts = { ".choices": el(), ".browse input": el(), ".folders": el(), ".browse": el() };
@@ -148,6 +159,29 @@ async function githubPicker(error) {
   await context.done;
   return shown.textContent;
 }
+
+test("the external agents card says the hub can't be reached, and does not ask it", async () => {
+  const asked = [];
+  const card = { outerHTML: "" };
+  const context = {
+    account: { email: "owner@example.test" },
+    hub: { online: false, hub: (call) => (asked.push(call.cmd), Promise.reject("not connected to the hub")) },
+    actions: {},
+    agentApproval: () => null,
+    invoke: () => Promise.reject("invoke should not run"),
+    settingsOpen: () => true,
+    page: "integrations",
+    document: { body: { dataset: { page: "settings" } }, getElementById: (id) => (id === "external-agents" ? card : null) },
+    esc: (text) => String(text ?? ""),
+  };
+  vm.createContext(context);
+  vm.runInContext(`${read("connection.js")}\n${line(read("main.js"), "const hubUp = ")}\n${line(settingsSrc, "const connectorCall = ")}\n${read("agents-mcp.js")}\nglobalThis.__load = loadExternalAgents; globalThis.__ui = agentsUi;`, context);
+  await context.__load();
+  assert.deepEqual(asked, []);
+  assert.equal(context.__ui.error, "Can't reach the hub, and this needs it.");
+  assert.match(card.outerHTML, /Can't reach the hub, and this needs it\./);
+  assert.doesNotMatch(card.outerHTML, /not connected to the hub/);
+});
 
 test("the GitHub picker asks to connect GitHub only when GitHub is the one not connected", async () => {
   assert.equal(await githubPicker("GitHub is not connected"), "Connect GitHub under Settings → Connectors first.");
@@ -193,7 +227,7 @@ function settingsApp({ up, sent }) {
   };
   context.globalThis = context;
   vm.createContext(context);
-  vm.runInContext(`${read("connection.js")}\n${line(read("main.js"), "const hubUp = ")}\n${settingsSrc}\nglobalThis.__actions = actions; globalThis.__onHubSettings = onHubSettings; globalThis.__showPage = showPage;`, context);
+  vm.runInContext(`${read("connection.js")}\n${line(read("main.js"), "const hubUp = ")}\n${settingsSrc}\nglobalThis.__actions = actions; globalThis.__onHubSettings = onHubSettings; globalThis.__showPage = showPage; globalThis.__pullSettings = pullSettings;`, context);
   if (sent) {
     context.hub.online = true;
     context.__onHubSettings(sent);
@@ -219,6 +253,25 @@ test("with the hub gone after it sent settings, Connectors and Workflows show th
   assert.ok(workflows.startsWith(`<h2>Workflows</h2><div class="card"><p>Can't reach the hub, and this needs it. These are the last settings it sent.</p></div><fieldset class="hub-out" disabled>`), workflows.slice(0, 200));
   assert.doesNotMatch(workflows, /Connect Linear or Slack first/);
   assert.match(workflows, /＋ New workflow/);
+});
+
+test("settings read while the hub answers stay after it drops, even when the push never arrived", async () => {
+  const { context, show } = settingsApp({ up: true, sent: null });
+  assert.deepEqual(here(await context.__pullSettings()), LAST_SENT);
+  context.hub.online = false;
+  const connectors = show("integrations");
+  assert.ok(connectors.includes("These are the last settings it sent."), connectors.slice(0, 240));
+  assert.match(connectors, /Connected as <b>Owner<\/b> \(owner@example\.test\) in Acme\./);
+  const workflows = show("connectors");
+  assert.ok(workflows.includes("These are the last settings it sent."), workflows.slice(0, 240));
+});
+
+test("redrawing the workflow editor before this sign-in's settings arrive leaves the hub message", () => {
+  const { context, byId } = settingsApp({ up: false, sent: null });
+  const page = byId("settings-page");
+  page.querySelector = (selector) => (selector === ".canvas" && page.innerHTML.includes('class="canvas"') ? { innerHTML: "" } : null);
+  vm.runInContext(`view = { name: "edit", open: null, draft: { id: "", name: "Answer", enabled: true, trigger: { kind: "called" } } }; redraw();`, context);
+  assert.equal(page.innerHTML, `<h2>Workflows</h2><div class="card"><p>Can't reach the hub, and this needs it.</p></div>`);
 });
 
 test("with the hub answering, the pages are drawn as before", () => {

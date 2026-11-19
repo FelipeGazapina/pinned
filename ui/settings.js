@@ -149,13 +149,20 @@ function readOnlyWithoutHub(title, html) {
   return `${html.slice(0, at)}<div class="card"><p>${HUB_NEEDED} These are the last settings it sent.</p></div><fieldset class="hub-out" disabled>${html.slice(at)}</fieldset>`;
 }
 
+async function pullSettings() {
+  const latest = await connectorCall("get_settings");
+  settings = latest;
+  if (hub) settingsHub = hub;
+  return latest;
+}
+
 async function toggleSettings() {
   if (settingsOpen()) return active ? activate(active) : delete document.body.dataset.page;
   document.body.dataset.page = "settings";
   picker.hidden = true;
   renderSettingsNav();
   try {
-    settings = await connectorCall("get_settings");
+    await pullSettings();
   } catch (e) {
     console.warn("get_settings", e);
   }
@@ -508,7 +515,7 @@ async function resumeWorkflow() {
   const kind = pendingWorkflow?.kind;
   pendingWorkflow = null;
   try {
-    settings = await connectorCall("get_settings");
+    await pullSettings();
   } catch (e) {
     console.warn("get_settings", e);
   }
@@ -1643,7 +1650,7 @@ function refresh() {
 function redraw() {
   settingsPage.dataset.view = view.name;
   settingsPage.innerHTML = readOnlyWithoutHub("Workflows", connectorsHtml());
-  if (view.name === "edit") refresh();
+  if (view.name === "edit" && settingsPage.querySelector(".canvas")) refresh();
 }
 
 function edit(index, draft = clone(settings.connectors[index]), open = null) {
@@ -1831,7 +1838,7 @@ const actions = {
       const found = await connectorCall("connect_slack", { token });
       slackNote = found.added === false ? `Updated the token for @${found.name}` : `Added @${found.name} in ${found.team}`;
       slackAdding = false;
-      settings = await connectorCall("get_settings");
+      await pullSettings();
       if (pendingWorkflow && triggerReady(pendingWorkflow.kind)) return await resumeWorkflow();
       showPage("integrations");
     } catch (e) {
@@ -1965,7 +1972,7 @@ const actions = {
     try {
       await connectorCall("disconnect_slack", { bot });
       suggestions.channels = [];
-      settings = await connectorCall("get_settings");
+      await pullSettings();
     } catch (e) {
       slackRowErrors[bot] = String(e);
     }

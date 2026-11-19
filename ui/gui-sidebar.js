@@ -731,6 +731,11 @@ function projectRows(list, kids, branch) {
 const projectMachinesHtml = (names) => names.map((name, i) => `<span class="m">${esc(name)}${i < names.length - 1 ? "," : ""}</span>`).join(" ");
 /** A thread's machine as its hover card names it: an icon, and the name as text when `named`. */
 const remoteMark = (name, named) => `<span class="remote${named ? " named" : ""}" title="${esc(name)}">${icon("monitor")}${named ? `<span class="name">${esc(name)}</span>` : ""}</span>`;
+function projectRunsAway(threads) {
+  const running = threads.filter((t) => ["working", "delegating"].includes(phaseOf(t)));
+  return running.length > 0 && running.every((t) => t.machine !== LOCAL);
+}
+
 /** A project's head: its icon and name, then in one line how many messages wait for its threads,
  * how many of its threads work and the machines they are on, with what they cost as that line's
  * tooltip. A project with no Captain offers to start one. */
@@ -753,7 +758,7 @@ function projectHead(key, roots, kids) {
   head.className = "project-head";
   head.dataset.project = key;
   head.dataset.headTab = roots[0].key;
-  head.toggleAttribute("data-remote", all.every((t) => t.machine !== LOCAL));
+  head.toggleAttribute("data-remote", projectRunsAway(all));
   const captain = roots.some(isOrchestrator) || threadOf(roots[0]).workspace?.scratch
     ? ""
     : `<button type="button" class="head-act" data-head-act="captain" aria-label="Open the ${esc(name)} Captain" data-tip="Open the ${esc(name)} Captain">${icon("side-bot")}</button>`;
