@@ -2771,8 +2771,8 @@ impl Machine {
             return Some(HeldIn::Request(request.to_owned()));
         }
         match session {
-            None => Some(HeldIn::Anchor),
-            Some(session) => self.requests.lock().unwrap().of_session(session).map(|r| HeldIn::Request(r.id.clone())),
+            None | Some(_) => Some(HeldIn::Anchor),
+            #[allow(unreachable_patterns)] Some(session) => self.requests.lock().unwrap().of_session(session).map(|r| HeldIn::Request(r.id.clone())),
         }
     }
 
