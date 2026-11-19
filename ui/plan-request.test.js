@@ -53,7 +53,7 @@ const requestTab = (over = {}, plans = [], glance = rglance()) => tabOf("m1", { 
 
 /** gui-plan.js in a page, with the real request lookups from gui-orchestrator.js and requests-model.js. */
 function harness({ reply, ...extra } = {}) {
-  const log = { shown: [], saved: 0, added: [], on: [], renders: 0 };
+  const log = { shown: [], saved: 0, added: [], on: [], renders: 0, activated: [], diff: [] };
   const listeners = {};
   const models = [];
   const tabs = [];
@@ -89,6 +89,12 @@ function harness({ reply, ...extra } = {}) {
       return reply(machine, call);
     },
     openDelegated: async () => {},
+    keyOf: (machine, id) => `${machine}:${id}`,
+    tabByKey: (key) => tabs.find((t) => t.key === key) ?? null,
+    refreshTabs: async () => {},
+    activate: (tab) => log.activated.push(tab.key),
+    startTab: async () => {},
+    setDiffState: (tab, change) => log.diff.push({ tab: tab.key, change: plain(change) }),
     ...extra,
   };
   vm.createContext(context);
@@ -182,7 +188,7 @@ test("a plan named in two requests appears only in the request being viewed", as
 test("a snapshot plan draws without a fetch, marked ended, in its Captain's section", async () => {
   const old = view({ id: "p9", title: "Old plan", lists: [{ id: "l9", name: "Cleanup", task: null, steps: [STEP({ id: "s9", name: "Delete the flag", state: "done" })] }] });
   const one = rglance({ captains: [CAPTAINS[0]] });
-  const h = harness({ reply: hub([old], one) });
+  const h = harness({ reply: hub([{ machine: "m1", path: "/work/storefront", plan: old }], one) });
   const request = requestTab({}, [], one);
   h.tabs.push(request);
   await h.open(request);
@@ -222,7 +228,7 @@ test("plan titles, step names, Captain names and a snapshot's text with markup d
   const bad = (id) => view({ id, title: `${evil} ${link}`, lists: [{ id: "l1", name: `${evil} ${link}`, task: null, steps: [STEP({ id: "s1", name: `${evil} ${link}`, state: "running", what: `${evil} ${link}`, why: link })] }] });
   const captains = [{ machine: "m1", path: "/work/storefront", project: `${evil} ${link}`, machine_name: `${evil} ${link}` }];
   const glance = rglance({ captains, title: `${evil} ${link}`, project: `${evil}`, last_text: `${evil} ${link}`, needs: `${evil} ${link}` });
-  const h = harness({ reply: (machine, call) => (call.cmd === "plan" ? [bad(call.plan)] : { glance, stands: {}, items: [], plans: [bad("p9")] }) });
+  const h = harness({ reply: (machine, call) => (call.cmd === "plan" ? [bad(call.plan)] : { glance, stands: {}, items: [], plans: [{ machine: "m1", path: "/work/storefront", plan: bad("p9") }] }) });
   const store = captainTab("m1", "tab-1", "/work/storefront", [plan("p1", { title: `${evil} ${link}` })]);
   const request = requestTab({}, [], glance);
   h.tabs.push(store, request);
@@ -305,4 +311,92 @@ test("a plan goes to its Captain by machine and path, never by folder or project
   assert.ok(place(html, "m1|tab-1|p1") > html.indexOf("Captain pinned"), "the plan on that path draws under it");
   assert.equal(sections(html).length, 2, "a tab on a folder that merely carries the project name is its own section");
   assert.equal(sections(html)[1], "Other Captain · pinned", "and is not taken for the Captain");
+});
+
+/** A plan of 4 main steps (2 done) and one fix of 2 steps (1 done): the board counts 3 of 6. */
+const withFix = (id = "p1") =>
+  view({
+    id,
+    lists: [
+      {
+        id: "l1",
+        name: "Build",
+        task: null,
+        steps: [
+          STEP({ id: "s1", name: "One", state: "done" }),
+          STEP({ id: "s2", name: "Two", state: "done" }),
+          STEP({ id: "s3", name: "Three", state: "pending" }),
+          STEP({ id: "s4", name: "Four", state: "failed", fixes: [{ id: "f1", steps: [STEP({ id: "x1", name: "Fix a", state: "done" }), STEP({ id: "x2", name: "Fix b", state: "running" })] }] }),
+        ],
+      },
+    ],
+  });
+
+test("the request panel counts fix steps with the main steps: 3 of 6", async () => {
+  const h = harness({ reply: (machine, call) => (call.cmd === "plan" ? [withFix(call.plan)] : hub()(machine, call)) });
+  const store = captainTab("m1", "tab-1", "/work/storefront", [plan("p1")]);
+  const request = requestTab();
+  h.tabs.push(store, request);
+  await h.open(request);
+  const html = h.html();
+  assert.match(html, /<span class="pl-count">1 list, 3 of 6 steps, 1 fix branch<\/span>/, "lists, done of all steps, fix branches");
+  assert.ok(html.includes('class="pl-progress"><span style="width:50%"'), "the bar uses the same numbers");
+});
+
+const SNAP = (id, title) => view({ id, title, lists: [{ id: "l9", name: `List of ${title}`, task: null, steps: [STEP({ id: "s9", name: `Step of ${title}`, state: "done" })] }] });
+
+test("two Captains, one snapshot each: each draws under its own Captain, marked ended, with no Ended plans section", async () => {
+  const snaps = [
+    { machine: "m2", path: "/work/billing", plan: SNAP("p9", "Billing leftovers") },
+    { machine: "m1", path: "/work/storefront", plan: SNAP("p8", "Storefront leftovers") },
+  ];
+  const h = harness({ reply: hub(snaps) });
+  const request = requestTab();
+  h.tabs.push(request);
+  await h.open(request);
+  const html = h.html();
+  assert.deepEqual(sections(html), ["Captain storefront · Mac mini", "Captain billing · Laptop"], "no Ended plans section");
+  const store = under(html, "Captain storefront · Mac mini");
+  const bill = under(html, "Captain billing · Laptop");
+  assert.ok(store.includes("Storefront leftovers") && !store.includes("Billing leftovers"), "the storefront snapshot is under storefront");
+  assert.ok(bill.includes("Billing leftovers") && !bill.includes("Storefront leftovers"), "the billing snapshot is under billing");
+  assert.equal((html.match(/class="pl-ended">ended</g) ?? []).length, 2, "each is marked ended");
+});
+
+test("a snapshot whose machine and exact path match no Captain goes to Ended plans", async () => {
+  const snaps = [
+    { machine: "m1", path: "/work/storefront-copy", plan: SNAP("p7", "Same machine, other path") },
+    { machine: "m3", path: "/work/storefront", plan: SNAP("p6", "Other machine, same path") },
+  ];
+  const h = harness({ reply: hub(snaps) });
+  const request = requestTab();
+  h.tabs.push(request);
+  await h.open(request);
+  const html = h.html();
+  assert.deepEqual(sections(html), ["Captain storefront · Mac mini", "Captain billing · Laptop", "Ended plans"]);
+  const ended = under(html, "Ended plans");
+  assert.ok(ended.includes("Same machine, other path") && ended.includes("Other machine, same path"), "both sit under Ended plans");
+  assert.ok(!under(html, "Captain storefront · Mac mini").includes("Same machine, other path"), "a path that only starts the same is not the Captain");
+});
+
+test("See the diff on a request thread: a live step with a task and a branch shows it, with its Captain as owner, and drawing calls only plan and user_request", async () => {
+  const live = view({ lists: [{ id: "l1", name: "Build", task: null, steps: [STEP({ id: "s2", name: "Wire the API", state: "running", task: "task-2", branch: "feat/wire-api" })] }] });
+  const h = harness({ reply: (machine, call) => (call.cmd === "plan" ? [live] : hub()(machine, call)) });
+  const store = captainTab("m1", "tab-1", "/work/storefront", [plan("p1")]);
+  const request = requestTab();
+  h.tabs.push(store, request);
+  await h.open(request);
+  assert.match(h.html(), /data-see-diff="task-2"[^>]*data-diff-machine="m1"[^>]*data-diff-tab="tab-1"/, "the Captain's machine and tab own the click");
+  assert.deepEqual([...new Set(h.log.on.map((c) => c.call.cmd))].sort(), ["plan", "user_request"], "no open_task while drawing");
+});
+
+test("See the diff: an ended snapshot never shows it, even with a task and a branch", async () => {
+  const old = view({ id: "p9", title: "Old plan", lists: [{ id: "l9", name: "Cleanup", task: null, steps: [STEP({ id: "s9", name: "Delete the flag", state: "running", task: "task-9", branch: "feat/old" })] }] });
+  const one = rglance({ captains: [CAPTAINS[0]] });
+  const h = harness({ reply: hub([{ machine: "m1", path: "/work/storefront", plan: old }], one) });
+  const request = requestTab({}, [], one);
+  h.tabs.push(request);
+  await h.open(request);
+  assert.ok(h.html().includes("Delete the flag"), "the snapshot draws");
+  assert.ok(!h.html().includes("data-see-diff") && !h.html().includes("See the diff"), "with no See the diff");
 });
