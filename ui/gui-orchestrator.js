@@ -17,12 +17,18 @@ function perTask(build) {
 /** The tag catalog the chat routes and paints sent messages with, as the composer reads it. */
 const laneCatalog = perTask(() => composerTagCatalog());
 
-/** When each project last reported to the orchestrator, by slug, read off the orchestrator's thread. */
+/** When each project last reported to the orchestrator, by slug, read off every global tab's thread:
+ * the anchor's and each request's, the latest report of a project winning. */
 function lastReports() {
-  const global = tabs.find(isGlobalOrchestratorTab);
   const at = new Map();
-  for (const item of global ? threadOf(global).items : []) {
-    if (item.kind === "user") for (const block of reportBlocks(item.text)) at.set(tagSlug(block.project), item.at);
+  for (const global of tabs.filter(isGlobalOrchestratorTab)) {
+    for (const item of threadOf(global).items) {
+      if (item.kind !== "user") continue;
+      for (const block of reportBlocks(item.text)) {
+        const slug = tagSlug(block.project);
+        if (!(Date.parse(at.get(slug)) >= Date.parse(item.at))) at.set(slug, item.at);
+      }
+    }
   }
   return at;
 }
@@ -96,16 +102,71 @@ function orchestratorTagsHtml(html) {
   return tagsInHtml(html, { project: new Set(catalog.projects.map((p) => p.slug)), machine: new Set(catalog.machines.map((m) => m.slug)) });
 }
 
-/** "Routed to Captain ..." under a sent message. Nothing records where the orchestrator sent it,
+/** "Routed to Captain ..." under a sent message on the anchor. Nothing records where the orchestrator sent it,
  * so it reads the message's tags against today's catalog, and drops out once a tag stops resolving. */
 function orchestratorRoutedHtml(text) {
   const line = routedLine(text, laneCatalog());
   return line ? `<p class="routed">${esc(line)}</p>` : "";
 }
 
-/** Everything the orchestrator's chat draws from outside its own thread, for renderThread's key. */
-const globalLaneKey = () =>
-  JSON.stringify([globalSettings.group_reports, laneCatalog().projects, captainFacts().map((f) => [f.slug, f.state, f.working, f.needs.length, f.needs[0] ?? null])]);
+/** The request a request thread belongs to, as the glances carry it. Any tab of the host may carry them. */
+function threadRequestGlance(tab) {
+  const id = tab?.view?.request;
+  if (!id) return null;
+  for (const other of tabs) {
+    const glance = other.machine === tab.machine ? other.view.requests?.find((g) => g.id === id) : null;
+    if (glance) return glance;
+  }
+  return null;
+}
+
+/** The plans of a request, `requestPlans`' entries, read off every machine's tabs. */
+function threadRequestPlans(tab) {
+  const glance = threadRequestGlance(tab);
+  if (!glance) return [];
+  const byMachine = {};
+  for (const other of tabs) (byMachine[other.machine] ??= []).push(other.view);
+  return requestPlans(glance, byMachine);
+}
+
+/** How many lists the request's plans hold on the Captain a send went to: the plans that sit in a
+ * checkout of the glance's Captain of that name. */
+function sentPlanLists(tab, name) {
+  const glance = threadRequestGlance(tab);
+  if (!glance) return 0;
+  const base = (path) => String(path).split(/[\\/]/).pop();
+  const captains = glance.captains.filter((c) => tagSlug(c.project) === tagSlug(name) || tagSlug(base(c.path)) === tagSlug(name));
+  let lists = 0;
+  for (const { machine, tab: view, plan } of threadRequestPlans(tab)) {
+    if (captains.some((c) => c.machine === machine && c.path === view.cwd)) lists += plan.strips?.length ?? plan.lists?.length ?? 0;
+  }
+  return lists;
+}
+
+/** The "Sent to Captain X · how it went" divider of each `send_to_captain` step a request thread's
+ * turn made, in the order it made them. It replaces the guess `orchestratorRoutedHtml` draws. */
+function orchestratorSentHtml(tab, turn) {
+  return turn.steps
+    .map(sendToCaptainOf)
+    .filter(Boolean)
+    .map((sent) => `<div class="sent-divider">${esc(sentToCaptainLine(sent, sentPlanLists(tab, sent.name)))}</div>`)
+    .join("");
+}
+
+/** Everything the orchestrator's chat draws from outside its own thread, for renderThread's key. A
+ * request thread's dividers also read its plans. */
+const globalLaneKey = (tab) =>
+  JSON.stringify([
+    globalSettings.group_reports,
+    laneCatalog().projects,
+    captainFacts().map((f) => [f.slug, f.state, f.working, f.needs.length, f.needs[0] ?? null]),
+    tab?.view?.request ? [threadRequestGlance(tab)?.captains, threadRequestPlans(tab).map((e) => [e.machine, e.tab.id, e.plan.id, e.plan.strips?.length])] : null,
+  ]);
+
+/** Whether the Captains rail stands beside this tab's chat: the anchor's, not a request's own thread. */
+function wantsRail(tab) {
+  return guiOn() && !!tab && isGlobalOrchestratorTab(tab) && !tab.view.request;
+}
 
 threadView.addEventListener("click", (e) => {
   const review = tabByKey(e.target.closest("[data-review-thread]")?.dataset.reviewThread);
@@ -137,7 +198,7 @@ const RAIL_LANE = 680;
 function renderRail() {
   const thread = getComputedStyle(threadView);
   const lane = chatEl.clientWidth - RAIL_WIDTH - parseFloat(thread.paddingLeft) - parseFloat(thread.paddingRight);
-  const on = guiOn() && !!active && isGlobalOrchestratorTab(active) && !narrow(768) && lane >= RAIL_LANE;
+  const on = wantsRail(active) && !narrow(768) && lane >= RAIL_LANE;
   chatEl.toggleAttribute("data-rail", on);
   captainsRail.hidden = !on;
   if (on) setHtml(captainsRail, railHtml(captainFacts()));

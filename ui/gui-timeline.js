@@ -990,6 +990,9 @@ function userHtml(user, t, tab, first) {
  * routed line under a sent message, quick replies, read aloud. Guarded by typeof so the plain
  * timeline, and the sandbox that tests it without composer-tags.js, keep the ordinary path. */
 const globalLane = (tab) => typeof isGlobalOrchestratorTab === "function" && isGlobalOrchestratorTab(tab);
+/** A request's own thread: a global tab that carries its request. It draws the board's body: a
+ * "Sent to Captain" divider for each send, report rows with the machine only, no Worked for fold. */
+const requestLane = (tab) => globalLane(tab) && !!tab.view.request;
 /** A sent message's body, with its #project and @machine tags painted in the orchestrator's lane. */
 const laneTagsHtml = (tab, html) => (globalLane(tab) ? orchestratorTagsHtml(html) : html);
 
@@ -999,7 +1002,7 @@ const laneTagsHtml = (tab, html) => (globalLane(tab) ? orchestratorTagsHtml(html
 function globalReportsHtml(user, t, tab, first, by, reports) {
   const mine = user.text.slice(0, reports[0].start).trim();
   const lead = mine ? userBubbleHtml({ ...user, text: mine }, t, tab, first, by) : "";
-  const rows = reports.map((report) => reportRowHtml(report, user.at, t, `full:${user.id}:${report.start}`, reportCaptainHtml(report))).join("");
+  const rows = reports.map((report) => reportRowHtml(report, user.at, t, `full:${user.id}:${report.start}`, requestLane(tab) ? undefined : reportCaptainHtml(report))).join("");
   const fold = reportFoldLabel(reports);
   const cut = fold.indexOf(" · ");
   const label = `<span class="count">${esc(fold.slice(0, cut))}</span><span class="names">${esc(fold.slice(cut + 3))}${dateOf(user.at) ? ` · ${whenHtml(user.at, "when")}` : ""}</span>`;
@@ -1084,7 +1087,7 @@ function userBubbleHtml(user, t, tab, first, by) {
     by === "pinned" && `<p class="sent-by">Sent by Pinned</p>`,
     user.steer && `<span class="steer" title="Steered the active turn">${icon("redo-2")}Steer</span>`,
   ];
-  return `<div class="user">${above.filter(Boolean).join("")}<div class="bubble">${bubble.filter(Boolean).join("")}</div>${globalLane(tab) ? orchestratorRoutedHtml(user.text) : ""}
+  return `<div class="user">${above.filter(Boolean).join("")}<div class="bubble">${bubble.filter(Boolean).join("")}</div>${globalLane(tab) && !requestLane(tab) ? orchestratorRoutedHtml(user.text) : ""}
     ${promptMetaHtml(user, t)}</div>`;
 }
 
@@ -1108,7 +1111,7 @@ function turnHtml(tab, turn, change, live, first, t, latest, workers = "") {
         <summary><span class="label">${label}</span></summary>
         <div class="steps">${steps}</div></details>
       ${!t.open.has(turn.id) && !compacting ? liveHtml(turn, active, cwd) : ""}`;
-  } else if (work.length) {
+  } else if (work.length && !requestLane(tab)) {
     const end = turn.user?.steer ? turn.end : turn.runEnd;
     const took = end > turn.start ? duration(end - turn.start) : "";
     const label =
@@ -1130,7 +1133,7 @@ function turnHtml(tab, turn, change, live, first, t, latest, workers = "") {
   const lead = live ? 0 : saidSteps.findIndex((s) => s.kind === "text") + 1;
   const said = saidHtml.slice(0, lead).join("") + workers + saidHtml.slice(lead).join("");
   const replies = quick && latest ? `<div class="quick-replies">${quick.options.map((option) => `<button type="button" class="quick-reply" data-reply="${esc(option)}">${esc(option)}</button>`).join("")}</div>` : "";
-  return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${notes.map(noteHtml).join("")}${live ? saidHtml.join("") : ""}${fold}${live ? workers : ""}
+  return `<section class="turn" data-turn-id="${esc(turn.id)}">${turn.user ? userHtml(turn.user, t, tab, first) : ""}${requestLane(tab) ? orchestratorSentHtml(tab, turn) : ""}${notes.map(noteHtml).join("")}${live ? saidHtml.join("") : ""}${fold}${live ? workers : ""}
     ${live ? "" : said}${replies}
     ${change ? changesHtml(change, t.open, change.ended === panelTurn(tab)) : ""}
     ${turn.prs.map((p) => `<p class="pr-line"><button class="pr-link" data-pr="${esc(p.url)}" title="${esc(p.url)}">${icon("github")}PR #${p.number}</button><span class="muted">${esc(p.repo)}</span></p>`).join("")}${turn.dividers.map(dividerHtml).join("")}</section>`;
@@ -1257,7 +1260,7 @@ function renderThread() {
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.start, !!t.fetchingOlder, t.olderError, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), !!tab.view.compacting, resume, boxKey(box), convex && [convex.repo, convex.deployment], globalLane(tab) ? globalLaneKey() : null, workersKey(tab), workerViewKey(tab), panelTurn(tab), waiting.rows.map((p) => [p.id, p.state, p.sent, p.text]), waiting.busy, waiting.stale]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.start, !!t.fetchingOlder, t.olderError, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), !!tab.view.compacting, resume, boxKey(box), convex && [convex.repo, convex.deployment], globalLane(tab) ? globalLaneKey(tab) : null, workersKey(tab), workerViewKey(tab), panelTurn(tab), waiting.rows.map((p) => [p.id, p.state, p.sent, p.text]), waiting.busy, waiting.stale]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
