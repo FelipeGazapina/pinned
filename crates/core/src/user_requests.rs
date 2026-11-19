@@ -624,7 +624,7 @@ pub struct Item {
 }
 
 /// A plan kept for a request after its Captain's tab went, named by that Captain.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug)]
 pub struct RequestPlan {
     pub machine: MachineId,
     pub path: String,
@@ -632,7 +632,7 @@ pub struct RequestPlan {
 }
 
 /// The answer to `Call::UserRequest`.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug)]
 pub struct UserRequestView {
     pub glance: RequestGlance,
     pub stands: Stands,
@@ -1035,6 +1035,7 @@ mod tests {
                 replies: 0,
                 captains: vec![],
                 tab: Some("tab-1".into()),
+                asked: String::new(),
             }
         );
         assert_eq!((glances[1].closed_at, glances[1].tab.as_deref()), (Some(15 * day), None));
