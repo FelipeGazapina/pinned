@@ -1212,6 +1212,12 @@ impl Delegates {
         self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, claim: 0, task: None, request: Some(request) });
     }
 
+    /// The text of every message waiting to be typed into `tab`.
+    #[cfg(test)]
+    pub fn queued_text(&self, tab: &str) -> Vec<String> {
+        self.reports.lock().unwrap().iter().filter(|r| r.tab == tab).map(|r| r.text.clone()).collect()
+    }
+
     /// Whether the notice `key` was already taken, queued or typed.
     pub fn took_notice(&self, key: &str) -> bool {
         self.notices.lock().unwrap().iter().any(|taken| taken == key)

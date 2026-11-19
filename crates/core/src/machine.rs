@@ -20314,6 +20314,155 @@ Have another model review a risky change before it goes ahead.";
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A request whose tab heard its Claude session `session`.
+    #[cfg(unix)]
+    fn request_on(m: &Machine, key: &str, session: &str) -> (String, TabId) {
+        let opened = ask_new(m, &[(key, "Fix the login.")]).unwrap();
+        let (id, tab) = (opened[0]["id"].as_str().unwrap().to_owned(), opened[0]["tab"].as_str().unwrap().to_owned());
+        m.record_event(AgentEvent { session: Some(session.into()), ..hook(&tab, AgentStatus::Done) });
+        (id, tab)
+    }
+
+    #[cfg(unix)]
+    fn send_from(m: &Machine, tab: &str, path: &str, request_id: &str) -> Result<String, String> {
+        m.project_tool(tab, ProjectTool::SendToCaptain { project: path.into(), message: "Ship it.".into(), request_id: request_id.into(), machine: None, boxed: None })
+    }
+
+    fn report_of(path: &str, text: &str, answers: &[String]) -> CaptainReport {
+        CaptainReport { machine: Default::default(), machine_name: "MacBook".into(), project: "site".into(), path: path.into(), tab: "tab-c".into(), text: text.into(), answers: answers.to_vec() }
+    }
+
+    /// Whether `text` reached `tab`: typed into its start, held for it, or queued for it.
+    #[cfg(unix)]
+    fn heard(m: &Machine, tab: &str, text: &str) -> bool {
+        m.tab(tab, |t| t.held.iter().chain(t.launch.iter()).any(|l| l.contains(text))).unwrap() || m.delegates.queued_text(tab).iter().any(|l| l.contains(text))
+    }
+
+    #[cfg(unix)]
+    fn routing_machine(name: &str) -> (PathBuf, PathBuf, Arc<Machine>, String) {
+        let dir = temp(name);
+        let site = dir.join("site");
+        std::fs::create_dir_all(&site).unwrap();
+        let claude = recording_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let path = m.open_project(site).display().to_string();
+        (dir, claude, m, path)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_report_lands_in_the_request_that_sent_it_not_the_anchor() {
+        let (dir, _claude, m, path) = routing_machine("req-route-sent");
+        let anchor = m.open_global_orchestrator().unwrap();
+        let (id, tab) = request_on(&m, "k-1", "s-a");
+        send_from(&m, &tab, &path, "r-1").unwrap();
+        assert_eq!(m.sent.lock().unwrap().in_flight(Path::new(&path)).iter().map(|s| s.request_id.clone()).collect::<Vec<_>>(), [format!("{id}/r-1")]);
+        let handoff = m.deliver_report("report:1", &report_of(&path, "Shipped.", &[format!("{id}/r-1")])).unwrap();
+        assert_eq!(handoff.tab(), tab);
+        assert!(heard(&m, &tab, "Shipped."));
+        assert!(!heard(&m, &anchor, "Shipped."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_retry_with_the_same_request_id_answers_the_first() {
+        let (dir, _claude, m, path) = routing_machine("req-route-retry");
+        let (id, tab) = request_on(&m, "k-1", "s-a");
+        let first = send_from(&m, &tab, &path, "r-1").unwrap();
+        assert_eq!(send_from(&m, &tab, &path, "r-1"), Ok(first));
+        assert_eq!(m.requests.lock().unwrap().get(&id).unwrap().captains.len(), 1);
+        let answers = [format!("{id}/r-1")];
+        assert_eq!(m.deliver_report("report:1", &report_of(&path, "Shipped.", &answers)).unwrap().tab(), tab);
+        assert_eq!(m.deliver_report("report:1", &report_of(&path, "Shipped.", &answers)).unwrap().tab(), tab, "a repeat answers the first outcome");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_report_from_an_old_captain_without_ids_lands_in_the_newest_open_request_for_it() {
+        let (dir, _claude, m, path) = routing_machine("req-route-old");
+        let (_, older) = request_on(&m, "k-1", "s-a");
+        send_from(&m, &older, &path, "r-1").unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        let (_, newer) = request_on(&m, "k-2", "s-b");
+        send_from(&m, &newer, &path, "r-1").unwrap();
+        let handoff = m.deliver_report("report:1", &report_of(&path, "Old news.", &[])).unwrap();
+        assert_eq!(handoff.tab(), newer);
+        assert!(heard(&m, &newer, "Old news."));
+        assert!(!heard(&m, &older, "Old news."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn two_request_sessions_sending_r1_to_one_project_both_get_typed() {
+        let (dir, _claude, m, path) = routing_machine("req-route-two");
+        let (a, tab_a) = request_on(&m, "k-1", "s-a");
+        let (b, tab_b) = request_on(&m, "k-2", "s-b");
+        send_from(&m, &tab_a, &path, "r-1").unwrap();
+        send_from(&m, &tab_b, &path, "r-1").unwrap();
+        let mut flying = m.sent.lock().unwrap().in_flight(Path::new(&path)).iter().map(|s| s.request_id.clone()).collect::<Vec<_>>();
+        flying.sort();
+        let mut both = vec![format!("{a}/r-1"), format!("{b}/r-1")];
+        both.sort();
+        assert_eq!(flying, both);
+        m.deliver_report("report:1", &report_of(&path, "Both shipped.", &both)).unwrap();
+        assert!(heard(&m, &tab_a, "Both shipped."));
+        assert!(heard(&m, &tab_b, "Both shipped."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_old_apps_global_tab_hears_back_from_its_captain() {
+        let (dir, _claude, m, path) = routing_machine("req-route-anchor");
+        let (_, request_tab) = request_on(&m, "k-1", "s-a");
+        let anchor = m.open_global_orchestrator().unwrap();
+        m.record_event(AgentEvent { session: Some("s-0".into()), ..hook(&anchor, AgentStatus::Done) });
+        send_from(&m, &anchor, &path, "r-1").unwrap();
+        assert_eq!(m.sent.lock().unwrap().in_flight(Path::new(&path)).iter().map(|s| s.request_id.clone()).collect::<Vec<_>>(), ["r-1"]);
+        let handoff = m.deliver_report("report:1", &report_of(&path, "Shipped.", &["r-1".into()])).unwrap();
+        assert_eq!(handoff.tab(), anchor);
+        assert!(!heard(&m, &request_tab, "Shipped."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn tell_orchestrator_under_auto_still_names_the_served_requests() {
+        let (dir, _claude, m, path) = routing_machine("req-route-tell");
+        m.set_global_settings(global::Settings { host: true, reports: global::ReportPolicy::Auto, ..global::Settings::default() }).unwrap();
+        let (id, tab) = request_on(&m, "k-1", "s-a");
+        let captain: Value = serde_json::from_str(&send_from(&m, &tab, &path, "r-1").unwrap()).unwrap();
+        let captain = captain["tab"].as_str().unwrap().to_owned();
+        let told: Value = serde_json::from_str(&m.project_tool(&captain, ProjectTool::TellOrchestrator { text: "Which form?".into() }).unwrap()).unwrap();
+        assert_eq!(told["tab"], json!(tab));
+        assert!(heard(&m, &tab, "Which form?"));
+        assert_eq!(m.sent.lock().unwrap().in_flight(Path::new(&path)).iter().map(|s| s.request_id.clone()).collect::<Vec<_>>(), [format!("{id}/r-1")], "a question answers nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_captain_in_folder_personal_harness_is_recorded_with_project_pinned() {
+        let dir = temp("req-route-key");
+        let checkout = dir.join("personal-harness");
+        std::fs::create_dir_all(&checkout).unwrap();
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", "https://github.com/o/pinned.git"]] {
+            assert!(process::command("git").arg("-C").arg(&checkout).args(args).status().unwrap().success());
+        }
+        let claude = recording_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let path = m.open_project(checkout).display().to_string();
+        assert!(path.ends_with("/personal-harness"), "{path}");
+        let (id, tab) = request_on(&m, "k-1", "s-a");
+        send_from(&m, &tab, &path, "r-1").unwrap();
+        let captains = m.requests.lock().unwrap().get(&id).unwrap().captains.clone();
+        assert_eq!(captains.iter().map(|c| (c.path.as_str(), c.project.as_str(), c.boxed)).collect::<Vec<_>>(), [(path.as_str(), "pinned", false)]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     #[cfg(unix)]
     fn an_agent_session_cannot_call_new_user_requests_or_user_request_action() {
