@@ -7,7 +7,7 @@
 // every tab of the host is scanned. With none carrying them the screen asks `user_requests`; an
 // error from that call means an older host, and the chat stays as it was, with no banner.
 
-const REQUEST_FILTERS = [["all", "All"], ["needs", "Needs you"], ["working", "Working"], ["done", "Done"]];
+const REQUEST_FILTERS = [["open", "Open"], ["needs", "Needs you"], ["done", "Done"]];
 const REQUEST_STATE_WORD = { needs: "Needs you", working: "Working", done: "Done" };
 /** The column's width; the Captains rail reads it to leave the lane room. */
 const REQUESTS_WIDTH = 340;
@@ -30,7 +30,7 @@ function readRequestsSeen() {
 }
 
 const rq = {
-  filter: "all",
+  filter: "open",
   /** The answer of `user_requests`, and the host and time it came from, read while no tab carries the glances. */
   fetched: null,
   host: null,

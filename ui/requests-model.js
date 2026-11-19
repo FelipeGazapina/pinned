@@ -13,12 +13,14 @@
 //   own tab waits on input). A need is stale when the user wrote after it (`last_user_at >
 //   needs_at`); without a `needs_at` it is never stale. Otherwise working.
 //
-// requestCounts(glances, ctx) -> { all, needs, working, done }
+// requestCounts(glances, ctx) -> { open, needs, done }
+//   open counts every request that is not done, so working and needs both.
 //   `ctx(glance)` returns requestState's second argument for that glance (optional).
 //
 // requestFilter(glances, filter, ctx) -> glance[]
-//   `filter` is "all" | "needs" | "working" | "done". Sorted needs, then working, then done; in
-//   each group the newest activity first (`last_at`, else `opened_at`). A new array.
+//   `filter` is "open" | "needs" | "done", the board's filters. open holds every request that is
+//   not done. Sorted needs, then working, then done; in each group the newest activity first
+//   (`last_at`, else `opened_at`). A new array.
 //
 // splitRequest(text, catalog) -> [{ title, text, project, machine }]
 //   One item per paragraph that carries a #project tag; an untagged paragraph joins the item
@@ -67,10 +69,11 @@ function requestActivity(glance) {
 }
 
 function requestCounts(glances, ctx) {
-  const counts = { all: 0, needs: 0, working: 0, done: 0 };
+  const counts = { open: 0, needs: 0, done: 0 };
   for (const glance of glances) {
-    counts.all++;
-    counts[requestState(glance, ctx?.(glance))]++;
+    const state = requestState(glance, ctx?.(glance));
+    if (state !== "done") counts.open++;
+    if (state !== "working") counts[state]++;
   }
   return counts;
 }
@@ -78,7 +81,7 @@ function requestCounts(glances, ctx) {
 function requestFilter(glances, filter, ctx) {
   return glances
     .map((glance) => ({ glance, state: requestState(glance, ctx?.(glance)) }))
-    .filter(({ state }) => filter === "all" || state === filter)
+    .filter(({ state }) => (filter === "open" ? state !== "done" : state === filter))
     .sort((a, b) => REQUEST_ORDER[a.state] - REQUEST_ORDER[b.state] || requestActivity(b.glance) - requestActivity(a.glance))
     .map(({ glance }) => glance);
 }

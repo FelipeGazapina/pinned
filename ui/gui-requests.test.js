@@ -235,7 +235,7 @@ test("with no tab carrying requests the screen asks user_requests, and draws its
   h.context.active = h.context.tabs[0];
   h.run("renderRequests()");
   assert.equal(h.column.hidden, false);
-  assert.deepEqual(rowIds(h.column.innerHTML), ["q-needs", "q-work", "q-done"]);
+  assert.deepEqual(rowIds(h.column.innerHTML), ["q-needs", "q-work"]);
 });
 
 test("when user_requests errors the single chat shows, with no banner and no message", async () => {
