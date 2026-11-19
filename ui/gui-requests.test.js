@@ -30,6 +30,9 @@ function element() {
       else delete this.attrs[name];
       return !!force;
     },
+    hasAttribute(name) {
+      return name in this.attrs;
+    },
     addEventListener(type, fn) {
       this.listeners[type] = fn;
     },
@@ -160,7 +163,7 @@ test("the column draws the filters with their counts and one row per request", (
   assert.match(work, /Add gift cards/);
   assert.match(work, /#storefront/);
   assert.match(work, /Working/);
-  assert.match(work, /Captain: Tests are running in a box/);
+  assert.match(work, /Captain storefront: Tests are running in a box/);
   assert.match(work, /7 of 8 steps/);
   assert.match(work, /12m/);
   assert.match(work, />2<\/span>/, "the unread count");
@@ -233,6 +236,7 @@ test("with no tab carrying requests the screen asks user_requests, and draws its
   await h.run("refreshRequests()");
   assert.deepEqual(h.log.calls, [["mac", { cmd: "user_requests" }]]);
   assert.equal(h.run("requestsOn()"), true);
+  h.context.active = h.context.tabs[0];
   h.run("renderRequests()");
   assert.equal(h.column.hidden, false);
   assert.deepEqual(rowIds(h.column.innerHTML), ["q-needs", "q-work", "q-done"]);

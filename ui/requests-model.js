@@ -2,8 +2,8 @@
 // glances the host sends, so no screen re-derives it. Pure: no DOM and no wire. Times are unix
 // milliseconds. A request is a thread with its own Orchestrator tab, and one `RequestGlance` is
 //   { id, title, project|null, opened_at, kind, closed_at|null, needs, needs_at|null,
-//     last_user_at|null, last: { who, text, at }|null, replies, captains: [{ machine, path,
-//     project, machine_name }], tab|null }.
+//     last_user_at|null, last_who: "user"|"orchestrator"|"captain"|null, last_text, last_at|null,
+//     replies, captains: [{ machine, path, project, machine_name }], tab|null }.
 // Loaded after composer-tags.js, whose paragraph and #tag parsing (`composerParagraphs`,
 // `paragraphTags`, `routeParagraph`, `tagSlug`, `TAG_WORD`) it reuses.
 //
@@ -18,7 +18,7 @@
 //
 // requestFilter(glances, filter, ctx) -> glance[]
 //   `filter` is "all" | "needs" | "working" | "done". Sorted needs, then working, then done; in
-//   each group the newest activity first (`last.at`, else `opened_at`). A new array.
+//   each group the newest activity first (`last_at`, else `opened_at`). A new array.
 //
 // splitRequest(text, catalog) -> [{ title, text, project, machine }]
 //   One item per paragraph that carries a #project tag; an untagged paragraph joins the item
@@ -32,7 +32,7 @@
 //   The open request a paragraph most looks like, or null. Only a request of the same project
 //   (the paragraph's #tag against `tagSlug` of the glance's project) and not closed counts. Words
 //   are lower-cased, accent-folded and kept at 4 letters or more; the score is the Jaccard index
-//   of the paragraph's words (tags left out) and those of the glance's `title` plus `last.text`.
+//   of the paragraph's words (tags left out) and those of the glance's `title` plus `last_text`.
 //   The best score at or above CLOSE_TO wins, the first of equal scores. A paragraph with no
 //   #project never matches.
 //
@@ -46,7 +46,7 @@
 //   The steps done and in all, summed over the plans. Takes requestPlans' entries or bare plan
 //   glances. Zeros with no plans: "7 of 8 steps" is drawn from it.
 //
-// unread(glance, seen) -> number
+// requestUnread(glance, seen) -> number
 //   The replies the user has not seen: max(0, glance.replies - (seen ?? 0)).
 
 /** How alike a paragraph and an open request must be for the composer to offer the request. */
@@ -63,7 +63,7 @@ function requestState(glance, { planGlances = [], tabWaits = false } = {}) {
 }
 
 function requestActivity(glance) {
-  return glance.last?.at ?? glance.opened_at;
+  return glance.last_at ?? glance.opened_at;
 }
 
 function requestCounts(glances, ctx) {
@@ -127,7 +127,7 @@ function closeTo(paragraph, openGlances) {
   let bestScore = 0;
   for (const glance of openGlances) {
     if (glance.closed_at != null || !glance.project || tagSlug(glance.project) !== slug) continue;
-    const theirs = requestWords(`${glance.title} ${glance.last?.text ?? ""}`);
+    const theirs = requestWords(`${glance.title} ${glance.last_text ?? ""}`);
     let shared = 0;
     for (const word of mine) if (theirs.has(word)) shared++;
     const union = mine.size + theirs.size - shared;
@@ -172,6 +172,6 @@ function requestProgress(plans = []) {
   return { done, total };
 }
 
-function unread(glance, seen) {
+function requestUnread(glance, seen) {
   return Math.max(0, glance.replies - (seen ?? 0));
 }
