@@ -152,7 +152,7 @@ function requestsColumnHtml({ glances, filter, seen, current, name, tabViews }) 
     <div class="rq-list">${rows.join("") || `<p class="rq-empty">Nothing here. A request you send shows up as a thread.</p>`}</div>`;
 }
 
-/** A request thread's header, or the New request screen's while it is open: its state dot, title, project and state, with Mark done or Reopen. Empty in any other tab. */
+/** A request thread's header, or the New request screen's while it is open: its state dot, title and state, with Plan and Mark done or Reopen. The project chip only shows with the "Requests /" crumb, as on the ThreadPlan board; the Main board has none, since the card and the composer footer name the project. Empty in any other tab. */
 function requestCrumbHtml(tab) {
   const screen = typeof newRequestCrumbHtml === "function" ? newRequestCrumbHtml() : "";
   if (screen) return screen;
@@ -160,9 +160,11 @@ function requestCrumbHtml(tab) {
   if (!glance) return "";
   const state = requestStateOf(glance);
   const [action, label] = state === "done" ? ["reopen", "Reopen"] : ["done", "Mark done"];
-  const crumb = requestColumnShown(tab) ? "" : `<button type="button" class="request-back" data-rq-back>Requests</button><span class="sep">/</span>`;
+  const beside = requestColumnShown(tab);
+  const crumb = beside ? "" : `<button type="button" class="request-back" data-rq-back>Requests</button><span class="sep">/</span>`;
+  const chip = beside ? "" : requestProjectChip(glance);
   const plan = `<button type="button" class="request-plan" data-request-plan aria-pressed="${requestPlanOpen(tab)}">Plan</button>`;
-  return `${crumb}<span class="request-dot" data-state="${state}" aria-hidden="true"></span><h2 class="request-title">${esc(glance.title)}</h2><span class="request-state" data-state="${state}">${REQUEST_STATE_WORD[state]}</span>${requestProjectChip(glance)}<span class="orchestrator-actions">${plan}<button type="button" data-request-action="${action}" data-request-id="${esc(glance.id)}">${label}</button></span>`;
+  return `${crumb}<span class="request-dot" data-state="${state}" aria-hidden="true"></span><h2 class="request-title">${esc(glance.title)}</h2><span class="request-state" data-state="${state}">${REQUEST_STATE_WORD[state]}</span>${chip}<span class="orchestrator-actions">${plan}<button type="button" data-request-action="${action}" data-request-id="${esc(glance.id)}">${label}</button></span>`;
 }
 
 /** What `renderThread` redraws the card for: the glance, the card's reply and the state they give. */

@@ -383,14 +383,14 @@ test("the hooks unit 10 and unit 11 fill in exist as stubs, and a later definiti
   assert.equal(h.run("typeof openAllActivity"), "function");
 });
 
-test("the header names the request, its project and state, and offers Mark done", () => {
+test("the header names the request and its state, and offers Mark done", () => {
   const g = board();
   g[2].tab = "tab-20";
   const asking = requestTab("q-needs", "tab-20");
   const h = harness({ tabs: [anchorTab(g), asking] });
   const html = h.run("requestCrumbHtml(tabs[1])");
   assert.match(html, /Why are login codes late\?/);
-  assert.match(html, /#storefront/);
+  assert.doesNotMatch(html, /#storefront/, "9r8: the Main board has no project chip; the card and the footer name the project");
   assert.match(html, /Needs you/);
   assert.match(html, /data-request-action="done"[^>]*>Mark done</);
 });
@@ -557,7 +557,7 @@ const ruleOf = (css, selector) => {
   return css.slice(at, css.indexOf("}", at));
 };
 
-test("9r3 item 10: the request header shows the crumb, the dot, the title, the state, the project and Mark done", () => {
+test("9r3 item 10: the request header shows the dot, the title, the state and Mark done (9r8: no project chip beside the column)", () => {
   const g = board();
   g[1].tab = "tab-21";
   const h = harness({ tabs: [anchorTab(g), requestTab("q-work", "tab-21")] });

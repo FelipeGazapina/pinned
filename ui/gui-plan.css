@@ -89,7 +89,7 @@
 @media (prefers-reduced-motion: reduce) { .plan-root * { transition: none !important; } }
 
 /* footer */
-.pl-foot { display: flex; flex: none; flex-direction: column; gap: 8px; padding: 12px 14px 14px; border-top: 1px solid var(--g-border); background: var(--g-bg); }
+.pl-foot { display: flex; flex: none; flex-direction: column; gap: 8px; padding: 12px 13px 14px 14px; border-top: 1px solid var(--g-border); background: var(--g-bg); }
 .pl-foot > p { margin: 0; }
 .pl-foot-top { display: flex; align-items: baseline; gap: 8px; font-size: 11px; }
 .pl-foot-top .st { margin-left: auto; font-size: 12px; font-weight: 500; color: var(--tone); }

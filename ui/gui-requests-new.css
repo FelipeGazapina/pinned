@@ -8,7 +8,7 @@
 
 :is(#new-request, #all-activity) .spacer { flex: 1; }
 
-:is(#new-request, #all-activity) .nr-main { display: flex; flex: 1; flex-direction: column; justify-content: center; gap: 14px; box-sizing: border-box; width: 720px; max-width: 100%; margin: 0 auto; padding: 24px; }
+:is(#new-request, #all-activity) .nr-main { display: flex; flex: 1; flex-direction: column; justify-content: center; gap: 14px; box-sizing: border-box; width: 768px; max-width: 100%; margin: 0 auto; padding: 24px; }
 :is(#new-request, #all-activity) .nr-main h2 { margin: 0 0 4px; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
 
 :is(#new-request, #all-activity) .nr-box { display: flex; flex-direction: column; border: 1px solid rgb(var(--g-ink-rgb) / 0.1); border-radius: 18px; background: var(--g-raised); padding: 16px 16px 10px; }
