@@ -2644,7 +2644,7 @@ impl Machine {
             return self.tab(tab, |t| t.cwd.display().to_string()).map(Some);
         };
         // What a restart kept for this start stays kept until it is typed, or dropped here.
-        if dropped {
+        if dropped || true {
             self.forget_held(&env);
         }
         let mut args = args;
