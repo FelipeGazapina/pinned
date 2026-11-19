@@ -23,7 +23,6 @@
 :is(#new-request, #all-activity) .nr-threads { border: 1px solid rgb(var(--g-ink-rgb) / 0.08); border-radius: 12px; background: var(--g-overlay); }
 :is(#new-request, #all-activity) .nr-threads-head { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; border-bottom: 1px solid rgb(var(--g-ink-rgb) / 0.06); }
 :is(#new-request, #all-activity) .nr-count { font-size: 12.5px; font-weight: 600; }
-:is(#new-request, #all-activity) .nr-new { padding: 1px 6px; border-radius: 4px; background: rgb(var(--g-primary-rgb) / 0.2); font-size: 10px; font-weight: 600; color: color-mix(in srgb, var(--g-link) 80%, white); }
 :is(#new-request, #all-activity) .nr-note { font-size: 12px; color: var(--g-muted); }
 
 :is(#new-request, #all-activity) .nr-card { display: flex; align-items: center; gap: 10px; padding: 11px 12px; }
@@ -54,6 +53,8 @@
 #new-request .nr-mirror:empty { display: none; }
 #new-request .nr-edit[data-tags="true"] .nr-text { position: relative; z-index: 1; color: transparent; caret-color: var(--g-fg); }
 #new-request .nr-edit[data-tags="true"] .nr-text::selection { color: transparent; background: rgb(var(--g-info-rgb) / 0.3); }
+/* The plan tree's `.pl` (a flex column) also matches the mirror's line divs; each line is a block so its tags stay inline. */
+#new-request .nr-mirror .pl { display: block; flex: none; min-height: 0; font-size: inherit; color: inherit; }
 #new-request .nr-mirror .tag { border-radius: 4px; }
 #new-request .nr-mirror .tag.project { color: var(--g-info); background: rgb(var(--g-info-rgb) / 0.16); }
 #new-request .nr-mirror .tag.machine { color: var(--g-success); background: color-mix(in srgb, var(--g-success) 16%, transparent); }

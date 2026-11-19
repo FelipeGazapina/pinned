@@ -55,10 +55,10 @@ function requestDayLabel(ms, now) {
   return d.getFullYear() === new Date(now).getFullYear() ? date : `${date}, ${d.getFullYear()}`;
 }
 
-/** The glances grouped by the local day they opened, newest first: [{ label, glances }]. */
+/** The glances grouped by the local day they opened, oldest first like a chat: [{ label, glances }]. */
 function requestDays(glances, now = Date.now()) {
   const days = [];
-  for (const glance of [...glances].sort((a, b) => b.opened_at - a.opened_at)) {
+  for (const glance of [...glances].sort((a, b) => a.opened_at - b.opened_at)) {
     const start = streamDayStart(glance.opened_at);
     const last = days.at(-1);
     if (last?.start === start) last.glances.push(glance);
@@ -80,7 +80,7 @@ const streamAsk = (glance) => (glance.kind === "earlier" ? STREAM_EARLIER : glan
 
 function streamEntryHtml(glance, { tabViews, name, selected }) {
   const state = requestStateOf(glance, tabViews);
-  const last = glance.kind === "earlier" ? "" : requestLastLine(glance, name);
+  const last = glance.kind === "earlier" ? "" : glance.last_text;
   return `<div class="rqs-ask"><span class="text">${esc(streamAsk(glance))}</span></div>
     <button type="button" class="rqs-state" data-rqs-entry="${esc(glance.id)}" data-state="${state}" aria-expanded="${selected}"><span class="dot" aria-hidden="true"></span><span class="word">${REQUEST_STATE_WORD[state]}</span>${requestProjectChip(glance)}<span class="n">${streamReplies(glance.replies)}</span><span class="last">${esc(last)}</span>${icon("chevron-right")}</button>`;
 }
@@ -97,7 +97,7 @@ function streamPanelHtml(glance, have, name, tabViews) {
     return `<div class="rqs-item"><div class="who"><span class="name" data-who="${esc(String(item.who))}">${esc(who)}</span><time>${streamTime(item.at)}</time></div><div class="text md">${markdown(String(item.text ?? ""))}</div></div>`;
   });
   return `<aside class="rqs-panel" aria-label="Thread"><div class="rqs-phead"><span class="dot" data-state="${state}" aria-hidden="true"></span><h2>${esc(streamTitle(glance))}</h2><button type="button" data-rqs-panel-close aria-label="Close thread">${icon("x")}</button></div>
-    <div class="rqs-pbody">${requestCardFrom(glance, have)}${items.join("")}</div>
+    <div class="rqs-pbody">${requestCardFrom(glance, have, { asked: false })}${items.join("")}</div>
     <div class="rqs-pfoot"><div class="rqs-reply"><label class="rqs-label" for="rqs-reply">Reply in this thread</label><input id="rqs-reply" type="text" data-rqs-reply="${esc(glance.id)}" placeholder="Reply in this thread" autocomplete="off"><button type="button" class="rqs-full" data-rqs-open="${esc(glance.id)}">Open full</button></div></div></aside>`;
 }
 
@@ -125,6 +125,7 @@ document.getElementById("chat-head").after(requestsStream);
 function closeAllActivity() {
   rqs.open = false;
   renderStream();
+  renderRequests();
 }
 
 /** The inputs are not part of the drawn html: their text lives in `rqs.ask` and `rqs.reply`. */
@@ -168,6 +169,7 @@ function openAllActivity() {
   if (!requestsOn() || rq.old?.host === requestHost()) return;
   Object.assign(rqs, { open: true, key: active?.key ?? null, older: [], end: false, selected: null });
   renderStream();
+  renderRequests();
 }
 
 /** The next page of older requests: those opened before the oldest one listed. An empty page, or an error, ends the list. */

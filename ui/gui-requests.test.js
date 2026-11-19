@@ -702,8 +702,8 @@ test("9r5 item 5: the request header has a Plan button beside Mark done, and it 
 
 test("9r5 item 7: a request panel with one block draws no section spacing under the root dot", () => {
   const css = cssOf("gui-plan.css");
-  assert.match(ruleOf(css, '.pl-sec-group[data-single="true"]'), /margin-top:\s*0/);
-  assert.match(read("gui-plan.js"), /<section class="pl-sec-group" data-single="\$\{plain\}">/);
+  assert.match(ruleOf(css, '.pl-scroll[data-single="true"] .pl-sec-group'), /margin-top:\s*0/);
+  assert.match(read("gui-plan.js"), /<div class="pl-scroll" data-single="\${plain}">/);
 });
 
 test("9r5 A: the card's pill row is the Captains first, then the links, and empty when there are neither", () => {

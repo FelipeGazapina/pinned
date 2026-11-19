@@ -158,7 +158,9 @@ function requestCrumbHtml(tab) {
   if (!glance) return "";
   const state = requestStateOf(glance);
   const [action, label] = state === "done" ? ["reopen", "Reopen"] : ["done", "Mark done"];
-  return `<button type="button" class="request-back" data-rq-back>Requests</button><span class="sep">/</span><span class="request-dot" data-state="${state}" aria-hidden="true"></span><h2 class="request-title">${esc(glance.title)}</h2><span class="request-state" data-state="${state}">${REQUEST_STATE_WORD[state]}</span>${requestProjectChip(glance)}<span class="orchestrator-actions"><button type="button" data-request-action="${action}" data-request-id="${esc(glance.id)}">${label}</button></span>`;
+  const crumb = requestColumnShown(tab) ? "" : `<button type="button" class="request-back" data-rq-back>Requests</button><span class="sep">/</span>`;
+  const plan = `<button type="button" class="request-plan" data-request-plan aria-pressed="${requestPlanOpen(tab)}">Plan</button>`;
+  return `${crumb}<span class="request-dot" data-state="${state}" aria-hidden="true"></span><h2 class="request-title">${esc(glance.title)}</h2><span class="request-state" data-state="${state}">${REQUEST_STATE_WORD[state]}</span>${requestProjectChip(glance)}<span class="orchestrator-actions">${plan}<button type="button" data-request-action="${action}" data-request-id="${esc(glance.id)}">${label}</button></span>`;
 }
 
 /** What `renderThread` redraws the card for: the glance, the card's reply and the state they give. */
@@ -174,20 +176,21 @@ function requestCardKey(tab) {
  * Needs you row always draws. Every field is text. */
 function requestCardHtml(tab) {
   const glance = requestHere(tab);
-  return glance ? requestCardFrom(glance, rq.views.get(glance.id)) : "";
+  return glance ? requestCardFrom(glance, rq.views.get(glance.id), { kept: !requestPlanOpen(tab) }) : "";
 }
-/** The card of `glance` from `have`, a `{ view }` read of its `user_request` or undefined while it loads. */
-function requestCardFrom(glance, have) {
+/** The card of `glance` from `have`, a `{ view }` read of its `user_request` or undefined while it loads. `asked: false` leaves out the You asked row (All activity shows the message right under the card); `kept` adds the Orchestrator line to the title. */
+function requestCardFrom(glance, have, { asked = true, kept = false } = {}) {
   if (have && !have.view) return "";
   const stands = have?.view?.stands ?? {};
   const waiting = requestStateOf(glance) === "needs";
   const needs = waiting ? stands.needs || glance.needs || "Waiting on you." : "Nothing right now.";
   const row = (label, text, attr = "") => `<span class="rc-k">${label}</span><span class="rc-v"${attr}>${esc(text || "—")}</span>`;
-  const links = (stands.links ?? []).map((link) => `<span class="rc-link">${esc(link)}</span>`).join("");
+  const pills = [...glance.captains.map((c) => `Captain ${c.project}`), ...(stands.links ?? [])].filter((pill, i, all) => all.indexOf(pill) === i);
+  const links = pills.map((link) => `<span class="rc-link">${esc(link)}</span>`).join("");
   const body = have
-    ? `<div class="rc-grid">${row("You asked", stands.asked)}${row("Done", stands.done)}${row("Left", stands.left)}${row("Needs you", needs, ` data-needs="${waiting}"`)}</div>${links ? `<div class="rc-links">${links}</div>` : ""}`
+    ? `<div class="rc-grid">${asked ? row("You asked", stands.asked) : ""}${row("Done", stands.done)}${row("Left", stands.left)}${row("Needs you", needs, ` data-needs="${waiting}"`)}</div>${links ? `<div class="rc-links">${links}</div>` : ""}`
     : `<p class="rc-loading" role="status">Loading…</p>`;
-  return `<section class="request-card" aria-label="Where this request stands"><div class="rc-head"><span class="rc-title">Where this stands</span></div>${body}</section>`;
+  return `<section class="request-card" aria-label="Where this request stands"><div class="rc-head"><span class="rc-title">Where this stands</span>${kept ? `<span class="rc-kept">kept up to date by the Orchestrator</span>` : ""}</div>${body}</section>`;
 }
 
 /** The composer footer in a request thread: the reply stays here, and a new subject is a new request. */
@@ -233,6 +236,9 @@ function requestPlanOpen(tab) {
   return !!panelOf(tab)?.open && shownSurface(tab)?.kind === "plan";
 }
 
+/** Whether the Requests column sits beside the thread: the Main board has no "Requests /" crumb then, and ThreadPlan (column gone) has it. */
+const requestColumnShown = (tab) => !narrow(768) && !requestPlanOpen(tab);
+
 const requestsColumn = Object.assign(document.createElement("aside"), { id: "requests-column", hidden: true });
 requestsColumn.setAttribute("aria-label", "Requests");
 document.getElementById("chat-head").after(requestsColumn);
@@ -243,7 +249,8 @@ function renderRequests() {
   refreshRequests();
   const chat = document.getElementById("chat");
   const inThread = requestsOn() && guiOn() && !!active && isGlobalOrchestratorTab(active) && !shellPage();
-  const on = inThread && !narrow(768) && !requestPlanOpen(active);
+  const streamOpen = typeof rqs !== "undefined" && rqs.open && rqs.key === active?.key;
+  const on = inThread && !narrow(768) && !requestPlanOpen(active) && !streamOpen;
   const shown = chat.hasAttribute("data-requests");
   chat.toggleAttribute("data-requests", on);
   requestsColumn.hidden = !on;
@@ -261,7 +268,7 @@ function renderRequests() {
     const html = requestsColumnHtml({ glances: requestGlances(), filter: rq.filter, seen: rq.seen, current: glance?.id ?? null, name: globalOrchestratorName(), tabViews: requestTabViews() });
     if (requestsColumn.innerHTML !== html) requestsColumn.innerHTML = html;
   }
-  const drawn = JSON.stringify([active.key, requestCardKey(active)]);
+  const drawn = JSON.stringify([active.key, requestCardKey(active), requestColumnShown(active), requestPlanOpen(active)]);
   if (drawn === rq.drawn) return;
   rq.drawn = drawn;
   if (glance) renderThread();
@@ -322,6 +329,11 @@ requestsColumn.addEventListener("click", (e) => {
   if (row) openRequest(row.dataset.request);
 });
 document.querySelector("#chat-head .crumb").addEventListener("click", (e) => {
+  if (e.target.closest("[data-request-plan]")) {
+    if (requestPlanOpen(active)) closePanel();
+    else addSurface(active, { id: "plan", kind: "plan", title: "Plan" });
+    return;
+  }
   if (e.target.closest("[data-rq-back]")) {
     if (requestPlanOpen(active) && typeof closePanel === "function") closePanel();
     return;

@@ -1,7 +1,8 @@
 /* All activity: every request by day, with a 420px side panel. It covers the chat beside the Requests
    column. Colours come from the theme tokens; the board's hard-coded dark values map to them. */
-#all-activity { position: absolute; top: 0; bottom: 0; left: 340px; right: 0; z-index: 7; display: flex; box-sizing: border-box; background: var(--g-bg); color: var(--g-fg); font-size: 13px; }
+#all-activity { position: absolute; top: 0; bottom: 0; left: 0; right: 0; z-index: 7; display: flex; box-sizing: border-box; background: var(--g-bg); color: var(--g-fg); font-size: 13px; }
 #all-activity[hidden] { display: none; }
+#chat[data-requests] #all-activity { left: 340px; }
 #all-activity [data-state="needs"] { --rq-tone: var(--g-warning); }
 #all-activity [data-state="working"] { --rq-tone: var(--g-blue); }
 #all-activity [data-state="done"] { --rq-tone: var(--g-success); }

@@ -116,7 +116,7 @@ function newRequestCardsHtml(draft = nr, { rename = true } = {}) {
     return `<div class="nr-card" data-nr-card="${i}" data-joined="${!!joined[i]}"><span class="dot" aria-hidden="true"></span><div class="nr-body"><span class="nr-top">${title}</span><span class="nr-route">${esc(route)}</span></div>${rename ? `<button type="button" class="nr-rename" data-nr-rename="${i}">Rename</button>` : ""}</div>`;
   });
   const head = fresh ? `This opens ${plural(fresh, "thread")}` : "Nothing new opens";
-  const threads = `<section class="nr-threads" aria-label="Threads this request opens"><div class="nr-threads-head"><span class="nr-count">${head}</span>${fresh ? `<span class="nr-new">New</span>` : ""}<span class="spacer"></span><span class="nr-note">one per paragraph, each with its own replies</span></div>${cards.join("")}<div class="nr-report">${NR_NOTE_ARROW}<span>A Captain's report lands in the thread of the request it answers, not in one long chat.</span></div></section>`;
+  const threads = `<section class="nr-threads" aria-label="Threads this request opens"><div class="nr-threads-head"><span class="nr-count">${head}</span><span class="spacer"></span><span class="nr-note">one per paragraph, each with its own replies</span></div>${cards.join("")}<div class="nr-report">${NR_NOTE_ARROW}<span>A Captain's report lands in the thread of the request it answers, not in one long chat.</span></div></section>`;
   const close = matches
     .map((match, i) =>
       match

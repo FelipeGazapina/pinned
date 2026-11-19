@@ -202,7 +202,7 @@ test("an entry shows the ask with no time, the state, project, reply count and l
   const h = harness({ tabs });
   open(h);
   const html = h.overlay.innerHTML;
-  const two = html.slice(html.indexOf('data-rqs-entry="q-two"') - 400, html.indexOf('data-rqs-entry="q-one"'));
+  const two = html.slice(html.lastIndexOf('<div class="rqs-entry">'));
   assert.match(two, /Why are login codes late\?/);
   assert.doesNotMatch(two, /09:05/, "the ask bubble carries no time");
   assert.doesNotMatch(two, /<time/, "the ask bubble carries no time element");
@@ -321,7 +321,7 @@ test("Open thread opens the request's own tab, or asks the host to open one when
   await flush();
   h.click({ "[data-rqs-open]": { dataset: { rqsOpen: "q-none" } } });
   await flush();
-  assert.deepEqual(h.log.calls.at(-1), ["mac", { cmd: "user_request_action", id: "q-none", action: "open" }]);
+  assert.deepEqual(h.log.calls.filter(([, c]) => c.cmd === "user_request_action").at(-1), ["mac", { cmd: "user_request_action", id: "q-none", action: "open" }]);
   assert.deepEqual(h.log.revealed, ["mac:tab-40"]);
   assert.deepEqual(h.log.activated, ["mac:tab-12", "mac:tab-40"]);
 });
@@ -606,7 +606,9 @@ test("9r5 item 6: the list runs oldest first, newest at the bottom, with the day
   const html = h.overlay.innerHTML;
   const at = (s) => html.indexOf(s);
   assert.ok(at('data-rqs-entry="q-old"') < at('data-rqs-entry="q-mid"') && at('data-rqs-entry="q-mid"') < at('data-rqs-entry="q-new"'), "q-old, q-mid, q-new");
-  assert.ok(at('<span>Yesterday</span>') < at('<span>Today</span>'), "Yesterday above Today");
+  const heads = [...html.matchAll(/rqs-dayhead/g)].map((m) => m.index);
+  assert.equal(heads.length, 2);
+  assert.ok(heads[0] < at('data-rqs-entry="q-old"') && at('data-rqs-entry="q-old"') < heads[1] && heads[1] < at('data-rqs-entry="q-mid"'), "the older day head comes first");
 });
 
 test("9r5 item 6: the panel's card has no You asked row in All activity, and keeps it elsewhere", async () => {
@@ -624,7 +626,9 @@ test("9r5 item 6: the panel's card has no You asked row in All activity, and kee
 });
 
 test("9r5 item 6: All activity hides the Requests column and gives the stream its room", () => {
-  const h = harness({ tabs: [anchorTab([glance("q1")])] });
+  const tabs = [anchorTab([glance("q1")])];
+  const h = harness({ tabs });
+  h.context.active = tabs[0];
   h.run("renderRequests()");
   assert.equal(h.run("requestsColumn.hidden"), false, "the column is beside the thread");
   open(h);

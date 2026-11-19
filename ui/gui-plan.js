@@ -422,7 +422,7 @@ function requestPlanHtml(t, s) {
   const body = model.sections
     .map((sec) => `<section class="pl-sec-group">${plain ? "" : `<h3 class="pl-sec">${esc(sec.title)}</h3>`}${sec.blocks.map((b) => requestBlockHtml(b, s, zoom, sec.blocks.length > 1)).join("") || `<p class="pl-loading">No plan from this Captain yet.</p>`}</section>`)
     .join("");
-  return `${head}<div class="pl-scroll">${root}${body}</div>${requestFootHtml(blocks, s)}`;
+  return `${head}<div class="pl-scroll" data-single="${plain}">${root}${body}</div>${requestFootHtml(blocks, s)}`;
 }
 
 function renderPlanPanel(s) {
