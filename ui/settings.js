@@ -999,7 +999,8 @@ function runnerPicker() {
   const choices = runnerChoices();
   if (!choices.length) return "";
   const current = settings.offline_runner ?? "";
-  const options = choices.map(([id, name]) => `<option value="${esc(id)}"${id === current ? " selected" : ""}>${esc(name)}</option>`).join("");
+  const placeholder = current ? "" : `<option value="" disabled selected>Choose a machine</option>`;
+  const options = placeholder + choices.map(([id, name]) => `<option value="${esc(id)}"${id === current ? " selected" : ""}>${esc(name)}</option>`).join("");
   return `<div class="card" id="offline-runner"><label>Offline runner <select id="offline-runner-pick">${options}</select></label>
     <p class="hint">The machine that runs workflows when the hub is stopped.</p></div>`;
 }
@@ -2479,9 +2480,11 @@ settingsPage.addEventListener("input", (e) => {
 
 settingsPage.addEventListener("change", async (e) => {
   if (e.target.id === "offline-runner-pick") {
+    const machine = e.target.value;
+    if (!machine) return;
     try {
-      await hub.hub({ cmd: "set_offline_runner", machine: e.target.value });
-      settings.offline_runner = e.target.value;
+      await hub.hub({ cmd: "set_offline_runner", machine });
+      settings.offline_runner = machine;
     } catch (err) {
       const line = document.getElementById("checked");
       if (line) line.textContent = String(err?.message ?? err);

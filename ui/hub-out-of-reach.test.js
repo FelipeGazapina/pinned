@@ -121,7 +121,7 @@ test("a clone on this Mac runs here while the hub doesn't answer, and through th
   const down = cloning({ up: false });
   assert.equal(await down.clone("local", "acme/site", "/Users/owner/code"), "/Users/owner/code/site");
   await assert.rejects(down.clone("m-mini", "acme/site"), /not connected to the hub/, "another machine is only reached through the hub");
-  assert.deepEqual(down.asked, [["here", "local_call", { call: { cmd: "clone", repo: "acme/site", dest: "/Users/owner/code" } }], ["hub", { cmd: "clone", machine: "m-mini", repo: "acme/site" }]]);
+  assert.deepEqual(down.asked, [["here", "local_call", { call: { cmd: "clone", machine: "local", repo: "acme/site", dest: "/Users/owner/code" } }], ["hub", { cmd: "clone", machine: "m-mini", repo: "acme/site" }]]);
 
   const up = cloning({ up: true });
   await up.clone("local", "acme/site");
@@ -129,7 +129,7 @@ test("a clone on this Mac runs here while the hub doesn't answer, and through th
 
   const out = cloning({ signed: false });
   await out.clone("local", "acme/site");
-  assert.deepEqual(out.asked, [["here", "local_call", { call: { cmd: "clone", repo: "acme/site" } }]]);
+  assert.deepEqual(out.asked, [["here", "local_call", { call: { cmd: "clone", machine: "local", repo: "acme/site" } }]]);
 });
 
 test("a signed-in clone on this Mac names the hub's GitHub token when git asks for one, and keeps any other failure", async () => {
@@ -343,6 +343,26 @@ test("a call the copy will not answer keeps the plain sentence", async () => {
   assert.deepEqual(asked.filter((row) => row[1] === "local_call").map((row) => row[2].call.cmd), ["connect_upstash"]);
 });
 
+test("an unset offline runner is a placeholder, so the only machine can still be chosen", () => {
+  const context = {
+    LOCAL: "local",
+    account: { machine_id: "m-local" },
+    machines: new Map([["local", { view: { name: "This Mac" }, hubView: { id: "m-local", name: "This Mac" } }]]),
+    settings: {},
+    esc: (value) => value,
+    runnerLabel: (id) => id,
+  };
+  vm.createContext(context);
+  vm.runInContext(`${fn(settingsSrc, "runnerChoices")}\n${fn(settingsSrc, "runnerPicker")}`, context);
+  const unset = context.runnerPicker();
+  assert.match(unset, /<option value="" disabled selected>Choose a machine<\/option>/);
+  assert.match(unset, /value="m-local">This Mac/);
+  context.settings = { offline_runner: "m-local" };
+  const set = context.runnerPicker();
+  assert.doesNotMatch(set, /Choose a machine/);
+  assert.match(set, /value="m-local" selected/);
+});
+
 test("signing out asks before it drops a copy that still holds changes", async () => {
   const asked = [];
   const context = {
@@ -378,6 +398,28 @@ test("signing out asks before it drops a copy that still holds changes", async (
     ["local_call", { call: { cmd: "get_settings" } }],
     "account",
   ]);
+});
+
+test("signing out leaves the machine when the copy cannot be read", async () => {
+  const asked = [];
+  const context = {
+    TAURI: {},
+    account: { machine_id: "m-local" },
+    hub: { hub: (call) => (asked.push(call.cmd), Promise.resolve()) },
+    invoke: (cmd) => {
+      asked.push(cmd);
+      return Promise.reject(new Error("copy unreadable"));
+    },
+    confirm: () => true,
+    disconnectHub() { asked.push("disconnect"); },
+    showAccount() { asked.push("account"); },
+    connectorCall: () => Promise.resolve({ connectors: [] }),
+    console: { warn() {} },
+  };
+  vm.createContext(context);
+  vm.runInContext(`${fn(accountSrc, "signOutApp")}\nglobalThis.signOutApp = signOutApp;`, context);
+  await context.signOutApp();
+  assert.deepEqual(asked, ["account_copy"]);
 });
 
 test("signed out, a settings call goes to local_call", async () => {

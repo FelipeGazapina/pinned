@@ -665,4 +665,18 @@ mod tests {
         assert_eq!(refused, Answer::Done(Err(BOX_OFF.into())));
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn the_local_clone_payload_names_this_machine() {
+        let with_dest: HubCall = serde_json::from_value(serde_json::json!({
+            "cmd": "clone",
+            "machine": "local",
+            "repo": "acme/site",
+            "dest": "/Users/owner/code",
+        }))
+        .unwrap();
+        assert!(matches!(with_dest, HubCall::Clone { ref machine, ref repo, dest: Some(ref dest) } if machine == "local" && repo == "acme/site" && dest == "/Users/owner/code"));
+        let bare: HubCall = serde_json::from_value(serde_json::json!({ "cmd": "clone", "machine": "local", "repo": "acme/site" })).unwrap();
+        assert!(matches!(bare, HubCall::Clone { ref machine, ref repo, dest: None } if machine == "local" && repo == "acme/site"));
+    }
 }

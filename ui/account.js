@@ -260,7 +260,9 @@ async function signOutApp() {
       if (!confirm("This Mac still has changes to hand back. Signing out drops them.")) return;
       anyway = true;
     }
-  } catch {}
+  } catch {
+    return;
+  }
   // A later sign-in registers this Mac anew, so the old entry would linger offline in the account.
   await hub?.hub({ cmd: "remove_machine", id: account.machine_id }).catch(console.warn);
   await invoke("sign_out", { anyway });

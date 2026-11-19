@@ -462,7 +462,7 @@ async function cloneFromGithub() {
 
 function cloneOn(machine, repo, dest) {
   if (hub && (machine !== LOCAL || hubUp())) return hub.hub({ cmd: "clone", machine: hubIdOf(machine), repo, dest });
-  const cloning = invoke("local_call", { call: { cmd: "clone", repo, dest } });
+  const cloning = invoke("local_call", { call: { cmd: "clone", machine: LOCAL, repo, dest } });
   if (!hub) return cloning;
   return cloning.catch((error) => Promise.reject(/authentication|could not read Username|terminal prompts disabled|\b40[13]\b/i.test(String(error?.message ?? error)) ? "A private repository needs the account's GitHub token on the hub." : error));
 }
