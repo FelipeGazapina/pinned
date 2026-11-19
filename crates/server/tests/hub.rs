@@ -13290,6 +13290,7 @@ mod teams_box_call;
 #[path = "hub/teams_calls.rs"] mod teams_calls;
 #[path = "hub/teams_runs.rs"] mod teams_runs;
 #[path = "hub/box_push_gate.rs"] mod box_push_gate;
+#[path = "hub/boxes_at_once.rs"] mod boxes_at_once;
 #[path = "hub/teams_go_ahead.rs"] mod teams_go_ahead;
 #[path = "hub/teams_separation_fixes.rs"] mod teams_separation_fixes;
 #[path = "hub/teams_hardening.rs"]
