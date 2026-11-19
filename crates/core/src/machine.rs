@@ -21069,6 +21069,183 @@ Have another model review a risky change before it goes ahead.";
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    const FOUR_ASKS: [(&str, &str); 4] = [("k-1", "First ask."), ("k-2", "Second ask."), ("k-3", "Third ask."), ("k-4", "Fourth ask.")];
+
+    /// `at_the_cap` with a fourth request held, then the first one's turn ends and the pass rests
+    /// it to start the fourth. Three live, mid-turn; the first rests on its session `s-k1`.
+    #[cfg(unix)]
+    fn rested_by_the_pass(name: &str) -> (PathBuf, PathBuf, Arc<Machine>, Vec<String>) {
+        let (dir, claude, m, _path, tabs) = at_the_cap(name, &FOUR_ASKS);
+        m.record_event(AgentEvent { session: Some("s-k1".into()), ..hook(&tabs[0], AgentStatus::Done) });
+        wait_for("the fourth's first prompt", || std::fs::read_to_string(format!("{}.typed.{}", claude.display(), tabs[3])).unwrap_or_default().contains("Fourth ask."));
+        let rested = m.view(&tabs[0]).unwrap();
+        assert_eq!((rested.alive, rested.asleep), (false, true), "the pass rested the first");
+        assert_eq!(live_global(&m), 3);
+        (dir, claude, m, tabs)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_wake_at_the_cap_does_not_start_a_fourth_request() {
+        let (dir, claude, m, _path, tabs) = at_the_cap("req-cap-wake", &FOUR_ASKS);
+        let typed = |tab: &str| std::fs::read_to_string(format!("{}.typed.{tab}", claude.display())).unwrap_or_default();
+        let held = &tabs[3];
+        assert!(m.tab(held, |t| t.asleep && t.held == ["Fourth ask."]).unwrap(), "the fourth waits with its first prompt held");
+        assert_eq!(m.wake(held, 80, 24), Ok(()));
+        assert_eq!(live_global(&m), 3, "the wake took no fourth place");
+        let view = m.view(held).unwrap();
+        assert_eq!((view.alive, view.asleep), (false, true), "the tab on screen shows it resting");
+        m.record_event(AgentEvent { session: Some("s-k2".into()), ..hook(&tabs[1], AgentStatus::Done) });
+        wait_for("the fourth's first prompt", || typed(held).contains("Fourth ask."));
+        assert_eq!(live_global(&m), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_wake_of_a_request_the_pass_rested_waits_for_room() {
+        let (dir, _claude, m, tabs) = rested_by_the_pass("req-cap-rewake");
+        let rested = &tabs[0];
+        assert_eq!(m.wake(rested, 80, 24), Ok(()));
+        assert_eq!(live_global(&m), 3, "the wake took no fourth place");
+        let view = m.view(rested).unwrap();
+        assert_eq!((view.alive, view.asleep), (false, true), "the tab on screen shows it resting");
+        // Once one of the three rests at its prompt, the next wake takes its place.
+        m.record_event(AgentEvent { session: Some("s-k2".into()), ..hook(&tabs[1], AgentStatus::Done) });
+        assert_eq!(m.wake(rested, 80, 24), Ok(()));
+        assert!(m.view(rested).unwrap().alive);
+        assert_eq!(live_global(&m), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_start_keys_or_restart_into_a_rested_request_at_the_cap_wait_for_room() {
+        let (dir, _claude, m, tabs) = rested_by_the_pass("req-cap-paths");
+        let rested = &tabs[0];
+        let paths: [(&str, &dyn Fn()); 3] = [
+            ("start_claude", &|| drop(m.call(Call::StartClaude { tab: rested.clone(), cols: 80, rows: 24 }))),
+            ("write_input", &|| drop(m.write_input(rested, b"x"))),
+            ("restart_claude", &|| drop(m.restart_claude(rested, 80, 24))),
+        ];
+        let started: Vec<&str> = paths
+            .iter()
+            .filter(|(_, run)| {
+                run();
+                let alive = m.view(rested).unwrap().alive;
+                if alive {
+                    // Rests it again for the next path.
+                    let session = m.tab(rested, |t| {
+                        t.asleep = true;
+                        t.screen.lock().unwrap().session += 1;
+                        t.session.take()
+                    });
+                    drop(session);
+                }
+                alive
+            })
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(started, Vec::<&str>::new(), "these started a fourth request session");
+        assert_eq!(live_global(&m), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_first_prompt_held_at_the_cap_survives_a_restart() {
+        let (dir, claude, m, _path, tabs) = at_the_cap("req-cap-restart", &FOUR_ASKS);
+        let id = m.view(&tabs[3]).unwrap().request.expect("a request tab");
+        m.quit();
+        drop(m);
+        let again = requests_machine(&dir, &claude);
+        again.restore_tabs();
+        let tab = again.request_tab(&id).expect("the fourth request rests in a tab again");
+        wait_for("the held first prompt", || std::fs::read_to_string(format!("{}.typed.{tab}", claude.display())).unwrap_or_default().contains("Fourth ask."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_users_prompt_held_at_the_cap_survives_a_restart() {
+        let (dir, claude, m, tabs) = rested_by_the_pass("req-cap-restart-user");
+        let id = m.view(&tabs[0]).unwrap().request.expect("a request tab");
+        assert_eq!(m.call(Call::Prompt { tab: tabs[0].clone(), text: "Any news?".into() }), Ok(json!("waits for a free place")));
+        m.quit();
+        drop(m);
+        let again = requests_machine(&dir, &claude);
+        again.restore_tabs();
+        let tab = again.request_tab(&id).expect("the first request rests in a tab again");
+        wait_for("the held prompt", || std::fs::read_to_string(format!("{}.typed.{tab}", claude.display())).unwrap_or_default().contains("Any news?"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_report_hand_off_does_not_hold_sent_through_the_start_wait() {
+        let dir = temp("req-gate-wait");
+        let site = dir.join("site");
+        std::fs::create_dir_all(&site).unwrap();
+        let claude = typing_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let path = m.open_project(site).display().to_string();
+        // A request whose start is under way and has given it no process yet: waking it waits that start out.
+        let (id, _) = m.requests.lock().unwrap().open("k-1", "Ask k-1", None, 1_000);
+        let slow = m.new_request_tab(&id).unwrap();
+        m.tab(&slow, |t| {
+            (t.asleep, t.starting) = (true, true);
+            t.held.push("First ask.".into());
+        })
+        .unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| m.maybe_deliver(&slow));
+            std::thread::sleep(Duration::from_millis(200));
+            let report = scope.spawn(|| m.deliver_report("report:1", &report_of(&path, "Unasked news.", &[])).unwrap());
+            std::thread::sleep(Duration::from_millis(200));
+            let begun = Instant::now();
+            m.mark_typed(&[]);
+            let took = begun.elapsed();
+            assert!(took < Duration::from_millis(200), "mark_typed waited {took:?} for the ledger");
+            assert!(matches!(report.join().unwrap(), Handoff::Started { .. }));
+        });
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_repeated_key_on_a_request_that_started_and_rests_answers_started() {
+        let (dir, _claude, m, tabs) = rested_by_the_pass("req-repeat-started");
+        let again = ask_new(&m, &[("k-1", "First ask.")]).unwrap();
+        assert_eq!((again[0]["tab"].as_str(), again[0]["handoff"].as_str()), (Some(tabs[0].as_str()), Some("started")), "k-1 started before it rested");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_retried_fallback_report_goes_where_the_first_try_went() {
+        let dir = temp("req-retry-fallback");
+        let site = dir.join("site");
+        std::fs::create_dir_all(&site).unwrap();
+        let claude = typing_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let path = m.open_project(site).display().to_string();
+        let report = report_of(&path, "Unasked news.", &[]);
+        assert!(matches!(m.deliver_report("report:1", &report), Ok(Handoff::Started { .. })));
+        // A crash cut the ledger's save after the delivery was marked.
+        std::fs::remove_file(dir.join("config/captain-requests.json")).unwrap();
+        m.quit();
+        drop(m);
+        let m = requests_machine(&dir, &claude);
+        // Meanwhile a request of the user's sent to that Captain, and is now its newest.
+        let opened = ask_new(&m, &[("k-1", "First ask.")]).unwrap();
+        let newest = opened[0]["id"].as_str().unwrap().to_owned();
+        let captain = CaptainRef { machine: report.machine.clone(), path: report.path.clone(), project: report.project.clone(), machine_name: report.machine_name.clone(), boxed: false, at: 2_000 };
+        m.requests.lock().unwrap().record_request_send(&newest, None, &format!("{newest}/x"), captain);
+        let again = m.deliver_report("report:1", &report).unwrap();
+        assert!(!m.requests.lock().unwrap().was_delivered("report:1", &crate::user_requests::Route::Request(newest.clone())), "typed again into {newest}: {again:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_slash_command_after_a_wake_is_typed_bare_and_the_digest_waits() {
         let digest = "[pinned] Open threads:\nq1 · Ask";
