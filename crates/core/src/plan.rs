@@ -1704,17 +1704,17 @@ fn clean_id(id: &Option<String>) -> Option<String> {
 }
 
 /// U+2028 and U+2029 break a line where `char::is_control` sees none.
-fn line_separator(c: char) -> bool {
+pub(crate) fn line_separator(c: char) -> bool {
     matches!(c, '\u{2028}' | '\u{2029}')
 }
 
 /// Embeddings, overrides, isolates and marks that make text read in another order than it is stored.
-fn direction_mark(c: char) -> bool {
+pub(crate) fn direction_mark(c: char) -> bool {
     matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}')
 }
 
 /// Characters that show nothing, so two names that read the same can differ.
-fn invisible(c: char) -> bool {
+pub(crate) fn invisible(c: char) -> bool {
     matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}')
 }
 

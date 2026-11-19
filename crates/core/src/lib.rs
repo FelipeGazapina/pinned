@@ -82,6 +82,7 @@ pub mod uploads;
 pub mod untrusted;
 pub mod upstash;
 pub mod usage;
+pub mod user_requests;
 pub mod vercel;
 pub mod wire;
 pub mod wire_contract;
