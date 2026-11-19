@@ -1,0 +1,58 @@
+/* All activity: every request by day, with a 420px side panel. It covers the chat beside the Requests
+   column. Colours come from the theme tokens; the board's hard-coded dark values map to them. */
+#all-activity { position: absolute; top: 0; bottom: 0; left: 340px; right: 0; z-index: 7; display: flex; box-sizing: border-box; background: var(--g-bg); color: var(--g-fg); font-size: 13px; }
+#all-activity[hidden] { display: none; }
+#all-activity [data-state="needs"] { --rq-tone: var(--g-warning); }
+#all-activity [data-state="working"] { --rq-tone: var(--g-blue); }
+#all-activity [data-state="done"] { --rq-tone: var(--g-success); }
+#all-activity .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--rq-tone); }
+
+#all-activity .rqs-main { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+#all-activity .rqs-head { display: flex; flex: none; align-items: center; gap: 10px; height: var(--topbar); padding: 0 24px; border-bottom: 1px solid rgb(var(--g-ink-rgb) / 0.06); }
+#all-activity .rqs-head h1 { margin: 0; font-size: 14px; font-weight: 600; }
+#all-activity .spacer { flex: 1; }
+#all-activity .rqs-head button { padding: 5px 10px; border-radius: 7px; font-size: 12px; color: color-mix(in srgb, var(--g-link) 75%, white); }
+#all-activity .rqs-head button:hover { background: var(--g-hover); }
+
+#all-activity .rqs-list { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 0 8px; }
+#all-activity .rqs-list > * { width: 680px; max-width: calc(100% - 48px); margin-left: auto; margin-right: auto; box-sizing: border-box; }
+#all-activity .rqs-day { display: flex; flex-direction: column; gap: 22px; margin-bottom: 22px; }
+#all-activity .rqs-dayhead { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--g-muted); }
+#all-activity .rqs-dayhead::before, #all-activity .rqs-dayhead::after { content: ""; flex: 1; height: 1px; background: rgb(var(--g-ink-rgb) / 0.07); }
+#all-activity .rqs-entry { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+#all-activity .rqs-ask { display: flex; align-items: baseline; gap: 10px; max-width: 82%; padding: 10px 14px; border: 1px solid rgb(var(--g-ink-rgb) / 0.06); border-radius: 16px;
+  background: var(--g-raised); font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+#all-activity .rqs-ask time, #all-activity .rqs-item time { flex: none; font-size: 11px; color: var(--g-muted); }
+#all-activity .rqs-state { display: flex; align-items: center; gap: 8px; max-width: 82%; padding: 7px 10px; border: 1px solid rgb(var(--g-ink-rgb) / 0.1); border-radius: 10px; font-size: 12px; text-align: left; }
+#all-activity .rqs-state:hover { background: var(--g-hover); }
+#all-activity .rqs-state[aria-expanded="true"] { border-color: color-mix(in srgb, var(--g-primary) 50%, transparent); background: color-mix(in srgb, var(--g-primary) 14%, transparent); }
+#all-activity .rqs-state .word { flex: none; font-weight: 600; color: var(--rq-tone); }
+#all-activity .rqs-state[data-state="done"] .word { color: var(--g-muted); }
+#all-activity .rqs-state .n { flex: none; color: rgb(var(--g-fg-rgb) / 0.85); }
+#all-activity .rqs-state .last { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--g-muted); }
+#all-activity .rqs-state .i { flex: none; width: 12px; height: 12px; color: var(--g-muted); }
+#all-activity .rqs-empty, #all-activity .rqs-end { margin: 24px auto; font-size: 13px; color: var(--g-muted); text-align: center; }
+
+#all-activity .rqs-foot { display: flex; flex: none; align-items: center; gap: 8px; width: 680px; max-width: calc(100% - 48px); box-sizing: border-box; margin: 8px auto 18px; padding: 12px 16px;
+  border: 1px solid rgb(var(--g-ink-rgb) / 0.08); border-radius: 18px; background: var(--g-raised); font-size: 12px; color: var(--g-muted); }
+#all-activity .rqs-foot button { display: inline-flex; align-items: center; gap: 6px; height: 28px; margin-left: auto; padding: 0 10px; border-radius: 8px; background: var(--g-primary);
+  color: var(--g-on-primary); font-size: 12px; font-weight: 600; }
+#all-activity .rqs-foot button:hover { background: var(--g-primary-hover); }
+#all-activity .rqs-foot .i { width: 12px; height: 12px; }
+
+#all-activity .rqs-panel { display: flex; flex: none; flex-direction: column; box-sizing: border-box; width: 420px; max-width: 60%; border-left: 1px solid rgb(var(--g-ink-rgb) / 0.06); background: var(--g-raised); }
+#all-activity .rqs-phead { display: flex; flex: none; align-items: center; gap: 8px; height: var(--topbar); padding: 0 12px 0 16px; border-bottom: 1px solid rgb(var(--g-ink-rgb) / 0.06); }
+#all-activity .rqs-phead h2 { flex: 1; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 600; }
+#all-activity .rqs-phead button { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; color: var(--g-muted); }
+#all-activity .rqs-phead button:hover { background: var(--g-hover); }
+#all-activity .rqs-phead .i { width: 14px; height: 14px; }
+#all-activity .rqs-pbody { display: flex; flex: 1; flex-direction: column; gap: 14px; min-height: 0; padding: 16px; overflow-y: auto; }
+#all-activity .rqs-pbody .request-card { margin: 0; }
+#all-activity .rqs-item { display: flex; flex-direction: column; gap: 3px; }
+#all-activity .rqs-item .who { display: flex; align-items: baseline; gap: 8px; }
+#all-activity .rqs-item .name { font-size: 12.5px; font-weight: 600; }
+#all-activity .rqs-item .name[data-who="orchestrator"], #all-activity .rqs-item .name[data-who="captain"] { color: color-mix(in srgb, var(--g-link) 75%, white); }
+#all-activity .rqs-item .text { font-size: 13.5px; line-height: 1.55; color: rgb(var(--g-fg-rgb) / 0.88); overflow-wrap: anywhere; white-space: pre-wrap; }
+#all-activity .rqs-pfoot { display: flex; flex: none; padding: 8px 16px 18px; }
+#all-activity .rqs-pfoot button { padding: 7px 12px; border: 1px solid rgb(var(--g-ink-rgb) / 0.12); border-radius: 8px; font-size: 12.5px; }
+#all-activity .rqs-pfoot button:hover { background: var(--g-hover); }
