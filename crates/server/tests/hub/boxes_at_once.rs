@@ -206,3 +206,52 @@ fn run_now_is_the_users_act_so_boxes_at_once_neither_refuses_nor_counts_it() {
     assert_eq!(fleet.worker("Three"), Err(TWO.to_owned()), "two agent boxes, not four");
     assert_eq!(fleet.ana.rows(&fleet.hub), 4);
 }
+
+/// A box row of ana's for issue `issue`, written by a connection of the test's own.
+fn held_row(ana: &BoxAccount, id: &str, issue: &str) -> String {
+    format!(
+        "insert into boxes (id, account, machine, connector, subject, spec, size, phase) values ('{id}', '{}', '{}', '{}', '{{\"issue\":\"{issue}\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'small', 'running')",
+        ana.id,
+        uuid::Uuid::new_v4(),
+        ana.connector
+    )
+}
+
+#[test]
+fn a_box_being_written_for_the_account_does_not_hold_up_an_agents_reserve() {
+    let hub = TestHub::start_with_boxes("boxes_at_once_key_share", Signup::Open, Policy { max_open: 12, ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    set_workflow(&mut ana.client, "fresh");
+    let held = super::teams_locks::Held::new(&hub, &held_row(&ana, "held-1", "other"));
+    let shared = hub.hub().clone();
+    let opened = hub.runtime.block_on(tokio::time::timeout(Duration::from_secs(5), shared.open(ana.id, ana.box_run(issue("r-1")))));
+    assert_eq!(opened, Ok(Ok(())), "the reserve did not wait for the other insert");
+    drop(held);
+}
+
+#[test]
+fn an_agents_reserve_that_loses_the_insert_answers_the_box_that_won() {
+    let hub = TestHub::start_with_boxes("boxes_at_once_conflict", Signup::Open, Policy { max_open: 12, ..fast() });
+    let ana = BoxAccount::new(&hub);
+    let fresh = pinned_server::boxes::BoxRow {
+        id: "fresh-1".into(),
+        account: ana.id,
+        machine: uuid::Uuid::new_v4(),
+        upstash: None,
+        connector: ana.connector.clone(),
+        subject: issue("r-2"),
+        spec: pinned_core::wire::RunSpec { folder: "/w".into(), repo: None, args: vec![], env: vec![], token: None, account: None, budget_usd: None },
+        size: BoxSize::Small,
+        phase: pinned_server::boxes::Phase::Creating,
+        age: Duration::ZERO,
+        work: pinned_server::boxes::BoxWork::Run,
+    };
+    let held = super::teams_locks::Held::new(&hub, &held_row(&ana, "held-2", "r-2"));
+    let shared = hub.hub().clone();
+    let reserving = hub.runtime.spawn(async move { shared.db.reserve_agent_box(&fresh, 8, None, 1).await });
+    wait_for("the reserve waits on the held insert", || held.waiters() >= 1);
+    held.commit("");
+    let (row, written) = hub.runtime.block_on(reserving).unwrap().unwrap().unwrap();
+    assert_eq!((row.id.as_str(), written), ("held-2", false));
+    assert_eq!(ana.rows(&hub), 1);
+}
