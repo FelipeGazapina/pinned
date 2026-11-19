@@ -419,8 +419,8 @@ test("the footer sends through the same path as New request: one new_user_reques
   assert.deepEqual(
     sent[0][1].items.map(({ title, text, project, machine }) => ({ title, text, project, machine })),
     [
-      { title: "show the delivery estimate on the cart page.", text: TWO.split("\n\n")[0], project: "storefront", machine: "laptop" },
-      { title: "the monthly export is missing refunds.", text: TWO.split("\n\n")[1], project: "billing-api", machine: "studio" },
+      { title: "show the delivery estimate on the cart page", text: TWO.split("\n\n")[0], project: "storefront", machine: "laptop" },
+      { title: "the monthly export is missing refunds", text: TWO.split("\n\n")[1], project: "billing-api", machine: "studio" },
     ],
   );
   assert.equal(new Set(sent[0][1].items.map((i) => i.key)).size, 2);

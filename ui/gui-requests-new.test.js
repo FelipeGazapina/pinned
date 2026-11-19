@@ -420,7 +420,7 @@ test("markup in any drawn field stays text: no img element and no javascript: hr
   await h.send();
   const pieces = { cards: h.cards(), label: h.run("newRequestSendLabel()"), told: h.log.told.join(""), panel: h.panel.innerHTML };
   assert.ok(cardCount(pieces.cards) === 2, "the cards draw");
-  assert.match(pieces.cards, /Looks like/, "the close match draws");
+  assert.match(pieces.cards, /Looks close/, "the close match draws");
   for (const [name, html] of Object.entries(pieces)) {
     assert.deepEqual(tagNames(html).filter((t) => t === "img"), [], `${name}: no img element`);
     assert.deepEqual(hrefs(html).filter((href) => /javascript:/i.test(href)), [], `${name}: no javascript: href`);

@@ -2024,7 +2024,7 @@ function renderMirror() {
   const catalog = isGlobalOrchestratorTab(tab) && prompt.value.trim() ? composerTagCatalog() : null;
   renderTagRoute(catalog);
   const tagging = !!catalog && hasTags(prompt.value);
-  const known = tagging && { project: new Set(catalog.projects.map((p) => p.slug)), machine: new Set(catalog.machines.map((m) => m.slug)) };
+  const known = tagging && tagKnown(catalog);
   const paint = (text) => (tagging ? tagLineHtml(text, known, esc) : esc(text));
   const on = (Object.keys(chips).length > 0 || blocks.length > 0 || tagging) && composer.dataset.composing !== "true";
   composer.dataset.chips = on;

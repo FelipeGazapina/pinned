@@ -228,6 +228,19 @@ function tagLineHtml(line, known, esc) {
   }).join("");
 }
 
+/** The slugs the mirror paints as known: a project is blue and a machine green, any other tag red. */
+function tagKnown(catalog) {
+  return { project: new Set(catalog.projects.map((p) => p.slug)), machine: new Set(catalog.machines.map((m) => m.slug)) };
+}
+
+/** A whole text as the mirror under a textarea draws it: one `.pl` line per line, tags painted by
+ * `tagLineHtml`. An empty line holds a zero-width space so it keeps its height. */
+function tagMirrorHtml(text, catalog, esc) {
+  if (!String(text ?? "").trim()) return "";
+  const known = tagKnown(catalog);
+  return String(text).split("\n").map((line) => `<div class="pl">${tagLineHtml(line, known, esc) || "\u200b"}</div>`).join("");
+}
+
 /** The popover's rows for a token: a heading, then each option with what it inserts. */
 function composerTagPopoverHtml(token, options, hi, esc) {
   const project = token.sign === "#";

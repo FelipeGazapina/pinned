@@ -150,8 +150,10 @@ function requestsColumnHtml({ glances, filter, seen, current, name, tabViews }) 
     <div class="rq-list">${rows.join("") || `<p class="rq-empty">Nothing here. A request you send shows up as a thread.</p>`}</div>`;
 }
 
-/** A request thread's header: its state dot, title, project and state, with Mark done or Reopen. Empty in any other tab. */
+/** A request thread's header, or the New request screen's while it is open: its state dot, title, project and state, with Mark done or Reopen. Empty in any other tab. */
 function requestCrumbHtml(tab) {
+  const screen = typeof newRequestCrumbHtml === "function" ? newRequestCrumbHtml() : "";
+  if (screen) return screen;
   const glance = requestHere(tab);
   if (!glance) return "";
   const state = requestStateOf(glance);
