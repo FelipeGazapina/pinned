@@ -2532,6 +2532,10 @@ pub struct Connectors {
     /// The loop guards of this account's Linear change triggers.
     guards: Mutex<Guards>,
     admits: Mutex<Option<fn(&Connector) -> bool>>,
+    /// False once the hub is stopping: `watch` finishes the check already inside `poll` and starts no more.
+    finding: AtomicBool,
+    /// Checks that have entered `check_once` and not returned, including one that then sees `finding` clear.
+    in_check: AtomicUsize,
 }
 
 /// The app posts one scan of `workflow` took and left out of `channel` (by id).
@@ -2684,7 +2688,20 @@ impl Connectors {
             won: Mutex::new(HashMap::new()),
             guards: Mutex::new(Guards::default()),
             admits: Mutex::new(None),
+            finding: AtomicBool::new(true),
+            in_check: AtomicUsize::new(0),
         }
+    }
+
+    /// The hub is stopping. `watch` returns after the check it has already entered, and `checks_open`
+    /// is 0 once that check has returned.
+    pub fn stop_finding(&self) {
+        self.finding.store(false, Ordering::Release);
+        self.wake.notify_waiters();
+    }
+
+    pub fn checks_open(&self) -> usize {
+        self.in_check.load(Ordering::Acquire)
     }
 
     /// Makes every event of these connectors ask `admission` first. Set once, by a hub, for a team.
@@ -4943,8 +4960,14 @@ impl Connectors {
         R: Taken,
     {
         loop {
+            if !self.finding.load(Ordering::Acquire) {
+                break;
+            }
             let check = self.check_once(&open).await;
             on_check(&check);
+            if !self.finding.load(Ordering::Acquire) {
+                break;
+            }
             let _ = tokio::time::timeout(INTERVAL, self.wake.notified()).await;
         }
     }
@@ -4958,6 +4981,13 @@ impl Connectors {
         Fut: Future<Output = R>,
         R: Taken,
     {
+        // Counted before the flag is read, so a stop that sees zero cannot return while this check then starts.
+        self.in_check.fetch_add(1, Ordering::AcqRel);
+        if !self.finding.load(Ordering::Acquire) {
+            self.in_check.fetch_sub(1, Ordering::AcqRel);
+            return self.checked.lock().unwrap().clone().unwrap_or_else(|| Check { at: chrono::Utc::now().to_rfc3339(), error: None });
+        }
+        let _checking = CountedWait(&self.in_check);
         if let Some(machine) = self.held_for() {
             let check = Check { at: chrono::Utc::now().to_rfc3339(), error: Some(copy::held_error(&machine)) };
             *self.checked.lock().unwrap() = Some(check.clone());

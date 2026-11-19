@@ -772,6 +772,24 @@ mod tests {
     }
 
     #[test]
+    fn stop_finding_checks_nothing() {
+        refuse_real_home();
+        let dir = scratch("stop-finding");
+        std::fs::write(dir.join("connectors.json"), br#"{"connectors":[]}"#).unwrap();
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "pinned".into());
+        connectors.stop_finding();
+        let called = AtomicBool::new(false);
+        let open = |_work: Work| {
+            called.store(true, Ordering::SeqCst);
+            async { Ok::<(), String>(()) }
+        };
+        let _ = block_on(connectors.check_once(&open));
+        assert!(!called.load(Ordering::SeqCst));
+        assert_eq!(connectors.checks_open(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_held_store_checks_nothing_and_refuses_run_now() {
         refuse_real_home();
         let dir = scratch("held");
