@@ -20211,12 +20211,13 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(ids.len(), 1);
         let tab = restored.iter().find(|t| first.tab(t, |t| global::is_global(&t.env)).unwrap()).unwrap().clone();
         assert_eq!(request_glance(&first, &ids[0]).tab, Some(tab.clone()), "the earlier request's tab is found from its session");
-        assert_eq!(first.open_global_orchestrator(), Ok(tab), "and it is the anchor");
+        assert_eq!(first.open_global_orchestrator(), Ok(tab.clone()), "and it is the anchor");
+        first.record_event(AgentEvent { session: Some("s-new".into()), ..hook(&tab, AgentStatus::Done) });
         first.quit();
         drop(first);
         let second = requests_machine(&dir, &claude);
         second.restore_tabs();
-        assert_eq!(earlier(&second), ids, "a restart migrates nothing again");
+        assert_eq!(earlier(&second), ids, "a restart migrates nothing again, though the anchor runs another session now");
         let _ = std::fs::remove_dir_all(dir);
     }
 
