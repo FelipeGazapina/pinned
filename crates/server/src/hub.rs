@@ -461,15 +461,22 @@ fn json<T: Serialize>(value: T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|e| e.to_string())
 }
 
+/// Whether subscribed sockets should hear that `project` changed. Equal heads that were both read
+/// are the only quiet case. A missed read can hide a write that landed, so it tells.
+fn heads_differ(before: Option<u64>, after: Option<u64>) -> bool {
+    !matches!((before, after), (Some(before), Some(after)) if before == after)
+}
+
 /// The answer of `Hub::hub_call` to a team call: team ops come only from the app's own path.
 pub const TEAM_CALL_ELSEWHERE: &str = "a team's ops run only from the pinned app";
 
 impl Hub {
-    /// `SyncChanged` when the write moved `project`'s head, a push that failed after some rows
-    /// landed included. No before-read, or a head that did not move, sends nothing.
+    /// `SyncChanged` when the write may have moved `project`'s head, a push that failed after some
+    /// rows landed included. A head that could not be read counts as moved: the sockets that asked
+    /// would otherwise wait out a recheck. Two reads that succeed with the same head send nothing.
     async fn tell_sync(&self, account: &Account, project: &str, before: Option<u64>) {
-        let Some(before) = before else { return };
-        if self.db.sync_head(account.id, project).await.ok().is_some_and(|after| after != before) {
+        let after = if before.is_some() { self.db.sync_head(account.id, project).await.ok() } else { None };
+        if heads_differ(before, after) {
             account.sync_changed(project);
         }
     }
@@ -2408,6 +2415,15 @@ pub(crate) fn task_key(id: &str) -> Result<Uuid, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missed_head_read_still_tells_and_an_unchanged_head_does_not() {
+        assert!(!heads_differ(Some(3), Some(3)));
+        assert!(heads_differ(Some(3), Some(4)));
+        assert!(heads_differ(None, Some(4)));
+        assert!(heads_differ(Some(3), None));
+        assert!(heads_differ(None, None));
+    }
 
     #[test]
     fn the_census_reads_memory_counts_and_skips_what_is_missing() {

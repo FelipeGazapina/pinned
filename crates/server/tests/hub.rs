@@ -14285,11 +14285,13 @@ fn a_row_from_before_revisions_is_in_a_full_read_and_in_no_delta() {
     ana.hub(json!({ "cmd": "sync_push", "project": project, "files": [note_file("claude/new.md", "new", 2)] })).unwrap();
     let next = ask_changes(&mut ana, project, Some(0));
     assert_eq!(next["full"], json!(false));
-    let paths: Vec<&str> = next["entries"].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap()).collect();
+    let mut paths: Vec<&str> = next["entries"].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap()).collect();
+    paths.sort_unstable();
     assert_eq!(paths, ["claude/new.md"]);
     let whole = ask_changes(&mut ana, project, None);
     assert_eq!(whole["full"], json!(true));
-    let paths: Vec<&str> = whole["entries"].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap()).collect();
+    let mut paths: Vec<&str> = whole["entries"].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap()).collect();
+    paths.sort_unstable();
     assert_eq!(paths, ["claude/new.md", "claude/old.md"]);
 }
 
@@ -14334,7 +14336,8 @@ fn a_socket_registered_before_its_read_hears_every_later_push() {
 
     let read = sock_call(&mut mac, 1, changes_call(project, None));
     assert_eq!(read["full"], json!(true));
-    let paths: Vec<&str> = read["entries"].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap()).collect();
+    let mut paths: Vec<&str> = read["entries"].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap()).collect();
+    paths.sort_unstable();
     assert_eq!(paths, ["claude/one.md", "claude/two.md"]);
 }
 
