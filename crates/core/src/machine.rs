@@ -115,6 +115,8 @@ const LOCAL_COMMANDS: [&str; 25] = [
 /// How long a compaction's mark holds when no end comes for it: the tab then reads as it did before.
 const COMPACT_WAIT: Duration = Duration::from_secs(600);
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
+/// What `request_update` answers outside a request's thread.
+const NOT_A_REQUEST: &str = "request_update works only in a request's thread; this chat is not one.";
 
 pub type Event = MachineEvent;
 /// Names a viewer of a tab, such as `local` for the app's own webview; attaching again replaces it.
@@ -753,6 +755,9 @@ struct Tab {
     /// The session started from sleep and has not taken the terminal yet, so keys typed meanwhile
     /// wait in `keys`.
     waking: bool,
+    /// A request's session started or woke, and the first prompt typed into it has not yet
+    /// carried the "Open threads" digest.
+    digest_due: bool,
     /// `permission_mode` is the mode the running session is in: a hook reported it, or the start
     /// asked for it. A bare resume starts in the default mode whatever was recorded before.
     mode_live: bool,
@@ -2560,6 +2565,7 @@ impl Machine {
             let slept = std::mem::take(&mut t.asleep);
             t.starting = true;
             t.waking = slept;
+            t.digest_due = true;
             // What was typed for a session this start replaces is not for the next one. What was
             // typed for a session that sleeps is why it starts.
             if !slept {
@@ -3079,10 +3085,16 @@ impl Machine {
             if blocked {
                 clear_since = None;
             } else if since.elapsed() >= HELD_SETTLE {
+                let digest = machine.open_threads_digest(&tab);
                 let wrote = machine.tab(&tab, |t| {
                     let Some(s) = t.session.as_mut() else { return false };
                     let mut wrote = false;
-                    for text in std::mem::take(&mut t.held) {
+                    let mut held = std::mem::take(&mut t.held);
+                    if let (Some(digest), Some(first)) = (digest.filter(|_| t.digest_due), held.first_mut()) {
+                        *first = format!("{digest}\n\n{first}");
+                        t.digest_due = false;
+                    }
+                    for text in held {
                         if s.write(&paste(&text)).is_ok() {
                             (t.turn_pending, t.typed_at) = (Some(Instant::now()), None);
                             wrote = true;
@@ -3491,6 +3503,15 @@ impl Machine {
         }
         self.emit_tabs();
         self.request_glance(id)
+    }
+
+    /// The "Open threads" digest a request's session reads in front of the first prompt typed
+    /// after it starts or wakes: one line per other open request. None for a tab that is no
+    /// request's, or when no other request is open.
+    fn open_threads_digest(&self, tab: &str) -> Option<String> {
+        let id = self.tab(tab, |t| crate::user_requests::of_env(&t.env).map(str::to_owned)).ok().flatten()?;
+        let lines = self.requests.lock().unwrap().live_digest(Some(&id));
+        (!lines.is_empty()).then(|| format!("[pinned] Open threads:\n{}", lines.join("\n")))
     }
 
     /// The user typed into `tab`: when it is a request's, nothing waits on them there any more.
@@ -4288,6 +4309,14 @@ impl Machine {
             ProjectTool::Waiting => {
                 only_global()?;
                 text_json(self.waiting()?)
+            }
+            ProjectTool::RequestUpdate { title, asked, done, left, needs, links } => {
+                only_global()?;
+                let id = self.tab(tab, |t| crate::user_requests::of_env(&t.env).map(str::to_owned))?.ok_or_else(|| NOT_A_REQUEST.to_owned())?;
+                let patch = crate::user_requests::StandsPatch { title, asked, done, left, needs, links };
+                self.requests.lock().unwrap().stands_update(&id, patch, crate::connectors::unix_millis())?;
+                self.emit_tabs();
+                Ok(format!("Updated {id}."))
             }
             ProjectTool::TasteGet { .. } | ProjectTool::TasteSet { .. } | ProjectTool::TasteReset { .. } if !self.tab(tab, |t| taste::is_chat(&t.env))? => {
                 Err("only a thread opened with Chat to adjust on the Way of working page has this tool".into())
@@ -5175,6 +5204,7 @@ impl Machine {
         // Read under the screen lock alone: held across the write, a paste larger than the pty's
         // free input would block it, and the reader thread would wait on the lock for good.
         let blocker = self.blocker(tab);
+        let digest = self.open_threads_digest(tab);
         let wrote = self.tab(tab, |t| match t.session.as_mut() {
             Some(s) if s.raw() => {
                 if let Some(blocker) = blocker {
@@ -5184,11 +5214,18 @@ impl Machine {
                 if !t.keys.is_empty() {
                     s.write(&std::mem::take(&mut t.keys)).map_err(failed)?;
                 }
-                for held in std::mem::take(&mut t.held) {
+                let mut lines = std::mem::take(&mut t.held);
+                lines.push(text.to_owned());
+                if let Some(digest) = digest.filter(|_| t.digest_due) {
+                    lines[0] = format!("{digest}\n\n{}", lines[0]);
+                    t.digest_due = false;
+                }
+                let text_line = lines.pop().unwrap_or_default();
+                for held in lines {
                     s.write(&paste(&held)).map_err(failed)?;
                     (t.turn_pending, t.typed_at) = (Some(Instant::now()), None);
                 }
-                s.write(&paste(text)).map_err(failed)?;
+                s.write(&paste(&text_line)).map_err(failed)?;
                 // The user's local command from the app starts no turn, as one typed in the terminal.
                 let local = user && local_command(text) && !t.prompt_pending();
                 let now = Instant::now();
@@ -7200,6 +7237,7 @@ impl Machine {
             asleep: false,
             bare: false,
             waking: false,
+            digest_due: false,
             mode_live: false,
             effort: None,
             shells_left: false,

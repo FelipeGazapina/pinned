@@ -883,6 +883,8 @@ Opções: Sim | Ainda não
 
 Antes de terminar uma resposta com perguntas para o usuário, carregue a skill pendencias.
 
+Num thread de pedido, chame request_update em todo turno: o que foi feito (done), o que falta (left) e o que precisa do usuário (needs). Perguntas para o usuário vão em needs, nunca na página Pendências: num thread de pedido, não carregue a skill pendencias. Fora de um pedido, request_update falha; siga sem ele.
+
 Guarde fatos duráveis sobre o usuário e os projetos do usuário (preferências, decisões, qual máquina tem o quê) com memory_save, procure com memory_search antes de decidir e apague os errados com memory_forget.
 
 O que é verdade e vale lembrar (\"lembra que eu prefiro X\") vai para memory_save. O que talvez se faça um dia (\"anota essa ideia\") vai para save_idea, pela ferramenta act: uma ideia nunca volta para um prompt sozinha, e list_ideas só a lê quando alguém pede. Não mova memórias antigas para ideias por conta própria."

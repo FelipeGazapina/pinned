@@ -666,6 +666,21 @@ fn project_tools() -> [(Audience, serde_json::Value); 24] {
                 "required": ["project"],
             },
         })),
+        (Audience::GlobalOrchestrator, serde_json::json!({
+            "name": "request_update",
+            "description": "Write \"Where this stands\" for the request of this thread: the fields you pass replace theirs, the rest stay. Call it every turn of a request's thread. Questions for the user go in needs. Each text is cut to one line; links are plain text. It takes no id and works only in a request's thread.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "The request's title, at most 80 characters." },
+                    "asked": { "type": "string", "description": "What the user asked, in one line." },
+                    "done": { "type": "string", "description": "What is done so far." },
+                    "left": { "type": "string", "description": "What is left." },
+                    "needs": { "type": "string", "description": "What needs the user now, such as a question; empty when nothing does." },
+                    "links": { "type": "array", "items": { "type": "string" }, "description": "At most 6 plain-text links, such as a PR URL." },
+                },
+            },
+        })),
         (Audience::TasteChat, serde_json::json!({
             "name": "taste_get",
             "description": "Read one scope of the account's way of working as JSON: effective (every field as its sessions get it), own (what the scope sets itself; a project's fields left out inherit from captains), profile, and brief (the text its sessions start with).",
@@ -1625,7 +1640,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
         assert_eq!(offered(Some("worker"), None), today);
         assert_eq!(offered(Some("orchestrator"), None), [&today[..], &CAPTAIN_TOOLS].concat());
-        assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &["delegation_stats"], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session", "repo_overview", "repo_read", "repo_search"]].concat());
+        assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &["delegation_stats"], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session", "repo_overview", "repo_read", "repo_search", "request_update"]].concat());
         assert_eq!(offered(Some("taste-chat"), None), [&today[..], &["taste_get", "taste_set", "taste_reset"]].concat(), "only a taste chat may change the way of working");
         assert_eq!(offered(Some("taste-chat"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a taste chat's delegated child can't");
         assert_eq!(offered(Some("global-orchestrator"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a delegated child plays no role");

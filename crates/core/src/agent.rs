@@ -119,6 +119,22 @@ pub enum ProjectTool {
     },
     /// The global orchestrator's: what waits on the user across the account's machines.
     Waiting,
+    /// The global orchestrator's, in a request's thread: writes "Where this stands" for the
+    /// request of the calling tab only. It takes no id.
+    RequestUpdate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        asked: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        done: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        left: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        needs: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        links: Option<Vec<String>>,
+    },
     /// The global orchestrator's: every session of the account, in `project` and on `machine`
     /// when given.
     Sessions {
