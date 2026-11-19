@@ -21620,6 +21620,79 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn after_a_restart_the_anchor_is_not_the_older_earlier_tab() {
+        let dir = temp("req-anchor-restart");
+        let claude = typing_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        m.requests.lock().unwrap().migrate(Some("s-old"), 1).expect("the earlier conversation's request");
+        m.requests.lock().unwrap().hold_for_anchor("Anchor news.");
+        m.quit();
+        drop(m);
+        // Both global tabs were open with no request in their environment, the earlier one first.
+        let folder = global_folder_of(&dir);
+        std::fs::create_dir_all(&folder).unwrap();
+        let folder = dunce::canonicalize(folder).unwrap();
+        let saved: Vec<sessions::Saved> = ["s-old", "s-anchor"].iter().map(|session| serde_json::from_value(json!({ "cwd": folder, "session": session, "env": global::env() })).unwrap()).collect();
+        sessions::save(&dir.join("config/sessions.json"), &saved).unwrap();
+        let again = requests_machine(&dir, &claude);
+        again.restore_tabs();
+        let on = |session: &str| again.tabs().into_iter().find(|v| v.session.as_deref() == Some(session)).map(|v| v.id).unwrap_or_else(|| panic!("no tab on {session}"));
+        let (earlier, anchor) = (on("s-old"), on("s-anchor"));
+        assert!(tab_number(&earlier) < tab_number(&anchor));
+        assert_eq!(again.open_global_orchestrator(), Ok(anchor.clone()), "the earlier conversation's tab answered as the anchor");
+        let typed = |tab: &str| std::fs::read_to_string(format!("{}.typed.{tab}", claude.display())).unwrap_or_default();
+        wait_for("the anchor's line", || typed(&anchor).contains("Anchor news."));
+        wait_for("the anchor's saved lines cleared once typed", || again.requests.lock().unwrap().anchor_held().is_empty());
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(typed(&anchor).matches("Anchor news.").count(), 1, "typed once");
+        assert_eq!(typed(&earlier), "", "the earlier conversation typed the anchor's line");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_report_held_for_an_anchor_with_a_session_survives_a_restart() {
+        let (dir, claude, m, _path, _tabs) = at_the_cap("req-anchor-session-held", &FOUR_ASKS[..3]);
+        let anchor = m.open_global_orchestrator().unwrap();
+        m.tab(&anchor, |t| t.claude_session = Some("s-anchor".into())).unwrap();
+        assert_eq!(m.launch_gated(&anchor, 80, 24, false, Some("Anchor news."), |_| {}), Ok(None), "no place free");
+        assert_eq!(m.requests.lock().unwrap().anchor_held(), ["Anchor news."], "the anchor's report was held in memory only");
+        m.save_sessions();
+        m.quit();
+        drop(m);
+        let again = requests_machine(&dir, &claude);
+        again.restore_tabs();
+        let anchor = again.open_global_orchestrator().unwrap();
+        assert_eq!(again.view(&anchor).unwrap().session.as_deref(), Some("s-anchor"), "the anchor's tab came back on its session");
+        let typed = || std::fs::read_to_string(format!("{}.typed.{anchor}", claude.display())).unwrap_or_default();
+        wait_for("the anchor's report", || typed().contains("Anchor news."));
+        wait_for("the anchor's saved lines cleared once typed", || again.requests.lock().unwrap().anchor_held().is_empty());
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(typed().matches("Anchor news.").count(), 1, "typed once");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_line_held_for_the_earlier_tab_survives_a_restart() {
+        let (dir, claude, m, _tabs, _anchor, earlier, id) = earlier_at_the_cap("req-earlier-restart");
+        assert_eq!(m.launch_gated(&earlier, 80, 24, false, Some("Earlier ask."), |_| {}), Ok(None), "no place free");
+        m.quit();
+        drop(m);
+        let again = requests_machine(&dir, &claude);
+        again.restore_tabs();
+        let tab = again.request_tab(&id).expect("the earlier conversation rests in a tab again");
+        let typed = |tab: &str| std::fs::read_to_string(format!("{}.typed.{tab}", claude.display())).unwrap_or_default();
+        wait_for("the earlier tab's line", || typed(&tab).contains("Earlier ask."));
+        wait_for("its record cleared once typed", || again.requests.lock().unwrap().get(&id).map(|r| r.held.clone()) == Some(vec![]));
+        std::thread::sleep(Duration::from_millis(500));
+        let everywhere: usize = again.tabs().iter().map(|v| typed(&v.id).matches("Earlier ask.").count()).sum();
+        assert_eq!((typed(&tab).matches("Earlier ask.").count(), everywhere), (1, 1), "typed once, into the earlier conversation");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_session_named_before_its_held_line_is_typed_keeps_the_line_saved() {
         let (dir, claude, m, _path, tabs) = at_the_cap("req-held-named", &FOUR_ASKS);
         let id = m.view(&tabs[3]).unwrap().request.expect("a request tab");
