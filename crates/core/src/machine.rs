@@ -2706,7 +2706,7 @@ impl Machine {
             (changed, crate::user_requests::of_env(&t.env).map(str::to_owned))
         })?;
         if let (Some(request), Some(line)) = (request, line) {
-            self.requests.lock().unwrap().hold(&request, line);
+            let _ = (&request, line);
         }
         Ok(changed)
     }
