@@ -636,19 +636,23 @@ fn main() {
                 | agent::Message::Project { .. } => Err("the machine answers this itself".into()),
                 callback => match handle.state::<account::Account>().forward(callback) {
                     Ok(answer) => answer,
-                    Err(agent::Message::Stage { connector, subject, stage }) => tauri::async_runtime::block_on(
-                        handle.state::<connectors::Connectors>().stage(&connector, &subject, stage),
-                    ),
-                    Err(agent::Message::SlackReply { connector, channel, thread, text }) => tauri::async_runtime::block_on(
-                        handle.state::<connectors::Connectors>().slack_reply(&connector, &channel, &thread, &text),
-                    ),
-                    Err(agent::Message::LinearCreate { connector, channel, thread, title, description, assignee }) => tauri::async_runtime::block_on(
-                        handle.state::<connectors::Connectors>().linear_create(&connector, &channel, &thread, &title, &description, &assignee),
-                    ),
-                    Err(agent::Message::LinearTake { connector, channel, thread, issue }) => tauri::async_runtime::block_on(
-                        handle.state::<connectors::Connectors>().linear_take(&connector, &channel, &thread, &issue),
-                    ),
-                    Err(_) => unreachable!("forward hands back only the callback it was given"),
+                    Err(message) => match pinned_core::local_hub::signed_out(&handle.state::<connectors::Connectors>(), message) {
+                        pinned_core::local_hub::SignedOut::Done(answer) => answer,
+                        pinned_core::local_hub::SignedOut::Stage { connector, subject, stage } => tauri::async_runtime::block_on(
+                            handle.state::<connectors::Connectors>().stage(&connector, &subject, stage),
+                        ),
+                        pinned_core::local_hub::SignedOut::SlackReply { connector, channel, thread, text } => tauri::async_runtime::block_on(
+                            handle.state::<connectors::Connectors>().slack_reply(&connector, &channel, &thread, &text),
+                        ),
+                        pinned_core::local_hub::SignedOut::LinearCreate { connector, channel, thread, title, description, assignee } => {
+                            tauri::async_runtime::block_on(handle.state::<connectors::Connectors>().linear_create(
+                                &connector, &channel, &thread, &title, &description, &assignee,
+                            ))
+                        }
+                        pinned_core::local_hub::SignedOut::LinearTake { connector, channel, thread, issue } => tauri::async_runtime::block_on(
+                            handle.state::<connectors::Connectors>().linear_take(&connector, &channel, &thread, &issue),
+                        ),
+                    },
                 },
             })?;
             let signed_in = app.state::<account::Account>().is_signed_in();

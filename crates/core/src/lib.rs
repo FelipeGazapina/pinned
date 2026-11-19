@@ -29,6 +29,7 @@ pub mod ipc;
 pub mod linear;
 pub mod link;
 pub mod load;
+pub mod local_hub;
 pub mod login_store;
 pub mod machine;
 pub mod marks;
