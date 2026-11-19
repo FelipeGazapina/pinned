@@ -14,6 +14,8 @@ pub const FILE: &str = "user-requests.json";
 /// first; open ones never do.
 pub const KEEP: usize = 500;
 pub const MAX_CAPTAINS: usize = 8;
+/// The longest Captain folder, in bytes, a request records.
+pub const MAX_PATH: usize = 4096;
 pub const MAX_LINKS: usize = 6;
 pub const MAX_LAST: usize = 120;
 pub const MAX_GLANCES: usize = 60;
@@ -478,10 +480,11 @@ impl UserRequests {
         shown.into_iter().take(MAX_GLANCES).map(|r| r.glance(tab_of(r))).collect()
     }
 
-    /// The user typed into request `id`'s session: nothing waits on them any more.
+    /// The user typed into request `id`'s session: nothing waits on them any more, and a Done
+    /// request opens again.
     pub fn user_typed(&mut self, id: &str, now: u64) -> bool {
         let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id) else { return false };
-        (r.stands.needs, r.stands.needs_at, r.last_user_at) = (String::new(), None, Some(now));
+        (r.stands.needs, r.stands.needs_at, r.last_user_at, r.closed) = (String::new(), None, Some(now), None);
         self.save();
         true
     }
@@ -672,16 +675,17 @@ impl CaptainRef {
         CaptainRef { machine: cut(&self.machine, MAX_NAME), project: cut(&self.project, MAX_NAME), machine_name: cut(&self.machine_name, MAX_NAME), ..self }
     }
 
-    /// A path with a control or line-separator character names no folder a tab runs in.
+    /// A path with a control or line-separator character names no folder a tab runs in, and one
+    /// over `MAX_PATH` bytes is not kept: cutting it would break the exact match.
     fn path_ok(&self) -> bool {
-        !self.path.chars().any(|c| c.is_control() || crate::plan::line_separator(c))
+        self.path.len() <= MAX_PATH && !self.path.chars().any(|c| c.is_control() || crate::plan::line_separator(c))
     }
 
     /// Whether `report`'s Captain is this one: the same machine and folder, or for a box, the same
-    /// machine or repo.
+    /// box. A box's folder name says nothing: every clone of a repo named `site` is `site`.
     fn serves(&self, report: &CaptainRef) -> bool {
         if self.boxed {
-            (!self.machine.is_empty() && self.machine == report.machine) || (!self.project.is_empty() && self.project == report.project)
+            !self.machine.is_empty() && self.machine == report.machine
         } else {
             self.machine == report.machine && self.path == report.path
         }

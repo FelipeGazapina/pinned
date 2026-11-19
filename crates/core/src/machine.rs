@@ -758,6 +758,8 @@ struct Tab {
     /// A request's session started or woke, and the first prompt typed into it has not yet
     /// carried the "Open threads" digest.
     digest_due: bool,
+    /// The launch arguments this start takes carry the digest in front of their prompt.
+    digest_launched: bool,
     /// `permission_mode` is the mode the running session is in: a hook reported it, or the start
     /// asked for it. A bare resume starts in the default mode whatever was recorded before.
     mode_live: bool,
@@ -2565,7 +2567,7 @@ impl Machine {
             let slept = std::mem::take(&mut t.asleep);
             t.starting = true;
             t.waking = slept;
-            t.digest_due = true;
+            t.digest_due = !std::mem::take(&mut t.digest_launched);
             // What was typed for a session this start replaces is not for the next one. What was
             // typed for a session that sleeps is why it starts.
             if !slept {
@@ -3090,9 +3092,8 @@ impl Machine {
                     let Some(s) = t.session.as_mut() else { return false };
                     let mut wrote = false;
                     let mut held = std::mem::take(&mut t.held);
-                    if let (Some(digest), Some(first)) = (digest.filter(|_| t.digest_due), held.first_mut()) {
-                        *first = format!("{digest}\n\n{first}");
-                        t.digest_due = false;
+                    if let Some(digest) = digest.filter(|_| t.digest_due) {
+                        t.digest_due = !put_digest(&mut held, &digest);
                     }
                     for text in held {
                         if s.write(&paste(&text)).is_ok() {
@@ -3818,9 +3819,13 @@ impl Machine {
         }
         match ready {
             Ready::Stopped | Ready::Fresh => {
+                let digest = self.open_threads_digest(tab);
                 self.tab(tab, |t| {
                     let mut args = t.claude_session.as_deref().map(|session| crate::delegate::resume_args(t.account.provider, session)).unwrap_or_default();
-                    args.push(if line.starts_with('-') { format!("\n{line}") } else { line.to_owned() });
+                    let mut prompt = [line.to_owned()];
+                    t.digest_launched = digest.as_deref().is_some_and(|d| put_digest(&mut prompt, d));
+                    let [line] = prompt;
+                    args.push(if line.starts_with('-') { format!("\n{line}") } else { line });
                     t.launch = args;
                 })?;
                 if ready == Ready::Fresh {
@@ -3857,13 +3862,13 @@ impl Machine {
 
     /// The Capitão in `tab` as a request records it: its folder as the tab reports it, and its
     /// repo's name as the project, under the machine id `report_up` sends. A Capitão on another
-    /// machine is known by neither here.
-    fn captain_ref(&self, tab: &str, remote: bool) -> CaptainRef {
+    /// machine is known by the machine and folder `send_to_captain` resolved for it.
+    fn captain_ref(&self, tab: &str, remote: Option<(crate::wire::MachineId, String)>) -> CaptainRef {
         let at = crate::connectors::unix_millis();
-        let (machine, machine_name) = (self.hub_id.lock().unwrap().clone(), crate::account::hostname());
-        if remote {
-            return remote_captain_ref("", "", at);
+        if let Some((machine, path)) = remote {
+            return remote_captain_ref(&machine, &path, at);
         }
+        let (machine, machine_name) = (self.hub_id.lock().unwrap().clone(), crate::account::hostname());
         let path = self.view(tab).map(|v| v.cwd).unwrap_or_default();
         let folder = Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let project = git_remote(Path::new(&path)).as_deref().and_then(repo_name).map(str::to_owned).unwrap_or(folder);
@@ -3873,10 +3878,19 @@ impl Machine {
     /// Hands `message` to `project`'s Capitão: on this machine when the project is here and
     /// `machine` names no other, else on the machine the hub finds.
     fn send_to_captain(&self, project: &str, machine: Option<&str>, message: &str, request_id: &str) -> Result<Handoff, String> {
+        self.send_to_captain_at(project, machine, message, request_id).map(|(handoff, _)| handoff)
+    }
+
+    /// `send_to_captain`, with the machine and folder it resolved when the Capitão is on another.
+    fn send_to_captain_at(&self, project: &str, machine: Option<&str>, message: &str, request_id: &str) -> Result<(Handoff, Option<(crate::wire::MachineId, String)>), String> {
         let sender = self.global_settings().name;
         match self.local_project(project, machine) {
-            Some(path) => self.enqueue_to_captain(&path.display().to_string(), message, request_id, &sender, None),
-            None => self.route_remote(project, machine, message, request_id, &sender),
+            Some(path) => Ok((self.enqueue_to_captain(&path.display().to_string(), message, request_id, &sender, None)?, None)),
+            None => {
+                let (target, path) = self.remote_checkout(project, machine)?;
+                let handoff = self.route_remote_to(&target, &path, message, request_id, &sender)?;
+                Ok((handoff, Some((target, path))))
+            }
         }
     }
 
@@ -4087,11 +4101,10 @@ impl Machine {
         text_json(out)
     }
 
-    /// Hands a message to a Capitão on another machine through `HubCall::Relay`, under this
-    /// machine's busy policy, since this machine hosts the orchestrator that sends it.
-    fn route_remote(&self, project: &str, machine: Option<&str>, text: &str, request_id: &str, sender: &str) -> Result<Handoff, String> {
-        let (target, path) = self.remote_checkout(project, machine)?;
-        let to = global::RelayTo::Captain { machine: target, path, text: text.to_owned(), sender: sender.to_owned(), busy: Some(self.global_settings().busy) };
+    /// Hands `text` to the Capitão in folder `path` of machine `target` through `HubCall::Relay`,
+    /// under this machine's busy policy, since this machine hosts the orchestrator that sends it.
+    fn route_remote_to(&self, target: &str, path: &str, text: &str, request_id: &str, sender: &str) -> Result<Handoff, String> {
+        let to = global::RelayTo::Captain { machine: target.to_owned(), path: path.to_owned(), text: text.to_owned(), sender: sender.to_owned(), busy: Some(self.global_settings().busy) };
         let answer = self.call_hub(HubCall::Relay { request_id: request_id.to_owned(), to }).map_err(needs_update)?;
         serde_json::from_value(answer).map_err(|e| format!("the hub answered the relay with something unreadable: {e}"))
     }
@@ -4295,9 +4308,9 @@ impl Machine {
             ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: None } => {
                 only_global()?;
                 let (session, request_id) = self.sent_from(tab, &request_id)?;
-                let handoff = self.send_to_captain(&project, machine.as_deref(), &message, &request_id)?;
+                let (handoff, remote) = self.send_to_captain_at(&project, machine.as_deref(), &message, &request_id)?;
                 if let Some(session) = session.filter(|_| !matches!(handoff, Handoff::Busy { .. })) {
-                    let captain = self.captain_ref(handoff.tab(), self.local_project(&project, machine.as_deref()).is_none());
+                    let captain = self.captain_ref(handoff.tab(), remote);
                     self.requests.lock().unwrap().record_send(&session, &request_id, captain);
                 }
                 text_json(handoff)
@@ -5217,8 +5230,7 @@ impl Machine {
                 let mut lines = std::mem::take(&mut t.held);
                 lines.push(text.to_owned());
                 if let Some(digest) = digest.filter(|_| t.digest_due) {
-                    lines[0] = format!("{digest}\n\n{}", lines[0]);
-                    t.digest_due = false;
+                    t.digest_due = !put_digest(&mut lines, &digest);
                 }
                 let text_line = lines.pop().unwrap_or_default();
                 for held in lines {
@@ -6885,13 +6897,17 @@ impl Machine {
         if self.blocker(tab).is_some() {
             return Ok(false);
         }
+        let digest = self.open_threads_digest(tab);
         self.tab(tab, |t| {
             if !t.notice_idle() {
                 return Ok(false);
             }
             match t.session.as_mut() {
                 Some(s) if s.raw() => {
-                    s.write(&paste(text)).map_err(|e| e.to_string())?;
+                    let mut text = [text.to_owned()];
+                    let digested = digest.as_deref().filter(|_| t.digest_due).is_some_and(|d| put_digest(&mut text, d));
+                    s.write(&paste(&text[0])).map_err(|e| e.to_string())?;
+                    t.digest_due &= !digested;
                     (t.turn_pending, t.typed_at) = (Some(Instant::now()), None);
                     Ok(true)
                 }
@@ -7238,6 +7254,7 @@ impl Machine {
             bare: false,
             waking: false,
             digest_due: false,
+            digest_launched: false,
             mode_live: false,
             effort: None,
             shells_left: false,
@@ -8185,6 +8202,15 @@ fn whole_command(could_be: u32, len: usize) -> bool {
 }
 
 /// `text`'s first word is a slash and one of `LOCAL_COMMANDS`.
+/// Puts `digest` in front of the first of `lines` that is a prompt. A slash command stays bare,
+/// since a digest in front of it turns it into a prompt. False when every line is one, so the
+/// digest waits for the next prompt.
+fn put_digest(lines: &mut [String], digest: &str) -> bool {
+    let Some(line) = lines.iter_mut().find(|l| !l.trim_start().starts_with('/')) else { return false };
+    *line = format!("{digest}\n\n{line}");
+    true
+}
+
 fn local_command(text: &str) -> bool {
     text.bytes().enumerate().fold(Head::Blank, |head, (i, byte)| head.push(byte, i + 1)).local()
 }
@@ -8279,16 +8305,18 @@ pub fn git_remote(dir: &Path) -> Option<String> {
     (out.status.success() && !url.is_empty()).then_some(url)
 }
 
-/// A Capitão in a box as a request records it, from the hub's answer to `send_to_captain`.
+/// A Capitão in a box as a request records it, from the hub's answer to `send_to_captain`: the
+/// box's machine id, which is how its reports are matched, and the repo's name to show. An answer
+/// with no machine leaves the id empty, which matches no report.
 pub(crate) fn box_captain_ref(answer: &Value, repo: &str, at: u64) -> CaptainRef {
-    let _ = answer;
-    CaptainRef { project: repo_name(repo).unwrap_or(repo).to_owned(), boxed: true, at, ..CaptainRef::default() }
+    let field = |name: &str| answer.get(name).and_then(Value::as_str).unwrap_or_default().to_owned();
+    CaptainRef { machine: field("machine"), machine_name: field("machineName"), project: repo_name(repo).unwrap_or(repo).to_owned(), boxed: true, at, ..CaptainRef::default() }
 }
 
 /// A Capitão on machine `machine`, in folder `path`, as a request records it.
 pub(crate) fn remote_captain_ref(machine: &str, path: &str, at: u64) -> CaptainRef {
-    let _ = (machine, path);
-    CaptainRef { at, ..CaptainRef::default() }
+    let project = Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    CaptainRef { machine: machine.to_owned(), path: path.to_owned(), project, boxed: false, at, ..CaptainRef::default() }
 }
 
 /// The folder name a clone of `repo` gets under `~/pinned`.
@@ -20722,6 +20750,48 @@ Have another model review a risky change before it goes ahead.";
         assert!(text.contains(&digest), "{text:?}");
         assert!(!text.contains(&format!("{c} ·")), "its own request is left out: {text:?}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_report_that_wakes_a_request_carries_the_open_threads_digest() {
+        let dir = temp("req-wake-digest");
+        let claude = typing_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let asks = [("k-1", "First ask."), ("k-2", "Second ask."), ("k-3", "Third ask."), ("k-4", "Fourth ask.")];
+        let opened = ask_new(&m, &asks).unwrap();
+        let field = |name: &str| -> Vec<String> { opened.as_array().unwrap().iter().map(|o| o[name].as_str().unwrap().to_owned()).collect() };
+        let (ids, tabs) = (field("id"), field("tab"));
+        let typed = |tab: &str| std::fs::read_to_string(format!("{}.typed.{tab}", claude.display())).unwrap_or_default();
+        for (tab, (_, text)) in tabs.iter().zip(&asks).take(3) {
+            wait_for("the first prompt", || typed(tab).contains(text));
+        }
+        m.record_event(AgentEvent { session: Some("s-k2".into()), ..hook(&tabs[1], AgentStatus::Done) });
+        wait_for("the fourth's first prompt", || typed(&tabs[3]).contains("Fourth ask."));
+        m.record_event(AgentEvent { session: Some("s-k4".into()), ..hook(&tabs[3], AgentStatus::Done) });
+        let _ = std::fs::remove_file(format!("{}.{}", claude.display(), tabs[1]));
+        let sent = format!("{}/r-1", ids[1]);
+        let captain = CaptainRef { machine: "m1".into(), path: "/p/site".into(), project: "site".into(), machine_name: "Mini".into(), boxed: false, at: 1 };
+        m.requests.lock().unwrap().record_send("s-k2", &sent, captain);
+        let report = global::CaptainReport { machine: "m1".into(), machine_name: "Mini".into(), project: "site".into(), path: "/p/site".into(), tab: "tab-c".into(), text: "Shipped.".into(), answers: vec![sent] };
+        m.deliver_report("report:wake-1", &report).unwrap();
+        let args = started(&claude, &tabs[1]);
+        let prompt = args.last().unwrap();
+        assert!(prompt.starts_with("[pinned] Open threads:\n") && prompt.contains(&format!("{} · Ask k-1", ids[0])) && prompt.ends_with(&report.line()), "{prompt:?}");
+        assert!(!prompt.contains(&format!("{} ·", ids[1])), "its own request is left out: {prompt:?}");
+        assert!(!m.tab(&tabs[1], |t| t.digest_due).unwrap(), "the digest went with the launch, once");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_slash_command_after_a_wake_is_typed_bare_and_the_digest_waits() {
+        let digest = "[pinned] Open threads:\nq1 · Ask";
+        let mut lines = vec!["/clear".to_owned()];
+        assert!(!put_digest(&mut lines, digest), "a lone slash command leaves the digest due");
+        assert_eq!(lines, ["/clear"]);
+        let mut lines = vec!["  /model opus".to_owned(), "Ship it.".to_owned()];
+        assert!(put_digest(&mut lines, digest));
+        assert_eq!(lines, ["  /model opus".to_owned(), format!("{digest}\n\nShip it.")]);
     }
 
     #[test]
