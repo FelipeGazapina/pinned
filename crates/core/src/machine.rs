@@ -3384,7 +3384,7 @@ impl Machine {
         // opens by itself for it.
         let record = closed.as_ref().map(|t| (t.env.clone(), t.claude_session.clone()));
         if let Some(record) = record.and_then(|(env, session)| self.held_record_of(&env, session.as_deref())) {
-            self.requests.lock().unwrap().park(record.request());
+            self.forget_held(record, usize::MAX);
         }
         let made = closed.as_ref().and_then(|t| t.made.clone());
         drop(closed);
