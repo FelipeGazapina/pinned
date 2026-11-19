@@ -21001,6 +21001,74 @@ Have another model review a risky change before it goes ahead.";
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Three request sessions mid-turn, `asks` of them asked here and the rest
+    /// held at the cap, and a Captain's project at `path`.
+    #[cfg(unix)]
+    fn at_the_cap(name: &str, asks: &[(&str, &str)]) -> (PathBuf, PathBuf, Arc<Machine>, String, Vec<String>) {
+        let dir = temp(name);
+        let site = dir.join("site");
+        std::fs::create_dir_all(&site).unwrap();
+        let claude = typing_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let path = m.open_project(site).display().to_string();
+        let opened = ask_new(&m, asks).unwrap();
+        let tabs: Vec<String> = opened.as_array().unwrap().iter().map(|o| o["tab"].as_str().unwrap().to_owned()).collect();
+        for (tab, (_, text)) in tabs.iter().zip(asks).take(3) {
+            wait_for("the first prompt", || std::fs::read_to_string(format!("{}.typed.{tab}", claude.display())).unwrap_or_default().contains(text));
+        }
+        assert_eq!(live_global(&m), 3);
+        (dir, claude, m, path, tabs)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn two_wakes_at_two_free_places_minus_one_start_only_one() {
+        let asks = [("k-1", "First ask."), ("k-2", "Second ask."), ("k-3", "Third ask."), ("k-4", "Fourth ask.")];
+        let (dir, claude, m, path, tabs) = at_the_cap("req-cap-race", &asks);
+        let typed = |tab: &str| std::fs::read_to_string(format!("{}.typed.{tab}", claude.display())).unwrap_or_default();
+        let held = &tabs[3];
+        assert!(m.tab(held, |t| t.asleep && t.held == ["Fourth ask."]).unwrap(), "the fourth waits with its first prompt held");
+        // One of the three rests at its prompt: two live, so one free place for two starts.
+        m.record_event(AgentEvent { session: Some("s-k2".into()), ..hook(&tabs[1], AgentStatus::Done) });
+        let barrier = std::sync::Barrier::new(2);
+        let handoff = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                barrier.wait();
+                m.maybe_deliver(held);
+            });
+            let report = scope.spawn(|| {
+                barrier.wait();
+                m.deliver_report("report:1", &report_of(&path, "Unasked news.", &[])).unwrap()
+            });
+            report.join().unwrap()
+        });
+        let reports = handoff.tab().to_owned();
+        let live = |tab: &str| m.tab(tab, |t| t.session.is_some() || t.starting).unwrap();
+        assert_eq!([live(held), live(&reports)].iter().filter(|l| **l).count(), 1, "one start for one place: {handoff:?}");
+        assert_eq!(live_global(&m), 3);
+        let (waits, text) = if live(held) { (reports, "Unasked news.") } else { (held.clone(), "Fourth ask.") };
+        m.record_event(AgentEvent { session: Some("s-k1".into()), ..hook(&tabs[0], AgentStatus::Done) });
+        wait_for("the one that waited", || typed(&waits).contains(text));
+        assert_eq!(live_global(&m), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_report_held_at_the_cap_starts_when_a_place_frees() {
+        let (dir, claude, m, path, tabs) = at_the_cap("req-cap-rearm", &[("k-1", "First ask."), ("k-2", "Second ask."), ("k-3", "Third ask.")]);
+        let handoff = m.deliver_report("report:1", &report_of(&path, "Unasked news.", &[])).unwrap();
+        assert!(matches!(handoff, Handoff::Queued { .. }), "three request sessions are live: {handoff:?}");
+        let tab = handoff.tab().to_owned();
+        // A pass that finds no room returns, and the next one looks again.
+        std::thread::sleep(Duration::from_millis(2_500));
+        assert!(!m.view(&tab).unwrap().alive);
+        m.record_event(AgentEvent { session: Some("s-k3".into()), ..hook(&tabs[2], AgentStatus::Done) });
+        wait_for("the held report", || std::fs::read_to_string(format!("{}.typed.{tab}", claude.display())).unwrap_or_default().contains("Unasked news."));
+        assert_eq!(live_global(&m), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_slash_command_after_a_wake_is_typed_bare_and_the_digest_waits() {
         let digest = "[pinned] Open threads:\nq1 · Ask";

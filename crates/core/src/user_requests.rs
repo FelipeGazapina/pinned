@@ -1060,7 +1060,8 @@ mod tests {
         let from_box = captain("box-7", "/home/boxuser/work/site", "site", 0);
         assert_eq!(store.route("rep-1", &[], &from_box, 3_000), vec![to(&a)]);
         let from_next_box = captain("box-9", "/home/boxuser/work/site", "site", 0);
-        assert_eq!(store.route("rep-2", &[], &from_next_box, 4_000), vec![to(&a)], "or by repo");
+        let routes = store.route("rep-2", &[], &from_next_box, 4_000);
+        assert!(!routes.contains(&to(&a)), "another box with the same folder name is another Captain: {routes:?}");
         assert_eq!(store.route("rep-3", &[], &captain("m1", "/p/site", "site", 0), 5_000), vec![to(&b)]);
     }
 
@@ -1197,6 +1198,18 @@ mod tests {
         store.record_send("s-a", &format!("{a}/r-2"), captain("m1", &edge, "site", 1_200));
         let paths: Vec<usize> = store.get(&a).unwrap().captains.iter().map(|c| c.path.len()).collect();
         assert_eq!(paths, vec![4_096], "only the path of 4096 bytes is kept, byte for byte");
+    }
+
+    #[test]
+    fn a_report_path_over_4096_bytes_reaches_no_fallback_key() {
+        let mut store = UserRequests::load(None);
+        let long = format!("/{}", "é".repeat(2_048));
+        let routes = store.route("rep-1", &[], &captain("m1", &long, "site", 0), 1_000);
+        let [Route::Request(id)] = routes.as_slice() else { panic!("one request, not {routes:?}") };
+        let r = store.get(id).unwrap();
+        assert_eq!((r.key.as_str(), r.captains.len()), ("captain-reports/m1/", 0));
+        let routes = store.route("rep-2", &[], &captain("m1", &format!("{long}x"), "site", 0), 2_000);
+        assert_eq!(routes, vec![to(id)], "another path no record keeps joins it");
     }
 
     #[test]
