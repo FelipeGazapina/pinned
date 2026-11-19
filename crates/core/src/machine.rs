@@ -20597,4 +20597,103 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!((rested.alive, rested.asleep, rested.session.as_deref()), (false, true, Some("s-k2")), "the one whose turn ended rested");
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[cfg(unix)]
+    fn request_update(m: &Machine, tab: &str, args: Value) -> Result<String, String> {
+        let mut call = json!({ "name": "request_update" });
+        call.as_object_mut().unwrap().extend(args.as_object().unwrap().clone());
+        m.project_tool(tab, serde_json::from_value(call).unwrap())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn request_update_never_touches_another_request() {
+        let (dir, _claude, m, _path) = routing_machine("req-update-own");
+        let (a, tab_a) = request_on(&m, "k-1", "s-a");
+        let (b, _) = request_on(&m, "k-2", "s-b");
+        let said = request_update(&m, &tab_a, json!({ "id": b, "title": "Login\nfix", "done": "Login fixed.", "needs": "Merge it?\nNow?", "links": ["https://github.com/o/site/pull/12"] }));
+        assert_eq!(said, Ok(format!("Updated {a}.")));
+        let requests = m.requests.lock().unwrap();
+        let (mine, other) = (requests.get(&a).unwrap(), requests.get(&b).unwrap());
+        assert_eq!((mine.title.as_str(), mine.stands.done.as_str(), mine.stands.needs.as_str(), mine.stands.links.clone()), ("Login fix", "Login fixed.", "Merge it? Now?", vec!["https://github.com/o/site/pull/12".to_owned()]));
+        assert_eq!((other.title.as_str(), other.stands.done.as_str(), other.stands.needs.as_str(), other.stands.links.len()), ("Ask k-2", "", "", 0));
+        drop(requests);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn request_update_from_the_anchor_is_refused_with_the_literal_text() {
+        let (dir, _claude, m, _path) = routing_machine("req-update-anchor");
+        let anchor = m.open_global_orchestrator().unwrap();
+        let (id, _) = request_on(&m, "k-1", "s-a");
+        assert_eq!(request_update(&m, &anchor, json!({ "done": "Shipped." })), Err("request_update works only in a request's thread; this chat is not one.".to_owned()));
+        assert_eq!(m.requests.lock().unwrap().get(&id).unwrap().stands.done, "");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_cannot_call_request_update() {
+        let (dir, _claude, m, path) = routing_machine("req-update-agent");
+        let (id, _) = request_on(&m, "k-1", "s-a");
+        let plain = m.open_tab(Some(path.clone()), false).unwrap();
+        assert_eq!(request_update(&m, &plain, json!({ "done": "Shipped." })), Err("only the global orchestrator has this tool".to_owned()));
+        let act = m.call(Call::ActFor { caller: plain.clone(), call: json!({ "cmd": "request_update", "done": "Shipped." }) });
+        assert!(act.is_err(), "{act:?}");
+        assert_eq!(m.requests.lock().unwrap().get(&id).unwrap().stands.done, "");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_waking_request_reads_the_other_open_threads_stands() {
+        let dir = temp("req-digest");
+        let claude = typing_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let typed = |tab: &str| std::fs::read_to_string(format!("{}.typed.{tab}", claude.display())).unwrap_or_default();
+        let first = ask_new(&m, &[("k-1", "First ask.")]).unwrap();
+        let a = first[0]["id"].as_str().unwrap().to_owned();
+        std::thread::sleep(Duration::from_millis(5));
+        let second = ask_new(&m, &[("k-2", "Second ask.")]).unwrap();
+        let b = second[0]["id"].as_str().unwrap().to_owned();
+        {
+            let mut requests = m.requests.lock().unwrap();
+            let patch = |left: &str, needs: &str| crate::user_requests::StandsPatch { done: Some("Login fixed.".into()), left: Some(left.into()), needs: Some(needs.into()), ..Default::default() };
+            requests.stands_update(&a, patch("Tests.", ""), 1).unwrap();
+            requests.stands_update(&b, patch("Deploy.", "Merge it?"), 2).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+        let third = ask_new(&m, &[("k-3", "Third ask.")]).unwrap();
+        let (c, tab) = (third[0]["id"].as_str().unwrap().to_owned(), third[0]["tab"].as_str().unwrap().to_owned());
+        wait_for("the first prompt", || typed(&tab).contains("Third ask."));
+        let digest = format!("[pinned] Open threads:\n{b} · Ask k-2 · done: Login fixed. · left: Deploy. · needs: Merge it?\n{a} · Ask k-1 · done: Login fixed. · left: Tests.\n\nThird ask.");
+        let text = typed(&tab);
+        assert!(text.contains(&digest), "{text:?}");
+        assert!(!text.contains(&format!("{c} ·")), "its own request is left out: {text:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_global_prompt_is_byte_equal_across_request_sessions() {
+        let dir = temp("req-prompt");
+        let claude = typing_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let opened = ask_new(&m, &[("k-1", "First ask."), ("k-2", "Second ask.")]).unwrap();
+        let system = |tab: &str| {
+            let args = started(&claude, tab);
+            let at = args.iter().position(|a| a == "--append-system-prompt").expect("no system prompt");
+            args[at + 1].clone()
+        };
+        let prompts: Vec<String> = opened.as_array().unwrap().iter().map(|o| system(o["tab"].as_str().unwrap())).collect();
+        assert_eq!(prompts[0], prompts[1]);
+        assert!(prompts[0].starts_with(&global::prompt("Orchestrator", &crate::account::hostname())));
+        for o in opened.as_array().unwrap() {
+            let id = o["id"].as_str().unwrap();
+            assert!(!prompts[0].contains(id), "{id} is in the system prompt");
+        }
+        assert!(!prompts[0].contains("Ask k-"), "a request's title is in the system prompt");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
