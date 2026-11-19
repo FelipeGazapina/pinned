@@ -161,11 +161,11 @@ test("two #projects make two cards, each with its title and project", () => {
   const items = h.items();
   assert.equal(items.length, 2);
   assert.deepEqual(items.map((i) => i.project), ["storefront", "billing-api"]);
-  assert.equal(items[0].title, "show the delivery estimate on the cart page, before the customer reaches checkout");
+  assert.equal(items[0].title, "show the delivery estimate on the cart page, before the…");
   assert.equal(items[1].title, "the monthly export is missing refunds");
   const html = h.cards();
   assert.equal(cardCount(html), 2);
-  assert.match(html, /show the delivery estimate on the cart page, before the customer reaches checkout/);
+  assert.match(html, /show the delivery estimate on the cart page, before the…/);
   assert.match(html, /#storefront/);
   assert.match(html, /#billing-api/);
   assert.match(html, /This opens 2 threads/);
@@ -242,7 +242,7 @@ test("Send makes one new_user_requests call with a key per item, and opens the f
   assert.deepEqual(
     call.items.map(({ title, text, project, machine }) => ({ title, text, project, machine })),
     [
-      { title: "show the delivery estimate on the cart page, before the customer reaches checkout", text: TWO.split("\n\n")[0], project: "storefront", machine: "laptop" },
+      { title: "show the delivery estimate on the cart page, before the…", text: TWO.split("\n\n")[0], project: "storefront", machine: "laptop" },
       { title: "the monthly export is missing refunds", text: TWO.split("\n\n")[1], project: "billing-api", machine: "studio" },
     ],
   );
@@ -356,6 +356,7 @@ test("when the single chat cannot take the text either, the draft stays", async 
       throw new Error("unknown variant");
     },
   });
+  h.run("openNewRequest()");
   h.type(text);
   await h.send();
   assert.equal(h.run("nr.text"), text);
