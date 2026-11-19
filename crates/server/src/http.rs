@@ -1380,6 +1380,9 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
                 | HubCall::SyncMarkExecutable { .. }
         ) =>
         {
+            if let HubCall::SyncChanges { project, .. } = &call {
+                account.hears_sync(&machine, socket, project);
+            }
             hub.hub_call(&account, call).await
         }
         // A thread opened with Chat to adjust changes the account's tastes, and the hub

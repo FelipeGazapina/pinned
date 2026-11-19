@@ -883,8 +883,9 @@ async fn set_one_live_run(client: &Client) -> Result<Vec<(Uuid, String)>, tokio_
 /// Gives every write to a `project_files` row its project's next revision, whichever statement or
 /// hub binary writes it, so a delta (`Db::sync_changes`) misses none. An insert that will conflict
 /// takes none: the update it turns into takes one if it writes, and a stale deletion skipped by
-/// `write_pushed`'s condition writes nothing and moves no head. The head's row lock is held to
-/// commit, so one project's writes take their revisions in commit order.
+/// `write_pushed`'s condition writes nothing and moves no head. A push of n files that land moves
+/// the head by n. The head's row lock is held to commit, so one project's writes take their
+/// revisions in commit order.
 const SYNC_REVISIONS: &str = "
 create or replace function project_files_rev() returns trigger language plpgsql as $$
 begin
@@ -1182,8 +1183,8 @@ impl Db {
     /// The project's files written since revision `since`, or every file, `full`, when it names
     /// none or one past the head (a database restored to an older copy).
     ///
-    /// A reader that sees head R sees every row stamped R or lower: the trigger stamps a row and
-    /// moves the head in one statement, and holds the head's row to commit (`SYNC_REVISIONS`).
+    /// A reader that sees head R also sees every row stamped at or below R. The trigger stamps a
+    /// row and moves the head in one statement, and holds the head's row to commit (`SYNC_REVISIONS`).
     /// The head is read first, so a row stamped past it may come too; the next read since R
     /// returns it again. A delta can't say a row is gone, so this rests on no row ever being
     /// deleted: a deletion is a row with an empty sha. A change that deletes rows must make the

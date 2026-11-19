@@ -405,6 +405,9 @@ struct Online {
     /// Kept for a team's machines only, whose runs end by it (`teams::calls::box_ended`): a
     /// person's machine runs sessions for ever more subjects, and nothing reads theirs.
     gone: Vec<(String, Subject, LastTurn)>,
+    /// The projects this socket asked `SyncChanges` for. It hears `SyncChanged` for these only,
+    /// and a reconnect starts empty.
+    sync_heard: HashSet<String>,
 }
 
 /// How a connector session's last turn stood when its tab went or its box ended.
@@ -462,6 +465,15 @@ fn json<T: Serialize>(value: T) -> Result<Value, String> {
 pub const TEAM_CALL_ELSEWHERE: &str = "a team's ops run only from the pinned app";
 
 impl Hub {
+    /// `SyncChanged` when the write moved `project`'s head, a push that failed after some rows
+    /// landed included. No before-read, or a head that did not move, sends nothing.
+    async fn tell_sync(&self, account: &Account, project: &str, before: Option<u64>) {
+        let Some(before) = before else { return };
+        if self.db.sync_head(account.id, project).await.ok().is_some_and(|after| after != before) {
+            account.sync_changed(project);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, team_policy: pinned_core::teams::TeamPolicy, convex_http: Arc<dyn ConvexHttp>, reports: Option<crate::reports::Config>, dev: Dev) -> Result<Arc<Hub>, String> {
         let public_url = public_url.trim_end_matches('/').to_owned();
@@ -1018,7 +1030,10 @@ impl Hub {
                     let base = file.base.filter(|_| file.entry.path == sync::HISTORY && !file.entry.sha.is_empty());
                     kept.push((file.entry, data, agreed, base));
                 }
-                return json(self.db.sync_push(account.id, &project, kept).await?);
+                let before = self.db.sync_head(account.id, &project).await.ok();
+                let pushed = self.db.sync_push(account.id, &project, kept).await;
+                self.tell_sync(account, &project, before).await;
+                return json(pushed?);
             }
             HubCall::SyncMarkExecutable { project, repairs } => {
                 if project != sync::PLUGINS_KEY {
@@ -1029,7 +1044,10 @@ impl Hub {
                         return Err(format!("{} is not a file a project shares", repair.path));
                     }
                 }
-                return json(self.db.sync_mark_executable(account.id, &project, &repairs).await?);
+                let before = self.db.sync_head(account.id, &project).await.ok();
+                let marked = self.db.sync_mark_executable(account.id, &project, &repairs).await;
+                self.tell_sync(account, &project, before).await;
+                return json(marked?);
             }
             HubCall::SyncPull { project, paths } => {
                 let files = self.db.sync_pull(account.id, &project, &paths).await?;
@@ -1580,7 +1598,7 @@ impl Account {
                 let _ = out.send(frame(&ToMachine::WatchThreads { viewer: viewer(*id), tabs: tabs.iter().cloned().collect() }));
             }
         }
-        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version, state: None, background: None, closing: HashSet::new(), gone: Vec::new() };
+        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version, state: None, background: None, closing: HashSet::new(), gone: Vec::new(), sync_heard: HashSet::new() };
         live.machines.insert(machine.to_owned(), online);
     }
 
@@ -1884,6 +1902,35 @@ impl Account {
         let live = self.live.lock().unwrap();
         if let Some(m) = live.machines.get(machine).filter(|m| m.socket == socket) {
             let _ = m.out.send(frame(message));
+        }
+    }
+
+    /// The live socket of `machine`, when it is online.
+    pub fn socket_of(&self, machine: &str) -> Option<u64> {
+        self.live.lock().unwrap().machines.get(machine).map(|online| online.socket)
+    }
+
+    /// `machine`'s socket asked for `project`'s changes, so it hears of every later write. A socket
+    /// that has since reconnected does not: its set starts empty. Called before the hub reads.
+    pub fn hears_sync(&self, machine: &str, socket: u64, project: &str) {
+        let mut live = self.live.lock().unwrap();
+        if let Some(online) = live.machines.get_mut(machine).filter(|online| online.socket == socket) {
+            online.sync_heard.insert(project.to_owned());
+        }
+    }
+
+    /// Tells every socket that asked `SyncChanges` for `project` that it changed, the writer's own
+    /// included. The frame is built once; the outboxes are cloned under the live lock and sent
+    /// after it drops. Notices leave this process only: a machine on another hub process hears
+    /// nothing until its recheck (`pinned_core::mirror::RECHECK`).
+    pub fn sync_changed(&self, project: &str) {
+        let notice = frame(&ToMachine::SyncChanged { project: project.to_owned() });
+        let outboxes: Vec<Outbox> = {
+            let live = self.live.lock().unwrap();
+            live.machines.values().filter(|online| online.sync_heard.contains(project)).map(|online| online.out.clone()).collect()
+        };
+        for out in outboxes {
+            let _ = out.send(notice.clone());
         }
     }
 
