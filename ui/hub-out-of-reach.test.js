@@ -17,8 +17,6 @@ const fn = (src, name) => {
 };
 const here = (value) => JSON.parse(JSON.stringify(value));
 
-/** The desktop app (or the web page with `TAURI: null`) signed in as machine m-local, with this Mac's
- * own entry and no view of it from the hub yet. */
 function signedIn(extra = {}) {
   const page = { innerHTML: "", querySelector: () => null };
   const context = {
@@ -55,13 +53,19 @@ test("in the app this Mac is an online machine of the account before the hub sen
 });
 
 test("the footer counts this Mac online in the app even when the hub last saw every machine go", () => {
-  const { context } = signedIn();
-  context.machines.get("local").hubView = { id: "m-local", name: "owner-mbp", os: "macos", online: false, version: "0.18.7" };
-  context.machines.set("m-mini", { view: { id: "m-mini", name: "mac-mini", online: false } });
-  assert.deepEqual(here(context.machineCounts()), { machinesOnline: 1, machinesTotal: 2 });
-
-  const web = signedIn({ TAURI: null, account: { machine_id: null, email: "owner@example.test" }, machines: new Map([["m-mini", { view: { id: "m-mini", name: "mac-mini", online: false } }]]) }).context;
-  assert.deepEqual(here(web.machineCounts()), { machinesOnline: 0, machinesTotal: 1 }, "the web page has no machine of its own to count");
+  const offline = [
+    { id: "m-local", name: "owner-mbp", os: "macos", online: false, version: "0.18.7" },
+    { id: "m-mini", name: "mac-mini", os: "macos", online: false, version: "0.18.7" },
+  ];
+  const hubSays = (context) => {
+    vm.runInContext(fn(read("main.js"), "showMachines"), context);
+    vm.runInContext("showMachines(machinesFromHub, {})", Object.assign(context, { machinesFromHub: offline }));
+    return here(context.machineCounts());
+  };
+  const stubs = { hub: { transport: () => ({}) }, setTabs() {}, refreshTabs: async () => {}, retryUploadImages() {}, refreshSyncStopped() {}, render() {}, settingsOpen: () => false };
+  assert.deepEqual(hubSays(signedIn(stubs).context), { machinesOnline: 1, machinesTotal: 2 });
+  const web = signedIn({ ...stubs, TAURI: null, account: { machine_id: null, email: "owner@example.test" }, machines: new Map() }).context;
+  assert.deepEqual(hubSays(web), { machinesOnline: 0, machinesTotal: 2 }, "the web page has no machine of its own to count");
 });
 
 test("Settings, Machines shows this Mac's row from what the app knows while the hub never sent its view", () => {
@@ -73,8 +77,6 @@ test("Settings, Machines shows this Mac's row from what the app knows while the 
   assert.match(page.innerHTML, /<button class="secondary" data-action="update-machine">Update<\/button>/);
 });
 
-/** This computer's `update-every-machine` with the hub answering or not: what each machine was asked
- * through the hub and what this computer ran itself. */
 function updating(up) {
   const viaHub = [];
   const ran = [];
@@ -102,7 +104,6 @@ test("Update every machine updates this Mac through its own installer while the 
   assert.deepEqual(up.ran, []);
 });
 
-/** main.js's clone routing, signed in (`signed`) with the hub answering or not (`up`). */
 function cloning({ signed = true, up }) {
   const asked = [];
   const context = {
@@ -131,7 +132,6 @@ test("a clone on this Mac runs here while the hub doesn't answer, and through th
   assert.deepEqual(out.asked, [["here", "clone_repo", { repo: "acme/site" }]]);
 });
 
-/** The project picker's Clone from GitHub, whose repository list fails with `error`. */
 async function githubPicker(error) {
   const el = () => ({ innerHTML: "", textContent: "", focus() {} });
   const parts = { ".choices": el(), ".browse input": el(), ".folders": el(), ".browse": el() };
@@ -158,8 +158,6 @@ const LAST_SENT = { linear: { name: "Owner", email: "owner@example.test", organi
 
 const HUB_ANSWERS = { get_settings: LAST_SENT, linear_suggestions: { labels: [], columns: [], teams: [] }, vercel_models: [] };
 
-/** settings.js in the app signed in to a hub that answers or not (`up`), with the settings the hub sent
- * this run (`sent`, none when null). */
 function settingsApp({ up, sent }) {
   const elements = new Map();
   const byId = (id) => {

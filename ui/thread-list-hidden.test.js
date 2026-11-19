@@ -80,7 +80,7 @@ function sidebar({ screen }) {
       between("const durationLabel", "\n"),
       between("let linkDownAt", "function noteHubLink"),
       between("function tickDurations", "visibleInterval("),
-      between("function renderSidebar", "/** What the closed sidebar holds"),
+      between("function renderSidebar", "function sidebarSummary"),
     ].join("\n"),
     context,
   );

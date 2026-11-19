@@ -379,8 +379,6 @@ body.dragging-row .settled-head.drop-target { color: var(--g-primary); }
 .global-row.disabled { opacity: 0.5; cursor: default; }
 .global-row.disabled:hover { background: transparent; }
 
-/* The app's own link to the hub is down: a thin bar over everything, and the live states of threads on
- * other machines (data-remote) held still and dimmed. This computer's own threads keep running. */
 #reconnect-bar { display: none; flex: none; align-items: center; justify-content: center; gap: 8px; height: 24px; padding: 0 12px; font-size: 12px; font-weight: 600; white-space: nowrap;
   color: var(--g-warning-fg, #ffb900); background: rgb(var(--g-warning-rgb, 254 154 0) / 0.14); border-bottom: 1px solid rgb(var(--g-warning-rgb, 254 154 0) / 0.3); }
 body[data-hub="offline"] #reconnect-bar { display: flex; }

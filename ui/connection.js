@@ -21,7 +21,6 @@ const emptyListText = (offline) => (offline ? "No threads to show while machines
  * the app's HTTP client. */
 const NO_ANSWER = /failed to fetch|load failed|networkerror|network request failed|error sending request|connection refused|connection reset|dns error|tcp connect|timed out|unreachable/i;
 
-/** The host of the hub at address `hub`, as the app names it to the user: "hub.example.test". */
 function hubHost(hub) {
   const address = String(hub ?? "").trim();
   try {
@@ -40,14 +39,11 @@ function signInProblem(error, hub) {
   return `Can't reach the hub${host ? ` at ${host}` : ""}. Check your connection and try again.`;
 }
 
-/** What the Account page says while the signed-in hub at `hub` doesn't answer. `computer` is "Mac" or
- * "PC" in the app, whose own threads go on without the hub, and null on the web page. */
 function hubOutOfReach(hub, computer) {
   const host = hubHost(hub);
   return `Can't reach the hub${host ? ` at ${host}` : ""}. ${computer ? `This ${computer} keeps working and reconnects` : "This page reconnects"} once the hub answers.`;
 }
 
-/** What a feature that lives on the hub says while the signed-in hub doesn't answer. */
 const HUB_NEEDED = "Can't reach the hub, and this needs it.";
 
 /** Whether `error` is the kind `signInProblem` words as "can't reach", so the form offers Retry. */

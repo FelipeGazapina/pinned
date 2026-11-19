@@ -389,7 +389,6 @@ test("web sign-in with a wrong password shows the hub's words and no Retry", asy
   assert.equal(retry.hidden, true);
 });
 
-/** The Account page, signed in to the hub at hub.example.test, with the hub link in `state`. */
 function accountPage(state, TAURI = {}) {
   const page = { innerHTML: "", querySelector: () => ({ current: { value: "" }, password: { value: "" } }) };
   const context = {

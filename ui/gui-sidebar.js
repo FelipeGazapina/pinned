@@ -550,21 +550,21 @@ function drawThreadList(scope = projectGroups().find((g) => g.key === ui.project
   document.getElementById("new-thread").dataset.tipSub = projectCount() > 1 ? `New thread in current project: Shift+click (${MOD_LABEL}⇧N)` : "";
 }
 
-/** What the closed sidebar holds: how many things wait on you (agents' approvals and blocked
- * threads, as the Orchestrator's row counts them) and where a thread is working: "here" when one
- * on this computer is, "remote" when only threads on other machines are, else false. */
 function sidebarSummary() {
   let waiting = agentConfirmations.length;
   let running = false;
+  let runningHere = false;
   for (const tab of tabs) {
     if (waitingKindOf(tab.view)) waiting++;
-    if (["working", "delegating"].includes(phaseOf(tab))) running = tab.machine === LOCAL ? "here" : running || "remote";
+    if (!["working", "delegating"].includes(phaseOf(tab))) continue;
+    running = true;
+    runningHere ||= tab.machine === LOCAL;
   }
-  return { waiting, running };
+  return { waiting, running, runningHere };
 }
 /** The chat header's sidebar toggle with a pill for what waits and a dot while something works. */
-function sidebarToggleHtml({ waiting, running }) {
-  return `<span class="glyph">${icon("panel-left")}${running ? `<span class="running"${running === "remote" ? " data-remote" : ""} aria-hidden="true"></span>` : ""}</span>${waiting ? `<span class="count">${waiting}</span>` : ""}`;
+function sidebarToggleHtml({ waiting, running, runningHere }) {
+  return `<span class="glyph">${icon("panel-left")}${running ? `<span class="running"${runningHere ? "" : " data-remote"} aria-hidden="true"></span>` : ""}</span>${waiting ? `<span class="count">${waiting}</span>` : ""}`;
 }
 const sidebarToggleLabel = ({ waiting, running }) => `Toggle sidebar (${MOD_LABEL}B)${waiting ? `, ${waiting} waiting on you` : ""}${running ? ", something is working" : ""}`;
 let sidebarTouched = false;
@@ -1190,15 +1190,10 @@ function scheduleWake() {
   if (Number.isFinite(next)) wakeTimer = setTimeout(() => guiOn() && renderSidebar(), Math.min((next - nowS()) * 1000 + 50, 2 ** 31 - 1));
 }
 
-/** When the app's hub link dropped, in seconds, while it is down. The timers of threads on other machines
- * stop there, so a "Working 7m" the app can no longer vouch for doesn't keep counting. This computer's
- * own threads report without the hub, so theirs keep running. */
 let linkDownAt = null;
 function noteHubLink(on) {
   linkDownAt = on ? null : (linkDownAt ?? nowS());
 }
-/** The time the timers of a thread on `machine` show against, in milliseconds: now, or where the hub
- * link dropped for a thread on another machine. */
 const clockMs = (machine) => (linkDownAt === null || machine === LOCAL ? Date.now() : linkDownAt * 1000);
 function tickDurations() {
   const now = nowS();

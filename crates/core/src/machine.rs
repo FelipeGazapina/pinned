@@ -1462,7 +1462,6 @@ impl Machine {
             return true;
         };
         let flushed = flush(&event);
-        // The hub passes the phase back to this machine's window, so with the link down the window hears it here.
         if !flushed {
             self.emit(event);
         }
@@ -3331,12 +3330,9 @@ impl Machine {
         let dir = self.orchestration_dir.as_deref();
         let tastes = match self.hub.lock().unwrap().clone() {
             Some(hub) => {
-                let answer = hub(call).map_err(|e| {
-                    if Self::hub_unreachable(&e) {
-                        format!("{}, and it keeps the account's way of working, so it can't change until the hub answers", Self::no_hub(&e))
-                    } else {
-                        e
-                    }
+                let answer = hub(call).map_err(|e| match Self::why_no_hub(&e) {
+                    Some(why) => format!("{why}, and it keeps the account's way of working, so it can't change until the hub answers"),
+                    None => e,
                 })?;
                 let tastes: Tastes = serde_json::from_value(answer).map_err(|e| format!("the hub's answer did not read: {e}"))?;
                 if let Err(e) = taste::save(&tastes, dir) {
@@ -3604,12 +3600,10 @@ impl Machine {
         (!id.is_empty() && machine == *id) || machine.eq_ignore_ascii_case(&crate::account::hostname())
     }
 
-    /// Every project of the account for the global orchestrator's `projects` tool: the hub's view
-    /// of every machine, or this machine's alone while no hub answers or the hub is too old to.
     fn projects_overview(&self) -> Result<global::Overview, String> {
         match self.call_hub(HubCall::Overview) {
             Ok(overview) => serde_json::from_value(overview).map_err(|e| format!("the hub's overview did not read: {e}")),
-            Err(e) if Self::hub_unreachable(&e) || crate::link::is_unknown_command(&e) => Ok(self.local_overview()),
+            Err(e) if Self::why_no_hub(&e).is_some() || crate::link::is_unknown_command(&e) => Ok(self.local_overview()),
             Err(e) => Err(e),
         }
     }
@@ -3659,8 +3653,10 @@ impl Machine {
         let call = HubCall::ReadSession { tab: id.to_owned(), machine: machine.map(|m| machine_named(m).to_owned()), items: Some(items) };
         match self.call_hub(call) {
             Ok(out) => text_json(out),
-            Err(e) if Self::hub_unreachable(&e) => Err(format!("no session {id} on this machine, and {} to look on the others", Self::no_hub(&e))),
-            Err(e) => Err(needs_update(e)),
+            Err(e) => Err(match Self::why_no_hub(&e) {
+                Some(why) => format!("no session {id} on this machine, and {why} to look on the others"),
+                None => needs_update(e),
+            }),
         }
     }
 
@@ -3699,8 +3695,10 @@ impl Machine {
         let call = HubCall::RepoLook { tab: tab.to_owned(), project: project.to_owned(), machine: machine.map(|m| machine_named(m).to_owned()), look };
         match self.call_hub(call) {
             Ok(out) => text_json(out),
-            Err(e) if Self::hub_unreachable(&e) => Err(format!("the repo tools read through the hub, and {}", Self::no_hub(&e))),
-            Err(e) => Err(needs_update(e)),
+            Err(e) => Err(match Self::why_no_hub(&e) {
+                Some(why) => format!("the repo tools read through the hub, and {why}"),
+                None => needs_update(e),
+            }),
         }
     }
 
@@ -4031,8 +4029,8 @@ impl Machine {
             ProjectTool::Act { action, args, request_id, machine } => {
                 let act = surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine };
                 match self.call_hub(HubCall::Act { act }) {
-                    Err(e) if Self::hub_unreachable(&e) => Err(format!("{}, and act writes its audit trail there", Self::no_hub(&e))),
-                    answer => text_json(answer?),
+                    Ok(answer) => text_json(answer),
+                    Err(e) => Err(Self::why_no_hub(&e).map_or(e, |why| format!("{why}, and act writes its audit trail there"))),
                 }
             }
         }
@@ -4060,7 +4058,7 @@ impl Machine {
             Ok(Value::String(text)) => Ok(text),
             Ok(value) => text_json(value),
             Err(e) if e == NOT_LINKED => Err(SIGNED_OUT.into()),
-            Err(e) if Self::hub_unreachable(&e) => Err(HUB_DOWN.into()),
+            Err(e) if Self::why_no_hub(&e).is_some() => Err(HUB_DOWN.into()),
             Err(e) => Err(needs_update(e)),
         }
     }
@@ -4700,19 +4698,11 @@ impl Machine {
         }
     }
 
-    /// Whether `call_hub` failed because no hub answered: this machine is signed out, its link is
-    /// down, or the hub went quiet. A call this machine can answer itself answers here instead.
-    fn hub_unreachable(error: &str) -> bool {
-        error == NOT_LINKED || crate::link::is_unanswered(error)
-    }
-
-    /// Why no hub answered, for a tool to say after a call only the hub can make, with
-    /// `hub_unreachable(error)`.
-    fn no_hub(error: &str) -> &'static str {
-        if error == NOT_LINKED {
-            "this machine is not signed in to a hub"
-        } else {
-            "the hub can't be reached right now"
+    fn why_no_hub(error: &str) -> Option<&'static str> {
+        match error {
+            NOT_LINKED => Some("this machine is not signed in to a hub"),
+            _ if crate::link::is_unanswered(error) => Some("the hub can't be reached right now"),
+            _ => None,
         }
     }
 
@@ -5030,13 +5020,10 @@ impl Machine {
         }
     }
 
-    /// The account's tastes as they stand: the hub's while it answers, else what `taste.json` keeps,
-    /// the hub's last answer or this machine's own while signed out. Unlike `tastes`, it waits for the
-    /// hub's answer as long as the link does.
     fn tastes_now(&self) -> Result<Tastes, String> {
         match self.call_hub(HubCall::GetTastes) {
             Ok(tastes) => serde_json::from_value(tastes).map_err(|e| format!("the hub's answer did not read: {e}")),
-            Err(e) if Self::hub_unreachable(&e) => Ok(self.local_tastes()),
+            Err(e) if Self::why_no_hub(&e).is_some() => Ok(self.local_tastes()),
             Err(e) => Err(e),
         }
     }

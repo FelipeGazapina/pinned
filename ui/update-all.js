@@ -7,17 +7,20 @@ function accountMachines() {
   return rows;
 }
 
-/** This computer's row among the account's machines: the hub's view of it, or in the app, before the hub
- * sent one, a row made from what the app knows, kept on the machine so an update's state stays on it.
- * The app runs here, so its row is online whatever the hub last saw. */
 function ownView(machine) {
-  if (!TAURI || !account?.machine_id) return machine.hubView;
-  if (machine.hubView) return Object.assign(machine.hubView, { online: true });
-  machine.ownView ??= { id: account.machine_id, name: machine.view.name, os: machine.view.os, last_seen: 0 };
-  return Object.assign(machine.ownView, { online: true, version: (document.body.dataset.version ?? "").replace(/^v/, "") });
+  if (!TAURI || !account?.machine_id || machine.hubView) return machine.hubView;
+  return (machine.ownView ??= {
+    id: account.machine_id,
+    name: machine.view.name,
+    os: machine.view.os,
+    online: true,
+    last_seen: 0,
+    get version() {
+      return (document.body.dataset.version ?? "").replace(/^v/, "");
+    },
+  });
 }
 
-/** This computer's update phase as it reports it over Tauri, which it does while the hub can't pass it on. */
 function noteOwnUpdate(status) {
   const view = ownView(machines.get(LOCAL));
   if (!view) return;
@@ -68,8 +71,6 @@ function land(id, call) {
   });
 }
 
-/** Asks machine `id` of the account to update itself: through the hub while it answers, else this
- * computer through its own installer. */
 function updateMachine(id) {
   if (TAURI && id === account?.machine_id && !hubUp()) return invoke("install_update");
   return hub.call(id, { cmd: "update_self" });

@@ -39,8 +39,6 @@ const machines = new Map();
 const viewListeners = [];
 let account = null;
 let hub = null;
-/** Whether the hub answers now. A feature this computer can run by itself routes on this, never on
- * being signed in (`hub`), so it keeps working while the hub is out of reach. */
 const hubUp = () => hub?.online === true;
 
 const tabs = [];
@@ -462,9 +460,6 @@ async function cloneFromGithub() {
   show();
 }
 
-/** Clones `repo` on `machine`, into `dest` when given: through the hub while it answers, which clones
- * with the account's GitHub token, else here with this computer's own. Another machine is reached only
- * through the hub. */
 function cloneOn(machine, repo, dest) {
   if (hub && (machine !== LOCAL || hubUp())) return hub.hub({ cmd: "clone", machine: hubIdOf(machine), repo, dest });
   return invoke("clone_repo", { repo, dest });
@@ -1585,7 +1580,6 @@ if (!TAURI && window.visualViewport) {
   fitVisible();
 }
 
-// The web page shows only what the hub sends; the app keeps running this computer's threads without it.
 if (TAURI) document.getElementById("reconnect-bar").textContent = `Can't reach the hub. This ${COMPUTER} keeps working.`;
 
 function connectHub(signedIn) {
@@ -1623,7 +1617,7 @@ function showMachines(list, tabsByMachine) {
   for (const view of list) {
     if (view.id === account.machine_id) {
       const first = !machines.get(LOCAL).hubView;
-      machines.get(LOCAL).hubView = view;
+      machines.get(LOCAL).hubView = TAURI ? { ...view, online: true } : view;
       if (first) refreshSyncStopped(LOCAL);
       continue;
     }
