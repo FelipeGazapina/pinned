@@ -190,7 +190,7 @@ test("the earlier conversation shows as one entry named Earlier conversation, Do
   const h = harness({ tabs });
   open(h);
   const html = h.overlay.innerHTML;
-  assert.equal(html.match(/data-rqs-entry="/g").length, 1);
+  assert.equal(html.match(/data-rqs-entry="/g).length, 1);
   assert.match(html, /Earlier conversation/);
   assert.match(html, /Done/);
   assert.doesNotMatch(html, /whatever the host named it/);
