@@ -21667,6 +21667,8 @@ Have another model review a risky change before it goes ahead.";
     #[cfg(unix)]
     fn a_report_held_for_an_anchor_with_a_session_survives_a_restart() {
         let (dir, claude, m, _path, _tabs) = at_the_cap("req-anchor-session-held", &FOUR_ASKS[..3]);
+        // The app loaded and found no conversation from before requests to migrate.
+        m.restore_tabs();
         let anchor = m.open_global_orchestrator().unwrap();
         m.tab(&anchor, |t| t.claude_session = Some("s-anchor".into())).unwrap();
         assert_eq!(m.launch_gated(&anchor, 80, 24, false, Some("Anchor news."), |_| {}), Ok(None), "no place free");
