@@ -2,12 +2,16 @@
 // panel frame, the add menu entry and the render dispatch; this file draws the surface, keeps its data current
 // and owns its clicks. Loaded after gui-surfaces.js.
 
-/** The zoom levels: the cell width and row height of one main step, in px. */
+/** The zoom levels, the board's numbers (PlanTree): `cell` is the width of one step, `row` the height of a lane, `cy` the y of a
+ * step's dot, `fixDot` the y of a fix step's dot and `fixRow` the lane's height while a fix branch is open. `d` and `cy` also
+ * sit in gui-plan.css (.z0, .z1, .z2). */
 const PLAN_ZOOMS = [
-  { name: "Dots", cell: 24, row: 30 },
-  { name: "Steps", cell: 92, row: 52 },
-  { name: "Details", cell: 132, row: 74 },
+  { name: "Dots", cell: 36, row: 30, cy: 14, fixDot: 40, fixRow: 58 },
+  { name: "Steps", cell: 96, row: 68, cy: 16, fixDot: 92, fixRow: 150 },
+  { name: "Details", cell: 150, row: 92, cy: 18, fixDot: 120, fixRow: 196 },
 ];
+/** Where a lane's line starts: the trunk is at x 10, the elbow reaches x 28. */
+const PLAN_LEFT = 28;
 
 /** The words a step and a Captain's plan show. Every surface that names a state reads them from here. */
 const PLAN_STEP_WORD = { done: "Done", running: "Running now", failed: "Failed", waiting: "Waiting for your go", pending: "Not started" };
@@ -27,16 +31,22 @@ const planRunBy = (step) => step.by ?? (step.task ? "Worker" : "Captain");
 const planCost = (cost) => (cost == null ? "" : `$${cost.toFixed(2)}`);
 const planClock = (ms) => new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 
-/** A list's tone and word, from its steps. */
-function planListWord(list) {
-  if (!list.steps.length) return ["pending", "Not started"];
-  const states = list.steps.map((s) => s.state);
-  if (states.every((x) => x === "done")) return list.steps.some(planAfterFix) ? ["done", "Done, after one fix"] : ["done", "Done"];
-  if (states.includes("failed")) return ["failed", list.steps.some((s) => s.state === "failed" && s.fixes.length) ? "Failed, fix in progress" : "Failed"];
-  if (states.includes("waiting")) return ["waiting", "Waiting for your go"];
-  if (states.includes("running")) return ["running", "Running now"];
-  if (states.includes("done")) return ["running", "Between steps"];
-  return ["pending", "Not started"];
+/** A lane head's class and words, the board's formula (PlanTree): "<done> of <steps>", then "Done" (with "1 fix" or "N fixes") once every
+ * step is done, else ", needs you" while a step waits, else ", running". The board has no word for the data's `failed` step or a
+ * fix in progress: a failed step with no running fix reads ", failed", and ", fixing" while its fix runs. */
+function planLaneWord(list) {
+  const steps = list.steps;
+  const done = steps.filter((x) => x.state === "done").length;
+  if (steps.length && done === steps.length) {
+    const fixes = steps.reduce((n, x) => n + x.fixes.length, 0);
+    return ["ok", fixes ? `Done, ${fixes} ${fixes === 1 ? "fix" : "fixes"}` : "Done"];
+  }
+  const head = `${done} of ${steps.length}`;
+  if (steps.some((x) => x.state === "waiting")) return ["fix", `${head}, needs you`];
+  const failed = steps.filter((x) => x.state === "failed");
+  if (failed.length) return failed.some((x) => x.fixes.some((f) => f.steps.some((y) => y.state === "running"))) ? ["run", `${head}, fixing`] : ["fix", `${head}, failed`];
+  if (steps.some((x) => x.state === "running")) return ["run", `${head}, running`];
+  return ["", head];
 }
 
 /** The step the footer shows when none is picked: the first waiting one, else a running fix, else the first running. */
@@ -64,24 +74,23 @@ function planFindStep(plan, id) {
   return null;
 }
 
-/** Cells for one list: the x of every main step, and where each open fix branch sits. */
+/** Cells for one list, as the board lays them out: the x of every main step, and where each open fix branch sits. The fix
+ * steps take the places after their failed step, and the steps after it move right by that many cells. */
 function planLayout(list, s, Z, scope = "") {
-  const pad = 16;
-  let x = pad + Z.cell / 2;
+  const x0 = PLAN_LEFT + Z.cell / 2;
+  let at = 0;
   const xs = [];
   const fixes = [];
   for (const step of list.steps) {
+    const x = x0 + at++ * Z.cell;
     xs.push(x);
     const fsteps = step.fixes.flatMap((f) => f.steps);
-    let gap = Z.cell;
-    if (fsteps.length && planFixOpen(s, step, scope)) {
-      fixes.push({ at: x, step, steps: fsteps, xs: fsteps.map((_, k) => x + (k + 0.6) * Z.cell) });
-      gap = Math.max(Z.cell, (fsteps.length + 0.5) * Z.cell);
-    }
-    x += gap;
+    if (!fsteps.length || !planFixOpen(s, step, scope)) continue;
+    fixes.push({ at: x, step, steps: fsteps, xs: fsteps.map((_, k) => x0 + (at + k) * Z.cell), right: x + (fsteps.length + 1) * Z.cell });
+    at += fsteps.length;
   }
-  const last = xs.at(-1) ?? pad + Z.cell / 2;
-  return { xs, fixes, last, width: last + Z.cell / 2 + pad };
+  const last = xs.at(-1) ?? x0;
+  return { xs, fixes, last, width: Math.max(last, ...fixes.map((f) => f.right)) + Z.cell / 2 + 12 };
 }
 
 // ---- data: the glance from every tabs push, the full plans fetched when the glance moves ----
@@ -291,59 +300,58 @@ function planChipsHtml(glances, plan) {
     .join("")}</div>`;
 }
 
-function planStepHtml(step, x, y, Z, zoom, s, scope = "") {
-  const picked = s.step === scope + step.id ? " picked" : "";
-  const meta = zoom === 2 ? `<span class="pl-meta">${esc(planCost(step.cost) || (step.state === "pending" && !step.task ? "" : planRunBy(step)))}</span>` : "";
-  const name = zoom ? `<span class="pl-name">${esc(step.name)}</span>` : "";
-  return `<button type="button" class="pl-step${picked}" data-step="${esc(scope + step.id)}" data-state="${step.state}"${planAfterFix(step) ? ' data-fixed=""' : ""} style="left:${x - Z.cell / 2}px;top:${y - 8}px;width:${Z.cell}px" title="${esc(step.name)} · ${esc(planStepWord(step))}"><span class="pl-dot"></span>${name}${meta}</button>`;
+function planCellHtml(step, x, top, height, Z, zoom, s, scope, fix) {
+  const sel = s.step === scope + step.id ? " sel" : "";
+  const word = planStepWord(step);
+  const meta = zoom === 2 ? esc(planCost(step.cost) || (step.state === "pending" && !step.task ? "" : planRunBy(step))) : "";
+  return `<button type="button" class="cell${fix ? " fix" : ""}${sel}" data-step="${esc(scope + step.id)}" data-state="${step.state}" style="left:${x - Z.cell / 2}px;top:${top}px;width:${Z.cell}px;height:${height}px" title="${esc(step.name)} · ${esc(word)}" aria-label="${esc(step.name)}: ${esc(word)}"><span class="dot"></span><span class="lbl">${esc(step.name)}</span><span class="meta">${meta}</span></button>`;
 }
 
-function planListHtml(list, s, zoom, scope = "") {
+/** One list as a lane of the git graph: its head, and under it the track with the base line, the green line to the last non-pending
+ * step, the ubranch of every open fix, and a cell per step. `last` stops the trunk at this lane's head. */
+function planListHtml(list, s, zoom, scope = "", last = false) {
   const Z = PLAN_ZOOMS[zoom];
   const folded = (s.folded ?? []).includes(scope + list.id);
-  const [tone, word] = planListWord(list);
+  const [tone, word] = planLaneWord(list);
   const fixSteps = list.steps.filter((x) => x.fixes.length);
   const fixOn = fixSteps.some((x) => planFixOpen(s, x, scope));
-  const fixCount = fixSteps.reduce((n, x) => n + x.fixes.length, 0);
-  const chip = fixSteps.length
-    ? `<button type="button" class="pl-fixchip" data-fixchip="${esc(scope + list.id)}" aria-pressed="${fixOn}" title="${fixOn ? "Hide" : "Show"} the fix branch">${icon("git-branch")}${fixCount} ${fixCount === 1 ? "fix" : "fixes"}</button>`
-    : "";
-  const bar = `<span class="pl-bar">${list.steps.map((x) => `<i data-state="${x.state}"></i>`).join("")}</span>`;
-  const head = `<div class="pl-list-head"><button type="button" class="pl-fold" data-fold="${esc(scope + list.id)}" aria-expanded="${!folded}">${icon(folded ? "chevron-right" : "chevron-down")}<span class="pl-list-name">${esc(list.name)}</span></button>${bar}<span class="pl-word" data-tone="${tone}">${word}</span>${chip}</div>`;
-  if (folded) return `<section class="pl-list folded">${head}</section>`;
-  const { xs, fixes, last, width } = planLayout(list, s, Z, scope);
-  const dotY = zoom === 0 ? Z.row / 2 : 12;
-  const height = Z.row + (fixes.length ? Z.row : 0);
-  let doneTo = -1;
-  while (doneTo + 1 < list.steps.length && list.steps[doneTo + 1].state === "done") doneTo++;
-  let svg = `<line class="pl-base" x1="0" y1="${dotY}" x2="${last}" y2="${dotY}"/>`;
-  if (doneTo >= 0) svg += `<line class="pl-fill" x1="0" y1="${dotY}" x2="${xs[doneTo]}" y2="${dotY}"/>`;
-  let steps = "";
+  const chip = fixSteps.length ? `<button type="button" class="chip" data-fixchip="${esc(scope + list.id)}" aria-pressed="${fixOn}">${fixOn ? "Hide" : "Show"} the fix branch</button>` : "";
+  const segs = list.steps.map((x) => `<span class="seg" data-state="${x.state}"></span>`).join("");
+  const head = `<div class="lane-head"><div class="lane-head-in"><button type="button" class="lane-toggle" data-fold="${esc(scope + list.id)}" aria-expanded="${!folded}"><span class="chev${folded ? " shut" : ""}" aria-hidden="true"></span>${esc(list.name)}</button><span class="segs" aria-hidden="true">${segs}</span><span class="lane-state" data-tone="${tone}">${word}</span>${chip}</div></div>`;
+  const trunk = `<div class="trunk" style="height:${last ? "30px" : "100%"}"></div>`;
+  if (folded) return `<section class="lane folded">${trunk}${head}</section>`;
+  const { xs, fixes, last: lastX, width } = planLayout(list, s, Z, scope);
+  const activeAt = list.steps.findLastIndex((x) => x.state !== "pending");
+  let body = `<div class="elbow"></div><div class="base" style="width:${xs.length ? lastX - PLAN_LEFT : 0}px"></div><div class="prog" style="width:${activeAt < 0 ? 0 : xs[activeAt] - PLAN_LEFT}px"></div>`;
+  const fixTop = Z.fixDot - Z.cy;
   for (const f of fixes) {
-    const fy = Z.row + dotY;
-    const r = 7;
-    const rx = f.xs.at(-1) + Z.cell * 0.5;
     const healed = f.steps.every((x) => x.state === "done");
-    svg += `<path class="pl-u${healed ? " healed" : ""}" d="M${f.at},${dotY} V${fy - r} Q${f.at},${fy} ${f.at + r},${fy} H${rx - r} Q${rx},${fy} ${rx},${fy - r} V${dotY}"/>`;
-    f.steps.forEach((st, k) => (steps += planStepHtml(st, f.xs[k], fy, Z, zoom, s, scope)));
+    body += `<div class="ubranch${healed ? " merged" : ""}" style="left:${f.at}px;width:${f.right - f.at}px;top:${Z.cy}px;height:${fixTop + 1}px"></div>`;
+    f.steps.forEach((st, k) => (body += planCellHtml(st, f.xs[k], fixTop, Z.fixRow - fixTop, Z, zoom, s, scope, true)));
   }
-  list.steps.forEach((st, i) => (steps += planStepHtml(st, xs[i], dotY, Z, zoom, s, scope)));
-  const track = `<div class="pl-track" data-z="${zoom}" style="height:${height}px"><div class="pl-canvas" style="width:${width}px;height:${height}px"><svg width="${width}" height="${height}" aria-hidden="true">${svg}</svg>${steps}</div></div>`;
-  return `<section class="pl-list${fixes.length ? " has-fix" : ""}">${head}${track}</section>`;
+  list.steps.forEach((st, i) => (body += planCellHtml(st, xs[i], 0, Z.row, Z, zoom, s, scope, false)));
+  return `<section class="lane">${trunk}${head}<div class="track" style="height:${fixes.length ? Z.fixRow : Z.row}px;width:${width}px">${body}</div></section>`;
+}
+
+/** The lanes of one plan. The block is as wide as its widest open lane, so a narrow screen scrolls the lanes sideways. */
+function planListsHtml(lists, s, zoom, scope = "") {
+  const Z = PLAN_ZOOMS[zoom];
+  const wide = Math.max(0, ...lists.filter((l) => !(s.folded ?? []).includes(scope + l.id)).map((l) => planLayout(l, s, Z, scope).width));
+  return `<div class="pl-lists z${zoom}" style="min-width:${wide}px">${lists.map((l, i) => planListHtml(l, s, zoom, scope, i === lists.length - 1)).join("")}</div>`;
 }
 
 function planFootHtml(plan, s, owner = null) {
   const live = planLiveStep(plan);
   const hit = (s.step && planFindStep(plan, s.step)) || (live && planFindStep(plan, live.id));
   if (!hit) return "";
-  const { step, list, under, fix } = hit;
+  const { step, list, under } = hit;
   const why = step.why && !planAfterFix(step) ? `<p class="pl-why">${esc(step.why)}</p>` : "";
-  const branch = under ? `Fix ${esc(fix.id)}, under “${esc(under.name)}”` : "Main line";
-  const diff = step.task && step.branch && owner ? ` <button type="button" class="outline pl-open" data-see-diff="${esc(step.task)}" data-diff-machine="${esc(owner.machine)}" data-diff-tab="${esc(owner.tab)}">${icon("git-branch")}See the diff</button>` : "";
-  return `<div class="pl-foot" data-state="${step.state}"><p class="pl-foot-state"><span class="pl-dot"></span>${s.step ? planStepWord(step) : `Live now · ${planStepWord(step)}`}</p>
+  const cost = step.state === "pending" ? "Not started" : planCost(step.cost) || "None yet";
+  const diff = step.task && step.branch && owner ? `<button type="button" class="btn" data-see-diff="${esc(step.task)}" data-diff-machine="${esc(owner.machine)}" data-diff-tab="${esc(owner.tab)}">See the diff</button>` : "";
+  return `<div class="pl-foot" data-state="${step.state}"><div class="pl-foot-top"><span class="muted">${s.step ? "Selected step" : "Happening now"}</span><span class="st">${planStepWord(step)}</span></div>
       <p class="pl-foot-name">${esc(step.name)}</p>${step.what ? `<p class="pl-foot-what">${esc(step.what)}</p>` : ""}${why}
-      <dl class="pl-facts"><dt>List</dt><dd>${esc(list.name)}</dd><dt>Run by</dt><dd>${esc(planRunBy(step))}</dd><dt>Branch</dt><dd>${branch}</dd><dt>Cost</dt><dd>${esc(planCost(step.cost)) || "None yet"}</dd></dl>
-      ${step.task ? `<button type="button" class="outline pl-open" data-open-task="${esc(step.task)}">${icon("arrow-up-right")}Open thread</button>${diff}` : ""}</div>`;
+      <div class="facts"><span class="fact">List<b>${esc(list.name)}${under ? ", fix branch" : ""}</b></span><span class="fact">Run by<b>${esc(planRunBy(step))}</b></span><span class="fact">Branch<b class="mono">${esc(step.branch ?? "none")}</b></span><span class="fact">Cost<b>${esc(cost)}</b></span></div>
+      ${step.task ? `<div class="pl-foot-btns"><button type="button" class="btn" data-open-task="${esc(step.task)}">Open worker thread</button>${diff}</div>` : ""}</div>`;
 }
 
 /** The body of the surface for the active Captain: dropped line, switcher, header, the plan's lists, footer. */
@@ -362,9 +370,8 @@ function planBodyHtml(t, s) {
   const done = ms.filter((x) => x.state === "done").length;
   const head = `<div class="pl-head"><span class="pl-count">${done} of ${ms.length} done</span>${planZoomHtml(zoom)}</div>${planProgressHtml(done, ms.length)}`;
   const at = plan.closed ? `Closed: ${esc(plan.closed)}` : plan.finished_at ? `Finished at ${planClock(plan.finished_at)}` : `Plan, from your message at ${planClock(plan.asked_at)}`;
-  const root = `<p class="pl-root">${icon("message-circle")}<span><b>${esc(plan.title)}</b><span class="pl-root-at">${at}</span></span></p>`;
-  const lists = plan.lists.map((l) => planListHtml(l, s, zoom)).join("");
-  return `${dropped}${chips}${head}<div class="pl-scroll">${root}<div class="pl-lists">${lists}</div></div>${planFootHtml(plan, s, { machine: t.machine, tab: t.view.id })}`;
+  const root = `<div class="root-row"><b>${esc(plan.title)}</b><span>${at}</span></div>`;
+  return `${dropped}${chips}${head}<div class="pl-scroll">${root}${planListsHtml(plan.lists, s, zoom)}</div>${planFootHtml(plan, s, { machine: t.machine, tab: t.view.id })}`;
 }
 
 
@@ -381,7 +388,7 @@ function requestFootHtml(blocks, s) {
 function requestBlockHtml(b, s, zoom, many) {
   const title = b.ended || many ? `<p class="pl-plan"><b>${esc(b.view?.title ?? b.glance.title)}</b>${b.ended ? ` <span class="pl-ended">ended</span>` : ""}</p>` : "";
   if (!b.view) return `${title}<p class="pl-loading">${b.cache?.failed ? "Could not load the plan." : "Loading the plan…"}</p>`;
-  return `${title}<div class="pl-lists">${b.view.lists.map((l) => planListHtml(l, s, zoom, b.scope)).join("")}</div>`;
+  return `${title}${planListsHtml(b.view.lists, s, zoom, b.scope)}`;
 }
 
 /** The body of a request thread's surface: header with the zoom, one root, then a section per owner. */
@@ -400,7 +407,7 @@ function requestPlanHtml(t, s) {
   const fixes = views.flatMap(planMains).reduce((n, x) => n + x.fixes.length, 0);
   const summary = [planPlural(lists, "list"), `${done} of ${planPlural(steps.length, "step")}`, fixes ? planPlural(fixes, "fix branch").replace("branchs", "branches") : ""].filter(Boolean).join(", ");
   const head = `<div class="pl-head"><span class="pl-title">Plan</span><span class="pl-count">${esc(summary)}</span>${planZoomHtml(zoom)}</div>${planProgressHtml(done, steps.length)}`;
-  const root = `<p class="pl-root-row">Plan, from your request at ${planClock(model.glance.opened_at)}</p>`;
+  const root = `<div class="root-row">Plan, from your request at ${planClock(model.glance.opened_at)}</div>`;
   const body = model.sections
     .map((sec) => `<section class="pl-sec-group"><h3 class="pl-sec">${esc(sec.title)}</h3>${sec.blocks.map((b) => requestBlockHtml(b, s, zoom, sec.blocks.length > 1)).join("") || `<p class="pl-loading">No plan from this Captain yet.</p>`}</section>`)
     .join("");
