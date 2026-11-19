@@ -17,6 +17,15 @@ function ownView(machine) {
   return Object.assign(machine.ownView, { online: true, version: (document.body.dataset.version ?? "").replace(/^v/, "") });
 }
 
+/** This computer's update phase as it reports it over Tauri, which it does while the hub can't pass it on. */
+function noteOwnUpdate(status) {
+  const view = ownView(machines.get(LOCAL));
+  if (!view) return;
+  view.update = status;
+  for (const notify of viewListeners.slice()) notify();
+  if (settingsOpen() && page === "machines" && !machinesUi.renaming) showMachinesPage();
+}
+
 const FINAL = new Set(["up_to_date", "failed", "cannot"]);
 const PHASE_WAIT = 4 * 5 * 60 * 1000 + 60 * 1000;
 

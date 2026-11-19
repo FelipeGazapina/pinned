@@ -1302,6 +1302,7 @@ function onMachineEvent(machine, event) {
   if (event.kind === "thread") return onThreadEvent(machine, event);
   if (event.kind === "skills-changed") return skillsChanged(machine);
   if (event.kind === "tastes-changed") return tastesChanged();
+  if (event.kind === "update" && machine === LOCAL) return noteOwnUpdate(event.status);
   if (event.kind === "usage") {
     machines.get(machine).usage[event.account ?? DEFAULT_ACCOUNT] = event.usage;
     return renderUsage();

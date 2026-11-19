@@ -1457,13 +1457,16 @@ impl Machine {
             }
             gate.flusher.clone()
         };
-        match flusher {
-            Some(flush) => flush(&event),
-            None => {
-                self.emit(event);
-                true
-            }
+        let Some(flush) = flusher else {
+            self.emit(event);
+            return true;
+        };
+        let flushed = flush(&event);
+        // The hub passes the phase back to this machine's window, so with the link down the window hears it here.
+        if !flushed {
+            self.emit(event);
         }
+        flushed
     }
 
     /// Keeps the update gate busy after `install` returns `Updating`, until a final phase is reported.
@@ -3328,7 +3331,14 @@ impl Machine {
         let dir = self.orchestration_dir.as_deref();
         let tastes = match self.hub.lock().unwrap().clone() {
             Some(hub) => {
-                let tastes: Tastes = serde_json::from_value(hub(call)?).map_err(|e| format!("the hub's answer did not read: {e}"))?;
+                let answer = hub(call).map_err(|e| {
+                    if Self::hub_unreachable(&e) {
+                        format!("{}, and it keeps the account's way of working, so it can't change until the hub answers", Self::no_hub(&e))
+                    } else {
+                        e
+                    }
+                })?;
+                let tastes: Tastes = serde_json::from_value(answer).map_err(|e| format!("the hub's answer did not read: {e}"))?;
                 if let Err(e) = taste::save(&tastes, dir) {
                     eprintln!("pinned: could not keep the account's taste: {e}");
                 }
@@ -3595,11 +3605,11 @@ impl Machine {
     }
 
     /// Every project of the account for the global orchestrator's `projects` tool: the hub's view
-    /// of every machine, or this machine's alone while it is not linked or the hub can't answer.
+    /// of every machine, or this machine's alone while no hub answers or the hub is too old to.
     fn projects_overview(&self) -> Result<global::Overview, String> {
         match self.call_hub(HubCall::Overview) {
             Ok(overview) => serde_json::from_value(overview).map_err(|e| format!("the hub's overview did not read: {e}")),
-            Err(e) if e == NOT_LINKED || crate::link::is_unknown_command(&e) => Ok(self.local_overview()),
+            Err(e) if Self::hub_unreachable(&e) || crate::link::is_unknown_command(&e) => Ok(self.local_overview()),
             Err(e) => Err(e),
         }
     }
@@ -3649,7 +3659,7 @@ impl Machine {
         let call = HubCall::ReadSession { tab: id.to_owned(), machine: machine.map(|m| machine_named(m).to_owned()), items: Some(items) };
         match self.call_hub(call) {
             Ok(out) => text_json(out),
-            Err(e) if e == NOT_LINKED => Err(format!("no session {id} on this machine, and it is not linked to a hub to look on the others")),
+            Err(e) if Self::hub_unreachable(&e) => Err(format!("no session {id} on this machine, and {} to look on the others", Self::no_hub(&e))),
             Err(e) => Err(needs_update(e)),
         }
     }
@@ -3689,7 +3699,7 @@ impl Machine {
         let call = HubCall::RepoLook { tab: tab.to_owned(), project: project.to_owned(), machine: machine.map(|m| machine_named(m).to_owned()), look };
         match self.call_hub(call) {
             Ok(out) => text_json(out),
-            Err(e) if e == NOT_LINKED => Err("the repo tools read through the hub, and this machine is not signed in to one".into()),
+            Err(e) if Self::hub_unreachable(&e) => Err(format!("the repo tools read through the hub, and {}", Self::no_hub(&e))),
             Err(e) => Err(needs_update(e)),
         }
     }
@@ -4021,7 +4031,7 @@ impl Machine {
             ProjectTool::Act { action, args, request_id, machine } => {
                 let act = surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine };
                 match self.call_hub(HubCall::Act { act }) {
-                    Err(e) if e == NOT_LINKED => Err(format!("{NOT_LINKED}, which keeps the audit trail act writes")),
+                    Err(e) if Self::hub_unreachable(&e) => Err(format!("{}, and act writes its audit trail there", Self::no_hub(&e))),
                     answer => text_json(answer?),
                 }
             }
@@ -4032,7 +4042,7 @@ impl Machine {
     /// repo key. The machine reports a tab just after it starts it, so the offer at a session's
     /// start waits a moment for the hub to hear of it.
     fn convex(&self, tab: &str, ask: crate::convex::Ask) -> Result<String, String> {
-        use crate::convex::{Ask, SIGNED_OUT, UNKNOWN_TAB};
+        use crate::convex::{Ask, HUB_DOWN, SIGNED_OUT, UNKNOWN_TAB};
         let cwd = self.tab(tab, |t| t.cwd.clone())?;
         let repo = git_remote(&history::project_of(&cwd)).and_then(|remote| repo_key(&remote));
         let offer = ask == Ask::Offer;
@@ -4050,6 +4060,7 @@ impl Machine {
             Ok(Value::String(text)) => Ok(text),
             Ok(value) => text_json(value),
             Err(e) if e == NOT_LINKED => Err(SIGNED_OUT.into()),
+            Err(e) if Self::hub_unreachable(&e) => Err(HUB_DOWN.into()),
             Err(e) => Err(needs_update(e)),
         }
     }
@@ -4689,6 +4700,22 @@ impl Machine {
         }
     }
 
+    /// Whether `call_hub` failed because no hub answered: this machine is signed out, its link is
+    /// down, or the hub went quiet. A call this machine can answer itself answers here instead.
+    fn hub_unreachable(error: &str) -> bool {
+        error == NOT_LINKED || crate::link::is_unanswered(error)
+    }
+
+    /// Why no hub answered, for a tool to say after a call only the hub can make, with
+    /// `hub_unreachable(error)`.
+    fn no_hub(error: &str) -> &'static str {
+        if error == NOT_LINKED {
+            "this machine is not signed in to a hub"
+        } else {
+            "the hub can't be reached right now"
+        }
+    }
+
     fn shared_plugin_dirs(&self, account: &Account) -> Vec<PathBuf> {
         let Some(config) = self.sync_file.as_ref().and_then(|file| file.parent()) else { return vec![] };
         sync::plugin_dirs(&self.accounts.home(account), &config.join("synced-plugins"))
@@ -5003,12 +5030,14 @@ impl Machine {
         }
     }
 
-    /// The account's tastes as they stand: the hub's while this machine is linked, else its own.
-    /// Unlike `tastes`, a hub that can't answer is an error, so a chat never reads a stale copy.
+    /// The account's tastes as they stand: the hub's while it answers, else what `taste.json` keeps,
+    /// the hub's last answer or this machine's own while signed out. Unlike `tastes`, it waits for the
+    /// hub's answer as long as the link does.
     fn tastes_now(&self) -> Result<Tastes, String> {
-        match self.hub.lock().unwrap().clone() {
-            Some(hub) => serde_json::from_value(hub(HubCall::GetTastes)?).map_err(|e| format!("the hub's answer did not read: {e}")),
-            None => Ok(self.local_tastes()),
+        match self.call_hub(HubCall::GetTastes) {
+            Ok(tastes) => serde_json::from_value(tastes).map_err(|e| format!("the hub's answer did not read: {e}")),
+            Err(e) if Self::hub_unreachable(&e) => Ok(self.local_tastes()),
+            Err(e) => Err(e),
         }
     }
 
@@ -16622,7 +16651,7 @@ Have another model review a risky change before it goes ahead.";
             Err(crate::link::OFFLINE.into())
         }));
         let started = Instant::now();
-        assert_eq!(tool(&thread, Ask::Offer), Err(crate::link::OFFLINE.into()));
+        assert_eq!(tool(&thread, Ask::Offer), Err(crate::convex::HUB_DOWN.into()));
         assert_eq!(offline.load(Ordering::SeqCst), 1, "a hub link that is down is not asked again, so a session's start does not wait on it");
         assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
         let _ = std::fs::remove_dir_all(dir);
@@ -18538,29 +18567,79 @@ Have another model review a risky change before it goes ahead.";
     }
 
     #[test]
-    fn a_report_uses_the_link_flusher_when_one_is_installed() {
+    fn a_report_goes_through_the_link_and_reaches_this_machines_window_itself_while_the_link_is_down() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let m = Machine::new(launch(), None, None, {
             let seen = seen.clone();
             move |event| seen.lock().unwrap().push(event)
         });
-        let flushed = Arc::new(Mutex::new(None));
+        let flushed = Arc::new(Mutex::new(Vec::new()));
+        let online = Arc::new(AtomicBool::new(true));
         m.set_flusher(Arc::new({
-            let flushed = flushed.clone();
+            let (flushed, online) = (flushed.clone(), online.clone());
             move |event| {
-                *flushed.lock().unwrap() = Some(event.clone());
-                false
+                flushed.lock().unwrap().push(event.clone());
+                online.load(Ordering::SeqCst)
             }
         }));
+        let updating = UpdateStatus::Updating { to: "0.16.0".into() };
+        assert!(m.report(updating.clone()));
+        assert_eq!(flushed.lock().unwrap().len(), 1);
+        assert!(seen.lock().unwrap().is_empty(), "with the link up the hub passes the phase on, so the window would hear it twice");
+
+        online.store(false, Ordering::SeqCst);
         let current = UpdateStatus::UpToDate { version: "0.16.0".into() };
-        m.set_installer(Arc::new(Fixed(current.clone())));
         assert!(!m.report(current.clone()));
-        assert_eq!(m.call(Call::UpdateSelf).unwrap(), status(current.clone()));
-        match flushed.lock().unwrap().clone() {
-            Some(MachineEvent::Update { status }) => assert_eq!(status, Some(current)),
+        match flushed.lock().unwrap().last().cloned() {
+            Some(MachineEvent::Update { status }) => assert_eq!(status, Some(current.clone())),
             other => panic!("{other:?}"),
         }
-        assert!(seen.lock().unwrap().is_empty());
+        match seen.lock().unwrap().as_slice() {
+            [MachineEvent::Update { status }] => assert_eq!(status, &Some(current.clone())),
+            other => panic!("the window did not hear the phase the link dropped: {other:?}"),
+        };
+        m.set_installer(Arc::new(Fixed(current.clone())));
+        assert_eq!(m.call(Call::UpdateSelf).unwrap(), status(current));
+        assert_eq!(seen.lock().unwrap().len(), 2, "the installer's own report reached the window too");
+    }
+
+    #[test]
+    fn with_the_hub_out_of_reach_the_tools_answer_from_this_machine_or_say_the_hub_is_down() {
+        let dir = temp("hub-out-of-reach");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        m.set_global_settings(global::Settings { host: true, ..global::Settings::default() }).unwrap();
+        let path = m.open_project(project).display().to_string();
+        let global_tab = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+        let chat = m.call(Call::OpenTasteChat { scope: TasteScope::Captains, path: None }).unwrap().as_str().unwrap().to_owned();
+        m.set_local_taste(&TasteScope::Captains, serde_json::from_value(json!({ "parallel": 2 })).unwrap()).unwrap();
+        let tool = |tab: &str, call: Value| m.project_tool(tab, serde_json::from_value(call).unwrap());
+        let signed_out = tool(&global_tab, json!({ "name": "projects" })).unwrap();
+        assert!(signed_out.contains(&path), "{signed_out}");
+
+        for down in [crate::link::OFFLINE, crate::link::HUB_TIMEOUT] {
+            m.set_hub(Arc::new(move |_| Err(down.into())));
+            assert_eq!(tool(&global_tab, json!({ "name": "projects" })), Ok(signed_out.clone()), "{down}: projects is this machine's");
+            assert_eq!(tool(&global_tab, json!({ "name": "waiting" })), Ok("[]".into()), "{down}");
+            assert_eq!(
+                tool(&global_tab, json!({ "name": "read_session", "id": "tab-404" })),
+                Err("no session tab-404 on this machine, and the hub can't be reached right now to look on the others".into())
+            );
+            assert_eq!(tool(&global_tab, json!({ "name": "repo_overview", "project": path })), Err("the repo tools read through the hub, and the hub can't be reached right now".into()));
+            assert_eq!(tool(&global_tab, json!({ "name": "act", "action": "pair_code" })), Err("the hub can't be reached right now, and act writes its audit trail there".into()));
+            let kept: Value = serde_json::from_str(&tool(&chat, json!({ "name": "taste_get", "scope": "captains" })).unwrap()).unwrap();
+            assert_eq!(kept["effective"]["parallel"], json!(2), "{down}: taste_get reads the copy taste.json keeps");
+            assert_eq!(
+                tool(&chat, json!({ "name": "taste_set", "scope": "captains", "patch": { "parallel": 3 } })),
+                Err("the hub can't be reached right now, and it keeps the account's way of working, so it can't change until the hub answers".into())
+            );
+        }
+        assert_eq!(m.local_tastes().captains.parallel, 2, "a change the hub never took changed the kept copy");
+
+        m.set_hub(Arc::new(|_| Err("this account may not read repositories".into())));
+        assert_eq!(tool(&global_tab, json!({ "name": "projects" })), Err("this account may not read repositories".into()), "a refusal is not an unreachable hub");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     const GO_429: &str = "API Error: Request rejected (429) · Go usage limit exceeded";

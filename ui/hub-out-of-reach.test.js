@@ -236,3 +236,27 @@ test("a change made while the hub doesn't answer fails with the same plain sente
   assert.equal(byId("linear-error").textContent, "Can't reach the hub, and this needs it.");
   assert.deepEqual(asked, []);
 });
+
+test("while the hub doesn't answer, this Mac's own update phases land on its row and finish Update every machine", async () => {
+  const drawn = [];
+  const { context } = signedIn({
+    hubUp: () => false,
+    hub: { call: () => Promise.reject("not connected to the hub") },
+    invoke: (cmd) => Promise.resolve(cmd === "install_update" ? { state: "updating", to: "" } : null),
+    setTimeout: () => ({}),
+    settingsOpen: () => true,
+    page: "machines",
+  });
+  vm.runInContext(`${fn(read("main.js"), "onMachineEvent")}\nglobalThis.onMachineEvent = onMachineEvent; showMachinesPage = () => drawn.push("machines page");`, Object.assign(context, { drawn }));
+  let finished = false;
+  const updating = vm.runInContext("updateEveryMachine()", context).then(() => (finished = true));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(finished, false, "an updating phase is not the end");
+  context.onMachineEvent("local", { kind: "update", status: { state: "updating", to: "0.18.8" } });
+  assert.deepEqual(here(context.accountMachines()[0].update), { state: "updating", to: "0.18.8" });
+  context.onMachineEvent("local", { kind: "update", status: { state: "up_to_date", version: "0.18.8" } });
+  await updating;
+  assert.equal(finished, true);
+  assert.deepEqual(here(context.accountMachines()[0].update), { state: "up_to_date", version: "0.18.8" });
+  assert.deepEqual(drawn, ["machines page", "machines page"]);
+});
