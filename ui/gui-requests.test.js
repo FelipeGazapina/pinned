@@ -548,3 +548,93 @@ test("markup in any field stays text: no img element and no javascript: href in 
   assert.ok(pieces.card.includes("&#60;img src=x onerror=alert(1)&#62;"), "the card shows the markup as text");
   assert.ok(pieces.column.includes("&#60;img src=x onerror=alert(1)&#62;"), "the row shows the markup as text");
 });
+
+// ---- 0.18.8 unit 9r3 ----
+const cssOf = (name) => read(name).replace(/\/\*[\s\S]*?\*\//g, "");
+const ruleOf = (css, selector) => {
+  const at = css.indexOf(`${selector} {`);
+  assert.ok(at >= 0, `${selector} is a rule`);
+  return css.slice(at, css.indexOf("}", at));
+};
+
+test("9r3 item 10: the request header shows the crumb, the dot, the title, the state, the project and Mark done", () => {
+  const g = board();
+  g[1].tab = "tab-21";
+  const h = harness({ tabs: [anchorTab(g), requestTab("q-work", "tab-21")] });
+  const html = h.run("requestCrumbHtml(tabs[1])");
+  assert.match(html, /^<button type="button" class="request-back" data-rq-back>Requests<\/button><span class="sep">\/<\/span><span class="request-dot"/);
+  assert.match(html, /<h2 class="request-title">Add gift cards<\/h2>/);
+  assert.match(html, /<button type="button" data-request-action="done" data-request-id="q-work">Mark done<\/button>/);
+});
+
+test("9r3 item 10: the title truncates and nothing else in the header shrinks or paints over the buttons", () => {
+  const css = cssOf("gui-requests.css");
+  assert.match(ruleOf(css, "#chat-head .crumb .request-title"), /min-width:\s*0[^}]*text-overflow:\s*ellipsis/);
+  assert.match(ruleOf(css, "#chat-head .crumb:has(.request-dot)"), /overflow:\s*hidden/, "the crumb clips instead of painting over the controls");
+  for (const sel of ["#chat-head .crumb .request-back", "#chat-head .crumb .request-state", "#chat-head .crumb .rq-project"]) assert.match(ruleOf(css, sel), /flex:\s*none/, `${sel} keeps its size`);
+  assert.match(cssOf("gui-orchestrator.css"), /#chat-head \.crumb \.orchestrator-actions \{[^}]*flex:\s*none/, "the button group does not shrink");
+  assert.match(read("gui.css"), /#chat-head \.controls \{ flex: none;/, "nor do the view toggles");
+});
+
+test("9r3 item 10: the Requests crumb closes the Plan panel and brings the column back", () => {
+  const g = board();
+  g[1].tab = "tab-21";
+  const tab = requestTab("q-work", "tab-21");
+  const h = harness({ tabs: [anchorTab(g), tab] });
+  const log = [];
+  h.context.panelOf = () => ({ open: true, active: "plan", surfaces: [{ id: "plan", kind: "plan" }] });
+  h.context.closePanel = () => log.push("closePanel");
+  h.click(h.els.crumb, { "[data-rq-back]": { dataset: {} } });
+  assert.deepEqual(log, ["closePanel"]);
+});
+
+test("9r3 item 11: the column shows beside a request thread while its Plan is closed, and hides while it is open", () => {
+  const g = board();
+  g[1].tab = "tab-21";
+  const tab = requestTab("q-work", "tab-21");
+  const h = harness({ tabs: [anchorTab(g), tab] });
+  const panel = { open: false, active: "plan", surfaces: [{ id: "plan", kind: "plan" }] };
+  h.context.panelOf = () => panel;
+  h.context.shownSurface = (t) => t.panel?.surfaces?.find((s) => s.id === panel.active) ?? panel.surfaces.find((s) => s.id === panel.active);
+  h.context.active = tab;
+  h.run("renderRequests()");
+  assert.equal(h.column.hidden, false, "Plan closed: the column is there");
+  assert.equal(h.els.chat.attrs["data-requests"], "");
+  panel.open = true;
+  h.run("renderRequests()");
+  assert.equal(h.column.hidden, true, "Plan open: the column is gone");
+  assert.equal("data-requests" in h.els.chat.attrs, false);
+  panel.surfaces = [{ id: "diff", kind: "diff" }];
+  panel.active = "diff";
+  h.run("renderRequests()");
+  assert.equal(h.column.hidden, false, "another surface open: the column stays");
+});
+
+test("9r3 item 12: the stands card has no 'kept up to date' line and no New mark", () => {
+  const html = h0().run("requestCardFrom(requestGlance, { view: { stands: { asked: 'a', done: 'b', left: 'c', needs: '', links: [] } } })");
+  assert.doesNotMatch(html, /kept up to date|>New<|class="[^"]*\bnew\b/i);
+  assert.match(html, /<span class="rc-title">Where this stands<\/span>/);
+});
+function h0() {
+  const g = board();
+  g[1].tab = "tab-21";
+  const h = harness({ tabs: [anchorTab(g), requestTab("q-work", "tab-21")] });
+  h.run("var requestGlance = requestOf(tabs[1])");
+  return h;
+}
+
+test("9r3 item 13: a running request tab's composer says 'Reply in this thread'; a stopped one keeps the start-the-agent line", () => {
+  const src = read("gui-composer.js");
+  const at = src.indexOf("function promptText(");
+  const text = src.slice(at, src.indexOf("\n}\n", at) + 2);
+  const run = (tab) => {
+    const ctx = { matchMedia: () => ({ matches: true }), menuKind: () => null, machines: new Map(), touchComposer: () => false, requestHere: (t) => (t.view.request ? { id: t.view.request } : null) };
+    vm.createContext(ctx);
+    vm.runInContext(text, ctx);
+    return ctx.promptText(tab, null);
+  };
+  const request = (running) => ({ view: { running, role: "orchestrator", orchestrator_global: true, request: "q1" } });
+  assert.equal(run(request(true)), "Reply in this thread");
+  assert.equal(run(request(false)), "claude isn't running. Press Enter to start it.");
+  assert.equal(run({ view: { running: true, role: "worker" } }), "Ask anything, @ files, $ skills, / commands", "other threads are as before");
+});

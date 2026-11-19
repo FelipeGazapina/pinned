@@ -111,9 +111,9 @@ function harness(extra = {}) {
 }
 
 /** Opens a Captain's Plan on `lists` (each a list of STEP overrides) and returns the drawn html. */
-async function draw(lists, { zoom = 1, edit = () => {} } = {}) {
+async function draw(lists, { zoom = 1, edit = () => {}, extra = {} } = {}) {
   const view = plan({ lists });
-  const h = harness({ reply: () => [view] });
+  const h = harness({ reply: () => [view], ...extra });
   const tab = captain([glance()]);
   h.tabs.push(tab);
   h.context.active = tab;
@@ -284,4 +284,84 @@ test("phone, 390 px: Steps gives lanes that scroll sideways, Dots gives none", a
 
 test("gui-plan.css uses theme tokens only: no hex, rgb() or hsl() literal", () => {
   assert.deepEqual(cssSrc.replace(/\/\*[\s\S]*?\*\//g, "").match(/#[0-9a-fA-F]{3,8}\b|rgba?\(\s*\d|hsla?\(/g) ?? [], []);
+});
+
+// ---- 0.18.8 unit 9r3: the plan-tree pair differences ----
+const LOCALE_DATE = class extends Date {
+  toLocaleTimeString(locales, options) {
+    return `T|${locales}|${JSON.stringify(options)}`;
+  }
+};
+const cut = (html, from, to) => html.slice(html.indexOf(from), html.indexOf(to, html.indexOf(from)));
+const cellOf = (html, step) => tags(html, "cell").find((t) => t.includes(`data-step="${step}"`)) && html.slice(html.indexOf(`data-step="${step}"`), html.indexOf("</button>", html.indexOf(`data-step="${step}"`)));
+const rule = (selector) => {
+  const css = cssSrc.replace(/\/\*[\s\S]*?\*\//g, "");
+  const at = css.indexOf(`${selector} {`);
+  assert.ok(at >= 0, `${selector} is a rule`);
+  return css.slice(at, css.indexOf("}", at));
+};
+/** The CSS specificity of a selector as [attributes and classes, pseudo-elements and tags]. */
+const specificity = (selector) => [(selector.match(/\[[^\]]*\]|\.[\w-]+/g) ?? []).length, (selector.match(/::[\w-]+|(?:^|[\s>+~])[a-z][\w-]*/g) ?? []).length];
+
+test("9r3 item 1: the Captain's header is Plan, the summary, the zoom and the bar, from one builder", async () => {
+  const { html } = await draw(lists());
+  assert.match(html, /<div class="pl-head"><div class="pl-head-row"><span class="pl-title">Plan<\/span><span class="pl-count">2 lists, 5 of 8 steps, 1 fix branch<\/span><span class="pl-zoom"/);
+  assert.match(html, /<div class="pl-progress"><span style="width:62\.5%"><\/span><\/div><\/div>/, "the bar sits inside the head, over its 1 px divider");
+  assert.match(rule(".pl-head"), /border-bottom:\s*1px solid var\(--g-border\)/);
+  assert.ok(fn(planSrc, "planBodyHtml").includes("planHeadHtml(") && fn(planSrc, "requestPlanHtml").includes("planHeadHtml("), "both panels call the one function");
+});
+
+test("9r3 item 2: the zoom is two bordered square buttons around the label, the disabled end dimmed", async () => {
+  const { html } = await draw(lists(), { zoom: 0 });
+  assert.match(html, /<button type="button" class="sq" data-zoom="-1" aria-label="Zoom out" title="Zoom out" disabled>−<\/button><span class="pl-zoom-name">Dots<\/span><button type="button" class="sq" data-zoom="1" aria-label="Zoom in" title="Zoom in">\+<\/button>/);
+  assert.match(rule(".pl-zoom button.sq"), /border:\s*1px solid var\(--g-border\)/, "each button has its own border");
+  assert.doesNotMatch(rule(".pl-zoom"), /border/, "the group is not a bordered pill");
+  assert.match(rule(".pl-zoom button:disabled"), /opacity:\s*0\.4/, "the board's dim");
+  assert.match(cssSrc, /body\[data-phone-screen\] \.pl-zoom button \{[^}]*min-width: 44px[^}]*min-height: 44px/, "44 px on the phone");
+});
+
+test("9r3 item 3: the root row reads 'Plan, from your request at <time>' with the viewer's locale and no title", async () => {
+  const { html } = await draw(lists(), { extra: { Date: LOCALE_DATE } });
+  assert.ok(html.includes('<div class="root-row">Plan, from your request at T|undefined|{"hour":"numeric","minute":"2-digit"}</div>'), cut(html, 'class="root-row"', "</div>"));
+  assert.doesNotMatch(html, /<div class="root-row"><b>/);
+});
+
+test("9r3 item 4: a step with a fix branch opens it on the first paint, and the user's toggle still wins", async () => {
+  const { h, s, html } = await draw(lists("done").map((l, i) => (i ? l : { ...l, steps: l.steps.map((x) => (x.id === "s3" ? { ...x, state: "done" } : x)) })));
+  const lane = laneHtml(html)[0];
+  assert.ok(/class="ubranch merged"/.test(lane) && lane.includes("Hide the fix branch"), "a done step's fix is open as the board opens it");
+  h.click("[data-fixchip]", { fixchip: "l1" });
+  assert.ok(laneHtml(h.html())[0].includes("Show the fix branch") && s.fixOpen.s3 === false, "closing it is remembered");
+});
+
+test("9r3 item 5: a merged fix branch keeps its right arm", () => {
+  assert.doesNotMatch(rule(".pl .ubranch.merged"), /border-right-color/);
+});
+
+test("9r3 item 6: the Dots zoom beats every per-state glyph rule, waiting included", () => {
+  const css = cssSrc.replace(/\/\*[\s\S]*?\*\//g, "");
+  const hide = [...css.matchAll(/([^{}]*\.z0[^{}]*)\{[^}]*display:\s*none/g)].flatMap((m) => m[1].split(",")).map((x) => x.trim()).filter((x) => x.includes("::after"));
+  assert.ok(hide.length, "a .z0 rule hides ::after");
+  const waiting = specificity('.pl .cell[data-state="waiting"] .dot::after');
+  for (const sel of hide) {
+    const [a, b] = specificity(sel);
+    assert.ok(a > waiting[0] || (a === waiting[0] && b >= waiting[1]), `${sel} outranks the waiting glyph`);
+  }
+  assert.ok(css.lastIndexOf(".z0 ") > css.indexOf('.cell[data-state="waiting"] .dot::after'), "and comes after it");
+});
+
+test("9r3 item 7: the footer words are the board's", async () => {
+  const st = async (steps, picked) => /<span class="st">([^<]*)<\/span>/.exec((await draw([L("l1", "Build", steps)], { edit: (s) => (s.step = picked) })).html)?.[1];
+  assert.equal(await st([STEP({ id: "a", state: "waiting" })], "a"), "Waiting on you");
+  assert.equal(await st([STEP({ id: "a", state: "failed", fixes: FIX("running") })], "a"), "Failed, fix in progress");
+  assert.equal(await st([STEP({ id: "a", state: "failed" })], "a"), "Failed");
+  assert.equal(await st([STEP({ id: "a", state: "running" })], "a"), "Running now");
+  assert.equal(await st([STEP({ id: "a", state: "pending" })], "a"), "Not started");
+  assert.equal(await st([STEP({ id: "a", state: "done", why: "after one fix" })], "a"), "Done, after one fix");
+});
+
+test("9r3 item 8: at Details a pending step shows nothing under its name, whatever its cost or runner", async () => {
+  const { html } = await draw([L("l1", "Build", [STEP({ id: "a", state: "done", cost: 0.12 }), STEP({ id: "b", state: "pending", cost: 0, task: "task-4" })])], { zoom: 2 });
+  assert.ok(cellOf(html, "b").includes('<span class="meta"></span>'), cellOf(html, "b"));
+  assert.ok(cellOf(html, "a").includes('<span class="meta">$0.12</span>'), "a done step keeps its cost");
 });

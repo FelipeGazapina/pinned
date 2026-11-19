@@ -400,3 +400,39 @@ test("See the diff: an ended snapshot never shows it, even with a task and a bra
   assert.ok(h.html().includes("Delete the flag"), "the snapshot draws");
   assert.ok(!h.html().includes("data-see-diff") && !h.html().includes("See the diff"), "with no See the diff");
 });
+
+// ---- 0.18.8 unit 9r3 ----
+const LOCALE_DATE = class extends Date {
+  toLocaleTimeString(locales, options) {
+    return `T|${locales}|${JSON.stringify(options)}`;
+  }
+};
+
+test("9r3 item 3: the request panel's root row reads 'Plan, from your request at <time>' in the viewer's locale", async () => {
+  const h = harness({ reply: hub(), Date: LOCALE_DATE });
+  const request = requestTab();
+  h.tabs.push(captainTab("m1", "tab-1", "/work/storefront", [plan("p1")]), request);
+  await h.open(request);
+  assert.ok(h.html().includes('<div class="root-row">Plan, from your request at T|undefined|{"hour":"numeric","minute":"2-digit"}</div>'));
+});
+
+test("9r3 item 9: one Captain and no ended plan draws no section heading and no plan-title line", async () => {
+  const one = rglance({ captains: [CAPTAINS[0]] });
+  const h = harness({ reply: hub([], one) });
+  const req = requestTab({}, [], one);
+  h.tabs.push(captainTab("m1", "tab-1", "/work/storefront", [plan("p1")]), req);
+  await h.open(req);
+  assert.deepEqual(sections(h.html()), [], "no heading with one block");
+  assert.doesNotMatch(h.html(), /class="pl-plan"/, "no plan-title line");
+  assert.match(h.html(), /class="lane/, "the lanes still draw");
+});
+
+test("9r3 item 9: headings return once there is more than one block", async () => {
+  const one = rglance({ captains: [CAPTAINS[0]] });
+  const h = harness({ reply: hub([{ machine: "m1", path: "/work/storefront", plan: SNAP("e1", "Earlier: log the delivery times") }], one) });
+  const req = requestTab({}, [], one);
+  h.tabs.push(captainTab("m1", "tab-1", "/work/storefront", [plan("p1")]), req);
+  await h.open(req);
+  assert.deepEqual(sections(h.html()), ["Captain storefront · Mac mini"]);
+  assert.match(h.html(), /class="pl-plan"/);
+});
