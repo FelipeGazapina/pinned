@@ -1650,6 +1650,7 @@ function disconnectHub() {
     machines.delete(id);
   }
   delete machines.get(LOCAL)?.hubView;
+  delete machines.get(LOCAL)?.ownView;
   delete machines.get(LOCAL)?.syncStopped;
   resetAgentSurface();
   render();

@@ -4,7 +4,8 @@ import test from "node:test";
 
 const source = readFileSync(new URL("./update-all.js", import.meta.url), "utf8");
 
-function open(account) {
+/** update-all.js in the app (`TAURI` set) or the web page (null), signed in as `account`. */
+function open(account, { TAURI = {}, version = "v0.18.7" } = {}) {
   const machines = new Map();
   const calls = [];
   const pending = [];
@@ -29,8 +30,10 @@ function open(account) {
     "viewListeners",
     "LOCAL",
     "seedAccount",
-    `let account = seedAccount;\n${source}\nreturn { updateEveryMachine, updateLabel, rowUpdate };`,
-  )(machines, hub, viewListeners, "local", account);
+    "TAURI",
+    "document",
+    `let account = seedAccount;\n${source}\nreturn { updateEveryMachine, updateLabel, rowUpdate, accountMachines };`,
+  )(machines, hub, viewListeners, "local", account, TAURI, { body: { dataset: { version } } });
   return {
     machines,
     calls,

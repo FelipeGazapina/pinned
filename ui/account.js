@@ -285,7 +285,7 @@ function showMachinesPage() {
       <div class="actions start"><button class="primary" data-action="go-account">Go to Account</button></div>`;
     return;
   }
-  const rows = [...machines.entries()].map(([id, m]) => machineEntryHtml(id, id === LOCAL ? m.hubView : m.view)).join("");
+  const rows = [...machines.entries()].map(([id, m]) => machineEntryHtml(id, id === LOCAL ? ownView(m) : m.view)).join("");
   const pair = machinesUi.pair;
   settingsPage.innerHTML = `<h2>Machines</h2>
     <p class="hint">Every machine signed into ${esc(account.email || "this account")}. Sessions on the ones online show up as tabs here.</p>
@@ -452,7 +452,7 @@ async function renameMachine(field) {
   const name = field.value.trim();
   machinesUi.renaming = null;
   const m = machines.get(id);
-  const current = id === LOCAL ? m.hubView : m.view;
+  const current = id === LOCAL ? ownView(m) : m.view;
   if (!name || name === current.name) return showMachinesPage();
   current.name = name;
   render();
