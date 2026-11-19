@@ -28,7 +28,7 @@ function showAccount() {
   const typing = settingsPage.querySelector(".new-password");
   if (typing && (typing.current.value || typing.password.value)) return;
   const state = document.body.dataset.hub;
-  const badge = state === "online" ? "Connected" : state === "refused" ? "Refused by the hub" : "Connecting…";
+  const badge = { online: "Connected", offline: "Can't reach the hub", refused: "Refused by the hub" }[state] ?? "Connecting…";
   const name = machines.get(LOCAL)?.hubView?.name;
   settingsPage.innerHTML = `<h2>Account</h2>
     <p class="hint">Your machines, their sessions and your workflows belong to this account.</p>
@@ -38,6 +38,7 @@ function showAccount() {
         <span class="badge" data-on="${state === "online"}">${badge}</span></div>
       ${document.body.dataset.version ? `<p class="hint">pinned ${esc(document.body.dataset.version)}</p>` : ""}
       ${TAURI ? `<p>This ${COMPUTER} is <b>${esc(name ?? "…")}</b> in the account. It stays signed in, with its sessions open to your other devices, until you sign out.</p>` : ""}
+      ${state === "offline" ? `<p>${esc(hubOutOfReach(account.hub, TAURI ? COMPUTER : null))}</p>` : ""}
       ${state === "refused" ? `<p class="error">The hub no longer accepts this sign-in. Sign out, then sign in again.</p>` : ""}
       <div class="actions"><button class="secondary" data-action="sign-out">Sign out</button></div>
     </div>

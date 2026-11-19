@@ -21,16 +21,30 @@ const emptyListText = (offline) => (offline ? "No threads to show while machines
  * the app's HTTP client. */
 const NO_ANSWER = /failed to fetch|load failed|networkerror|network request failed|error sending request|connection refused|connection reset|dns error|tcp connect|timed out|unreachable/i;
 
+/** The host of the hub at address `hub`, as the app names it to the user: "hub.example.test". */
+function hubHost(hub) {
+  const address = String(hub ?? "").trim();
+  try {
+    return new URL(address).host || address;
+  } catch {
+    return address;
+  }
+}
+
 /** What the sign-in form says for an error: a plain sentence when the hub couldn't be reached, else the
  * error as the hub said it. `hub` is the hub's address. */
 function signInProblem(error, hub) {
   const text = String(error);
   if (!NO_ANSWER.test(text)) return text;
-  let host = String(hub ?? "").trim();
-  try {
-    host = new URL(host).host || host;
-  } catch {}
+  const host = hubHost(hub);
   return `Can't reach the hub${host ? ` at ${host}` : ""}. Check your connection and try again.`;
+}
+
+/** What the Account page says while the signed-in hub at `hub` doesn't answer. `computer` is "Mac" or
+ * "PC" in the app, whose own threads go on without the hub, and null on the web page. */
+function hubOutOfReach(hub, computer) {
+  const host = hubHost(hub);
+  return `Can't reach the hub${host ? ` at ${host}` : ""}. ${computer ? `This ${computer} keeps working and reconnects` : "This page reconnects"} once the hub answers.`;
 }
 
 /** Whether `error` is the kind `signInProblem` words as "can't reach", so the form offers Retry. */

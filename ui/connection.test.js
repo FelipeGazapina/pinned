@@ -389,6 +389,43 @@ test("web sign-in with a wrong password shows the hub's words and no Retry", asy
   assert.equal(retry.hidden, true);
 });
 
+/** The Account page, signed in to the hub at hub.example.test, with the hub link in `state`. */
+function accountPage(state, TAURI = {}) {
+  const page = { innerHTML: "", querySelector: () => ({ current: { value: "" }, password: { value: "" } }) };
+  const context = {
+    URL,
+    TAURI,
+    COMPUTER: "Mac",
+    LOCAL: "local",
+    account: { email: "owner@example.test", hub: "https://hub.example.test" },
+    machines: new Map([["local", { hubView: { name: "owner-mbp" } }]]),
+    document: { body: { dataset: state ? { hub: state } : {} } },
+    settingsPage: page,
+    esc: (text) => String(text),
+    repoInsightHtml: () => "",
+    notificationsHtml: () => "",
+    invitesHtml: () => "",
+    bindRepoInsight() {},
+    loadInvites() {},
+    invitesUi: {},
+  };
+  vm.createContext(context);
+  vm.runInContext(`${connectionSrc}\n${fn(accountSrc, "showAccount")}\nshowAccount();`, context);
+  const text = page.innerHTML.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  return { badge: /<span class="badge"[^>]*>([^<]*)<\/span>/.exec(page.innerHTML)[1], text };
+}
+
+test("signed in with the hub out of reach, the Account page names the hub's host instead of Connecting forever", () => {
+  const offline = accountPage("offline");
+  assert.equal(offline.badge, "Can't reach the hub");
+  assert.ok(offline.text.includes("Can't reach the hub at hub.example.test. This Mac keeps working and reconnects once the hub answers."), offline.text);
+  assert.ok(accountPage("offline", null).text.includes("Can't reach the hub at hub.example.test. This page reconnects once the hub answers."));
+  assert.equal(accountPage(undefined).badge, "Connecting…", "before the socket's first event it is still connecting");
+  assert.ok(!accountPage(undefined).text.includes("Can't reach"));
+  assert.equal(accountPage("online").badge, "Connected");
+  assert.equal(accountPage("refused").badge, "Refused by the hub");
+});
+
 test("in the app the reconnect bar says this computer keeps working; the web page keeps its own words", () => {
   const bar = (TAURI) => {
     const el = { textContent: "Reconnecting… showing the last state" };
