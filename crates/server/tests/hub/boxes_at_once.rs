@@ -23,7 +23,12 @@ struct Fleet {
 
 impl Fleet {
     fn start(name: &str) -> Fleet {
-        let hub = TestHub::start_with_boxes(name, Signup::Open, Policy { max_open: 12, ..fast() });
+        Fleet::capped(name, 12)
+    }
+
+    /// A fleet on a hub whose cap on an account's open boxes is `max_open`.
+    fn capped(name: &str, max_open: u32) -> Fleet {
+        let hub = TestHub::start_with_boxes(name, Signup::Open, Policy { max_open, ..fast() });
         let mut ana = BoxAccount::new(&hub);
         hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
         let dir = temp(&format!("{name}-mac"));
@@ -179,6 +184,38 @@ fn boxes_at_once_full_refuses_every_agent_before_an_ask_reaches_the_user() {
     assert_eq!(fleet.captain_box("r-1"), Err(ONE.to_owned()), "send_to_captain with a box");
     assert_eq!(fleet.agents_box(), Err(ONE.to_owned()), "an agent's open_box");
     assert_eq!(fleet.workflow("w-1"), Err(ONE.to_owned()), "a workflow's box");
+    assert_eq!(fleet.asks(), 0, "no ask card was made");
+    assert_eq!(fleet.ana.rows(&fleet.hub), 1);
+}
+
+#[test]
+fn the_hubs_cap_at_or_below_boxes_at_once_refuses_with_its_own_text_not_the_settings_one() {
+    const CAP_TWO: &str = "Upstash Box: 2 boxes are already open, and this account's limit is 2";
+    let mut fleet = Fleet::capped("boxes_at_once_under_cap", 2);
+    assert_eq!(fleet.worker("One").unwrap()["workState"], "working");
+    assert_eq!(fleet.worker("Two").unwrap()["workState"], "working");
+    fleet.every_box("ask");
+    assert_eq!(fleet.worker("Three"), Err(CAP_TWO.to_owned()), "Boxes at once at its 8, the hub's cap at 2");
+    assert_eq!(fleet.captain_box("r-1"), Err(CAP_TWO.to_owned()), "send_to_captain with a box");
+    assert_eq!(fleet.agents_box(), Err(CAP_TWO.to_owned()), "an agent's open_box");
+    assert_eq!(fleet.workflow("w-1"), Err(CAP_TWO.to_owned()), "a workflow's box");
+    fleet.boxes_at_once(2);
+    assert_eq!(fleet.worker("Three"), Err(CAP_TWO.to_owned()), "equal: raising Boxes at once would change nothing");
+    fleet.boxes_at_once(1);
+    assert_eq!(fleet.worker("Three"), Err(TWO.to_owned()), "below the cap, Boxes at once is what stops it");
+    assert_eq!(fleet.asks(), 0, "no ask card was made");
+    assert_eq!(fleet.ana.rows(&fleet.hub), 2);
+}
+
+#[test]
+fn a_box_budget_refusal_speaks_before_boxes_at_once() {
+    let mut fleet = Fleet::start("boxes_at_once_budget");
+    fleet.boxes_at_once(1);
+    assert_eq!(fleet.worker("One").unwrap()["workState"], "working");
+    fleet.ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 100 } })).unwrap();
+    fleet.every_box("ask");
+    let budget = "a box may spend at most US$ 1.00; name less, or raise Box budget in Settings › Way of working";
+    assert_eq!(fleet.agents_box(), Err(budget.to_owned()), "an agent's open_box naming US$ 2.00 with Boxes at once full");
     assert_eq!(fleet.asks(), 0, "no ask card was made");
     assert_eq!(fleet.ana.rows(&fleet.hub), 1);
 }

@@ -216,6 +216,14 @@ pub const BOXES_AT_ONCE_ZERO: &str = "Boxes at once is 0, so agents cannot start
 /// The rest of an agent's box refused because the account's agents already have Boxes at once open.
 const BOXES_AT_ONCE_FULL: &str = "the most it allows at once. Wait for one to end, or raise Boxes at once in Settings › Way of working.";
 
+/// Which limit holds an account's agents' boxes.
+#[derive(Clone, Copy)]
+enum AgentsLimit {
+    /// The account's Boxes at once, lower than the hub's cap.
+    BoxesAtOnce(u32),
+    HubCap,
+}
+
 /// The hub's record that one run lives in one box. It exists before its box does and goes only
 /// after the box and its machine are gone.
 #[derive(Clone, Debug)]
@@ -1287,30 +1295,31 @@ impl Boxes {
     pub async fn open_session(&self, hub: &Arc<Hub>, account: &Arc<Account>, repo: String, size: Option<BoxSize>, budget_usd: Option<f64>, opener: Option<Opener>) -> Result<BoxStatus, String> {
         let connectors = hub.connectors(account).await?;
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
-        if opener.is_some() {
-            self.agents_have_room(hub, account).await?;
+        let permission = connectors.box_access().session;
+        if permission == BoxPermission::Off {
+            return Err("Upstash Box is off for sessions: choose a box permission in Connectors settings".into());
         }
-        match (connectors.box_access().session, &opener) {
-            (BoxPermission::Off, _) => return Err("Upstash Box is off for sessions: choose a box permission in Connectors settings".into()),
-            (BoxPermission::Ask, Some(opener)) => {
+        let repo = normalize_repo(&repo).ok_or("name a GitHub repository as owner/repo or paste its clone URL")?;
+        let size = box_size(hub, account, Some(&repo), size).await?.size();
+        let budget_usd = box_budget(hub, account, Some(&repo), budget_usd).await?;
+        if let Some(budget) = budget_usd {
+            minimum_budget(size, budget)?;
+        }
+        // After the budget, which speaks first as it did before Boxes at once, and before any ask.
+        if let Some(opener) = &opener {
+            self.agents_have_room(hub, account).await?;
+            if permission == BoxPermission::Ask {
                 let name = account.name_of(&opener.machine.to_string()).unwrap_or_else(|| opener.machine.to_string());
                 let asked = Subject::LinearIssue { issue: format!("sessions of {name} {}", opener.tab) };
                 allowed(&connectors, BoxPermission::Ask, "Sessions", INTERACTIVE_CONNECTOR, &asked).await?;
             }
-            _ => {}
         }
-        let repo = normalize_repo(&repo).ok_or("name a GitHub repository as owner/repo or paste its clone URL")?;
         // An agent's box signs in as the account its own session runs under; the user's, as the project's.
         let signs_in = match opener.as_ref().and_then(|o| account.tab(&o.machine.to_string(), &o.tab)) {
             Some(tab) => tab.account,
             None => project_account(hub, account, None, Some(&repo)).await?,
         };
         token_kept(&connectors, &signs_in, Some(&project_name(None, Some(&repo))))?;
-        let size = box_size(hub, account, Some(&repo), size).await?.size();
-        let budget_usd = box_budget(hub, account, Some(&repo), budget_usd).await?;
-        if let Some(budget) = budget_usd {
-            minimum_budget(size, budget)?;
-        }
         self.within_cap(&hub.db.boxes(account.id).await?)?;
         let name = machine::repo_name(&repo).unwrap_or("repo").to_owned();
         let id = new_row_id();
@@ -1641,41 +1650,51 @@ impl Boxes {
     /// each is held to the account's Boxes at once, at most the hub's cap, counted and written at once.
     /// A box the user opens is not held to it and does not count.
     async fn reserve_agent(&self, hub: &Hub, account: &Account, row: &BoxRow, opener: Option<&Opener>) -> Result<(BoxRow, bool), String> {
-        let most = self.agents_limit(hub, account).await?;
-        match hub.db.reserve_agent_box(row, most, opener, unix_millis()).await? {
+        let limit = self.agents_limit(hub, account).await?;
+        match hub.db.reserve_agent_box(row, self.most(limit), opener, unix_millis()).await? {
             Ok(reserved) => Ok(reserved),
-            Err(open) => Err(self.past_limit(account, most, open)),
+            Err(open) => Err(self.past_limit(limit, open)),
         }
     }
 
     /// Refuses an agent's new box when the account's agents already have its limit open, before
     /// anything is asked or written. The reserve counts again under the account's lock.
     async fn agents_have_room(&self, hub: &Hub, account: &Account) -> Result<(), String> {
-        let most = self.agents_limit(hub, account).await?;
+        let limit = self.agents_limit(hub, account).await?;
+        let most = self.most(limit);
         let open = if most == 0 { 0 } else { hub.db.agent_boxes_open(account.id).await? };
         if most > open {
             return Ok(());
         }
-        Err(self.past_limit(account, most, open))
+        Err(self.past_limit(limit, open))
     }
 
-    /// How many boxes the account's agents may have open: its Boxes at once up to the hub's cap. A
-    /// team has no Boxes at once to set, so its limit is the hub's cap.
-    async fn agents_limit(&self, hub: &Hub, account: &Account) -> Result<u32, String> {
+    /// What holds the account's agents' boxes: the lower of its Boxes at once and the hub's cap,
+    /// the cap when they are equal, as raising the setting would change nothing. A team has no
+    /// Boxes at once to set, so its limit is the hub's cap.
+    async fn agents_limit(&self, hub: &Hub, account: &Account) -> Result<AgentsLimit, String> {
         if account.team {
-            return Ok(self.policy.max_open);
+            return Ok(AgentsLimit::HubCap);
         }
         let tastes = hub.db.tastes(account.id).await?.unwrap_or_default();
-        Ok(Tastes { box_cap: self.policy.max_open, ..tastes }.boxes_limit())
+        Ok(if tastes.boxes_at_once < self.policy.max_open { AgentsLimit::BoxesAtOnce(tastes.boxes_at_once) } else { AgentsLimit::HubCap })
     }
 
-    /// Why an agent's box is refused when `open` of the account's `most` are open.
-    fn past_limit(&self, account: &Account, most: u32, open: u32) -> String {
-        match (account.team, most, open) {
-            (true, n, _) => format!("Upstash Box: {n} {} already open, and this account's limit is {n}", if n == 1 { "box is" } else { "boxes are" }),
-            (false, 0, _) => BOXES_AT_ONCE_ZERO.into(),
-            (false, _, 1) => format!("1 box already runs on this account, {BOXES_AT_ONCE_FULL}"),
-            (false, _, open) => format!("{open} boxes already run on this account, {BOXES_AT_ONCE_FULL}"),
+    fn most(&self, limit: AgentsLimit) -> u32 {
+        match limit {
+            AgentsLimit::BoxesAtOnce(n) => n,
+            AgentsLimit::HubCap => self.policy.max_open,
+        }
+    }
+
+    /// Why an agent's box is refused when `open` are open. It names Settings only when Boxes at
+    /// once stopped it, the one limit there the user can raise; the hub's cap speaks as it always did.
+    fn past_limit(&self, limit: AgentsLimit, open: u32) -> String {
+        match (limit, open) {
+            (AgentsLimit::HubCap, _) => self.cap_refusal(),
+            (AgentsLimit::BoxesAtOnce(0), _) => BOXES_AT_ONCE_ZERO.into(),
+            (AgentsLimit::BoxesAtOnce(_), 1) => format!("1 box already runs on this account, {BOXES_AT_ONCE_FULL}"),
+            (AgentsLimit::BoxesAtOnce(_), open) => format!("{open} boxes already run on this account, {BOXES_AT_ONCE_FULL}"),
         }
     }
 
@@ -1687,9 +1706,13 @@ impl Boxes {
         if open < self.policy.max_open {
             return Ok(());
         }
+        Err(self.cap_refusal())
+    }
+
+    fn cap_refusal(&self) -> String {
         let n = self.policy.max_open;
         let (noun, verb) = if n == 1 { ("box", "is") } else { ("boxes", "are") };
-        Err(format!("Upstash Box: {n} {noun} {verb} already open, and this account's limit is {n}"))
+        format!("Upstash Box: {n} {noun} {verb} already open, and this account's limit is {n}")
     }
 
     /// Brings the row to running: its box's node online within `boot_wait`, then `spec` answered
