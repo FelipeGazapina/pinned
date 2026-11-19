@@ -21198,6 +21198,40 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn keys_typed_into_a_resting_request_at_the_cap_go_to_its_start() {
+        let (dir, claude, m, tabs) = rested_by_the_pass("req-cap-keys");
+        let rested = &tabs[0];
+        m.write_input(rested, b"hi\r").unwrap();
+        assert_eq!(live_global(&m), 3, "the keys took no fourth place");
+        assert!(!m.view(rested).unwrap().alive);
+        m.record_event(AgentEvent { session: Some("s-k2".into()), ..hook(&tabs[1], AgentStatus::Done) });
+        wait_for("the keys", || std::fs::read_to_string(format!("{}.typed.{rested}", claude.display())).unwrap_or_default().contains("hi\r"));
+        assert_eq!(live_global(&m), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_report_held_for_the_anchor_with_no_session_survives_a_restart() {
+        let (dir, claude, m, path, _tabs) = at_the_cap("req-cap-anchor", &[("k-1", "First ask."), ("k-2", "Second ask."), ("k-3", "Third ask.")]);
+        let anchor = m.open_global_orchestrator().unwrap();
+        send_from(&m, &anchor, &path, "r-1").unwrap();
+        let handoff = m.deliver_report("report:1", &report_of(&path, "Anchor news.", &["r-1".into()])).unwrap();
+        assert!(matches!(&handoff, Handoff::Queued { tab, .. } if *tab == anchor), "three request sessions are live: {handoff:?}");
+        m.quit();
+        drop(m);
+        let again = requests_machine(&dir, &claude);
+        again.restore_tabs();
+        let anchor = again.open_global_orchestrator().unwrap();
+        let typed = || std::fs::read_to_string(format!("{}.typed.{anchor}", claude.display())).unwrap_or_default();
+        wait_for("the held report", || typed().contains("Anchor news."));
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(typed().matches("Anchor news.").count(), 1, "typed once");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_report_hand_off_does_not_hold_sent_through_the_start_wait() {
         let dir = temp("req-gate-wait");
         let site = dir.join("site");
