@@ -89,6 +89,7 @@ pub fn box_may_send(call: &HubCall) -> Result<(), String> {
         | HubCall::RecordTasks { .. }
         | HubCall::AutoArchive { .. }
         | HubCall::Team { .. } => return Ok(()),
+        HubCall::Mirror { .. } | HubCall::Handback { .. } => return Err("a box may not keep a copy of the account's keys".into()),
         // A Capitão's report on its own work, and a worker it hands to another box, which is held
         // to this gate as this box is.
         HubCall::Relay { to: RelayTo::Orchestrator { .. }, .. } => return Ok(()),
@@ -106,7 +107,9 @@ pub fn box_may_send(call: &HubCall) -> Result<(), String> {
         | HubCall::PauseSchedule { .. }
         | HubCall::DeleteSchedule { .. }
         | HubCall::RunWorkflow { .. }
-        | HubCall::GenerateWorkflow { .. } => WORKFLOWS,
+        | HubCall::GenerateWorkflow { .. }
+        | HubCall::SetOfflineRunner { .. }
+        | HubCall::ReleaseWorkflows => WORKFLOWS,
         // Its way of working, which every session starts with.
         HubCall::SetTaste { .. }
         | HubCall::ResetTasteField { .. }
@@ -226,6 +229,18 @@ mod tests {
         assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "set_reviewer", "patch": { "rounds": 2 } }))), refused);
         assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "set_worker_profiles", "profiles": [profile.clone()] }))), refused);
         assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "propose_worker_profile", "tab": "tab-1", "profile": profile }))), refused);
+        assert_eq!(
+            box_may_send(&call(serde_json::json!({ "cmd": "mirror", "have": "", "login": "user-token" }))),
+            Err("a box may not keep a copy of the account's keys".to_owned())
+        );
+        assert_eq!(
+            box_may_send(&call(serde_json::json!({ "cmd": "handback", "changes": {}, "login": "user-token" }))),
+            Err("a box may not keep a copy of the account's keys".to_owned())
+        );
+        assert_eq!(
+            box_may_send(&call(serde_json::json!({ "cmd": "release_workflows" }))),
+            Err("a box may not change the account's workflows".to_owned())
+        );
     }
 
     #[test]

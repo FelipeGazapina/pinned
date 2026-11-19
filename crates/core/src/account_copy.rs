@@ -22,7 +22,7 @@ pub const COPY_EVERY: Duration = Duration::from_secs(5 * 60);
 /// A copy heard from the hub this long before it went counts as current at the takeover.
 pub const FRESH: Duration = Duration::from_secs(90);
 
-const TASTE_FIELDS: &[&str] = &[
+pub(crate) const TASTE_FIELDS: &[&str] = &[
     "strategy",
     "ladder",
     "hard_model",

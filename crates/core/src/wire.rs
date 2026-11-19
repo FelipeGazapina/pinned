@@ -1594,6 +1594,20 @@ pub enum HubCall {
         team: Option<String>,
         op: crate::teams::TeamOp,
     },
+    /// From a desktop that signed in: `account_copy::Mirrored`. `have` is the tag of the copy it
+    /// holds; `login` is the user token that proves the owner's login.
+    Mirror { have: String, login: String },
+    /// From that desktop: `account_copy::Taken`, the account as it is once `changes` landed. A
+    /// repeat of `changes.id` answers the current copy and replays no run variables.
+    Handback { changes: crate::account_copy::Changes, login: String },
+    /// The machine that runs the account's workflows while the hub is off, or none to clear it.
+    /// Only the owner, in the app.
+    SetOfflineRunner {
+        #[serde(default)]
+        machine: Option<MachineId>,
+    },
+    /// The owner's release, in the app, of a hold that waits for the offline runner to hand back.
+    ReleaseWorkflows,
 }
 
 /// A project an external agent may work in: one folder on one machine.

@@ -105,6 +105,8 @@ impl Connectors {
             round_trip::<crate::convex::Connection>(&version.value)
         } else if name.starts_with("mcp/") {
             round_trip::<crate::mcp::Entry>(&version.value)
+        } else if item.is_taste() {
+            return crate::taste::Tastes::normalize_copy_item(item, &version);
         } else {
             None
         };
@@ -116,6 +118,16 @@ impl Connectors {
 
     pub fn own_runs(&self) -> Vec<Value> {
         self.runs.lock().unwrap().iter().filter_map(|run| serde_json::to_value(run).ok()).collect()
+    }
+
+    /// Whether the store holds a live run of `connector` on `subject`, the same run `run_set` writes.
+    pub fn has_run(&self, connector: &str, subject: &crate::agent::Subject) -> bool {
+        self.runs.lock().unwrap().iter().any(|run| {
+            matches!(run.status, runner::Status::Running | runner::Status::Waiting)
+                && matches!(run.session, runner::Session::Live { .. })
+                && &run.subject == subject
+                && run.session_owner.as_deref().unwrap_or(run.connector.as_str()) == connector
+        })
     }
 
     pub fn admit_only(&self, admits: fn(&Connector) -> bool) {

@@ -1246,6 +1246,8 @@ impl Hub {
             // A team op runs only on the app's own path, `http::client_frame`, which reads the op
             // and checks the unlock on it first; a team box's ask goes through `teams::machine_call`.
             // An agent's act, a team's own call or any other path that lands here runs none.
+            HubCall::Mirror { .. } | HubCall::Handback { .. } => return Err("only a signed-in desktop keeps a copy of the account".into()),
+            HubCall::SetOfflineRunner { .. } | HubCall::ReleaseWorkflows => return Err("only the account's owner sets who runs workflows while the hub is off".into()),
             HubCall::Team { .. } => return Err(TEAM_CALL_ELSEWHERE.into()),
         };
         if changed {

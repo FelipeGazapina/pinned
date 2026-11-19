@@ -380,7 +380,7 @@ pub const LOCKED: &str = "unlock with your password in the app to do this";
 /// The app keeps its login on disk, where any process of the same user reads it; the unlock lives
 /// in the app's memory only.
 pub fn owner_only(side: Side, cmd: &str, locked: bool) -> bool {
-    if side == Side::Hub && matches!(cmd, "decide_confirmation" | "set_release_protection") {
+    if side == Side::Hub && matches!(cmd, "decide_confirmation" | "set_release_protection" | "set_offline_runner" | "release_workflows") {
         return true;
     }
     locked && of_cmd(side, cmd).is_some_and(|action| action.class == Confirm)
