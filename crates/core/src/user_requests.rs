@@ -346,6 +346,12 @@ impl UserRequests {
         self.save();
     }
 
+    pub fn record_request_send(&mut self, _request: &str, session: Option<&str>, request_id: &str, captain: CaptainRef) {
+        if let Some(session) = session {
+            self.record_send(session, request_id, captain);
+        }
+    }
+
     /// Where `report`, from `captain` and answering `answers`, goes, leaving out what `delivered`
     /// already marked for it.
     /// 1. Each answer that a global session sent, matched exactly: that session's request, or the
@@ -944,6 +950,53 @@ mod tests {
         assert_eq!(store.route("rep-1", &answers, &site, 5_000), vec![]);
         assert_eq!(store.route("rep-2", &answers, &site, 6_000), vec![to(&a), to(&b)]);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_report_after_clear_reaches_the_request_that_sent_it() {
+        let dir = temp("clear");
+        let mut store = UserRequests::load(Some(&dir));
+        store.record_send("s-anchor", "r-9", captain("m1", "/p/site", "site", 500));
+        let a = started(&mut store, "a", 1_000);
+        store.record_request_send(&a, Some("s-a"), &format!("{a}/r-1"), captain("m1", "/p/site", "site", 1_100));
+        assert!(store.set_session(&a, "s-a2"), "the user typed /clear in A");
+        let site = captain("m1", "/p/site", "site", 0);
+        assert_eq!(store.route("rep-1", &[format!("{a}/r-1")], &site, 2_000), vec![to(&a)]);
+        let mut store = UserRequests::load(Some(&dir));
+        assert_eq!(store.route("rep-2", &[format!("{a}/r-1")], &site, 3_000), vec![to(&a)], "the request id survives a restart");
+        assert_eq!(store.route("rep-3", &["r-9".to_owned()], &site, 4_000), vec![Route::Session("s-anchor".into())], "a session no request holds keeps its route");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_sent_id_saved_before_requests_were_kept_still_routes_by_session() {
+        let dir = temp("old-sent");
+        std::fs::write(dir.join(FILE), r#"{"requests":[],"sent":[{"id":"r-1","session":"s-anchor","at":5}]}"#).unwrap();
+        let mut store = UserRequests::load(Some(&dir));
+        assert_eq!(store.route("rep-1", &["r-1".to_owned()], &captain("m1", "/p/site", "site", 0), 1_000), vec![Route::Session("s-anchor".into())]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_request_tab_without_a_session_yet_still_gets_its_report() {
+        let mut store = UserRequests::load(None);
+        let (a, _) = store.open("a", "Ask a", Some("site"), 1_000);
+        store.record_request_send(&a, None, &format!("{a}/r-1"), captain("m1", "/p/site", "site", 1_100));
+        assert_eq!(store.get(&a).unwrap().captains.len(), 1, "the request remembers its Captain");
+        assert_eq!(store.route("rep-1", &[format!("{a}/r-1")], &captain("m1", "/p/site", "site", 0), 2_000), vec![to(&a)]);
+    }
+
+    #[test]
+    fn two_unmatched_reports_from_one_captain_share_one_thread() {
+        let mut store = UserRequests::load(None);
+        let refused = captain("m1", "/p/\nsite", "site", 0);
+        let first = store.route("rep-1", &[], &refused, 1_000);
+        assert_eq!(store.route("rep-2", &[], &refused, 2_000), first, "a path the store refuses still finds its reports thread");
+        let elsewhere = store.route("rep-3", &[], &captain("m1", "/q/\nsite", "site", 0), 3_000);
+        assert_ne!(elsewhere, first, "never matched by folder name");
+        let other_machine = store.route("rep-4", &[], &captain("m2", "/p/\nsite", "site", 0), 4_000);
+        assert_ne!(other_machine, first);
+        assert_eq!(store.all().iter().filter(|r| r.kind == Kind::CaptainReports).count(), 3);
     }
 
     #[test]

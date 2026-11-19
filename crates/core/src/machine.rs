@@ -20472,6 +20472,75 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn a_report_after_clear_is_typed_into_its_request_tab_not_the_anchor() {
+        let (dir, _claude, m, path) = routing_machine("req-route-clear");
+        let anchor = m.open_global_orchestrator().unwrap();
+        let (id, tab) = request_on(&m, "k-1", "s-a");
+        send_from(&m, &tab, &path, "r-1").unwrap();
+        m.record_event(AgentEvent { session: Some("s-a2".into()), ..hook(&tab, AgentStatus::Done) });
+        assert_eq!(m.requests.lock().unwrap().get(&id).unwrap().session.as_deref(), Some("s-a2"), "the user typed /clear");
+        let handoff = m.deliver_report("report:1", &report_of(&path, "Shipped.", &[format!("{id}/r-1")])).unwrap();
+        assert_eq!(handoff.tab(), tab);
+        assert!(heard(&m, &tab, "Shipped."));
+        assert!(!heard(&m, &anchor, "Shipped."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_request_tab_that_sent_before_its_session_started_hears_back() {
+        let (dir, _claude, m, path) = routing_machine("req-route-unstarted");
+        let anchor = m.open_global_orchestrator().unwrap();
+        let opened = ask_new(&m, &[("k-1", "Fix the login.")]).unwrap();
+        let (id, tab) = (opened[0]["id"].as_str().unwrap().to_owned(), opened[0]["tab"].as_str().unwrap().to_owned());
+        assert_eq!(m.requests.lock().unwrap().get(&id).unwrap().session, None);
+        send_from(&m, &tab, &path, "r-1").unwrap();
+        let handoff = m.deliver_report("report:1", &report_of(&path, "Shipped.", &[format!("{id}/r-1")])).unwrap();
+        assert_eq!(handoff.tab(), tab);
+        assert!(!heard(&m, &anchor, "Shipped."));
+        assert_eq!(m.requests.lock().unwrap().all().iter().filter(|r| r.kind == crate::user_requests::Kind::CaptainReports).count(), 0, "no reports thread was opened");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unmatched_report_starts_its_own_reports_thread_not_the_anchor() {
+        let (dir, _claude, m, path) = routing_machine("req-route-phantom");
+        let anchor = m.open_global_orchestrator().unwrap();
+        m.record_event(AgentEvent { session: Some("s-0".into()), ..hook(&anchor, AgentStatus::Done) });
+        let handoff = m.deliver_report("report:1", &report_of(&path, "Unasked news.", &[])).unwrap();
+        let tab = handoff.tab().to_owned();
+        assert_ne!(tab, anchor);
+        assert!(!heard(&m, &anchor, "Unasked news."));
+        assert!(heard(&m, &tab, "Unasked news."));
+        assert!(!m.tab(&tab, |t| t.launch.iter().any(|a| a.contains("s-0"))).unwrap(), "it never resumes the anchor");
+        let id = m.view(&tab).unwrap().request.expect("a request tab");
+        let r = m.requests.lock().unwrap().get(&id).cloned().unwrap();
+        assert_eq!((r.title.as_str(), r.kind), ("Reports from Captain site", crate::user_requests::Kind::CaptainReports));
+        let next = m.deliver_report("report:2", &report_of(&path, "More news.", &[])).unwrap();
+        assert_eq!(next.tab(), tab, "the next unmatched report joins it");
+        assert!(heard(&m, &tab, "More news."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_report_delivered_before_a_restart_is_not_typed_again() {
+        let (dir, _claude, m, path) = routing_machine("req-route-crash");
+        let anchor = m.open_global_orchestrator().unwrap();
+        let (id, tab) = request_on(&m, "k-1", "s-a");
+        send_from(&m, &tab, &path, "r-1").unwrap();
+        // The last run typed it and stopped before its ledger saved the hand-off.
+        m.requests.lock().unwrap().delivered("report:1", &crate::user_requests::Route::Request(id.clone()));
+        let handoff = m.deliver_report("report:1", &report_of(&path, "Shipped.", &[format!("{id}/r-1")])).unwrap();
+        assert_eq!(handoff, Handoff::Delivered { tab: tab.clone() });
+        assert!(!heard(&m, &anchor, "Shipped."));
+        assert!(!heard(&m, &tab, "Shipped."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_retry_with_the_same_request_id_answers_the_first() {
         let (dir, _claude, m, path) = routing_machine("req-route-retry");
         let (id, tab) = request_on(&m, "k-1", "s-a");
