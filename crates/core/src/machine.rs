@@ -3421,7 +3421,7 @@ impl Machine {
                             self.add_tab(folder.clone(), account.clone(), vec![], env, false, None)
                         }
                     };
-                    let start = self.first_prompt(&tab, &id, text)?;
+                    let start = self.first_prompt(&tab, text)?;
                     (tab, start)
                 }
             };
@@ -3432,12 +3432,14 @@ impl Machine {
     }
 
     /// Starts request `id`'s new tab and types `text` once the session takes the terminal. With
-    /// `MAX_LIVE_REQUESTS` sessions mid-turn, `text` waits in the tab's queue instead and the tab
-    /// starts on it once one of them rests.
-    fn first_prompt(&self, tab: &str, id: &str, text: &str) -> Result<crate::user_requests::Start, String> {
+    /// `MAX_LIVE_REQUESTS` sessions mid-turn, the tab rests with `text` held instead, and starts
+    /// on it once one of them rests.
+    fn first_prompt(&self, tab: &str, text: &str) -> Result<crate::user_requests::Start, String> {
         if !self.room_for(tab) {
-            self.delegates.queue_request(tab, None, text.to_owned(), format!("{id}/first"));
-            self.tab(tab, |t| t.asleep = true)?;
+            self.tab(tab, |t| {
+                t.held.push(text.to_owned());
+                t.asleep = true;
+            })?;
             self.arm_delegate_pass();
             return Ok(crate::user_requests::Start::Queued);
         }
@@ -3755,12 +3757,18 @@ impl Machine {
         })?;
         let id = tab.to_owned();
         if ready == Ready::Stopped && self.tab(tab, |t| global::is_global(&t.env))? && !self.room_for(tab) {
+            // A session that never started reads no queue, so its line is held for its start.
             let session = self.tab(tab, |t| {
                 t.launch = t.claude_session.as_deref().map(|session| crate::delegate::resume_args(t.account.provider, session)).unwrap_or_default();
                 t.asleep = true;
+                if t.claude_session.is_none() {
+                    t.held.push(line.to_owned());
+                }
                 t.claude_session.clone()
             })?;
-            self.delegates.queue_request(tab, session, line.to_owned(), request_id.to_owned());
+            if session.is_some() {
+                self.delegates.queue_request(tab, session, line.to_owned(), request_id.to_owned());
+            }
             self.arm_delegate_pass();
             self.emit_tabs();
             return Ok(Handoff::Queued { position: sent.queued_on(tab) + 1, tab: id });
@@ -6736,7 +6744,8 @@ impl Machine {
     fn maybe_deliver(&self, tab: &str) {
         if !self.parent_idle(tab) {
             // A sleeping session starts for its news, and a later pass types it.
-            if self.tab(tab, |t| t.asleep).unwrap_or(false) && self.delegates.has_news(tab) {
+            // A request tab that waited for room rests with its first prompt held.
+            if self.tab(tab, |t| t.asleep).unwrap_or(false) && (self.delegates.has_news(tab) || self.tab(tab, |t| !t.held.is_empty()).unwrap_or(false)) {
                 // A global session waits for room under the live cap; a later pass looks again.
                 if self.tab(tab, |t| global::is_global(&t.env)).unwrap_or(false) && !self.room_for(tab) {
                     return;
