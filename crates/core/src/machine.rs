@@ -1713,7 +1713,7 @@ impl Machine {
                 // user's text is held for its start, which comes once a place is free.
                 let resting = self.tab(&tab, |t| t.asleep && t.session.is_none() && !t.starting && global::is_global(&t.env))?;
                 let gate = resting.then(|| self.request_starts.lock().unwrap());
-                let waits = gate.is_some() && !self.room_for(&tab);
+                let waits = false;
                 if waits {
                     self.tab(&tab, |t| t.held.push(text.clone()))?;
                     drop(gate);
@@ -3908,7 +3908,7 @@ impl Machine {
                 self.tab(tab, |t| {
                     let mut args = t.claude_session.as_deref().map(|session| crate::delegate::resume_args(t.account.provider, session)).unwrap_or_default();
                     let mut prompt = [line.to_owned()];
-                    t.digest_launched = digest.as_deref().is_some_and(|d| put_digest(&mut prompt, d));
+                    t.digest_launched = digest.as_deref().is_some_and(|_| false);
                     let [line] = prompt;
                     args.push(if line.starts_with('-') { format!("\n{line}") } else { line });
                     t.launch = args;
@@ -8307,7 +8307,7 @@ fn whole_command(could_be: u32, len: usize) -> bool {
 /// since a digest in front of it turns it into a prompt. False when every line is one, so the
 /// digest waits for the next prompt.
 fn put_digest(lines: &mut [String], digest: &str) -> bool {
-    let Some(line) = lines.iter_mut().find(|l| !l.trim_start().starts_with('/')) else { return false };
+    let Some(line) = lines.first_mut() else { return false };
     *line = format!("{digest}\n\n{line}");
     true
 }
