@@ -1169,8 +1169,8 @@ pub struct Machine {
     /// Every message handed to a Capitão or to the global orchestrator here. Never locked while
     /// holding `tabs`.
     sent: Mutex<global::Ledger>,
-    /// Held from the check for a free place under `MAX_LIVE_REQUESTS` until the start that takes
-    /// it, so two request sessions never both take the last one.
+    /// Held by `launch_gated` from the check for a free place under `MAX_LIVE_REQUESTS` until the
+    /// tab is marked starting, so two request sessions never both take the last one.
     request_starts: Mutex<()>,
     /// The ledger's projects in flight, which a tab's view reads while a hand-off holds `sent`.
     turns: global::Turns,
@@ -1711,19 +1711,9 @@ impl Machine {
             Call::Prompt { tab, text } => {
                 // A resting request's session starts under the cap like any other: at the cap the
                 // user's text is held for its start, which comes once a place is free.
-                let resting = self.tab(&tab, |t| t.asleep && t.session.is_none() && !t.starting && global::is_global(&t.env))?;
-                let gate = resting.then(|| self.request_starts.lock().unwrap());
-                let waits = gate.is_some() && !self.room_for(&tab);
-                if waits {
-                    self.tab(&tab, |t| t.held.push(text.clone()))?;
-                    drop(gate);
-                    self.arm_delegate_pass();
-                } else {
-                    self.type_line(&tab, &text, true).map_err(NotTyped::for_person)?;
-                    drop(gate);
-                }
+                let typed = self.type_line(&tab, &text, true).map_err(NotTyped::for_person)?;
                 self.user_typed(&tab);
-                json(waits.then_some(WAITS_FOR_ROOM))
+                json((!typed).then_some(WAITS_FOR_ROOM))
             }
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
@@ -2579,11 +2569,36 @@ impl Machine {
     }
 
     fn launch_tab(&self, tab: &str, cols: u16, rows: u16, replace: bool) -> Result<String, String> {
+        match self.launch_gated(tab, cols, rows, replace, None, |_| {})? {
+            Some(cwd) => Ok(cwd),
+            None => self.tab(tab, |t| t.cwd.display().to_string()),
+        }
+    }
+
+    /// The one start of every session. A global tab with no session running or starting takes
+    /// one of `MAX_LIVE_REQUESTS` places: `request_starts` is held from the room check until the
+    /// tab is marked starting, which `room_for` counts, and never through a wait for the session.
+    /// With no place free nothing starts: the tab rests with `hold` kept for its start, the pass
+    /// looks again, and this answers `None`. `prepare` readies the tab for the start it gets.
+    /// Never called with `request_starts` held.
+    fn launch_gated(&self, tab: &str, cols: u16, rows: u16, replace: bool, hold: Option<&str>, prepare: impl FnOnce(&mut Tab)) -> Result<Option<String>, String> {
         // A headless child's thread has no session of its own while the child works.
         if self.thread_task(tab, false).is_some_and(|task| self.delegates.get(&task).is_some_and(|t| t.thread.is_some_and(|thread| !thread.runs))) {
-            return self.tab(tab, |t| t.cwd.display().to_string());
+            return self.tab(tab, |t| t.cwd.display().to_string()).map(Some);
+        }
+        let gate = self.tab(tab, |t| global::is_global(&t.env))?.then(|| self.request_starts.lock().unwrap());
+        // Decided under the gate: a pass may have rested the tab since the caller looked.
+        if gate.is_some() && self.tab(tab, |t| t.session.is_none() && !t.starting)? && !self.room_for(tab) {
+            let changed = self.hold_for_room(tab, hold)?;
+            drop(gate);
+            self.arm_delegate_pass();
+            if changed {
+                self.emit_tabs();
+            }
+            return Ok(None);
         }
         let prepared = self.tab(tab, |t| {
+            prepare(t);
             if !replace && (t.session.is_some() || t.starting) && t.launch.is_empty() {
                 return None;
             }
@@ -2618,9 +2633,15 @@ impl Machine {
             }
             Some((t.cwd.clone(), t.account.clone(), t.program, args, t.env.clone(), t.bypass, asked, slept))
         })?;
+        // Starting, the tab holds its place: the rest of the start needs no gate.
+        drop(gate);
         let Some((cwd, account, program, args, env, bypass, asked, slept)) = prepared else {
-            return self.tab(tab, |t| t.cwd.display().to_string());
+            return self.tab(tab, |t| t.cwd.display().to_string()).map(Some);
         };
+        // What a restart kept for this start goes with it.
+        if let Some(request) = crate::user_requests::of_env(&env) {
+            self.requests.lock().unwrap().clear_held(request);
+        }
         let mut args = args;
         let mut prompt = vec![];
         if self.device_agents.as_ref().is_some_and(|f| f.exists()) {
@@ -2671,7 +2692,23 @@ impl Machine {
         }
         self.continue_when_limit_lifts(tab);
         self.emit_tabs();
-        Ok(cwd.display().to_string())
+        Ok(Some(cwd.display().to_string()))
+    }
+
+    /// `tab` rests until a place under `MAX_LIVE_REQUESTS` is free, with `line` held for its
+    /// start: in the tab, and in its request's record, which a restart reads back. Whether that
+    /// changed the tab.
+    fn hold_for_room(&self, tab: &str, line: Option<&str>) -> Result<bool, String> {
+        let (changed, request) = self.tab(tab, |t| {
+            let changed = !t.asleep || line.is_some();
+            t.asleep = true;
+            t.held.extend(line.map(str::to_owned));
+            (changed, crate::user_requests::of_env(&t.env).map(str::to_owned))
+        })?;
+        if let (Some(request), Some(line)) = (request, line) {
+            self.requests.lock().unwrap().hold(&request, line);
+        }
+        Ok(changed)
     }
 
     /// The config file Claude Code keeps `account`'s onboarding and folder trust in.
@@ -2915,8 +2952,9 @@ impl Machine {
 
     /// Starts the process of a session that sleeps, and waits out a start already under way, so
     /// what follows finds the session. One that runs is marked as in use, which keeps it from
-    /// going to sleep under what follows.
-    fn awake(&self, tab: &str) -> Result<(), String> {
+    /// going to sleep under what follows. False when a request's session waits for a free place
+    /// instead, with `hold` held for its start.
+    fn awake(&self, tab: &str, hold: Option<&str>) -> Result<bool, String> {
         let slept = self.tab(tab, |t| {
             t.seen = Some(SystemTime::now());
             t.asleep.then(|| t.screen.clone())
@@ -2924,13 +2962,15 @@ impl Machine {
         if let Ok(Some(screen)) = slept {
             // The size a client last gave the terminal, which it does not send again.
             let (rows, cols) = Some(screen.lock().unwrap().size).filter(|(rows, cols)| *rows > 0 && *cols > 0).unwrap_or((UNWATCHED.1, UNWATCHED.0));
-            self.start_claude(tab, cols, rows)?;
+            if self.launch_gated(tab, cols, rows, false, hold, |_| {})?.is_none() {
+                return Ok(false);
+            }
         }
         let starts = Instant::now();
         while self.tab(tab, |t| t.starting && t.session.is_none()).unwrap_or(false) && starts.elapsed() < START_WAIT {
             std::thread::sleep(Duration::from_millis(5));
         }
-        Ok(())
+        Ok(true)
     }
 
     /// What a client sends for the tab on its screen, and again while it stays there: a session
@@ -3177,7 +3217,7 @@ impl Machine {
         if Shells::owns(tab) {
             return self.shells.write(tab, data);
         }
-        self.awake(tab)?;
+        self.awake(tab, None)?;
         let mut cleared = false;
         let (submitted, mode_unknown) = self.tab(tab, |t| {
             let submitted = note_draft(&mut t.draft, data);
@@ -3441,9 +3481,10 @@ impl Machine {
                 let session = requests.get(&id).and_then(|r| r.session.clone());
                 (id, session)
             };
-            // A tab that started, or waits for room, already has the text.
+            // A tab that started, or waits for room, already has the text. One that started and
+            // rests now has a conversation.
             let handed = match self.request_tab(&id) {
-                Some(tab) => self.tab(&tab, |t| (t.session.is_some() || t.starting || !t.held.is_empty() || t.asleep).then_some(if t.session.is_none() && t.asleep { Start::Queued } else { Start::Started }))?.map(|start| (tab, start)),
+                Some(tab) => self.tab(&tab, |t| (t.session.is_some() || t.starting || !t.held.is_empty() || t.asleep).then_some(if t.session.is_none() && t.asleep && t.claude_session.is_none() { Start::Queued } else { Start::Started }))?.map(|start| (tab, start)),
                 None if session.is_some() => Some((self.open_request_tab(&id)?, Start::Started)),
                 None => None,
             };
@@ -3472,18 +3513,9 @@ impl Machine {
     /// `MAX_LIVE_REQUESTS` sessions mid-turn, the tab rests with `text` held instead, and starts
     /// on it once one of them rests.
     fn first_prompt(&self, tab: &str, text: &str) -> Result<crate::user_requests::Start, String> {
-        let gate = self.request_starts.lock().unwrap();
-        if !self.room_for(tab) {
-            self.tab(tab, |t| {
-                t.held.push(text.to_owned());
-                t.asleep = true;
-            })?;
-            drop(gate);
-            self.arm_delegate_pass();
+        if self.launch_gated(tab, UNWATCHED.0, UNWATCHED.1, false, Some(text), |_| {})?.is_none() {
             return Ok(crate::user_requests::Start::Queued);
         }
-        self.start_claude(tab, UNWATCHED.0, UNWATCHED.1)?;
-        drop(gate);
         self.type_prompt(tab, text).map_err(NotTyped::for_person)?;
         Ok(crate::user_requests::Start::Started)
     }
@@ -3581,16 +3613,23 @@ impl Machine {
         self.reopen_held_requests();
     }
 
-    /// After a restart, each request that waited for room to start rests again in a tab of its
-    /// own with the lines held for it, and starts on them once there is room.
+    /// After a restart, each request that waited for room to start rests again with the lines
+    /// held for it, in its restored tab, on its session, or new, and starts on them once there is room.
     fn reopen_held_requests(&self) {
-        let waiting = self.requests.lock().unwrap().unstarted();
+        let waiting = self.requests.lock().unwrap().held();
         let mut opened = false;
-        for (id, lines) in waiting.into_iter().filter(|(id, _)| self.request_tab(id).is_none()) {
-            let Ok(tab) = self.new_request_tab(&id) else { continue };
+        for (id, started, lines) in waiting {
+            let tab = match self.request_tab(&id) {
+                Some(tab) => Ok(tab),
+                None if started => self.open_request_tab(&id),
+                None => self.new_request_tab(&id),
+            };
+            let Ok(tab) = tab else { continue };
             let _ = self.tab(&tab, |t| {
-                t.held = lines;
-                t.asleep = true;
+                if t.session.is_none() && !t.starting && t.held.is_empty() {
+                    t.held = lines;
+                    t.asleep = true;
+                }
             });
             opened = true;
         }
@@ -3798,7 +3837,7 @@ impl Machine {
         let captain = CaptainRef { machine: report.machine.clone(), path: report.path.clone(), project: report.project.clone(), machine_name: report.machine_name.clone(), boxed: false, at: crate::connectors::unix_millis() };
         let (matched, routes) = {
             let mut requests = self.requests.lock().unwrap();
-            let matched = requests.routes(&report.answers, &captain, captain.at);
+            let matched = requests.routes(request_id, &report.answers, &captain, captain.at);
             let left: Vec<_> = matched.iter().filter(|route| !requests.was_delivered(request_id, route)).cloned().collect();
             (matched, left)
         };
@@ -3878,48 +3917,27 @@ impl Machine {
             Some(_) => Ready::Busy,
         })?;
         let id = tab.to_owned();
-        // Held until the start below, so another start never takes the place this one found.
-        let gate = (ready == Ready::Stopped && self.tab(tab, |t| global::is_global(&t.env))?).then(|| self.request_starts.lock().unwrap());
-        if gate.is_some() && !self.room_for(tab) {
-            drop(gate);
-            // A session that never started reads no queue, so its line is held for its start.
-            let (session, request) = self.tab(tab, |t| {
-                t.launch = t.claude_session.as_deref().map(|session| crate::delegate::resume_args(t.account.provider, session)).unwrap_or_default();
-                t.asleep = true;
-                if t.claude_session.is_none() {
-                    t.held.push(line.to_owned());
-                }
-                (t.claude_session.clone(), crate::user_requests::of_env(&t.env).map(str::to_owned))
-            })?;
-            // A request's held line outlives a restart in its record; the tab's own does not.
-            if let (None, Some(request)) = (&session, request) {
-                self.requests.lock().unwrap().hold(&request, line);
-            }
-            if session.is_some() {
-                self.delegates.queue_request(tab, session, line.to_owned(), request_id.to_owned());
-            }
-            self.arm_delegate_pass();
-            self.emit_tabs();
-            return Ok(Handoff::Queued { position: sent.queued_on(tab) + 1, tab: id });
-        }
         match ready {
             Ready::Stopped | Ready::Fresh => {
                 let digest = self.open_threads_digest(tab);
-                self.tab(tab, |t| {
+                let prepare = |t: &mut Tab| {
                     let mut args = t.claude_session.as_deref().map(|session| crate::delegate::resume_args(t.account.provider, session)).unwrap_or_default();
                     let mut prompt = [line.to_owned()];
                     t.digest_launched = digest.as_deref().is_some_and(|d| put_digest(&mut prompt, d));
                     let [line] = prompt;
                     args.push(if line.starts_with('-') { format!("\n{line}") } else { line });
                     t.launch = args;
-                })?;
-                if ready == Ready::Fresh {
-                    self.relaunch(tab, UNWATCHED.0, UNWATCHED.1)?;
-                } else {
-                    self.start_claude(tab, UNWATCHED.0, UNWATCHED.1)?;
+                };
+                // A session that never started reads no queue, so at the cap its line is held for its start.
+                let session = self.tab(tab, |t| t.claude_session.clone())?;
+                if self.launch_gated(tab, UNWATCHED.0, UNWATCHED.1, ready == Ready::Fresh, session.is_none().then_some(line), prepare)?.is_some() {
+                    return Ok(Handoff::Started { tab: id });
                 }
-                drop(gate);
-                Ok(Handoff::Started { tab: id })
+                if session.is_some() {
+                    self.delegates.queue_request(tab, session, line.to_owned(), request_id.to_owned());
+                    self.emit_tabs();
+                }
+                Ok(Handoff::Queued { position: sent.queued_on(tab) + 1, tab: id })
             }
             Ready::Idle if self.write_notice(tab, line) == Ok(true) => Ok(Handoff::Delivered { tab: id }),
             Ready::Idle | Ready::Busy if busy == BusyPolicy::Refuse => Ok(Handoff::Busy { tab: id }),
@@ -5305,12 +5323,15 @@ impl Machine {
     /// see a prompt.
     /// Nothing is typed while the screen shows a menu or dialog, held prompts included.
     fn type_prompt(&self, tab: &str, text: &str) -> Result<(), NotTyped> {
-        self.type_line(tab, text, false)
+        self.type_line(tab, text, false).map(|_| ())
     }
 
-    /// `type_prompt`, of the user's own `text` when `user`.
-    fn type_line(&self, tab: &str, text: &str, user: bool) -> Result<(), NotTyped> {
-        self.awake(tab).map_err(NotTyped::Failed)?;
+    /// `type_prompt`, of the user's own `text` when `user`. False when a request's session waits
+    /// for a free place, with `text` held for its start.
+    fn type_line(&self, tab: &str, text: &str, user: bool) -> Result<bool, NotTyped> {
+        if !self.awake(tab, Some(text)).map_err(NotTyped::Failed)? {
+            return Ok(false);
+        }
         // Read under the screen lock alone: held across the write, a paste larger than the pty's
         // free input would block it, and the reader thread would wait on the lock for good.
         let blocker = self.blocker(tab);
@@ -5355,7 +5376,7 @@ impl Machine {
         if wrote {
             self.arm_delegate_pass();
         }
-        Ok(())
+        Ok(true)
     }
 
     /// `restore_tabs`, returning only the tabs to start now: the ones with work left.
@@ -6961,14 +6982,9 @@ impl Machine {
             // A request tab that waited for room rests with its first prompt held.
             if self.tab(tab, |t| t.asleep).unwrap_or(false) && (self.delegates.has_news(tab) || self.tab(tab, |t| !t.held.is_empty()).unwrap_or(false)) {
                 // A global session waits for room under the live cap; a later pass looks again.
-                let gate = self.tab(tab, |t| global::is_global(&t.env)).unwrap_or(false).then(|| self.request_starts.lock().unwrap());
-                if gate.is_some() && !self.room_for(tab) {
-                    return;
-                }
-                if let Err(error) = self.awake(tab) {
+                if let Err(error) = self.awake(tab, None) {
                     eprintln!("pinned: could not wake {tab} for its news: {error}");
                 }
-                drop(gate);
                 self.arm_delegate_pass();
             }
             return;

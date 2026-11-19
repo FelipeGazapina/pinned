@@ -325,17 +325,26 @@ impl UserRequests {
         true
     }
 
-    /// `line` waits for request `id`'s first session, which has not started.
+    /// `line` waits for request `id`'s session to start, at the cap.
     pub fn hold(&mut self, id: &str, line: &str) {
-        if let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id && r.session.is_none()) {
+        if let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id) {
             r.held.push(line.to_owned());
             self.save();
         }
     }
 
-    /// Each open request still waiting to start, with the lines held for it.
-    pub fn unstarted(&self) -> Vec<(String, Vec<String>)> {
-        self.saved.requests.iter().filter(|r| r.closed.is_none() && r.session.is_none() && !r.held.is_empty()).map(|r| (r.id.clone(), r.held.clone())).collect()
+    /// Request `id`'s session started with what was held for it.
+    pub fn clear_held(&mut self, id: &str) {
+        if let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id && !r.held.is_empty()) {
+            r.held.clear();
+            self.save();
+        }
+    }
+
+    /// Each open request waiting for a place to start, whether its session started before, with
+    /// the lines held for it.
+    pub fn held(&self) -> Vec<(String, bool, Vec<String>)> {
+        self.saved.requests.iter().filter(|r| r.closed.is_none() && !r.held.is_empty()).map(|r| (r.id.clone(), r.session.is_some(), r.held.clone())).collect()
     }
 
     /// Marks the request Done. False for an unknown id.
@@ -386,7 +395,7 @@ impl UserRequests {
     /// Where `report`, from `captain` and answering `answers`, goes, leaving out what `delivered`
     /// already marked for it.
     pub fn route(&mut self, report: &str, answers: &[String], captain: &CaptainRef, now: u64) -> Vec<Route> {
-        let mut to = self.routes(answers, captain, now);
+        let mut to = self.routes(report, answers, captain, now);
         to.retain(|route| !self.was_delivered(report, route));
         to
     }
@@ -396,12 +405,13 @@ impl UserRequests {
         self.saved.delivered.iter().any(|d| d.report == report && &d.to == route)
     }
 
-    /// Where a report from `captain` answering `answers` goes, never empty:
+    /// Where `report`, from `captain` and answering `answers`, goes, never empty:
     /// 1. Each answer that a global tab sent, matched exactly: the request whose tab sent it, else
     ///    that session's request, or the session itself when no request holds it.
     /// 2. Only when none matched: the newest open request that sent to this Captain, else its open
-    ///    "Reports from Captain X" request, opened here when there is none.
-    pub fn routes(&mut self, answers: &[String], captain: &CaptainRef, now: u64) -> Vec<Route> {
+    ///    "Reports from Captain X" request, opened here when there is none. A retry of a report
+    ///    already typed in goes where the first try went, not to a request opened since.
+    pub fn routes(&mut self, report: &str, answers: &[String], captain: &CaptainRef, now: u64) -> Vec<Route> {
         let mut to: Vec<Route> = vec![];
         for sent in answers.iter().filter_map(|a| self.saved.sent.iter().find(|s| &s.id == a)) {
             let route = match (sent.request.as_deref().and_then(|id| self.get(id)), self.of_session(&sent.session)) {
@@ -414,7 +424,8 @@ impl UserRequests {
             }
         }
         if to.is_empty() {
-            to.push(Route::Request(self.fallback(captain, now)));
+            let earlier = self.saved.delivered.iter().find(|d| d.report == report).map(|d| d.to.clone());
+            to.push(earlier.unwrap_or_else(|| Route::Request(self.fallback(captain, now))));
         }
         to
     }
