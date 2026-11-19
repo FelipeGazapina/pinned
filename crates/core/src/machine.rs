@@ -2754,10 +2754,9 @@ impl Machine {
         Ok(changed)
     }
 
-    /// The record that keeps the lines held for global tab `tab`: its request's, the request on
-    /// its Claude session (the earlier conversation's tab), or the anchor's for a tab with
-    /// neither. None for a tab that is not global, or whose session is no request's, as the
-    /// anchor's once it ran one.
+    /// The record that keeps the lines held for global tab `tab`: its request's, the anchor's
+    /// whatever its session, or the request on its Claude session (the earlier conversation's
+    /// tab). None for a tab that is not global.
     fn held_record(&self, tab: &str) -> Option<HeldIn> {
         let (env, session) = self.tab(tab, |t| (t.env.clone(), t.claude_session.clone())).ok()?;
         self.held_record_of(&env, session.as_deref())
@@ -2770,10 +2769,19 @@ impl Machine {
         if let Some(request) = crate::user_requests::of_env(env) {
             return Some(HeldIn::Request(request.to_owned()));
         }
-        match session {
-            None => Some(HeldIn::Anchor),
-            Some(session) => self.requests.lock().unwrap().of_session(session).map(|r| HeldIn::Request(r.id.clone())),
+        let requests = self.requests.lock().unwrap();
+        if requests.is_anchor(true, None, session) {
+            return Some(HeldIn::Anchor);
         }
+        session.and_then(|s| requests.of_session(s)).map(|r| HeldIn::Request(r.id.clone()))
+    }
+
+    /// The anchor tabs open, with their Claude sessions.
+    fn anchors(&self) -> Vec<(TabId, Option<String>)> {
+        let open: Vec<(TabId, bool, Option<String>, Option<String>)> =
+            self.tabs.lock().unwrap().iter().map(|(id, t)| (id.clone(), global::is_global(&t.env), crate::user_requests::of_env(&t.env).map(str::to_owned), t.claude_session.clone())).collect();
+        let requests = self.requests.lock().unwrap();
+        open.into_iter().filter(|(_, global, request, session)| requests.is_anchor(*global, request.as_deref(), session.as_deref())).map(|(id, _, _, session)| (id, session)).collect()
     }
 
     /// The first `typed` lines `record` keeps were typed into its tab's session.
@@ -3480,7 +3488,7 @@ impl Machine {
     pub fn open_global_orchestrator(&self) -> Result<TabId, String> {
         std::fs::create_dir_all(&self.global_dir).map_err(|e| format!("could not make {}: {e}", self.global_dir.display()))?;
         let folder = self.global_folder();
-        let open = self.tabs.lock().unwrap().iter().filter(|(_, t)| global::is_global(&t.env) && crate::user_requests::of_env(&t.env).is_none()).map(|(id, _)| id.clone()).min_by_key(|id| tab_number(id));
+        let open = self.anchors().into_iter().map(|(id, _)| id).min_by_key(|id| tab_number(id));
         if let Some(id) = open {
             return Ok(id);
         }
@@ -3524,7 +3532,10 @@ impl Machine {
 
     /// Puts the requests' glances on one global tab: the anchor, else the newest request tab.
     fn carry_requests(&self, views: &mut [TabView]) {
-        let anchor = views.iter().filter(|v| v.orchestrator_global && v.request.is_none()).min_by_key(|v| v.opened);
+        let anchor = {
+            let requests = self.requests.lock().unwrap();
+            views.iter().filter(|v| requests.is_anchor(v.orchestrator_global, v.request.as_deref(), v.session.as_deref())).min_by_key(|v| v.opened)
+        };
         let carrier = anchor.or_else(|| views.iter().filter(|v| v.orchestrator_global).max_by_key(|v| v.opened)).map(|v| v.id.clone());
         let Some(carrier) = carrier else { return };
         let glances = {
@@ -3632,7 +3643,7 @@ impl Machine {
         Ok(crate::user_requests::Start::Started)
     }
 
-    /// A resting tab on request `id`'s session. The earlier conversation's is the anchor, with no
+    /// A resting tab on request `id`'s session. The earlier conversation's tab has, as the anchor, no
     /// request in its environment.
     fn open_request_tab(&self, id: &str) -> Result<TabId, String> {
         let (session, kind) = self.requests.lock().unwrap().get(id).map(|r| (r.session.clone(), r.kind)).ok_or_else(|| format!("No request {id}."))?;
@@ -3748,7 +3759,7 @@ impl Machine {
             };
             (tab, lines, HeldIn::Request(id))
         });
-        // The anchor held lines only while it had no session, so no saved tab restored it.
+        // The anchor's restored tab takes its lines, else a new one.
         let anchor = (!anchor.is_empty()).then(|| (self.open_global_orchestrator(), anchor, HeldIn::Anchor));
         for (tab, lines, record) in tabs.chain(anchor) {
             let Ok(tab) = tab else { continue };
@@ -3768,9 +3779,12 @@ impl Machine {
     }
 
     fn old_global_session(&self) -> Option<String> {
-        let anchor = |env: &[(String, String)]| global::is_global(env) && crate::user_requests::of_env(env).is_none();
-        let open = self.tabs.lock().unwrap().iter().filter(|(_, t)| anchor(&t.env)).filter_map(|(id, t)| Some((tab_number(id), t.claude_session.clone()?))).min().map(|(_, session)| session);
-        let saved = || self.sessions_file.as_ref().and_then(|file| sessions::load(file).into_iter().find(|s| anchor(&s.env)).map(|s| s.session));
+        let open = self.anchors().into_iter().filter_map(|(id, session)| Some((tab_number(&id), session?))).min().map(|(_, session)| session);
+        let saved = || {
+            let saved = sessions::load(self.sessions_file.as_ref()?);
+            let requests = self.requests.lock().unwrap();
+            saved.into_iter().find(|s| requests.is_anchor(global::is_global(&s.env), crate::user_requests::of_env(&s.env), Some(&s.session))).map(|s| s.session)
+        };
         open.or_else(saved).or_else(|| self.newest_global_transcript())
     }
 

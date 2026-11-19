@@ -315,6 +315,13 @@ impl UserRequests {
         self.saved.requests.iter().find(|r| r.session.as_deref() == Some(session))
     }
 
+    /// Whether a tab is the anchor: global, with no request in its environment, and with no
+    /// Claude session yet or one that is no request's. The earlier conversation's tab is global
+    /// with no request in its environment too, but runs on its request's session.
+    pub fn is_anchor(&self, global: bool, request: Option<&str>, session: Option<&str>) -> bool {
+        global && request.is_none() && session.is_none_or(|s| self.of_session(s).is_none())
+    }
+
     /// Opens a request for the app's `key`, or answers the one that key opened: its id, and
     /// whether it is new.
     pub fn open(&mut self, key: &str, title: &str, project: Option<&str>, now: u64) -> (String, bool) {
@@ -412,10 +419,11 @@ impl UserRequests {
         if self.saved.anchor_parked { vec![] } else { self.anchor_held() }
     }
 
-    /// Each open request waiting for a place to start, whether its session started before, with
-    /// the lines held for it. A parked request waits for its tab to be opened instead.
+    /// Each request waiting for a place to start, whether its session started before, with the
+    /// lines held for it, closed ones too, as the earlier conversation's. A parked request, as
+    /// one marked Done with its tab, waits for its tab to be opened instead.
     pub fn held(&self) -> Vec<(String, bool, Vec<String>)> {
-        self.saved.requests.iter().filter(|r| r.closed.is_none() && !r.held.is_empty() && !r.parked).map(|r| (r.id.clone(), r.session.is_some(), r.held.clone())).collect()
+        self.saved.requests.iter().filter(|r| !r.held.is_empty() && !r.parked).map(|r| (r.id.clone(), r.session.is_some(), r.held.clone())).collect()
     }
 
     /// Marks the request Done. False for an unknown id.
