@@ -685,7 +685,7 @@ impl CaptainRef {
     /// box. A box's folder name says nothing: every clone of a repo named `site` is `site`.
     fn serves(&self, report: &CaptainRef) -> bool {
         if self.boxed {
-            !self.machine.is_empty() && self.machine == report.machine
+            (!self.machine.is_empty() && self.machine == report.machine) || (!self.project.is_empty() && self.project == report.project)
         } else {
             self.machine == report.machine && self.path == report.path
         }
