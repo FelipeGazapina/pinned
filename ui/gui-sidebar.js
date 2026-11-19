@@ -494,7 +494,7 @@ async function openGlobalChat() {
   if (!host || machines.get(host)?.view?.online !== true) return tell(host ? `${esc(machineName(host))} is offline, so the orchestrator can't open.` : "No machine is online to open the orchestrator on.", 4000);
   if (narrow(768)) toggleSidebar(false);
   try {
-    const open = tabs.find((t) => t.machine === host && isGlobalOrchestratorTab(t));
+    const open = (typeof requestLandingTab === "function" ? requestLandingTab(host) : null) ?? tabs.find((t) => t.machine === host && isGlobalOrchestratorTab(t));
     const tab = open ?? await revealTab(host, await callOn(host, { cmd: "open_global_orchestrator" }));
     activate(tab);
   } catch (e) {
@@ -2406,7 +2406,8 @@ function drawNav() {
   orchestrator.title = away ? `${machineName(host)} is offline, so the orchestrator can't open` : "";
   setText(orchestrator.querySelector(".name"), globalSettings.name);
   setText(orchestrator.querySelector(".host"), host ? `${machineName(host)}${away ? " · offline" : ""}` : "");
-  drawCount(orchestrator.querySelector(".count"), counts.orchestrator, `${counts.orchestrator} ${counts.orchestrator === 1 ? "report" : "reports"} from the Captains you haven't read`);
+  const byRequests = typeof requestsBadge === "function" && requestsBadge() !== null;
+  drawCount(orchestrator.querySelector(".count"), counts.orchestrator, byRequests ? `${counts.orchestrator} ${counts.orchestrator === 1 ? "request needs" : "requests need"} you` : `${counts.orchestrator} ${counts.orchestrator === 1 ? "report" : "reports"} from the Captains you haven't read`);
   drawCount(navRow("needs-you").querySelector(".count"), counts.needsYou, `${counts.needsYou} waiting on you`);
   const reviews = navRow("pull-requests").querySelector(".meta");
   reviews.hidden = !(counts.reviews > 0);

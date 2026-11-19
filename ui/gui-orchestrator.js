@@ -197,7 +197,7 @@ const RAIL_WIDTH = 296;
 const RAIL_LANE = 680;
 function renderRail() {
   const thread = getComputedStyle(threadView);
-  const lane = chatEl.clientWidth - RAIL_WIDTH - parseFloat(thread.paddingLeft) - parseFloat(thread.paddingRight);
+  const lane = chatEl.clientWidth - RAIL_WIDTH - (chatEl.hasAttribute("data-requests") ? REQUESTS_WIDTH : 0) - parseFloat(thread.paddingLeft) - parseFloat(thread.paddingRight);
   const on = wantsRail(active) && !narrow(768) && lane >= RAIL_LANE;
   chatEl.toggleAttribute("data-rail", on);
   captainsRail.hidden = !on;

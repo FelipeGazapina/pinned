@@ -18,7 +18,7 @@ const requestFilter = call("requestFilter");
 const closeTo = call("closeTo");
 const requestPlans = call("requestPlans");
 const requestProgress = call("requestProgress");
-const unread = call("unread");
+const requestUnread = call("requestUnread");
 
 const glance = (id, over = {}) => ({
   id,
@@ -30,7 +30,9 @@ const glance = (id, over = {}) => ({
   needs: "",
   needs_at: null,
   last_user_at: null,
-  last: null,
+  last_who: null,
+  last_text: "",
+  last_at: null,
   replies: 0,
   captains: [],
   tab: null,
@@ -71,10 +73,10 @@ test("a request tab that waits on input makes the request need you", () => {
 
 const board = [
   glance("working-old", { opened_at: 100 }),
-  glance("done-new", { opened_at: 50, closed_at: 900, last: { who: "orchestrator", text: "Shipped", at: 900 } }),
+  glance("done-new", { opened_at: 50, closed_at: 900, last_who: "orchestrator", last_text: "Shipped", last_at: 900 }),
   glance("needs-old", { opened_at: 10, needs: "Approve the plan", needs_at: 20 }),
-  glance("working-new", { opened_at: 1, last: { who: "captain", text: "Tests green", at: 700 } }),
-  glance("needs-new", { opened_at: 5, last: { who: "captain", text: "Waiting", at: 800 } }),
+  glance("working-new", { opened_at: 1, last_who: "captain", last_text: "Tests green", last_at: 700 }),
+  glance("needs-new", { opened_at: 5, last_who: "captain", last_text: "Waiting", last_at: 800 }),
   glance("done-old", { opened_at: 30, closed_at: 40 }),
 ];
 const ctx = (g) => (g.id === "needs-new" ? { tabWaits: true } : {});
@@ -117,13 +119,13 @@ test("closeTo matches a paragraph to an open request of the same project", () =>
 });
 
 test("closeTo folds accents: migração matches migracao", () => {
-  const open = [glance("q1", { title: "Migracao banco", last: null })];
+  const open = [glance("q1", { title: "Migracao banco" })];
   assert.equal(closeTo("#pinned migração banco", open).id, "q1");
   assert.equal(closeTo("#pinned MIGRAÇÃO BANCO", open).id, "q1");
 });
 
 test("closeTo reads the last line of the thread as well as its title", () => {
-  const open = [glance("q1", { title: "Ajustes", last: { who: "captain", text: "Provedor autenticacao concluido", at: 5 } })];
+  const open = [glance("q1", { title: "Ajustes", last_who: "captain", last_text: "Provedor autenticacao concluido", last_at: 5 })];
   assert.equal(closeTo("#pinned provedor autenticacao", open).id, "q1");
 });
 
@@ -221,10 +223,10 @@ test("requestProgress sums done and total over the plans", () => {
   assert.deepEqual(requestProgress(), { done: 0, total: 0 });
 });
 
-test("unread is the replies the user has not seen, never below 0", () => {
-  assert.equal(unread({ replies: 5 }, 2), 3);
-  assert.equal(unread({ replies: 2 }, 5), 0);
-  assert.equal(unread({ replies: 3 }, null), 3);
-  assert.equal(unread({ replies: 3 }, undefined), 3);
-  assert.equal(unread({ replies: 0 }, 0), 0);
+test("requestUnread is the replies the user has not seen, never below 0", () => {
+  assert.equal(requestUnread({ replies: 5 }, 2), 3);
+  assert.equal(requestUnread({ replies: 2 }, 5), 0);
+  assert.equal(requestUnread({ replies: 3 }, null), 3);
+  assert.equal(requestUnread({ replies: 3 }, undefined), 3);
+  assert.equal(requestUnread({ replies: 0 }, 0), 0);
 });

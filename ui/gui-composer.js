@@ -234,7 +234,7 @@ function renderComposer(tab) {
   if (!tab) return setHtml(footer, "");
   const pr = prOf(tab);
   const ws = t.workspace;
-  setHtml(footer, `${workspaceHtml(tab)}
+  setHtml(footer, `${workspaceHtml(tab)}${typeof requestFooterHtml === "function" ? requestFooterHtml(tab) : ""}
     <span class="spacer"></span>
     ${prBadge(tab, "button", pr)}
     ${ws?.branch ? `<button type="button" class="branch" title="${esc(ws.branch)} · ${bindingLabel("composer.branch") ?? ""}">${icon("git-branch")}<span>${middle(ws.branch, 24)}</span>${icon("chevron-down", "chev")}</button>` : ""}`);

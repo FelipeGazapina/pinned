@@ -1,0 +1,538 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import vm from "node:vm";
+
+const read = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
+const settingsSrc = read("settings.js");
+const line = (src, from) => src.slice(src.indexOf(from), src.indexOf("\n", src.indexOf(from)));
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+/** Plain copies of what the page's own realm builds, for deepStrictEqual. */
+const plain = (value) => JSON.parse(JSON.stringify(value));
+
+function element() {
+  return {
+    hidden: false,
+    dataset: {},
+    innerHTML: "",
+    textContent: "",
+    attrs: {},
+    style: {},
+    listeners: {},
+    setAttribute(name, value) {
+      this.attrs[name] = String(value);
+    },
+    removeAttribute(name) {
+      delete this.attrs[name];
+    },
+    toggleAttribute(name, force) {
+      if (force) this.attrs[name] = "";
+      else delete this.attrs[name];
+      return !!force;
+    },
+    hasAttribute(name) {
+      return name in this.attrs;
+    },
+    addEventListener(type, fn) {
+      this.listeners[type] = fn;
+    },
+    after() {},
+    append() {},
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    classList: { toggle() {}, add() {}, remove() {} },
+  };
+}
+
+const glance = (id, over = {}) => ({
+  id,
+  title: `Request ${id}`,
+  project: "storefront",
+  opened_at: 1000,
+  kind: "asked",
+  closed_at: null,
+  needs: "",
+  needs_at: null,
+  last_user_at: null,
+  last_who: null,
+  last_text: "",
+  last_at: null,
+  replies: 0,
+  captains: [],
+  tab: null,
+  ...over,
+});
+const planGlance = (id, over = {}) => ({ id, title: id, state: "working", done: 1, total: 2, strips: [], requests: [], ...over });
+const stands = (over = {}) => ({ asked: "Find out why codes are late.", done: "Cause found.", left: "Tell support.", needs: "", links: ["Captain storefront", "PR #212 merged"], at: 5000, ...over });
+const view = (id, over = {}) => ({ glance: glance(id), stands: stands(), items: [], plans: [], ...over });
+
+/** gui-requests.js in a page: the app's globals stubbed, the real esc and the real model. */
+function harness({ tabs = [], reply = () => [], host = "mac", online = true } = {}) {
+  const log = { calls: [], told: [], activated: [], revealed: [], threads: 0, newRequest: 0, allActivity: 0 };
+  const els = { chat: element(), crumb: element(), footer: element(), head: element() };
+  const models = [];
+  const context = {
+    console,
+    Date,
+    Math,
+    JSON,
+    Promise,
+    Map,
+    Set,
+    Array,
+    Object,
+    String,
+    Number,
+    setTimeout,
+    clearTimeout,
+    tabs,
+    active: null,
+    machines: new Map([[host, { view: { online } }]]),
+    globalHostMachine: () => host,
+    isGlobalOrchestratorTab: (tab) => tab?.view?.orchestrator_global === true,
+    guiOn: () => true,
+    narrow: () => false,
+    shellPage: () => null,
+    ago: () => "12m",
+    icon: (name) => `<svg data-icon="${name}"></svg>`,
+    globalOrchestratorName: () => "Orchestrator",
+    waitingKindOf: () => null,
+    onModelChange: (fn) => models.push(fn),
+    visibleInterval: () => {},
+    renderThread: () => log.threads++,
+    tell: (html) => log.told.push(html),
+    activate: (tab) => {
+      context.active = tab;
+      log.activated.push(tab.key);
+    },
+    revealTab: async (machine, id) => {
+      log.revealed.push(`${machine}:${id}`);
+      const tab = context.tabs.find((t) => t.key === `${machine}:${id}`);
+      context.activate(tab);
+      return tab;
+    },
+    callOn: async (machine, call) => {
+      log.calls.push([machine, plain(call)]);
+      return context.reply(call);
+    },
+    reply,
+    localStorage: { getItem: () => null, setItem() {} },
+    document: {
+      getElementById: (id) => ({ chat: els.chat, "chat-head": els.head, "composer-footer": els.footer })[id] ?? null,
+      querySelector: (sel) => (sel === "#chat-head .crumb" ? els.crumb : null),
+      createElement: () => element(),
+    },
+  };
+  vm.createContext(context);
+  const run = (code) => vm.runInContext(code, context);
+  run(line(settingsSrc, "const esc = "));
+  for (const file of ["composer-tags.js", "requests-model.js", "gui-requests.js"]) run(read(file));
+  const column = run("requestsColumn");
+  const click = (el, selectors) => el.listeners.click({ target: { closest: (sel) => selectors[sel] ?? null } });
+  return { context, run, log, els, column, models, click };
+}
+
+/** A global tab as the host lists it: the anchor carries `requests`, a request tab carries `request`. */
+const anchorTab = (requests, over = {}) => ({ key: "mac:tab-1", machine: "mac", view: { id: "tab-1", orchestrator_global: true, requests, plans: [], ...over } });
+const requestTab = (id, tabId, over = {}) => ({ key: `mac:${tabId}`, machine: "mac", view: { id: tabId, orchestrator_global: true, request: id, plans: [], ...over } });
+
+const tagNames = (html) => [...html.matchAll(/<([a-z][a-z0-9-]*)/gi)].map((m) => m[1].toLowerCase());
+const hrefs = (html) => [...html.matchAll(/\bhref\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi)].map((m) => m[1]);
+const rowIds = (html) => [...html.matchAll(/data-request="([^"]*)"/g)].map((m) => m[1]);
+
+/** requestsColumnHtml with the page's defaults filled in. */
+const draw = (h, over = {}) => h.run(`requestsColumnHtml(${JSON.stringify({ glances: [], filter: "all", seen: {}, current: null, name: "Orchestrator", tabViews: {}, ...over })})`);
+
+const board = () => [
+  glance("q-done", { title: "Pause the workers", closed_at: 900, last_who: "orchestrator", last_text: "Paused, nothing was lost", last_at: 900 }),
+  glance("q-work", { title: "Add gift cards", replies: 2, last_who: "captain", last_text: "Tests are running in a box", last_at: 700, captains: [{ machine: "mac", path: "/repo/store", project: "storefront", machine_name: "MacBook" }] }),
+  glance("q-needs", { title: "Why are login codes late?", replies: 3, needs: "Choose how support is told.", needs_at: 800, last_who: "orchestrator", last_text: "Two options, pick one", last_at: 800 }),
+];
+const planTabs = { mac: [{ id: "tab-30", cwd: "/repo/store", plans: [planGlance("p1", { done: 7, total: 8, requests: ["q-work"] })] }] };
+
+test("the column draws the filters with their counts and one row per request", () => {
+  const h = harness();
+  const html = draw(h, { glances: board(), tabViews: planTabs });
+  assert.match(html, />\s*Requests\s*</, "the heading");
+  assert.match(html, />All\s*<span[^>]*>3</);
+  assert.match(html, />Needs you\s*<span[^>]*>1</);
+  assert.match(html, />Working\s*<span[^>]*>1</);
+  assert.match(html, />Done\s*<span[^>]*>1</);
+  assert.match(html, /aria-pressed="true"[^>]*>All/);
+  const work = html.slice(html.indexOf('data-request="q-work"'), html.indexOf('data-request="q-done"'));
+  assert.match(work, /Add gift cards/);
+  assert.match(work, /#storefront/);
+  assert.match(work, /Working/);
+  assert.match(work, /Captain storefront: Tests are running in a box/);
+  assert.match(work, /7 of 8 steps/);
+  assert.match(work, /12m/);
+  assert.match(work, />2<\/span>/, "the unread count");
+  assert.match(html, /New request/);
+  assert.match(html, /All activity/);
+});
+
+test("a request that needs you shows first, then working, then done", () => {
+  const h = harness();
+  const ids = (filter) => rowIds(draw(h, { glances: board(), filter }));
+  assert.deepEqual(ids("all"), ["q-needs", "q-work", "q-done"]);
+  assert.deepEqual(ids("needs"), ["q-needs"]);
+  assert.deepEqual(ids("working"), ["q-work"]);
+  assert.deepEqual(ids("done"), ["q-done"]);
+  assert.match(draw(h, { glances: board(), filter: "needs" }), /aria-pressed="true"[^>]*>Needs you/);
+});
+
+test("a plan that needs you, or a request tab that waits, puts the request first", () => {
+  const h = harness();
+  const glances = [glance("q-a", { opened_at: 1, last_at: 500 }), glance("q-b", { opened_at: 2, last_at: 600 }), glance("q-c", { opened_at: 3, last_at: 100 })];
+  const tabViews = {
+    mac: [
+      { id: "tab-30", cwd: "/x", plans: [planGlance("p1", { state: "needs_you", requests: ["q-c"] })] },
+      { id: "tab-31", orchestrator_global: true, request: "q-a", status: "needs-input", running: true, interrupted: true, plans: [] },
+    ],
+  };
+  assert.deepEqual(rowIds(draw(h, { glances, tabViews })), ["q-a", "q-c", "q-b"]);
+});
+
+test("the unread count is the replies not yet seen on this device, and a seen request draws none", () => {
+  const h = harness();
+  const glances = [glance("q1", { replies: 3 })];
+  assert.match(draw(h, { glances }), />3<\/span>/);
+  assert.match(draw(h, { glances, seen: { q1: 1 } }), />2<\/span>/);
+  assert.doesNotMatch(draw(h, { glances, seen: { q1: 3 } }), /unread/);
+});
+
+test("the open request's row is the current one", () => {
+  const h = harness();
+  const html = draw(h, { glances: board(), current: "q-work" });
+  assert.match(html, /data-request="q-work"[^>]*aria-current="true"/);
+  assert.match(html, /data-request="q-needs"[^>]*aria-current="false"/);
+});
+
+test("an empty list says so", () => {
+  const h = harness();
+  const html = draw(h);
+  assert.match(html, /Nothing here\. A request you send shows up as a thread\./);
+});
+
+test("the glances come from the host's tab that carries them, and nothing is asked", async () => {
+  const tabs = [requestTab("q1", "tab-12"), anchorTab(board())];
+  const h = harness({ tabs });
+  await h.run("refreshRequests()");
+  assert.deepEqual(h.log.calls, []);
+  assert.equal(h.run("requestsOn()"), true);
+  assert.deepEqual(plain(h.run("requestGlances()")).map((g) => g.id), ["q-done", "q-work", "q-needs"]);
+});
+
+test("a tab of another machine that carries requests is not the host's", async () => {
+  const stray = { key: "mini:tab-9", machine: "mini", view: { id: "tab-9", orchestrator_global: true, requests: board() } };
+  const h = harness({ tabs: [stray], reply: () => [] });
+  await h.run("refreshRequests()");
+  assert.deepEqual(h.log.calls, [["mac", { cmd: "user_requests" }]]);
+});
+
+test("with no tab carrying requests the screen asks user_requests, and draws its answer", async () => {
+  const h = harness({ tabs: [requestTab("q1", "tab-12")], reply: (call) => (call.cmd === "user_requests" ? board() : null) });
+  assert.equal(h.run("requestsOn()"), false, "before the answer the single chat stays");
+  await h.run("refreshRequests()");
+  assert.deepEqual(h.log.calls, [["mac", { cmd: "user_requests" }]]);
+  assert.equal(h.run("requestsOn()"), true);
+  h.context.active = h.context.tabs[0];
+  h.run("renderRequests()");
+  assert.equal(h.column.hidden, false);
+  assert.deepEqual(rowIds(h.column.innerHTML), ["q-needs", "q-work", "q-done"]);
+});
+
+test("when user_requests errors the single chat shows, with no banner and no message", async () => {
+  const anchor = anchorTab(undefined);
+  const h = harness({ tabs: [anchor] });
+  h.context.reply = () => {
+    throw new Error("unknown variant `user_requests`");
+  };
+  h.context.active = anchor;
+  await h.run("refreshRequests()");
+  h.run("renderRequests()");
+  assert.deepEqual(h.log.calls, [["mac", { cmd: "user_requests" }]]);
+  assert.equal(h.run("requestsOn()"), false);
+  assert.equal(h.column.hidden, true, "the column stays away");
+  assert.equal(h.column.innerHTML, "", "and holds nothing, not even an error");
+  assert.equal("data-requests" in h.els.chat.attrs, false, "the chat keeps its width");
+  assert.deepEqual(h.log.told, [], "nothing is told");
+  assert.equal(h.run("requestsBadge()"), null, "the Orchestrator row keeps counting reports");
+  assert.equal(h.run("requestCardHtml(active)"), "");
+  assert.equal(h.run("requestFooterHtml(active)"), "");
+  await h.run("refreshRequests()");
+  assert.equal(h.log.calls.length, 1, "an old host is not asked again at once");
+});
+
+test("opening the Orchestrator on an old host lands on the first global tab, as before", async () => {
+  const first = anchorTab(undefined);
+  const second = requestTab("q1", "tab-12");
+  const h = harness({ tabs: [first, second] });
+  h.context.reply = () => {
+    throw new Error("unknown variant");
+  };
+  await h.run("refreshRequests()");
+  assert.equal(h.run("requestLandingTab('mac')").key, "mac:tab-1");
+});
+
+test("opening the Orchestrator lands on the request that needs you, else the anchor", () => {
+  const anchor = anchorTab(board());
+  const asking = requestTab("q-needs", "tab-20");
+  const working = requestTab("q-work", "tab-21");
+  const h = harness({ tabs: [anchor, working, asking] });
+  const g = board();
+  g[2].tab = "tab-20";
+  g[1].tab = "tab-21";
+  anchor.view.requests = g;
+  assert.equal(h.run("requestLandingTab('mac')").key, "mac:tab-20");
+  g[2].needs = "";
+  assert.equal(h.run("requestLandingTab('mac')").key, "mac:tab-1", "with nothing waiting the anchor is where it lands");
+  g[2].needs = "Choose how support is told.";
+  h.context.active = working;
+  h.run("renderRequests()");
+  assert.equal(h.run("requestLandingTab('mac')").key, "mac:tab-21", "the request last open is where it comes back to, even with another waiting");
+});
+
+test("the Orchestrator's badge counts the requests in needs", () => {
+  const h = harness({ tabs: [anchorTab(board())] });
+  assert.equal(h.run("requestsBadge()"), 1);
+  const more = board();
+  more[1].needs = "Approve the plan";
+  more[1].needs_at = 10;
+  h.context.tabs[0].view.requests = more;
+  assert.equal(h.run("requestsBadge()"), 2);
+  h.context.tabs[0].view.requests = more.map((g) => ({ ...g, closed_at: 5 }));
+  assert.equal(h.run("requestsBadge()"), 0);
+});
+
+test("a row opens its request's own tab", async () => {
+  const g = board();
+  g[2].tab = "tab-20";
+  const asking = requestTab("q-needs", "tab-20");
+  const h = harness({ tabs: [anchorTab(g), asking] });
+  h.click(h.column, { "[data-request]": { dataset: { request: "q-needs" } } });
+  await flush();
+  assert.deepEqual(h.log.activated, ["mac:tab-20"]);
+  assert.deepEqual(h.log.calls, []);
+});
+
+test("a row whose request has no tab asks the host to open one", async () => {
+  const g = board();
+  const resting = requestTab("q-done", "tab-40");
+  const h = harness({
+    tabs: [anchorTab(g), resting],
+    reply: (call) => (call.action === "open" ? { ...g[0], tab: "tab-40" } : null),
+  });
+  h.click(h.column, { "[data-request]": { dataset: { request: "q-done" } } });
+  await flush();
+  assert.deepEqual(h.log.calls, [["mac", { cmd: "user_request_action", id: "q-done", action: "open" }]]);
+  assert.deepEqual(h.log.revealed, ["mac:tab-40"]);
+});
+
+test("the column shows only beside a global tab, on a wide screen, in the app view", () => {
+  const anchor = anchorTab(board());
+  const plainTab = { key: "mac:tab-3", machine: "mac", view: { id: "tab-3", plans: [] } };
+  const h = harness({ tabs: [anchor, plainTab] });
+  h.context.active = plainTab;
+  h.run("renderRequests()");
+  assert.equal(h.column.hidden, true, "an ordinary thread has no column");
+  h.context.active = anchor;
+  h.context.narrow = () => true;
+  h.run("renderRequests()");
+  assert.equal(h.column.hidden, true, "a phone is unit 12's");
+  h.context.narrow = () => false;
+  h.context.guiOn = () => false;
+  h.run("renderRequests()");
+  assert.equal(h.column.hidden, true, "the terminal view has none");
+  h.context.guiOn = () => true;
+  h.run("renderRequests()");
+  assert.equal(h.column.hidden, false);
+});
+
+test("a filter button redraws the column with that filter", () => {
+  const anchor = anchorTab(board());
+  const h = harness({ tabs: [anchor] });
+  h.context.active = anchor;
+  h.run("renderRequests()");
+  assert.equal(h.column.hidden, false);
+  assert.equal(h.els.chat.attrs["data-requests"], "");
+  h.click(h.column, { "[data-rq-filter]": { dataset: { rqFilter: "done" } } });
+  assert.deepEqual(rowIds(h.column.innerHTML), ["q-done"]);
+});
+
+test("New request and All activity call their hooks", () => {
+  const anchor = anchorTab(board());
+  const h = harness({ tabs: [anchor] });
+  h.context.openNewRequest = () => h.log.newRequest++;
+  h.context.openAllActivity = () => h.log.allActivity++;
+  h.context.active = anchor;
+  h.run("renderRequests()");
+  h.click(h.column, { "[data-rq-new]": { dataset: {} } });
+  h.click(h.column, { "[data-rq-all]": { dataset: {} } });
+  assert.deepEqual([h.log.newRequest, h.log.allActivity], [1, 1]);
+});
+
+test("the hooks unit 10 and unit 11 fill in exist as stubs, and a later definition wins", () => {
+  const h = harness({ tabs: [] });
+  assert.equal(h.run("typeof openNewRequest"), "function");
+  assert.equal(h.run("typeof openAllActivity"), "function");
+});
+
+test("the header names the request, its project and state, and offers Mark done", () => {
+  const g = board();
+  g[2].tab = "tab-20";
+  const asking = requestTab("q-needs", "tab-20");
+  const h = harness({ tabs: [anchorTab(g), asking] });
+  const html = h.run("requestCrumbHtml(tabs[1])");
+  assert.match(html, /Why are login codes late\?/);
+  assert.match(html, /#storefront/);
+  assert.match(html, /Needs you/);
+  assert.match(html, /data-request-action="done"[^>]*>Mark done</);
+});
+
+test("Mark done sends user_request_action done for the request", async () => {
+  const g = board();
+  g[1].tab = "tab-21";
+  const working = requestTab("q-work", "tab-21");
+  const h = harness({ tabs: [anchorTab(g), working], reply: () => ({ ...g[1], closed_at: 5000 }) });
+  h.click(h.els.crumb, { "[data-request-action]": { dataset: { requestAction: "done", requestId: "q-work" } } });
+  await flush();
+  assert.deepEqual(h.log.calls, [["mac", { cmd: "user_request_action", id: "q-work", action: "done" }]]);
+  assert.equal(h.run("requestGlances().find((g) => g.id === 'q-work').closed_at"), 5000, "the reply shows before the next tabs push");
+});
+
+test("a done request offers Reopen, which sends user_request_action reopen", async () => {
+  const g = board();
+  g[0].tab = "tab-40";
+  const done = requestTab("q-done", "tab-40");
+  const h = harness({ tabs: [anchorTab(g), done], reply: () => ({ ...g[0], closed_at: null }) });
+  const html = h.run("requestCrumbHtml(tabs[1])");
+  assert.match(html, /data-request-action="reopen"[^>]*>Reopen</);
+  assert.match(html, /Done/);
+  h.click(h.els.crumb, { "[data-request-action]": { dataset: { requestAction: "reopen", requestId: "q-done" } } });
+  await flush();
+  assert.deepEqual(h.log.calls, [["mac", { cmd: "user_request_action", id: "q-done", action: "reopen" }]]);
+});
+
+test("a failed action tells the user and keeps the request as it was", async () => {
+  const g = board();
+  g[1].tab = "tab-21";
+  const h = harness({ tabs: [anchorTab(g), requestTab("q-work", "tab-21")] });
+  h.context.reply = () => {
+    throw new Error("the host is busy");
+  };
+  h.click(h.els.crumb, { "[data-request-action]": { dataset: { requestAction: "done", requestId: "q-work" } } });
+  await flush();
+  assert.equal(h.log.told.length, 1);
+  assert.match(h.log.told[0], /the host is busy/);
+  assert.equal(h.run("requestGlances().find((g) => g.id === 'q-work').closed_at"), null);
+});
+
+test("the card reads You asked, Done, Left, Needs you and the links from user_request", async () => {
+  const g = board();
+  g[2].tab = "tab-20";
+  const asking = requestTab("q-needs", "tab-20");
+  const h = harness({
+    tabs: [anchorTab(g), asking],
+    reply: (call) => (call.cmd === "user_request" ? view("q-needs", { glance: g[2], stands: stands({ needs: "Choose how support is told." }) }) : null),
+  });
+  h.context.active = asking;
+  assert.match(h.run("requestCardHtml(active)"), /Where this stands/, "the card holds its place while it loads");
+  await h.run("ensureRequestView(active)");
+  assert.deepEqual(h.log.calls, [["mac", { cmd: "user_request", id: "q-needs" }]]);
+  const html = h.run("requestCardHtml(active)");
+  for (const [label, text] of [["You asked", "Find out why codes are late."], ["Done", "Cause found."], ["Left", "Tell support."], ["Needs you", "Choose how support is told."]]) {
+    assert.match(html, new RegExp(`${label}[\\s\\S]*${text.replace(/[.?]/g, "\\$&")}`));
+  }
+  assert.match(html, /Captain storefront/);
+  assert.match(html, /PR #212 merged/);
+  assert.match(html, /data-needs="true"/);
+  await h.run("ensureRequestView(active)");
+  assert.equal(h.log.calls.length, 1, "an unchanged request is not read again");
+});
+
+test("Needs you always shows, and says nothing is needed when nothing is", async () => {
+  const g = board();
+  g[1].tab = "tab-21";
+  const working = requestTab("q-work", "tab-21");
+  const h = harness({ tabs: [anchorTab(g), working], reply: () => view("q-work", { glance: g[1], stands: stands({ needs: "" }) }) });
+  h.context.active = working;
+  await h.run("ensureRequestView(active)");
+  const html = h.run("requestCardHtml(active)");
+  assert.match(html, /Needs you/);
+  assert.match(html, /Nothing right now\./);
+  assert.match(html, /data-needs="false"/);
+});
+
+test("a stale need reads as nothing needed", async () => {
+  const g = board();
+  g[2].tab = "tab-20";
+  g[2].last_user_at = 900;
+  const asking = requestTab("q-needs", "tab-20");
+  const h = harness({ tabs: [anchorTab(g), asking], reply: () => view("q-needs", { glance: g[2], stands: stands({ needs: "Choose how support is told." }) }) });
+  h.context.active = asking;
+  await h.run("ensureRequestView(active)");
+  assert.match(h.run("requestCardHtml(active)"), /Nothing right now\./);
+});
+
+test("the card is drawn only in a request tab", () => {
+  const h = harness({ tabs: [anchorTab(board()), requestTab("q-work", "tab-21")] });
+  assert.equal(h.run("requestCardHtml(tabs[0])"), "", "the anchor keeps today's look");
+  assert.equal(h.run("requestFooterHtml(tabs[0])"), "");
+  assert.equal(h.run("requestCrumbHtml(tabs[0])"), "");
+});
+
+test("the composer footer says the reply stays in this thread and offers New request", () => {
+  const g = board();
+  g[1].tab = "tab-21";
+  const h = harness({ tabs: [anchorTab(g), requestTab("q-work", "tab-21")] });
+  const html = h.run("requestFooterHtml(tabs[1])");
+  assert.match(html, /#storefront/);
+  assert.match(html, /stays in this thread/);
+  assert.match(html, /data-new-request[^>]*>Another subject\? New request</);
+});
+
+test("the footer's New request calls the hook", () => {
+  const h = harness({ tabs: [] });
+  h.context.openNewRequest = () => h.log.newRequest++;
+  h.click(h.els.footer, { "[data-new-request]": { dataset: {} } });
+  assert.equal(h.log.newRequest, 1);
+});
+
+test("markup in any field stays text: no img element and no javascript: href in any request screen", async () => {
+  const bad = "<img src=x onerror=alert(1)>";
+  const link = "[x](javascript:alert(1))";
+  const hostile = glance(`${bad}`, {
+    title: `${bad} ${link}`,
+    project: `${bad}${link}`,
+    last_who: "captain",
+    last_text: `${bad} ${link}`,
+    needs: `${bad} ${link}`,
+    needs_at: 5,
+    replies: 4,
+    tab: `${bad}`,
+    captains: [{ machine: bad, path: bad, project: bad, machine_name: bad }],
+  });
+  const anchor = anchorTab([hostile]);
+  const own = requestTab(hostile.id, hostile.tab, { plans: [] });
+  const h = harness({
+    tabs: [anchor, own],
+    reply: () => view(hostile.id, { glance: hostile, stands: stands({ asked: `${bad} ${link}`, done: `${bad} ${link}`, left: `${bad} ${link}`, needs: `${bad} ${link}`, links: [`${bad} ${link}`, link, "javascript:alert(1)"] }) }),
+  });
+  h.context.active = own;
+  await h.run("ensureRequestView(active)");
+  const pieces = {
+    column: draw(h, { glances: [hostile], current: hostile.id, name: bad }),
+    crumb: h.run("requestCrumbHtml(tabs[1])"),
+    card: h.run("requestCardHtml(tabs[1])"),
+    footer: h.run("requestFooterHtml(tabs[1])"),
+  };
+  for (const [name, html] of Object.entries(pieces)) {
+    assert.ok(html.length > 0, `${name} draws`);
+    assert.deepEqual(tagNames(html).filter((tag) => tag === "img"), [], `${name}: no img element`);
+    assert.deepEqual(hrefs(html).filter((href) => /javascript:/i.test(href)), [], `${name}: no javascript: href`);
+    assert.doesNotMatch(html, /<img/i, `${name}: no raw <img`);
+  }
+  assert.ok(pieces.card.includes("&#60;img src=x onerror=alert(1)&#62;"), "the card shows the markup as text");
+  assert.ok(pieces.column.includes("&#60;img src=x onerror=alert(1)&#62;"), "the row shows the markup as text");
+});

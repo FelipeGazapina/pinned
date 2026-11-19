@@ -992,6 +992,9 @@ function userHtml(user, t, tab, first) {
 const globalLane = (tab) => typeof isGlobalOrchestratorTab === "function" && isGlobalOrchestratorTab(tab);
 /** A request's own thread: a global tab that carries its request. It draws the board's body: a
  * "Sent to Captain" divider for each send, report rows with the machine only, no Worked for fold. */
+/** A request thread's "Where this stands" card and what it reads, from gui-requests.js. */
+const requestCardOf = (tab) => (typeof requestCardHtml === "function" ? requestCardHtml(tab) : "");
+const requestCardKeyOf = (tab) => (typeof requestCardKey === "function" ? requestCardKey(tab) : null);
 const requestLane = (tab) => globalLane(tab) && !!tab.view.request;
 /** A sent message's body, with its #project and @machine tags painted in the orchestrator's lane. */
 const laneTagsHtml = (tab, html) => (globalLane(tab) ? orchestratorTagsHtml(html) : html);
@@ -1260,7 +1263,7 @@ function renderThread() {
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.start, !!t.fetchingOlder, t.olderError, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), !!tab.view.compacting, resume, boxKey(box), convex && [convex.repo, convex.deployment], globalLane(tab) ? globalLaneKey(tab) : null, workersKey(tab), workerViewKey(tab), panelTurn(tab), waiting.rows.map((p) => [p.id, p.state, p.sent, p.text]), waiting.busy, waiting.stale]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.start, !!t.fetchingOlder, t.olderError, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), !!tab.view.compacting, resume, boxKey(box), convex && [convex.repo, convex.deployment], globalLane(tab) ? globalLaneKey(tab) : null, requestCardKeyOf(tab), workersKey(tab), workerViewKey(tab), panelTurn(tab), waiting.rows.map((p) => [p.id, p.state, p.sent, p.text]), waiting.busy, waiting.stale]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
@@ -1295,7 +1298,7 @@ function renderThread() {
   const card = threadView.querySelector("#dialog-slot > .dialog-card");
   const focused = card?.contains(document.activeElement);
   const saying = document.activeElement?.dataset?.workerSay;
-  threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${resume ? resumeHtml(tab) : ""}${box ? boxHtml(box) : ""}${convex ? convexBannerHtml(convex) : ""}${body}${sub ? "" : `<div id="dialog-slot"></div>`}</div>`;
+  threadView.innerHTML = `<div class="lane" data-turns="${shown.length}">${sub ? "" : requestCardOf(tab)}${resume ? resumeHtml(tab) : ""}${box ? boxHtml(box) : ""}${convex ? convexBannerHtml(convex) : ""}${body}${sub ? "" : `<div id="dialog-slot"></div>`}</div>`;
   drawUploadImages();
   laneGrowth.disconnect();
   laneGrowth.observe(threadView.firstElementChild);
