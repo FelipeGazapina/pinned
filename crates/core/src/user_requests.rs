@@ -315,10 +315,10 @@ impl UserRequests {
         self.saved.requests.iter().find(|r| r.session.as_deref() == Some(session))
     }
 
-    /// Whether a tab is the anchor: global, with no request in its environment, and with no
-    /// Claude session yet or one that is no request's. The earlier conversation's tab is global
-    /// with no request in its environment too, but runs on its request's session.
-    pub fn is_anchor(&self, global: bool, request: Option<&str>, session: Option<&str>) -> bool {
+    /// Whether the lines a tab holds are the anchor's: global, with no request in its
+    /// environment, and with no Claude session yet or one that is no request's. The earlier
+    /// conversation's tab, the migrated anchor, keeps its lines in its request's record.
+    pub fn holds_for_anchor(&self, global: bool, request: Option<&str>, session: Option<&str>) -> bool {
         global && request.is_none() && session.is_none_or(|s| self.of_session(s).is_none())
     }
 
