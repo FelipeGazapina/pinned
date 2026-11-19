@@ -85,19 +85,26 @@ const SEND_TO_CAPTAIN = /(?:^|__)send_to_captain$/;
 const SEND_OUTCOMES = { entregue: "delivered", na_fila: "queued", iniciado: "started", ocupado: "busy, not sent" };
 
 /** The Captain a `send_to_captain` step handed a message to and how that went, or null for any other
- * step. `name` is the folder of the step's `project` argument (a repo key, a path or `<machine>:<path>`),
- * `outcome` the host's answer when it is one of SEND_OUTCOMES, `position` the queue place of a
- * `na_fila`, and `failed` whether the call came back as an error. Nothing else of the answer is kept. */
+ * step. `name` is the last part of the step's `project` argument (a repo key, a path or `<machine>:<path>`),
+ * `machine` the step's `machine` argument or the `<machine>` of the project,
+ * `tab` the Captain's tab the host answered with, `outcome` the host's answer when it is one of
+ * SEND_OUTCOMES, `position` the queue place of a `na_fila`, and `failed` whether the call came back
+ * as an error. Nothing else of the answer is kept. */
 function sendToCaptainOf(step) {
   if (step?.kind !== "tool" || !SEND_TO_CAPTAIN.test(step.name ?? "")) return null;
-  const project = String(step.args?.find(([key]) => key === "project")?.[1] ?? "").trim();
+  const arg = (key) => String(step.args?.find(([k]) => k === key)?.[1] ?? "").trim();
+  const project = arg("project");
   let answer = null;
   try {
     answer = JSON.parse(step.result?.text ?? "");
   } catch {}
   const outcome = Object.hasOwn(SEND_OUTCOMES, answer?.outcome) ? answer.outcome : null;
   const position = Number.isInteger(answer?.position) && answer.position > 0 ? answer.position : null;
-  return { name: project.replace(/[\\/]+$/, "").split(/[\\/:]/).pop() || project, outcome, position, failed: step.result?.error === true };
+  const tab = typeof answer?.tab === "string" && answer.tab ? answer.tab : null;
+  const prefixed = project.match(/^([^:\\/]{2,}):/)?.[1] ?? null;
+  const machine = arg("machine") || prefixed || null;
+  const name = project.replace(/[\\/]+$/, "").split(/[\\/:]/).pop() || project;
+  return { name, machine, tab, outcome, position, failed: step.result?.error === true };
 }
 
 /** The divider's words: "Sent to Captain site · delivered", or, once that Captain has a plan for the

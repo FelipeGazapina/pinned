@@ -129,18 +129,26 @@ function threadRequestPlans(tab) {
   return requestPlans(glance, byMachine);
 }
 
-/** How many lists the request's plans hold on the Captain a send went to: the plans that sit in a
- * checkout of the glance's Captain of that name. */
-function sentPlanLists(tab, name) {
+/** The Captain a send went to and how many lists the request's plans hold there. The plans are
+ * those on the tab the host answered with (and the step's machine, when it named one). With no tab
+ * in the answer, they are the plans in a checkout of the glance's Captain whose project key is the
+ * step's repo. A folder name never matches. `name` is that Captain's project when a plan matched
+ * and its checkout is a glance Captain, else the step's own name. */
+function sentPlan(tab, sent) {
   const glance = threadRequestGlance(tab);
-  if (!glance) return 0;
-  const base = (path) => String(path).split(/[\\/]/).pop();
-  const captains = glance.captains.filter((c) => tagSlug(c.project) === tagSlug(name) || tagSlug(base(c.path)) === tagSlug(name));
+  const none = { name: sent.name, lists: 0 };
+  if (!glance || sent.failed) return none;
+  const keyed = sent.tab ? [] : glance.captains.filter((c) => tagSlug(c.project) === tagSlug(sent.name) && (!sent.machine || c.machine === sent.machine));
+  const plans = threadRequestPlans(tab).filter(({ machine, tab: view }) =>
+    sent.tab ? view.id === sent.tab && (!sent.machine || machine === sent.machine) : keyed.some((c) => c.machine === machine && c.path === view.cwd),
+  );
   let lists = 0;
-  for (const { machine, tab: view, plan } of threadRequestPlans(tab)) {
-    if (captains.some((c) => c.machine === machine && c.path === view.cwd)) lists += plan.strips?.length ?? plan.lists?.length ?? 0;
+  let name = sent.name;
+  for (const { machine, tab: view, plan } of plans) {
+    lists += plan.strips?.length ?? plan.lists?.length ?? 0;
+    name = glance.captains.find((c) => c.machine === machine && c.path === view.cwd)?.project ?? name;
   }
-  return lists;
+  return { name: lists ? name : sent.name, lists };
 }
 
 /** The "Sent to Captain X · how it went" divider of each `send_to_captain` step a request thread's
@@ -149,7 +157,10 @@ function orchestratorSentHtml(tab, turn) {
   return turn.steps
     .map(sendToCaptainOf)
     .filter(Boolean)
-    .map((sent) => `<div class="sent-divider">${esc(sentToCaptainLine(sent, sentPlanLists(tab, sent.name)))}</div>`)
+    .map((sent) => {
+      const { name, lists } = sentPlan(tab, sent);
+      return `<div class="sent-divider">${esc(sentToCaptainLine({ ...sent, name }, lists))}</div>`;
+    })
     .join("");
 }
 

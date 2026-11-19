@@ -990,11 +990,11 @@ function userHtml(user, t, tab, first) {
  * routed line under a sent message, quick replies, read aloud. Guarded by typeof so the plain
  * timeline, and the sandbox that tests it without composer-tags.js, keep the ordinary path. */
 const globalLane = (tab) => typeof isGlobalOrchestratorTab === "function" && isGlobalOrchestratorTab(tab);
-/** A request's own thread: a global tab that carries its request. It draws the board's body: a
- * "Sent to Captain" divider for each send, report rows with the machine only, no Worked for fold. */
 /** A request thread's "Where this stands" card and what it reads, from gui-requests.js. */
 const requestCardOf = (tab) => (typeof requestCardHtml === "function" ? requestCardHtml(tab) : "");
 const requestCardKeyOf = (tab) => (typeof requestCardKey === "function" ? requestCardKey(tab) : null);
+/** A request's own thread: a global tab that carries its request. It draws the board's body: a
+ * "Sent to Captain" divider for each send, report rows with the machine only, no Worked for fold. */
 const requestLane = (tab) => globalLane(tab) && !!tab.view.request;
 /** A sent message's body, with its #project and @machine tags painted in the orchestrator's lane. */
 const laneTagsHtml = (tab, html) => (globalLane(tab) ? orchestratorTagsHtml(html) : html);
