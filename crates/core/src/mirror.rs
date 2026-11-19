@@ -4,8 +4,8 @@
 //! `Feed` wraps the link and is the `sync::Hub` a cycle passes to `sync::sync`. Its `list` answers
 //! from the project's mirror and asks the hub only for what changed since the mirror's revision,
 //! and only when something says the hub moved: a `SyncChanged` notice, this machine's own write, a
-//! new connection, or `RECHECK`. Against a hub from before revisions it lists once per project per
-//! cycle, as the loop did before.
+//! new connection, a user's sync, or `RECHECK`. Against a hub from before revisions it lists once
+//! per project per cycle, as the loop did before.
 //!
 //! A mirror is the hub's list, so there is one per project key. What a checkout agreed with the
 //! hub stays per checkout in `sync::State`: two checkouts of one project share a mirror and never
@@ -117,8 +117,9 @@ impl Mirror {
     /// Whether the mirror must be read before a sync trusts it at `now`, and how. From a hub that
     /// answers only `list`: once per cycle (`cycle` is when it began) and after this machine wrote.
     /// Otherwise whole with no head or past `FULL_EVERY`, and the changes since the head after a
-    /// notice, a write, a new connection, or `RECHECK`.
-    fn due(&self, now: Moment, answers: Option<Answers>, cycle: Instant) -> Option<Read> {
+    /// notice, a write, a new connection, a user's sync, or `RECHECK`. `fresh` is that user's sync:
+    /// one read this cycle, then the mirror is current again.
+    fn due(&self, now: Moment, answers: Option<Answers>, cycle: Instant, fresh: bool) -> Option<Read> {
         let Some(asked) = self.asked else { return Some(Read::Full) };
         if answers == Some(Answers::ListOnly) {
             return (self.wrote || asked.at < cycle).then_some(Read::Full);
@@ -127,7 +128,7 @@ impl Mirror {
         if self.full_at.is_none_or(|at| now.at.saturating_duration_since(at) >= FULL_EVERY) {
             return Some(Read::Full);
         }
-        let moved = self.wrote || now.heard != asked.heard || now.connection != asked.connection || now.at.saturating_duration_since(asked.at) >= RECHECK;
+        let moved = (fresh && asked.at < cycle) || self.wrote || now.heard != asked.heard || now.connection != asked.connection || now.at.saturating_duration_since(asked.at) >= RECHECK;
         moved.then_some(Read::Since(head))
     }
 
@@ -170,11 +171,18 @@ pub struct Feed<'a, S: Source> {
     watch: &'a Watch,
     mirrors: RefCell<&'a mut Mirrors>,
     cycle: Instant,
+    /// The user asked to sync. The mirror is read once this cycle even with no notice.
+    fresh: bool,
 }
 
 impl<'a, S: Source> Feed<'a, S> {
     pub fn new(source: &'a S, watch: &'a Watch, mirrors: &'a mut Mirrors, cycle: Instant) -> Self {
-        Feed { source, watch, mirrors: RefCell::new(mirrors), cycle }
+        Feed { source, watch, mirrors: RefCell::new(mirrors), cycle, fresh: false }
+    }
+
+    pub fn fresh(mut self, on: bool) -> Self {
+        self.fresh = on;
+        self
     }
 
     fn wrote(&self, project: &str) {
@@ -192,7 +200,7 @@ impl<S: Source> sync::Hub for Feed<'_, S> {
         let Mirrors { by_key, hub } = &mut **mirrors;
         let answers = hub.filter(|(connection, _)| *connection == now.connection).map(|(_, answers)| answers);
         let mirror = by_key.entry(project.to_owned()).or_default();
-        match mirror.due(now, answers, self.cycle) {
+        match mirror.due(now, answers, self.cycle, self.fresh) {
             None => {}
             Some(_) if answers == Some(Answers::ListOnly) => mirror.replace(self.source.list(project)?, now),
             Some(read) => match self.source.changes(project, read.since())? {
@@ -425,6 +433,21 @@ mod tests {
     }
 
     #[test]
+    fn a_users_sync_reads_a_change_that_arrived_with_no_notice() {
+        let hub = RevHub::with(1);
+        hub.as_machine(0).push(KEY, vec![file("claude/a.jsonl", "a1")]).unwrap();
+        let (on, mut mirrors) = (hub.as_machine(0), Mirrors::default());
+        assert_eq!(listed(&Feed::new(&on, &hub.watches[0], &mut mirrors, Instant::now())).len(), 1);
+        hub.write(file("claude/a.jsonl", "a2"));
+        let quiet = Feed::new(&on, &hub.watches[0], &mut mirrors, Instant::now());
+        assert_eq!(listed(&quiet), [("claude/a.jsonl".to_owned(), "a1".to_owned())], "nothing said the hub moved");
+        let asked = Feed::new(&on, &hub.watches[0], &mut mirrors, Instant::now()).fresh(true);
+        assert_eq!(listed(&asked), [("claude/a.jsonl".to_owned(), "a2".to_owned())]);
+        assert_eq!(listed(&asked), [("claude/a.jsonl".to_owned(), "a2".to_owned())], "the one read covers the rest of the cycle");
+        assert_eq!(*hub.reads.borrow(), [None, Some(1)]);
+    }
+
+    #[test]
     fn a_notice_or_a_write_by_another_machine_brings_only_the_change() {
         let hub = RevHub::with(2);
         let (mac, vps) = (hub.as_machine(0), hub.as_machine(1));
@@ -582,15 +605,18 @@ mod tests {
         let start = Instant::now();
         let at = |secs: u64| Moment { heard: 0, connection: 0, at: start + Duration::from_secs(secs) };
         let mut mirror = Mirror::default();
-        assert_eq!(mirror.due(at(0), None, start), Some(Read::Full));
+        assert_eq!(mirror.due(at(0), None, start, false), Some(Read::Full));
         mirror.apply(Changes { head: 7, full: true, entries: vec![] }, at(0));
-        assert_eq!(mirror.due(at(599), Some(Answers::Changes), start), None);
-        assert_eq!(mirror.due(at(600), Some(Answers::Changes), start), Some(Read::Since(7)));
+        assert_eq!(mirror.due(at(599), Some(Answers::Changes), start, false), None);
+        assert_eq!(mirror.due(at(600), Some(Answers::Changes), start, false), Some(Read::Since(7)));
         mirror.apply(Changes { head: 7, full: false, entries: vec![] }, at(600));
-        assert_eq!(mirror.due(at(1199), Some(Answers::Changes), start), None, "an empty recheck counts as a read");
-        assert_eq!(mirror.due(Moment { heard: 1, ..at(601) }, Some(Answers::Changes), start), Some(Read::Since(7)));
-        assert_eq!(mirror.due(at(24 * 3600 - 1), Some(Answers::Changes), start), Some(Read::Since(7)));
-        assert_eq!(mirror.due(at(24 * 3600), Some(Answers::Changes), start), Some(Read::Full));
+        assert_eq!(mirror.due(at(1199), Some(Answers::Changes), start, false), None, "an empty recheck counts as a read");
+        assert_eq!(mirror.due(Moment { heard: 1, ..at(601) }, Some(Answers::Changes), start, false), Some(Read::Since(7)));
+        assert_eq!(mirror.due(at(24 * 3600 - 1), Some(Answers::Changes), start, false), Some(Read::Since(7)));
+        assert_eq!(mirror.due(at(24 * 3600), Some(Answers::Changes), start, false), Some(Read::Full));
+        let quiet = start + Duration::from_secs(601);
+        assert_eq!(mirror.due(at(601), Some(Answers::Changes), quiet, false), None, "a quiet cycle inside the recheck asks nothing");
+        assert_eq!(mirror.due(at(601), Some(Answers::Changes), quiet, true), Some(Read::Since(7)), "a user's sync in a new cycle reads once");
     }
 
     /// One machine of the convergence run: a checkout of `KEY` in a folder of its own.
