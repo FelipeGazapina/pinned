@@ -406,6 +406,7 @@ function renderPanel() {
   }
   animatePanel(p.open);
   document.body.dataset.panel = p.open ? "open" : "closed";
+  if (typeof renderRequests === "function") renderRequests();
   document.body.dataset.panelMax = String(p.open && p.max);
   expandButton.innerHTML = icon(p.max ? "minimize-2" : "maximize-2");
   expandButton.title = p.max ? "Restore panel size" : "Maximize panel";

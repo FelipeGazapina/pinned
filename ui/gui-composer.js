@@ -180,6 +180,7 @@ function promptText(tab, t) {
   if (menu) return freeOption(menu) ? "Type your own answer, or leave this blank to use the selected option" : "Choose an option above";
   if (machines.get(tab.machine)?.view.online === false) return "Ask for changes, send follow-ups, or attach images";
   if (!tab.view.running) return touchComposer() ? "claude isn't running. Use the send button to start it." : "claude isn't running. Press Enter to start it.";
+  if (typeof requestHere === "function" && requestHere(tab)) return "Reply in this thread";
   const captain = tab.view.role === "orchestrator" && !tab.view.orchestrator_global;
   if (!desk) return captain ? "Message the Captain" : "Ask anything, @tag files/folders, $use skills, or / for commands";
   if (captain) return "Message the Captain. It keeps working while you type.";

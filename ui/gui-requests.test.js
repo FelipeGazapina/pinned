@@ -584,6 +584,8 @@ test("9r3 item 10: the Requests crumb closes the Plan panel and brings the colum
   const log = [];
   h.context.panelOf = () => ({ open: true, active: "plan", surfaces: [{ id: "plan", kind: "plan" }] });
   h.context.closePanel = () => log.push("closePanel");
+  h.context.shownSurface = () => ({ id: "plan", kind: "plan" });
+  h.context.active = tab;
   h.click(h.els.crumb, { "[data-rq-back]": { dataset: {} } });
   assert.deepEqual(log, ["closePanel"]);
 });
