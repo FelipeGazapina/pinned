@@ -220,7 +220,13 @@ pub struct StandsPatch {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct SentId {
     id: String,
+    /// The global session that sent it; empty for a request tab whose session had not started.
+    #[serde(default)]
     session: String,
+    /// The request whose tab sent it. A request keeps its id when its session changes, as after
+    /// `/clear`, so a report routes by it first.
+    #[serde(default)]
+    request: Option<String>,
     at: u64,
 }
 
@@ -328,16 +334,27 @@ impl UserRequests {
         true
     }
 
-    /// A global `session` sent `request_id` to `captain`. The first session to send an id keeps
-    /// it, so a retry answers the first; the session's request remembers the Captain.
+    /// A global `session` that no request tab holds sent `request_id` to `captain`. The first
+    /// sender of an id keeps it, so a retry answers the first.
     pub fn record_send(&mut self, session: &str, request_id: &str, captain: CaptainRef) {
+        let request = self.of_session(session).map(|r| r.id.clone());
+        self.record(request, session, request_id, captain);
+    }
+
+    /// Request `request`'s tab, on `session` when it has started one, sent `request_id` to
+    /// `captain`. The request remembers the Captain.
+    pub fn record_request_send(&mut self, request: &str, session: Option<&str>, request_id: &str, captain: CaptainRef) {
+        self.record(Some(request.to_owned()), session.unwrap_or_default(), request_id, captain);
+    }
+
+    fn record(&mut self, request: Option<String>, session: &str, request_id: &str, captain: CaptainRef) {
         let captain = captain.cleaned();
         if !self.saved.sent.iter().any(|s| s.id == request_id) {
-            self.saved.sent.push(SentId { id: request_id.to_owned(), session: session.to_owned(), at: captain.at });
+            self.saved.sent.push(SentId { id: request_id.to_owned(), session: session.to_owned(), request: request.clone(), at: captain.at });
             let over = self.saved.sent.len().saturating_sub(SENT_KEEP);
             self.saved.sent.drain(..over);
         }
-        if let Some(r) = self.saved.requests.iter_mut().find(|r| r.session.as_deref() == Some(session)).filter(|_| captain.path_ok()) {
+        if let Some(r) = request.and_then(|id| self.saved.requests.iter_mut().find(|r| r.id == id)).filter(|_| captain.path_ok()) {
             r.captains.retain(|c| !c.serves(&captain));
             r.captains.push(captain);
             let over = r.captains.len().saturating_sub(MAX_CAPTAINS);
@@ -346,24 +363,31 @@ impl UserRequests {
         self.save();
     }
 
-    pub fn record_request_send(&mut self, _request: &str, session: Option<&str>, request_id: &str, captain: CaptainRef) {
-        if let Some(session) = session {
-            self.record_send(session, request_id, captain);
-        }
-    }
-
     /// Where `report`, from `captain` and answering `answers`, goes, leaving out what `delivered`
     /// already marked for it.
-    /// 1. Each answer that a global session sent, matched exactly: that session's request, or the
-    ///    session itself when no request holds it.
+    pub fn route(&mut self, report: &str, answers: &[String], captain: &CaptainRef, now: u64) -> Vec<Route> {
+        let mut to = self.routes(answers, captain, now);
+        to.retain(|route| !self.was_delivered(report, route));
+        to
+    }
+
+    /// Whether `report` was already typed into `route`.
+    pub fn was_delivered(&self, report: &str, route: &Route) -> bool {
+        self.saved.delivered.iter().any(|d| d.report == report && &d.to == route)
+    }
+
+    /// Where a report from `captain` answering `answers` goes, never empty:
+    /// 1. Each answer that a global tab sent, matched exactly: the request whose tab sent it, else
+    ///    that session's request, or the session itself when no request holds it.
     /// 2. Only when none matched: the newest open request that sent to this Captain, else its open
     ///    "Reports from Captain X" request, opened here when there is none.
-    pub fn route(&mut self, report: &str, answers: &[String], captain: &CaptainRef, now: u64) -> Vec<Route> {
+    pub fn routes(&mut self, answers: &[String], captain: &CaptainRef, now: u64) -> Vec<Route> {
         let mut to: Vec<Route> = vec![];
         for sent in answers.iter().filter_map(|a| self.saved.sent.iter().find(|s| &s.id == a)) {
-            let route = match self.of_session(&sent.session) {
-                Some(r) => Route::Request(r.id.clone()),
-                None => Route::Session(sent.session.clone()),
+            let route = match (sent.request.as_deref().and_then(|id| self.get(id)), self.of_session(&sent.session)) {
+                (Some(r), _) | (None, Some(r)) => Route::Request(r.id.clone()),
+                (None, None) if !sent.session.is_empty() => Route::Session(sent.session.clone()),
+                (None, None) => continue,
             };
             if !to.contains(&route) {
                 to.push(route);
@@ -372,7 +396,6 @@ impl UserRequests {
         if to.is_empty() {
             to.push(Route::Request(self.fallback(captain, now)));
         }
-        to.retain(|route| !self.saved.delivered.iter().any(|d| d.report == report && &d.to == route));
         to
     }
 
@@ -380,8 +403,15 @@ impl UserRequests {
     /// request, opened when there is none.
     fn fallback(&mut self, captain: &CaptainRef, now: u64) -> String {
         let captain = captain.clone().cleaned();
+        // One per Captain, by machine and exact path, even for a path no Captain record keeps.
+        let key = format!("captain-reports/{}/{}", captain.machine, captain.path);
         let open_for = |kind: Kind| {
-            self.saved.requests.iter().filter(|r| r.kind == kind && r.closed.is_none() && r.captains.iter().any(|c| c.serves(&captain))).max_by_key(|r| r.opened_at).map(|r| r.id.clone())
+            self.saved
+                .requests
+                .iter()
+                .filter(|r| r.kind == kind && r.closed.is_none() && (r.captains.iter().any(|c| c.serves(&captain)) || (kind == Kind::CaptainReports && r.key == key)))
+                .max_by_key(|r| r.opened_at)
+                .map(|r| r.id.clone())
         };
         if let Some(id) = open_for(Kind::Asked).or_else(|| open_for(Kind::CaptainReports)) {
             return id;
@@ -389,7 +419,6 @@ impl UserRequests {
         let name = if captain.project.is_empty() { &captain.path } else { &captain.project };
         let title = cut(&format!("Reports from Captain {name}"), MAX_TITLE);
         let project = Some(captain.project.clone()).filter(|p| !p.is_empty());
-        let key = format!("captain-reports/{}/{}/{now}", captain.machine, captain.path);
         let id = self.add(key, title, project, Kind::CaptainReports, now);
         if let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id).filter(|_| captain.path_ok()) {
             r.captains.push(CaptainRef { at: now, ..captain });
@@ -460,9 +489,7 @@ impl UserRequests {
             let oldest_done = self.saved.requests.iter().enumerate().filter_map(|(i, r)| r.closed.map(|c| (c.at, i))).min();
             let Some((_, i)) = oldest_done else { break };
             let gone = self.saved.requests.remove(i);
-            if let Some(session) = &gone.session {
-                self.saved.sent.retain(|s| &s.session != session);
-            }
+            self.saved.sent.retain(|s| s.request.as_ref() != Some(&gone.id) && (gone.session.as_ref() != Some(&s.session)));
             let route = Route::Request(gone.id);
             self.saved.delivered.retain(|d| d.to != route);
         }
