@@ -526,3 +526,28 @@ test("the text box paints #project and @machine with the composer's tag painting
   h.type("");
   assert.equal(h.run("nrMirror").innerHTML, "", "an empty draft paints nothing");
 });
+
+const cssOfNew = (name) => read(name).replace(/\/\*[\s\S]*?\*\//g, "");
+const ruleOfNew = (css, selector) => {
+  const at = css.indexOf(`${selector} {`);
+  assert.ok(at >= 0, `${selector} is a rule`);
+  return css.slice(at, css.indexOf("}", at));
+};
+
+test("9r5 item 2: a mirror line is a block of its own, so tags stay inline and the sentence stays on the line", () => {
+  const h = harness();
+  h.type("#billing-api @studio the monthly export is missing refunds. Find out why.");
+  const mirror = h.run("nrMirror").innerHTML;
+  assert.equal(mirror, '<div class="pl"><span class="tag project">#billing-api</span> <span class="tag machine">@studio</span> the monthly export is missing refunds. Find out why.</div>');
+  const css = cssOfNew("gui-requests-new.css");
+  assert.match(ruleOfNew(css, "#new-request .nr-mirror .pl"), /display:\s*block;[^}]*flex:\s*none/, "the plan tree's .pl (flex column) does not reach the mirror's lines");
+});
+
+test("9r5 item 3: the preview header carries no New chip", () => {
+  const h = harness();
+  h.type(TWO);
+  const html = h.cards();
+  assert.match(html, /This opens 2 threads/);
+  assert.doesNotMatch(html, />New</);
+  assert.doesNotMatch(html, /nr-new/);
+});

@@ -176,7 +176,7 @@ const hrefs = (html) => [...html.matchAll(/\bhref\s*=\s*("[^"]*"|'[^']*'|[^\s>]+
 const local = (y, m, d, hh = 0, mm = 0) => new Date(y, m - 1, d, hh, mm).getTime();
 const open = (h) => h.run("openAllActivity()");
 
-test("requests group by their local day, newest first, and midnight splits a day", () => {
+test("9r5 item 6: requests group by their local day, oldest first like a chat, and midnight splits a day", () => {
   const h = harness();
   const now = local(2026, 11, 18, 12);
   const glances = [
@@ -187,9 +187,9 @@ test("requests group by their local day, newest first, and midnight splits a day
   ];
   const days = plain(h.run(`requestDays(${JSON.stringify(glances)}, ${now})`));
   assert.deepEqual(days.map((d) => [d.label, d.glances.map((g) => g.id)]), [
-    ["Today", ["noon", "early"]],
-    ["Yesterday", ["late"]],
     ["Nov 3", ["old"]],
+    ["Yesterday", ["late"]],
+    ["Today", ["early", "noon"]],
   ]);
 });
 
@@ -209,7 +209,7 @@ test("an entry shows the ask with no time, the state, project, reply count and l
   assert.match(two, /Working/);
   assert.match(two, /#storefront/);
   assert.match(two, /2 replies/);
-  assert.match(two, /Captain storefront: Tests are running/);
+  assert.match(two, /<span class="last">Tests are running<\/span>/, "the board shows the text, with no speaker");
   assert.match(html, /1 reply[^s]/);
   assert.match(html, /Done/);
   assert.match(html, /No replies yet/);
@@ -593,4 +593,46 @@ test("text typed into the footer is drawn as text: no img element and no javascr
   assert.match(html, /This opens 2 threads/);
   assert.equal(tagNames(html).includes("img"), false);
   assert.deepEqual(hrefs(html).filter((href) => /javascript:/i.test(href)), []);
+});
+
+test("9r5 item 6: the list runs oldest first, newest at the bottom, with the day heads in that order", () => {
+  const tabs = [anchorTab([
+    glance("q-new", { title: "Newest", asked: "Newest", opened_at: local(2026, 11, 18, 9) }),
+    glance("q-old", { title: "Oldest", asked: "Oldest", opened_at: local(2026, 11, 17, 9) }),
+    glance("q-mid", { title: "Middle", asked: "Middle", opened_at: local(2026, 11, 18, 8) }),
+  ])];
+  const h = harness({ tabs });
+  open(h);
+  const html = h.overlay.innerHTML;
+  const at = (s) => html.indexOf(s);
+  assert.ok(at('data-rqs-entry="q-old"') < at('data-rqs-entry="q-mid"') && at('data-rqs-entry="q-mid"') < at('data-rqs-entry="q-new"'), "q-old, q-mid, q-new");
+  assert.ok(at('<span>Yesterday</span>') < at('<span>Today</span>'), "Yesterday above Today");
+});
+
+test("9r5 item 6: the panel's card has no You asked row in All activity, and keeps it elsewhere", async () => {
+  const reply = (call) => (call.cmd === "user_request" ? userView("q1", { stands: stands({ asked: "Find out why codes are late." }) }) : null);
+  const h = harness({ tabs: [anchorTab([glance("q1", { title: "Codes" })])], reply });
+  open(h);
+  h.click(h.entry("q1"));
+  await flush();
+  const html = h.overlay.innerHTML;
+  assert.match(html, /<span class="rc-k">Done<\/span>/);
+  assert.match(html, /<span class="rc-k">Left<\/span>/);
+  assert.match(html, /<span class="rc-k">Needs you<\/span>/);
+  assert.doesNotMatch(html, /You asked/);
+  assert.match(h.run("requestCardFrom(rqs.views.get('q1').view.glance ?? { id: 'q1', captains: [] }, { view: { stands: { asked: 'x', done: '', left: '', needs: '', links: [] } } })"), /You asked/);
+});
+
+test("9r5 item 6: All activity hides the Requests column and gives the stream its room", () => {
+  const h = harness({ tabs: [anchorTab([glance("q1")])] });
+  h.run("renderRequests()");
+  assert.equal(h.run("requestsColumn.hidden"), false, "the column is beside the thread");
+  open(h);
+  assert.equal(h.run("requestsColumn.hidden"), true, "All activity open: no column");
+  assert.equal("data-requests" in h.els.chat.attrs, false);
+  h.run("closeAllActivity()");
+  assert.equal(h.run("requestsColumn.hidden"), false, "closed: the column is back");
+  const css = read("gui-requests-stream.css").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.match(css, /#all-activity \{[^}]*left:\s*0/);
+  assert.match(css, /#chat\[data-requests\] #all-activity \{[^}]*left:\s*340px/);
 });

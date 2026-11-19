@@ -562,7 +562,7 @@ test("9r3 item 10: the request header shows the crumb, the dot, the title, the s
   g[1].tab = "tab-21";
   const h = harness({ tabs: [anchorTab(g), requestTab("q-work", "tab-21")] });
   const html = h.run("requestCrumbHtml(tabs[1])");
-  assert.match(html, /^<button type="button" class="request-back" data-rq-back>Requests<\/button><span class="sep">\/<\/span><span class="request-dot"/);
+  assert.match(html, /^<span class="request-dot"/);
   assert.match(html, /<h2 class="request-title">Add gift cards<\/h2>/);
   assert.match(html, /<button type="button" data-request-action="done" data-request-id="q-work">Mark done<\/button>/);
 });
@@ -670,11 +670,77 @@ test("9r4 item 3: the Requests crumb is the theme's link colour", () => {
   assert.match(ruleOf(cssOf("gui-requests.css"), "#chat-head .crumb .request-back"), /color:\s*var\(--g-link\)/);
 });
 
-test("9r4 item 4: the footer facts sit in one row that never wraps, and Cost keeps its size", () => {
+test("9r5 item 1: the footer facts are a three-column grid that wraps, Cost under List, and nothing is cut with an ellipsis", () => {
   const css = cssOf("gui-plan.css");
-  assert.match(ruleOf(css, ".pl-foot .facts"), /display:\s*flex;[^}]*flex-wrap:\s*nowrap/);
-  assert.match(ruleOf(css, ".pl-foot .fact"), /min-width:\s*0/);
-  assert.match(ruleOf(css, ".pl-foot .fact:last-child"), /flex:\s*none/);
+  assert.match(ruleOf(css, ".pl-foot .facts"), /display:\s*grid;[^}]*grid-template-columns:\s*repeat\(3,/);
+  assert.doesNotMatch(ruleOf(css, ".pl-foot .facts"), /nowrap/);
+  assert.doesNotMatch(ruleOf(css, ".pl-foot .fact b"), /text-overflow|nowrap/);
+  assert.doesNotMatch(css, /\.pl-foot \.fact:last-child/);
+});
+
+test("9r5 item 5: the request header has a Plan button beside Mark done, and it opens and closes the Plan panel", () => {
+  const g = board();
+  g[1].tab = "tab-21";
+  const tab = requestTab("q-work", "tab-21");
+  const h = harness({ tabs: [anchorTab(g), tab] });
+  const html = h.run("requestCrumbHtml(tabs[1])");
+  assert.match(html, /<span class="orchestrator-actions"><button type="button" class="request-plan" data-request-plan aria-pressed="false">Plan<\/button><button type="button" data-request-action="done"/);
+  const log = [];
+  const panel = { open: false, active: "plan", surfaces: [{ id: "plan", kind: "plan" }] };
+  h.context.panelOf = () => panel;
+  h.context.shownSurface = () => panel.surfaces[0];
+  h.context.addSurface = (t, s) => log.push(["add", t.key, s.id, s.kind]);
+  h.context.closePanel = () => log.push(["close"]);
+  h.context.active = tab;
+  h.click(h.els.crumb, { "[data-request-plan]": { dataset: {} } });
+  assert.deepEqual(log, [["add", "mac:tab-21", "plan", "plan"]]);
+  panel.open = true;
+  assert.match(h.run("requestCrumbHtml(tabs[1])"), /data-request-plan aria-pressed="true">Plan</);
+  h.click(h.els.crumb, { "[data-request-plan]": { dataset: {} } });
+  assert.deepEqual(log.at(-1), ["close"]);
+});
+
+test("9r5 item 7: a request panel with one block draws no section spacing under the root dot", () => {
+  const css = cssOf("gui-plan.css");
+  assert.match(ruleOf(css, '.pl-sec-group[data-single="true"]'), /margin-top:\s*0/);
+  assert.match(read("gui-plan.js"), /<section class="pl-sec-group" data-single="\$\{plain\}">/);
+});
+
+test("9r5 A: the card's pill row is the Captains first, then the links, and empty when there are neither", () => {
+  const has = (captains, links) =>
+    h0().run(`requestCardFrom(${JSON.stringify(glance("q", { captains }))}, { view: { stands: { asked: 'a', done: 'b', left: 'c', needs: '', links: ${JSON.stringify(links)} } } })`);
+  const pills = (html) => [...html.matchAll(/<span class="rc-link">([^<]*)<\/span>/g)].map((m) => m[1]);
+  const one = [{ machine: "mac", path: "/s", project: "storefront", machine_name: "Mac" }];
+  assert.deepEqual(pills(has(one, ["PR #212 merged", "Ticket SUP-88"])), ["Captain storefront", "PR #212 merged", "Ticket SUP-88"]);
+  assert.doesNotMatch(has([], []), /rc-links/);
+});
+
+test("9r5 B: 'kept up to date by the Orchestrator' shows in the card's title while the Plan is closed, and hides while it is open", () => {
+  const h = h0();
+  const panel = { open: false, active: "plan", surfaces: [{ id: "plan", kind: "plan" }] };
+  h.context.panelOf = () => panel;
+  h.context.shownSurface = () => panel.surfaces[0];
+  h.run("var tab = tabs[1]; rq.views.set('q-work', { sig: requestSig(requestHere(tab)), view: { stands: { asked: 'a', done: 'b', left: 'c', needs: '', links: [] } }, at: Date.now() })");
+  const closed = h.run("requestCardHtml(tab)");
+  assert.match(closed, /<span class="rc-title">Where this stands<\/span><span class="rc-kept">kept up to date by the Orchestrator<\/span>/);
+  panel.open = true;
+  assert.doesNotMatch(h.run("requestCardHtml(tab)"), /kept up to date/);
+});
+
+test("9r5 C: the Requests crumb shows only while the column is hidden: Plan open or a narrow screen", () => {
+  const g = board();
+  g[1].tab = "tab-21";
+  const tab = requestTab("q-work", "tab-21");
+  const h = harness({ tabs: [anchorTab(g), tab] });
+  const panel = { open: false, active: "plan", surfaces: [{ id: "plan", kind: "plan" }] };
+  h.context.panelOf = () => panel;
+  h.context.shownSurface = () => panel.surfaces[0];
+  assert.match(h.run("requestCrumbHtml(tabs[1])"), /^<span class="request-dot"/, "column beside the thread: no crumb");
+  panel.open = true;
+  assert.match(h.run("requestCrumbHtml(tabs[1])"), /^<button type="button" class="request-back" data-rq-back>Requests<\/button><span class="sep">\/<\/span><span class="request-dot"/, "Plan open: the crumb");
+  panel.open = false;
+  h.context.narrow = () => true;
+  assert.match(h.run("requestCrumbHtml(tabs[1])"), /^<button type="button" class="request-back"/, "narrow: the crumb");
 });
 
 test("9r4 item 5: the minimap sits at the thread's left edge, not over the Requests column", () => {
