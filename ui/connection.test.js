@@ -389,6 +389,18 @@ test("web sign-in with a wrong password shows the hub's words and no Retry", asy
   assert.equal(retry.hidden, true);
 });
 
+test("in the app the reconnect bar says this computer keeps working; the web page keeps its own words", () => {
+  const bar = (TAURI) => {
+    const el = { textContent: "Reconnecting… showing the last state" };
+    const context = { TAURI, COMPUTER: "Mac", document: { getElementById: (id) => (id === "reconnect-bar" ? el : null) } };
+    vm.createContext(context);
+    vm.runInContext(line(read("main.js"), 'if (TAURI) document.getElementById("reconnect-bar")'), context);
+    return el.textContent;
+  };
+  assert.equal(bar({}), "Can't reach the hub. This Mac keeps working.");
+  assert.equal(bar(null), "Reconnecting… showing the last state");
+});
+
 test("the reconnect bar and the Retry button are in the page, hidden until their state", () => {
   const html = read("index.html");
   assert.match(html, /<div id="reconnect-bar" role="status">[^<]*<span class="spin"><\/span>Reconnecting… showing the last state<\/div>/);

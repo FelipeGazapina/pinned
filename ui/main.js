@@ -1573,6 +1573,9 @@ if (!TAURI && window.visualViewport) {
   fitVisible();
 }
 
+// The web page shows only what the hub sends; the app keeps running this computer's threads without it.
+if (TAURI) document.getElementById("reconnect-bar").textContent = `Can't reach the hub. This ${COMPUTER} keeps working.`;
+
 function connectHub(signedIn) {
   account = signedIn;
   hub = new Hub(signedIn.hub, signedIn.user_token, {
