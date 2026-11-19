@@ -332,28 +332,6 @@ function planListHtml(list, s, zoom, scope = "") {
   return `<section class="pl-list${fixes.length ? " has-fix" : ""}">${head}${track}</section>`;
 }
 
-const planWorkers = new Map(); // machine|tab|task|state -> { key: the worker's tab key, once found }
-
-/** The worker tab of a step's task, found the way Open thread finds it: `open_task` answers the tab that already holds
- * the task's conversation, or opens one. One call per task and step state; a failed call tries again when the state moves. */
-function planWorkerTab(owner, step) {
-  const id = `${owner.machine}|${owner.tab}|${step.task}|${step.state}`;
-  let c = planWorkers.get(id);
-  if (!c) {
-    c = { key: null };
-    planWorkers.set(id, c);
-    callOn(owner.machine, { cmd: "open_task", tab: owner.tab, task: step.task }).then(
-      async (created) => {
-        await refreshTabs(owner.machine);
-        c.key = keyOf(owner.machine, created);
-        planRerender();
-      },
-      () => {},
-    );
-  }
-  return (c.key && tabByKey(c.key)) || null;
-}
-
 function planFootHtml(plan, s, owner = null) {
   const live = planLiveStep(plan);
   const hit = (s.step && planFindStep(plan, s.step)) || (live && planFindStep(plan, live.id));
@@ -361,8 +339,7 @@ function planFootHtml(plan, s, owner = null) {
   const { step, list, under, fix } = hit;
   const why = step.why && !planAfterFix(step) ? `<p class="pl-why">${esc(step.why)}</p>` : "";
   const branch = under ? `Fix ${esc(fix.id)}, under “${esc(under.name)}”` : "Main line";
-  const worker = step.task && owner ? planWorkerTab(owner, step) : null;
-  const diff = worker?.view.workspace?.branch ? ` <button type="button" class="outline pl-open" data-see-diff="${esc(worker.key)}">${icon("git-branch")}See the diff</button>` : "";
+  const diff = step.task && step.branch && owner ? ` <button type="button" class="outline pl-open" data-see-diff="${esc(step.task)}" data-diff-machine="${esc(owner.machine)}" data-diff-tab="${esc(owner.tab)}">${icon("git-branch")}See the diff</button>` : "";
   return `<div class="pl-foot" data-state="${step.state}"><p class="pl-foot-state"><span class="pl-dot"></span>${s.step ? planStepWord(step) : `Live now · ${planStepWord(step)}`}</p>
       <p class="pl-foot-name">${esc(step.name)}</p>${step.what ? `<p class="pl-foot-what">${esc(step.what)}</p>` : ""}${why}
       <dl class="pl-facts"><dt>List</dt><dd>${esc(list.name)}</dd><dt>Run by</dt><dd>${esc(planRunBy(step))}</dd><dt>Branch</dt><dd>${branch}</dd><dt>Cost</dt><dd>${esc(planCost(step.cost)) || "None yet"}</dd></dl>
@@ -465,20 +442,27 @@ function onPlanClick(e) {
     s.step = null;
   } else if (q("[data-dismiss-dropped]")) panelOf(t).dropped = null;
   else if ((el = q("[data-open-task]"))) return openDelegated(el.dataset.openTask);
-  else if ((el = q("[data-see-diff]"))) return planSeeDiff(el.dataset.seeDiff);
+  else if ((el = q("[data-see-diff]"))) return planSeeDiff(el.dataset.diffMachine, el.dataset.diffTab, el.dataset.seeDiff);
   else return;
   savePanel(t);
   planRerender();
 }
 
-/** The worker's own diff surface, on its branch against its base, in front. */
-async function planSeeDiff(key) {
-  const worker = tabByKey(key);
-  if (!worker) return;
-  setDiffState(worker, { scope: "base", base: null });
-  addSurface(worker, { id: "diff", kind: "diff" });
-  activate(worker);
-  await startTab(worker);
+/** The worker's own diff surface, on its branch against its base, in front. `open_task` finds or opens the worker's tab,
+ * the same call Open thread makes; it runs on this click and never while drawing. */
+async function planSeeDiff(machine, tab, task) {
+  try {
+    const created = await callOn(machine, { cmd: "open_task", tab, task });
+    await refreshTabs(machine);
+    const worker = tabByKey(keyOf(machine, created));
+    if (!worker) return;
+    setDiffState(worker, { scope: "base", base: null });
+    addSurface(worker, { id: "diff", kind: "diff" });
+    activate(worker);
+    await startTab(worker);
+  } catch (e) {
+    showComposerNote(String(e), true);
+  }
 }
 
 panelBody.addEventListener("click", onPlanClick);

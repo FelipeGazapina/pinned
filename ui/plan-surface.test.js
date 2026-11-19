@@ -408,11 +408,12 @@ test("the Captain panel counts fix steps with the main steps: 3 of 6 done", asyn
 });
 
 /** A Captain with the plan's steps s2 (task-2, running, branch `branch`) and s3 (waiting, no task, but a branch); a tab for task-2 that open_task answers. */
-async function seeDiffHarness(branch) {
+async function seeDiffHarness(branch, edit = () => {}) {
   const workerTab = { key: "m1:tab-9", machine: "m1", view: { id: "tab-9", role: "worker", session: "s9", plans: [] }, panel: { open: false, surfaces: [], active: null, max: false } };
   const withBranch = plan();
   withBranch.lists[0].steps[1].branch = branch;
   withBranch.lists[1].steps[0].branch = "feat/no-task";
+  edit(withBranch);
   const h = harness();
   h.context.reply = (call) => (call.cmd === "open_task" ? "tab-9" : [withBranch]);
   const tab = captain([glance()]);
@@ -456,7 +457,8 @@ test("See the diff: absent for a step with no task, and for a step with no branc
 });
 
 test("drawing a plan whose live step has a task and a branch makes no host call", async () => {
-  const { h, tab } = await seeDiffHarness("feat/wire-api");
+  // The live step is the first waiting one: s3 here, given a task and a branch.
+  const { h, tab } = await seeDiffHarness("feat/wire-api", (p) => Object.assign(p.lists[1].steps[0], { task: "task-3" }));
   h.log.calls.length = 0;
   h.log.diff.length = 0;
   h.run("renderPlanPanel(shownSurface(active))");
