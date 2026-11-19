@@ -1055,6 +1055,93 @@
                 ]
               },
               {
+                "description": "`Vec<user_requests::RequestGlance>`: the 60 newest user requests opened before `before`,\nor of all, newest first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "user_requests"
+                  },
+                  "before": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`user_requests::UserRequestView`: request `id` with the last `items` things said in it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "user_request"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "`Vec<user_requests::Opened>`: one request and Orchestrator tab per item, its session\nstarted on the item's text. A repeat of a key answers the request it opened.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "new_user_requests"
+                  },
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/NewRequest"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "items"
+                ]
+              },
+              {
+                "description": "The request's new `user_requests::RequestGlance`. Done closes its tab; Open adds a resting\ntab on its session when none is open.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "user_request_action"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "action": {
+                    "$ref": "#/$defs/RequestAction"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "action"
+                ]
+              },
+              {
                 "description": "The id of a new tab, not yet started, whose session adjusts `scope`'s way of working with\nthe taste tools and whose first prompt says so. It opens in the project folder `path`, or\nin the folder for threads without a project.",
                 "type": "object",
                 "properties": {
@@ -3641,6 +3728,55 @@
               "path",
               "tab",
               "text"
+            ]
+          },
+          "NewRequest": {
+            "description": "What the app asks to open: one paragraph of a new request.",
+            "type": "object",
+            "properties": {
+              "key": {
+                "description": "The app's idempotency key for this paragraph.",
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "project": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "machine": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "key",
+              "title",
+              "text"
+            ]
+          },
+          "RequestAction": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "done",
+                  "reopen"
+                ]
+              },
+              {
+                "description": "A resting tab on the request's session, for one whose tab closed.",
+                "type": "string",
+                "const": "open"
+              }
             ]
           },
           "TasteScope": {
@@ -14003,6 +14139,93 @@
                 ]
               },
               {
+                "description": "`Vec<user_requests::RequestGlance>`: the 60 newest user requests opened before `before`,\nor of all, newest first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "user_requests"
+                  },
+                  "before": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`user_requests::UserRequestView`: request `id` with the last `items` things said in it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "user_request"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "`Vec<user_requests::Opened>`: one request and Orchestrator tab per item, its session\nstarted on the item's text. A repeat of a key answers the request it opened.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "new_user_requests"
+                  },
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/NewRequest"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "items"
+                ]
+              },
+              {
+                "description": "The request's new `user_requests::RequestGlance`. Done closes its tab; Open adds a resting\ntab on its session when none is open.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "user_request_action"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "action": {
+                    "$ref": "#/$defs/RequestAction"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "action"
+                ]
+              },
+              {
                 "description": "The id of a new tab, not yet started, whose session adjusts `scope`'s way of working with\nthe taste tools and whose first prompt says so. It opens in the project folder `path`, or\nin the folder for threads without a project.",
                 "type": "object",
                 "properties": {
@@ -16565,6 +16788,55 @@
               "path",
               "tab",
               "text"
+            ]
+          },
+          "NewRequest": {
+            "description": "What the app asks to open: one paragraph of a new request.",
+            "type": "object",
+            "properties": {
+              "key": {
+                "description": "The app's idempotency key for this paragraph.",
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "project": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "machine": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "key",
+              "title",
+              "text"
+            ]
+          },
+          "RequestAction": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "done",
+                  "reopen"
+                ]
+              },
+              {
+                "description": "A resting tab on the request's session, for one whose tab closed.",
+                "type": "string",
+                "const": "open"
+              }
             ]
           },
           "TasteScope": {
@@ -26418,6 +26690,20 @@
                 "items": {
                   "$ref": "#/$defs/PlanGlance"
                 }
+              },
+              "requests": {
+                "description": "The user requests' glances, on one global tab only: the anchor, else the newest request\ntab. Open ones and Done ones from the last 14 days, at most 60.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/RequestGlance"
+                }
+              },
+              "request": {
+                "description": "The user request this global tab is the session of.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -26772,6 +27058,190 @@
               "idle",
               "finished",
               "closed"
+            ]
+          },
+          "RequestGlance": {
+            "description": "What the app lists for a request.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "project": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "opened_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "kind": {
+                "$ref": "#/$defs/Kind",
+                "default": "asked"
+              },
+              "closed_at": {
+                "description": "Done when set.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "needs": {
+                "description": "Empty when nothing waits on the user.",
+                "type": "string",
+                "default": ""
+              },
+              "needs_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "last_user_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "last_who": {
+                "description": "The thread's last line, flat: no struct sits inside an Option on the wire.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Who"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "last_text": {
+                "type": "string",
+                "default": ""
+              },
+              "last_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "replies": {
+                "description": "Orchestrator replies and reports in the thread.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "captains": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/GlanceCaptain"
+                },
+                "default": []
+              },
+              "tab": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "asked": {
+                "description": "What the user first asked, one line of at most 300 characters.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "project",
+              "opened_at",
+              "kind",
+              "closed_at",
+              "needs",
+              "needs_at",
+              "last_user_at",
+              "last_who",
+              "last_text",
+              "last_at",
+              "replies",
+              "captains",
+              "tab",
+              "asked"
+            ]
+          },
+          "Kind": {
+            "oneOf": [
+              {
+                "description": "The user opened it.",
+                "type": "string",
+                "const": "asked"
+              },
+              {
+                "description": "\"Reports from Captain X\": reports no request asked for.",
+                "type": "string",
+                "const": "captain_reports"
+              },
+              {
+                "description": "The single Orchestrator conversation from before threads.",
+                "type": "string",
+                "const": "earlier"
+              }
+            ]
+          },
+          "Who": {
+            "type": "string",
+            "enum": [
+              "user",
+              "orchestrator",
+              "captain"
+            ]
+          },
+          "GlanceCaptain": {
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string",
+                "default": ""
+              },
+              "path": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "type": "string",
+                "default": ""
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "machine",
+              "path",
+              "project",
+              "machine_name"
             ]
           },
           "AgentEvent": {
@@ -34252,7 +34722,7 @@
             "type": "object",
             "properties": {
               "kind": {
-                "$ref": "#/$defs/Kind"
+                "$ref": "#/$defs/Kind2"
               },
               "title": {
                 "type": "string"
@@ -34296,7 +34766,7 @@
               "to_issue"
             ]
           },
-          "Kind": {
+          "Kind2": {
             "description": "What the reporter sends: something that does not work, or a suggestion.",
             "type": "string",
             "enum": [
@@ -35347,25 +35817,25 @@
             "type": "object",
             "properties": {
               "before_irreversible": {
-                "$ref": "#/$defs/Who",
+                "$ref": "#/$defs/Who2",
                 "default": {
                   "kind": "owner"
                 }
               },
               "in_doubt": {
-                "$ref": "#/$defs/Who",
+                "$ref": "#/$defs/Who2",
                 "default": {
                   "kind": "owner"
                 }
               },
               "on_limit": {
-                "$ref": "#/$defs/Who",
+                "$ref": "#/$defs/Who2",
                 "default": {
                   "kind": "owner"
                 }
               },
               "on_failure": {
-                "$ref": "#/$defs/Who",
+                "$ref": "#/$defs/Who2",
                 "default": {
                   "kind": "owner"
                 }
@@ -35378,7 +35848,7 @@
               "on_failure"
             ]
           },
-          "Who": {
+          "Who2": {
             "description": "Who a bot's call goes to.\n\n`{\"kind\":\"person\",\"account\":\"0b7e…\"}`, `{\"kind\":\"group\",\"handle\":\"design\"}`, `{\"kind\":\"owner\"}`",
             "oneOf": [
               {
@@ -36220,6 +36690,20 @@
                 "items": {
                   "$ref": "#/$defs/PlanGlance"
                 }
+              },
+              "requests": {
+                "description": "The user requests' glances, on one global tab only: the anchor, else the newest request\ntab. Open ones and Done ones from the last 14 days, at most 60.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/RequestGlance"
+                }
+              },
+              "request": {
+                "description": "The user request this global tab is the session of.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -36567,6 +37051,171 @@
               "finished",
               "closed"
             ]
+          },
+          "RequestGlance": {
+            "description": "What the app lists for a request.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "project": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "opened_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "kind": {
+                "$ref": "#/$defs/Kind",
+                "default": "asked"
+              },
+              "closed_at": {
+                "description": "Done when set.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "needs": {
+                "description": "Empty when nothing waits on the user.",
+                "type": "string",
+                "default": ""
+              },
+              "needs_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "last_user_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "last_who": {
+                "description": "The thread's last line, flat: no struct sits inside an Option on the wire.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Who"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "last_text": {
+                "type": "string",
+                "default": ""
+              },
+              "last_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "replies": {
+                "description": "Orchestrator replies and reports in the thread.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "captains": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/GlanceCaptain"
+                },
+                "default": []
+              },
+              "tab": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "asked": {
+                "description": "What the user first asked, one line of at most 300 characters.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "opened_at"
+            ]
+          },
+          "Kind": {
+            "oneOf": [
+              {
+                "description": "The user opened it.",
+                "type": "string",
+                "const": "asked"
+              },
+              {
+                "description": "\"Reports from Captain X\": reports no request asked for.",
+                "type": "string",
+                "const": "captain_reports"
+              },
+              {
+                "description": "The single Orchestrator conversation from before threads.",
+                "type": "string",
+                "const": "earlier"
+              }
+            ]
+          },
+          "Who": {
+            "type": "string",
+            "enum": [
+              "user",
+              "orchestrator",
+              "captain"
+            ]
+          },
+          "GlanceCaptain": {
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string",
+                "default": ""
+              },
+              "path": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "type": "string",
+                "default": ""
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "AgentEvent": {
             "type": "object",
@@ -43841,7 +44490,7 @@
             "type": "object",
             "properties": {
               "kind": {
-                "$ref": "#/$defs/Kind"
+                "$ref": "#/$defs/Kind2"
               },
               "title": {
                 "type": "string"
@@ -43880,7 +44529,7 @@
               "title"
             ]
           },
-          "Kind": {
+          "Kind2": {
             "description": "What the reporter sends: something that does not work, or a suggestion.",
             "type": "string",
             "enum": [
@@ -44901,32 +45550,32 @@
             "type": "object",
             "properties": {
               "before_irreversible": {
-                "$ref": "#/$defs/Who",
+                "$ref": "#/$defs/Who2",
                 "default": {
                   "kind": "owner"
                 }
               },
               "in_doubt": {
-                "$ref": "#/$defs/Who",
+                "$ref": "#/$defs/Who2",
                 "default": {
                   "kind": "owner"
                 }
               },
               "on_limit": {
-                "$ref": "#/$defs/Who",
+                "$ref": "#/$defs/Who2",
                 "default": {
                   "kind": "owner"
                 }
               },
               "on_failure": {
-                "$ref": "#/$defs/Who",
+                "$ref": "#/$defs/Who2",
                 "default": {
                   "kind": "owner"
                 }
               }
             }
           },
-          "Who": {
+          "Who2": {
             "description": "Who a bot's call goes to.\n\n`{\"kind\":\"person\",\"account\":\"0b7e…\"}`, `{\"kind\":\"group\",\"handle\":\"design\"}`, `{\"kind\":\"owner\"}`",
             "oneOf": [
               {
@@ -62357,6 +63006,20 @@
             "items": {
               "$ref": "#/$defs/PlanGlance"
             }
+          },
+          "requests": {
+            "description": "The user requests' glances, on one global tab only: the anchor, else the newest request\ntab. Open ones and Done ones from the last 14 days, at most 60.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/RequestGlance"
+            }
+          },
+          "request": {
+            "description": "The user request this global tab is the session of.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -62712,6 +63375,190 @@
               "finished",
               "closed"
             ]
+          },
+          "RequestGlance": {
+            "description": "What the app lists for a request.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "project": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "opened_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "kind": {
+                "$ref": "#/$defs/Kind",
+                "default": "asked"
+              },
+              "closed_at": {
+                "description": "Done when set.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "needs": {
+                "description": "Empty when nothing waits on the user.",
+                "type": "string",
+                "default": ""
+              },
+              "needs_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "last_user_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "last_who": {
+                "description": "The thread's last line, flat: no struct sits inside an Option on the wire.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Who"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "last_text": {
+                "type": "string",
+                "default": ""
+              },
+              "last_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "replies": {
+                "description": "Orchestrator replies and reports in the thread.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "captains": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/GlanceCaptain"
+                },
+                "default": []
+              },
+              "tab": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "asked": {
+                "description": "What the user first asked, one line of at most 300 characters.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "project",
+              "opened_at",
+              "kind",
+              "closed_at",
+              "needs",
+              "needs_at",
+              "last_user_at",
+              "last_who",
+              "last_text",
+              "last_at",
+              "replies",
+              "captains",
+              "tab",
+              "asked"
+            ]
+          },
+          "Kind": {
+            "oneOf": [
+              {
+                "description": "The user opened it.",
+                "type": "string",
+                "const": "asked"
+              },
+              {
+                "description": "\"Reports from Captain X\": reports no request asked for.",
+                "type": "string",
+                "const": "captain_reports"
+              },
+              {
+                "description": "The single Orchestrator conversation from before threads.",
+                "type": "string",
+                "const": "earlier"
+              }
+            ]
+          },
+          "Who": {
+            "type": "string",
+            "enum": [
+              "user",
+              "orchestrator",
+              "captain"
+            ]
+          },
+          "GlanceCaptain": {
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string",
+                "default": ""
+              },
+              "path": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "type": "string",
+                "default": ""
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "machine",
+              "path",
+              "project",
+              "machine_name"
+            ]
           }
         }
       },
@@ -62996,6 +63843,20 @@
             "items": {
               "$ref": "#/$defs/PlanGlance"
             }
+          },
+          "requests": {
+            "description": "The user requests' glances, on one global tab only: the anchor, else the newest request\ntab. Open ones and Done ones from the last 14 days, at most 60.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/RequestGlance"
+            }
+          },
+          "request": {
+            "description": "The user request this global tab is the session of.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -63343,6 +64204,171 @@
               "finished",
               "closed"
             ]
+          },
+          "RequestGlance": {
+            "description": "What the app lists for a request.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "project": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "opened_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "kind": {
+                "$ref": "#/$defs/Kind",
+                "default": "asked"
+              },
+              "closed_at": {
+                "description": "Done when set.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "needs": {
+                "description": "Empty when nothing waits on the user.",
+                "type": "string",
+                "default": ""
+              },
+              "needs_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "last_user_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "last_who": {
+                "description": "The thread's last line, flat: no struct sits inside an Option on the wire.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Who"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "last_text": {
+                "type": "string",
+                "default": ""
+              },
+              "last_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "replies": {
+                "description": "Orchestrator replies and reports in the thread.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "captains": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/GlanceCaptain"
+                },
+                "default": []
+              },
+              "tab": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "asked": {
+                "description": "What the user first asked, one line of at most 300 characters.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "opened_at"
+            ]
+          },
+          "Kind": {
+            "oneOf": [
+              {
+                "description": "The user opened it.",
+                "type": "string",
+                "const": "asked"
+              },
+              {
+                "description": "\"Reports from Captain X\": reports no request asked for.",
+                "type": "string",
+                "const": "captain_reports"
+              },
+              {
+                "description": "The single Orchestrator conversation from before threads.",
+                "type": "string",
+                "const": "earlier"
+              }
+            ]
+          },
+          "Who": {
+            "type": "string",
+            "enum": [
+              "user",
+              "orchestrator",
+              "captain"
+            ]
+          },
+          "GlanceCaptain": {
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string",
+                "default": ""
+              },
+              "path": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "type": "string",
+                "default": ""
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              }
+            }
           }
         }
       }
@@ -67392,6 +68418,20 @@
                 "items": {
                   "$ref": "#/$defs/PlanGlance"
                 }
+              },
+              "requests": {
+                "description": "The user requests' glances, on one global tab only: the anchor, else the newest request\ntab. Open ones and Done ones from the last 14 days, at most 60.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/RequestGlance"
+                }
+              },
+              "request": {
+                "description": "The user request this global tab is the session of.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -67746,6 +68786,190 @@
               "idle",
               "finished",
               "closed"
+            ]
+          },
+          "RequestGlance": {
+            "description": "What the app lists for a request.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "project": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "opened_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "kind": {
+                "$ref": "#/$defs/Kind",
+                "default": "asked"
+              },
+              "closed_at": {
+                "description": "Done when set.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "needs": {
+                "description": "Empty when nothing waits on the user.",
+                "type": "string",
+                "default": ""
+              },
+              "needs_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "last_user_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "last_who": {
+                "description": "The thread's last line, flat: no struct sits inside an Option on the wire.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Who"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "last_text": {
+                "type": "string",
+                "default": ""
+              },
+              "last_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "replies": {
+                "description": "Orchestrator replies and reports in the thread.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "captains": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/GlanceCaptain"
+                },
+                "default": []
+              },
+              "tab": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "asked": {
+                "description": "What the user first asked, one line of at most 300 characters.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "project",
+              "opened_at",
+              "kind",
+              "closed_at",
+              "needs",
+              "needs_at",
+              "last_user_at",
+              "last_who",
+              "last_text",
+              "last_at",
+              "replies",
+              "captains",
+              "tab",
+              "asked"
+            ]
+          },
+          "Kind": {
+            "oneOf": [
+              {
+                "description": "The user opened it.",
+                "type": "string",
+                "const": "asked"
+              },
+              {
+                "description": "\"Reports from Captain X\": reports no request asked for.",
+                "type": "string",
+                "const": "captain_reports"
+              },
+              {
+                "description": "The single Orchestrator conversation from before threads.",
+                "type": "string",
+                "const": "earlier"
+              }
+            ]
+          },
+          "Who": {
+            "type": "string",
+            "enum": [
+              "user",
+              "orchestrator",
+              "captain"
+            ]
+          },
+          "GlanceCaptain": {
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string",
+                "default": ""
+              },
+              "path": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "type": "string",
+                "default": ""
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "machine",
+              "path",
+              "project",
+              "machine_name"
             ]
           },
           "Reply": {
@@ -71102,7 +72326,7 @@
               "asked": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/Who"
+                  "$ref": "#/$defs/Who2"
                 },
                 "default": []
               },
@@ -71160,7 +72384,7 @@
               "on_failure"
             ]
           },
-          "Who": {
+          "Who2": {
             "description": "Who a bot's call goes to.\n\n`{\"kind\":\"person\",\"account\":\"0b7e…\"}`, `{\"kind\":\"group\",\"handle\":\"design\"}`, `{\"kind\":\"owner\"}`",
             "oneOf": [
               {
@@ -72186,6 +73410,20 @@
                 "items": {
                   "$ref": "#/$defs/PlanGlance"
                 }
+              },
+              "requests": {
+                "description": "The user requests' glances, on one global tab only: the anchor, else the newest request\ntab. Open ones and Done ones from the last 14 days, at most 60.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/RequestGlance"
+                }
+              },
+              "request": {
+                "description": "The user request this global tab is the session of.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -72533,6 +73771,171 @@
               "finished",
               "closed"
             ]
+          },
+          "RequestGlance": {
+            "description": "What the app lists for a request.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "project": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "opened_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "kind": {
+                "$ref": "#/$defs/Kind",
+                "default": "asked"
+              },
+              "closed_at": {
+                "description": "Done when set.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "needs": {
+                "description": "Empty when nothing waits on the user.",
+                "type": "string",
+                "default": ""
+              },
+              "needs_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "last_user_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "last_who": {
+                "description": "The thread's last line, flat: no struct sits inside an Option on the wire.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Who"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "last_text": {
+                "type": "string",
+                "default": ""
+              },
+              "last_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              },
+              "replies": {
+                "description": "Orchestrator replies and reports in the thread.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "captains": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/GlanceCaptain"
+                },
+                "default": []
+              },
+              "tab": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "asked": {
+                "description": "What the user first asked, one line of at most 300 characters.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "opened_at"
+            ]
+          },
+          "Kind": {
+            "oneOf": [
+              {
+                "description": "The user opened it.",
+                "type": "string",
+                "const": "asked"
+              },
+              {
+                "description": "\"Reports from Captain X\": reports no request asked for.",
+                "type": "string",
+                "const": "captain_reports"
+              },
+              {
+                "description": "The single Orchestrator conversation from before threads.",
+                "type": "string",
+                "const": "earlier"
+              }
+            ]
+          },
+          "Who": {
+            "type": "string",
+            "enum": [
+              "user",
+              "orchestrator",
+              "captain"
+            ]
+          },
+          "GlanceCaptain": {
+            "type": "object",
+            "properties": {
+              "machine": {
+                "type": "string",
+                "default": ""
+              },
+              "path": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "type": "string",
+                "default": ""
+              },
+              "machine_name": {
+                "type": "string",
+                "default": ""
+              }
+            }
           },
           "Reply": {
             "description": "The answer to the call that carried `id`: `{\"id\":4,\"ok\":…}` or `{\"id\":4,\"err\":\"…\"}`.",
@@ -75767,7 +77170,7 @@
               "asked": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/Who"
+                  "$ref": "#/$defs/Who2"
                 },
                 "default": []
               },
@@ -75821,7 +77224,7 @@
               "on_failure"
             ]
           },
-          "Who": {
+          "Who2": {
             "description": "Who a bot's call goes to.\n\n`{\"kind\":\"person\",\"account\":\"0b7e…\"}`, `{\"kind\":\"group\",\"handle\":\"design\"}`, `{\"kind\":\"owner\"}`",
             "oneOf": [
               {
@@ -77407,6 +78810,93 @@
                 },
                 "required": [
                   "cmd"
+                ]
+              },
+              {
+                "description": "`Vec<user_requests::RequestGlance>`: the 60 newest user requests opened before `before`,\nor of all, newest first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "user_requests"
+                  },
+                  "before": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`user_requests::UserRequestView`: request `id` with the last `items` things said in it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "user_request"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "`Vec<user_requests::Opened>`: one request and Orchestrator tab per item, its session\nstarted on the item's text. A repeat of a key answers the request it opened.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "new_user_requests"
+                  },
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/NewRequest"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "items"
+                ]
+              },
+              {
+                "description": "The request's new `user_requests::RequestGlance`. Done closes its tab; Open adds a resting\ntab on its session when none is open.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "user_request_action"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "action": {
+                    "$ref": "#/$defs/RequestAction"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "action"
                 ]
               },
               {
@@ -79996,6 +81486,55 @@
               "path",
               "tab",
               "text"
+            ]
+          },
+          "NewRequest": {
+            "description": "What the app asks to open: one paragraph of a new request.",
+            "type": "object",
+            "properties": {
+              "key": {
+                "description": "The app's idempotency key for this paragraph.",
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "project": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "machine": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "key",
+              "title",
+              "text"
+            ]
+          },
+          "RequestAction": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "done",
+                  "reopen"
+                ]
+              },
+              {
+                "description": "A resting tab on the request's session, for one whose tab closed.",
+                "type": "string",
+                "const": "open"
+              }
             ]
           },
           "TasteScope": {
@@ -83045,6 +84584,93 @@
                 ]
               },
               {
+                "description": "`Vec<user_requests::RequestGlance>`: the 60 newest user requests opened before `before`,\nor of all, newest first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "user_requests"
+                  },
+                  "before": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`user_requests::UserRequestView`: request `id` with the last `items` things said in it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "user_request"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "items": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "`Vec<user_requests::Opened>`: one request and Orchestrator tab per item, its session\nstarted on the item's text. A repeat of a key answers the request it opened.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "new_user_requests"
+                  },
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/NewRequest"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "items"
+                ]
+              },
+              {
+                "description": "The request's new `user_requests::RequestGlance`. Done closes its tab; Open adds a resting\ntab on its session when none is open.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "user_request_action"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "action": {
+                    "$ref": "#/$defs/RequestAction"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "action"
+                ]
+              },
+              {
                 "description": "The id of a new tab, not yet started, whose session adjusts `scope`'s way of working with\nthe taste tools and whose first prompt says so. It opens in the project folder `path`, or\nin the folder for threads without a project.",
                 "type": "object",
                 "properties": {
@@ -85607,6 +87233,55 @@
               "path",
               "tab",
               "text"
+            ]
+          },
+          "NewRequest": {
+            "description": "What the app asks to open: one paragraph of a new request.",
+            "type": "object",
+            "properties": {
+              "key": {
+                "description": "The app's idempotency key for this paragraph.",
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "project": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "machine": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "key",
+              "title",
+              "text"
+            ]
+          },
+          "RequestAction": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "done",
+                  "reopen"
+                ]
+              },
+              {
+                "description": "A resting tab on the request's session, for one whose tab closed.",
+                "type": "string",
+                "const": "open"
+              }
             ]
           },
           "TasteScope": {
