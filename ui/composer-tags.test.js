@@ -25,6 +25,8 @@ const tagPopoverKey = call("tagPopoverKey");
 const tagOptions = call("tagOptions");
 const tagCatalog = call("tagCatalog");
 const tagLineHtml = call("tagLineHtml");
+const tagKnown = call("tagKnown");
+const tagMirrorHtml = call("tagMirrorHtml");
 const composerTagPopoverHtml = call("composerTagPopoverHtml");
 
 const host = (id, name, slug, online, captain = "none") => ({ id, name, slug, online, captain });
@@ -359,4 +361,20 @@ test("the routing strip says where a paragraph goes, and that a missing Captain 
   const two = composerRoutingHtml(routePreview("#pinned sobe\n\n#site publica", catalog), esc);
   assert.match(two, /<span class="preview">#pinned sobe<\/span><span class="where">Goes to <b>Captain pinned<\/b> on Mac mini\.<\/span>/);
   assert.match(two, /<div class="route ambiguous" data-index="1">.*<span class="where">site is on 2 machines<\/span><span class="choices"><button type="button" data-machine="macbook">@macbook<\/button>/);
+});
+
+test("tagKnown reads the catalog's project and machine slugs as sets", () => {
+  const known = context.tagKnown({ projects: [{ slug: "site" }, { slug: "api" }], machines: [{ slug: "macbook" }] });
+  assert.deepEqual([...known.project], ["site", "api"]);
+  assert.deepEqual([...known.machine], ["macbook"]);
+});
+
+test("tagMirrorHtml paints each line of a text as the composer's mirror does, an empty line as a zero-width space", () => {
+  const catalog = { projects: [{ slug: "site" }], machines: [{ slug: "macbook" }] };
+  const esc = (text) => text.replace(/[&<>]/g, (c) => `&#${c.charCodeAt(0)};`);
+  assert.equal(
+    tagMirrorHtml("#site @macbook <b>\n\n#x", catalog, esc),
+    '<div class="pl"><span class="tag project">#site</span> <span class="tag machine">@macbook</span> &#60;b&#62;</div><div class="pl">\u200b</div><div class="pl"><span class="tag project unknown">#x</span></div>',
+  );
+  assert.equal(tagMirrorHtml("", catalog, esc), "");
 });

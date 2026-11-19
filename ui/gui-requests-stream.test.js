@@ -64,9 +64,34 @@ const glance = (id, over = {}) => ({
 const stands = (over = {}) => ({ asked: "Find out why codes are late.", done: "Cause found.", left: "Tell support.", needs: "", links: ["PR #212 merged"], at: 5000, ...over });
 const userView = (id, over = {}) => ({ glance: glance(id), stands: stands(), items: [], plans: [], ...over });
 
+const CATALOG = {
+  name: "Orchestrator",
+  machines: [{ slug: "laptop", name: "laptop", online: true }, { slug: "studio", name: "studio", online: true }],
+  projects: [
+    { slug: "storefront", name: "storefront", repo: "", machines: [{ id: "mac", slug: "laptop", name: "laptop", online: true, captain: "working" }] },
+    { slug: "billing-api", name: "billing-api", repo: "", machines: [{ id: "studio", slug: "studio", name: "studio", online: true, captain: "idle" }] },
+  ],
+};
+const FACTS = [
+  { slug: "storefront", name: "storefront", machine: { id: "mac", name: "laptop" }, state: "working" },
+  { slug: "billing-api", name: "billing-api", machine: { id: "studio", name: "studio" }, state: "idle" },
+];
+/** The app's `markdown()` is gui-timeline.js's, which this page does not load: the same vendored marked, with raw HTML and unsafe links and images drawn as text. */
+const MARKDOWN_STUB = `const markdownParser = new marked.Marked({ gfm: true, breaks: true, renderer: {
+  html: ({ text }) => esc(text),
+  image: ({ text }) => esc(text),
+  link({ href, tokens }) { const inner = this.parser.parseInline(tokens); return /^https?:/i.test(href) ? '<a href="' + esc(href) + '">' + inner + '</a>' : inner; },
+} });
+function markdown(text) { return markdownParser.parse(text).trim(); }`;
+const TWO = "#storefront show the delivery estimate on the cart page.\n\n#billing-api @studio the monthly export is missing refunds.";
+const made = (call) => call.items.map((item, i) => ({ key: item.key, id: `q${i + 1}`, tab: `tab-${i + 5}`, handoff: "started" }));
+const typeAsk = (h, value) => h.overlay.listeners.input({ target: { closest: (sel) => (sel === "[data-rqs-ask]" ? { value } : null) } });
+const typeReply = (h, id, value) => h.overlay.listeners.input({ target: { closest: (sel) => (sel === "[data-rqs-reply]" ? { value, dataset: { rqsReply: id } } : null) } });
+const enter = (h, sel, extra = {}) => h.overlay.listeners.keydown({ key: "Enter", shiftKey: false, isComposing: false, preventDefault() {}, target: { closest: (s) => (s === sel ? extra : null) } });
+
 /** gui-requests.js and gui-requests-stream.js in a page: the app's globals stubbed, the real esc and the real model. */
 function harness({ tabs = [], reply = () => [], host = "mac" } = {}) {
-  const log = { calls: [], told: [], activated: [], revealed: [], newRequest: 0 };
+  const log = { calls: [], told: [], activated: [], revealed: [] };
   const els = { chat: element(), crumb: element(), footer: element(), head: element() };
   const made = [];
   const context = {
@@ -99,7 +124,10 @@ function harness({ tabs = [], reply = () => [], host = "mac" } = {}) {
     visibleInterval: () => {},
     renderThread() {},
     tell: (html) => log.told.push(html),
-    openNewRequest: () => log.newRequest++,
+    crypto: { randomUUID: (() => { let n = 0; return () => `key-${++n}`; })() },
+    globalSettings: { name: "Orchestrator", busy: "queue" },
+    composerTagCatalog: () => CATALOG,
+    captainFacts: () => FACTS,
     activate: (tab) => {
       context.active = tab;
       log.activated.push(tab.key);
@@ -129,7 +157,9 @@ function harness({ tabs = [], reply = () => [], host = "mac" } = {}) {
   vm.createContext(context);
   const run = (code) => vm.runInContext(code, context);
   run(line(settingsSrc, "const esc = "));
-  for (const file of ["composer-tags.js", "requests-model.js", "gui-requests.js", "gui-requests-stream.js"]) run(read(file));
+  run(read("vendor/marked.js"));
+  run(MARKDOWN_STUB);
+  for (const file of ["composer-tags.js", "requests-model.js", "gui-requests.js", "gui-requests-new.js", "gui-requests-stream.js"]) run(read(file));
   const overlay = run("requestsStream");
   const click = (selectors) => overlay.listeners.click({ target: { closest: (sel) => selectors[sel] ?? null } });
   const entry = (id) => ({ "[data-rqs-entry]": { dataset: { rqsEntry: id } } });
@@ -333,4 +363,208 @@ test("every field drawn from data is escaped: no img element and no javascript: 
   assert.equal(tagNames(html).includes("img"), false);
   assert.deepEqual(hrefs(html).filter((href) => /javascript:/i.test(href)), []);
   assert.doesNotMatch(html, /<img/i);
+});
+
+test("the header is the Orchestrator title with Requests and All activity tabs, and Requests returns to the column", () => {
+  const h = harness({ tabs: [anchorTab([glance("q1")])] });
+  open(h);
+  const html = h.overlay.innerHTML;
+  assert.match(html, /<h1>Orchestrator<\/h1>/);
+  assert.match(html, /<button[^>]*data-rqs-close[^>]*>Requests<\/button>/);
+  assert.match(html, /<[a-z]+[^>]*aria-current="page"[^>]*>All activity<\//);
+  assert.doesNotMatch(html, /<h1>All activity<\/h1>/);
+  h.click({ "[data-rqs-close]": {} });
+  assert.equal(h.overlay.hidden, true);
+});
+
+test("the footer is the Ask for something new composer, with no New request button", () => {
+  const h = harness({ tabs: [anchorTab([glance("q1")])] });
+  open(h);
+  const html = h.overlay.innerHTML;
+  assert.match(html, /<label[^>]*for="rqs-ask"[^>]*>Ask for something new<\/label>/);
+  assert.match(html, /<input[^>]*id="rqs-ask"[^>]*data-rqs-ask[^>]*placeholder="Ask for something new"/);
+  assert.match(html, /Each request opens its own thread/);
+  assert.match(html, /<button[^>]*data-rqs-send[^>]*disabled/, "nothing typed: Send is off");
+  assert.doesNotMatch(html, /data-rqs-new/);
+});
+
+test("the footer shows the preview only with two or more items or a close match", () => {
+  const h = harness({ tabs: [anchorTab([glance("q-gift", { title: "Add gift cards to checkout", tab: "tab-12" })])] });
+  open(h);
+  typeAsk(h, "#storefront show the estimate on the cart page.");
+  assert.doesNotMatch(h.overlay.innerHTML, /data-nr-card=/, "one plain item: no preview");
+  assert.doesNotMatch(h.overlay.innerHTML, /<button[^>]*data-rqs-send[^>]*disabled/, "Send is on");
+  typeAsk(h, TWO);
+  let html = h.overlay.innerHTML;
+  assert.equal(html.match(/data-nr-card=/g).length, 2);
+  assert.match(html, /This opens 2 threads/);
+  assert.match(html, /Goes to Captain billing-api on studio, free now/);
+  assert.doesNotMatch(html, /data-nr-rename/, "the stream's preview has no Rename, as its board has none");
+  typeAsk(h, "#storefront add gift cards to the checkout page");
+  html = h.overlay.innerHTML;
+  assert.match(html, /Looks close to an open thread: <b>Add gift cards to checkout<\/b>/);
+  assert.equal(h.log.calls.length, 0, "the preview calls nothing");
+});
+
+test("the footer sends through the same path as New request: one new_user_requests with a key per item", async () => {
+  const tabs = [anchorTab([glance("q0")]), requestTab("q1", "tab-5")];
+  const h = harness({ tabs, reply: (call) => (call.cmd === "new_user_requests" ? made(call) : null) });
+  open(h);
+  typeAsk(h, TWO);
+  h.click({ "[data-rqs-send]": {} });
+  await flush();
+  const sent = h.log.calls.filter(([, call]) => call.cmd === "new_user_requests");
+  assert.equal(sent.length, 1);
+  assert.deepEqual(Object.keys(sent[0][1]), ["cmd", "items"]);
+  assert.deepEqual(
+    sent[0][1].items.map(({ title, text, project, machine }) => ({ title, text, project, machine })),
+    [
+      { title: "show the delivery estimate on the cart page.", text: TWO.split("\n\n")[0], project: "storefront", machine: "laptop" },
+      { title: "the monthly export is missing refunds.", text: TWO.split("\n\n")[1], project: "billing-api", machine: "studio" },
+    ],
+  );
+  assert.equal(new Set(sent[0][1].items.map((i) => i.key)).size, 2);
+  assert.deepEqual(h.log.revealed, ["mac:tab-5"], "the first new thread opens");
+  assert.equal(h.run("rqs.ask.text"), "", "the draft is gone");
+  assert.equal(h.run("nr.text"), "", "New request's own draft was never touched");
+});
+
+test("Enter in the footer sends too, and a timeout keeps the ask and sends the same keys again", async () => {
+  let fail = true;
+  const tabs = [anchorTab([glance("q0")]), requestTab("q1", "tab-5")];
+  const h = harness({
+    tabs,
+    reply: (call) => {
+      if (call.cmd !== "new_user_requests") return null;
+      if (fail) throw new Error("timed out");
+      return made(call);
+    },
+  });
+  open(h);
+  typeAsk(h, TWO);
+  enter(h, "[data-rqs-ask]");
+  await flush();
+  assert.deepEqual(h.log.calls.filter(([, c]) => c.cmd === "prompt"), [], "nothing reaches the single chat");
+  assert.equal(h.run("rqs.ask.text"), TWO, "the ask stays");
+  assert.match(h.log.told.join(""), /timed out/);
+  fail = false;
+  h.click({ "[data-rqs-send]": {} });
+  await flush();
+  const [first, retry] = h.log.calls.filter(([, c]) => c.cmd === "new_user_requests").map(([, c]) => c.items.map((i) => i.key));
+  assert.deepEqual(retry, first);
+});
+
+test("a close match chosen in the footer sends a Prompt in that request's tab", async () => {
+  const gift = glance("q-gift", { title: "Add gift cards to checkout", tab: "tab-12" });
+  const tabs = [anchorTab([gift]), requestTab("q-gift", "tab-12")];
+  const h = harness({ tabs });
+  open(h);
+  typeAsk(h, "#storefront add gift cards to the checkout page");
+  h.click({ "[data-nr-join]": { dataset: { nrJoin: "0" } } });
+  h.click({ "[data-rqs-send]": {} });
+  await flush();
+  assert.deepEqual(h.log.calls, [["mac", { cmd: "prompt", tab: "tab-12", text: "#storefront add gift cards to the checkout page" }]]);
+});
+
+test("the side panel has Reply in this thread and Open full, and no Open thread", async () => {
+  const h = harness({ tabs: [anchorTab([glance("q1", { tab: "tab-12" })])], reply: (call) => (call.cmd === "user_request" ? userView("q1") : null) });
+  open(h);
+  h.click(h.entry("q1"));
+  await flush();
+  const html = h.overlay.innerHTML;
+  assert.match(html, /<label[^>]*for="rqs-reply"[^>]*>Reply in this thread<\/label>/);
+  assert.match(html, /<input[^>]*id="rqs-reply"[^>]*data-rqs-reply="q1"[^>]*placeholder="Reply in this thread"/);
+  assert.match(html, /<button[^>]*data-rqs-open="q1"[^>]*>Open full<\/button>/);
+  assert.doesNotMatch(html, /Open thread/);
+});
+
+test("a reply in the panel is a Prompt to the request's tab, then the panel reads the thread again", async () => {
+  const tabs = [anchorTab([glance("q1", { tab: "tab-12" })]), requestTab("q1", "tab-12")];
+  const h = harness({ tabs, reply: (call) => (call.cmd === "user_request" ? userView("q1") : null) });
+  open(h);
+  h.click(h.entry("q1"));
+  await flush();
+  typeReply(h, "q1", "Tell support: draft it.");
+  h.click({ "[data-rqs-reply-send]": { dataset: { rqsReplySend: "q1" } } });
+  await flush();
+  assert.deepEqual(h.log.calls.map(([, c]) => c.cmd), ["user_request", "prompt", "user_request"]);
+  assert.deepEqual(h.log.calls[1], ["mac", { cmd: "prompt", tab: "tab-12", text: "Tell support: draft it." }]);
+  assert.equal(h.run("rqs.reply.get('q1') ?? ''"), "", "the box is empty after it went");
+  assert.equal(h.log.activated.length, 0, "the panel stays; no tab is opened");
+});
+
+test("a reply to a request with no tab asks the host to open one first; Enter sends", async () => {
+  const h = harness({
+    tabs: [anchorTab([glance("q1", { tab: null })])],
+    reply: (call) => (call.cmd === "user_request" ? userView("q1") : call.cmd === "user_request_action" ? { tab: "tab-40" } : null),
+  });
+  open(h);
+  h.click(h.entry("q1"));
+  await flush();
+  typeReply(h, "q1", "Go on.");
+  enter(h, "[data-rqs-reply]", { dataset: { rqsReply: "q1" }, value: "Go on." });
+  await flush();
+  assert.deepEqual(h.log.calls.slice(1, 3).map(([, c]) => c), [{ cmd: "user_request_action", id: "q1", action: "open" }, { cmd: "prompt", tab: "tab-40", text: "Go on." }]);
+});
+
+test("a reply that fails keeps the text and says why", async () => {
+  const h = harness({
+    tabs: [anchorTab([glance("q1", { tab: "tab-12" })]), requestTab("q1", "tab-12")],
+    reply: (call) => {
+      if (call.cmd === "prompt") throw new Error("host is offline");
+      return call.cmd === "user_request" ? userView("q1") : null;
+    },
+  });
+  open(h);
+  h.click(h.entry("q1"));
+  await flush();
+  typeReply(h, "q1", "Go on.");
+  h.click({ "[data-rqs-reply-send]": { dataset: { rqsReplySend: "q1" } } });
+  await flush();
+  assert.equal(h.run("rqs.reply.get('q1')"), "Go on.");
+  assert.match(h.log.told.join(""), /host is offline/);
+});
+
+test("the panel's item text goes through markdown, and unsafe markup in it stays text", async () => {
+  const h = harness({
+    tabs: [anchorTab([glance("q1")])],
+    reply: () => userView("q1", { items: [{ who: "captain", text: "**Cause** found, see [the PR](https://example.com/pr/1). <img src=x onerror=alert(1)> [x](javascript:alert(1))", at: 1, captain: "storefront" }] }),
+  });
+  open(h);
+  h.click(h.entry("q1"));
+  await flush();
+  const html = h.overlay.innerHTML;
+  assert.match(html, /<strong>Cause<\/strong> found/);
+  assert.match(html, /<a href="https:\/\/example\.com\/pr\/1">the PR<\/a>/);
+  assert.equal(tagNames(html).includes("img"), false);
+  assert.deepEqual(hrefs(html).filter((href) => /javascript:/i.test(href)), []);
+});
+
+test("the ask bubble shows glance.asked, and the title when asked is empty or missing", () => {
+  const tabs = [anchorTab([
+    glance("q-a", { title: "Why are codes late?", asked: "Customers say the login code takes forever to arrive. Find out why." }),
+    glance("q-b", { title: "Pause the workers", asked: "" }),
+    glance("q-c", { title: "Compare v2.4 with the roadmap" }),
+    glance("q-d", { title: "Hostile", asked: "<img src=x onerror=alert(1)>" }),
+  ])];
+  const h = harness({ tabs });
+  open(h);
+  const html = h.overlay.innerHTML;
+  const ask = (id) => html.slice(html.indexOf(`data-rqs-entry="${id}"`) - 330, html.indexOf(`data-rqs-entry="${id}"`));
+  assert.match(ask("q-a"), /Customers say the login code takes forever to arrive\. Find out why\./);
+  assert.doesNotMatch(ask("q-a"), /Why are codes late/);
+  assert.match(ask("q-b"), /Pause the workers/);
+  assert.match(ask("q-c"), /Compare v2.4 with the roadmap/);
+  assert.doesNotMatch(html, /<img/i);
+});
+
+test("text typed into the footer is drawn as text: no img element and no javascript: link", () => {
+  const bad = "<img src=x onerror=alert(1)> [x](javascript:alert(1))";
+  const h = harness({ tabs: [anchorTab([glance("q1", { title: bad })])] });
+  open(h);
+  typeAsk(h, `#storefront ${bad}\n\n#billing-api ${bad}`);
+  const html = h.overlay.innerHTML;
+  assert.match(html, /This opens 2 threads/);
+  assert.equal(tagNames(html).includes("img"), false);
+  assert.deepEqual(hrefs(html).filter((href) => /javascript:/i.test(href)), []);
 });

@@ -81,8 +81,9 @@ const requestTab = (id, tabId) => ({ key: `mac:${tabId}`, machine: "mac", view: 
 
 /** gui-requests-new.js in a page: the app's globals stubbed, the real esc, composer-tags and model. */
 function harness({ tabs = [anchorTab()], glances = [], catalog = catalogOf(), facts = factsOf(), reply = () => [], host = "mac" } = {}) {
-  const log = { calls: [], told: [], activated: [], revealed: [] };
-  const els = { chat: element() };
+  const log = { calls: [], told: [], activated: [], revealed: [], threads: 0 };
+  const els = { chat: element(), crumb: element() };
+  const made = [];
   const models = [];
   let uuid = 0;
   const context = {
@@ -110,6 +111,7 @@ function harness({ tabs = [anchorTab()], glances = [], catalog = catalogOf(), fa
     composerTagCatalog: () => context.catalog,
     captainFacts: () => context.facts,
     icon: (name) => `<svg data-icon="${name}"></svg>`,
+    renderThread: () => log.threads++,
     onModelChange: (fn) => models.push(fn),
     tell: (html) => log.told.push(html),
     activate: (tab) => {
@@ -129,7 +131,12 @@ function harness({ tabs = [anchorTab()], glances = [], catalog = catalogOf(), fa
     reply,
     document: {
       getElementById: (id) => (id === "chat" ? els.chat : null),
-      createElement: () => element(),
+      querySelector: (sel) => (sel === "#chat-head .crumb" ? els.crumb : null),
+      createElement: () => {
+        const el = element();
+        made.push(el);
+        return el;
+      },
     },
   };
   vm.createContext(context);
@@ -144,7 +151,7 @@ function harness({ tabs = [anchorTab()], glances = [], catalog = catalogOf(), fa
   const send = () => run("sendNewRequest()");
   const created = () => log.calls.filter(([, call]) => call.cmd === "new_user_requests");
   const prompts = () => log.calls.filter(([, call]) => call.cmd === "prompt");
-  return { context, run, log, els, panel, models, click, type, items, cards, send, created, prompts };
+  return { context, run, log, els, made, panel, models, click, type, items, cards, send, created, prompts };
 }
 
 const TWO = "#storefront show the delivery estimate on the cart page, before the customer reaches checkout.\n\n#billing-api @studio the monthly export is missing refunds. Find out why.";
@@ -166,8 +173,6 @@ test("two #projects make two cards, each with its title and project", () => {
   const html = h.cards();
   assert.equal(cardCount(html), 2);
   assert.match(html, /show the delivery estimate on the cart page, before the…/);
-  assert.match(html, /#storefront/);
-  assert.match(html, /#billing-api/);
   assert.match(html, /This opens 2 threads/);
 });
 
@@ -424,4 +429,100 @@ test("markup in any drawn field stays text: no img element and no javascript: hr
   assert.ok(pieces.cards.includes("&#60;img src=x onerror=alert(1)&#62;"), "the markup shows as text");
   assert.ok(pieces.told.includes("&#60;img src=x onerror=alert(1)&#62;"), "the error shows as text");
   assert.match(pieces.cards, /<input[^>]*value="[^"]*&#60;img/, "the rename input holds the markup as text");
+});
+
+const failWith = (message) => (call) => {
+  if (call.cmd === "new_user_requests") throw new Error(message);
+  return null;
+};
+
+test("only an error that says the host does not know the command falls back to the single chat", async () => {
+  for (const message of [
+    "unknown variant `new_user_requests`, expected one of `agents`, `work_cost`",
+    "this hub runs pinned 0.17.19, which can't answer that: unknown variant `new_user_requests`",
+    "unknown command",
+    "unknown cmd new_user_requests",
+  ]) {
+    const h = harness({ reply: failWith(message) });
+    h.type("#storefront Show the estimate.");
+    await h.send();
+    assert.equal(h.prompts().length, 1, `falls back on: ${message}`);
+  }
+  for (const message of ["timed out", "socket closed", "host is offline", "not a list of requests"]) {
+    const h = harness({ reply: failWith(message) });
+    h.type("#storefront Show the estimate.");
+    await h.send();
+    assert.deepEqual(h.prompts(), [], `no prompt on: ${message}`);
+  }
+});
+
+test("a timeout keeps the draft and shows the error, and the retry sends the same keys", async () => {
+  const h = harness({ reply: failWith("timed out waiting for the host") });
+  h.run("openNewRequest()");
+  h.type(TWO);
+  await h.send();
+  assert.deepEqual(h.prompts(), [], "no prompt reached the single chat");
+  assert.equal(h.run("nr.text"), TWO, "the draft stays");
+  assert.equal(h.panel.hidden, false, "the screen stays open");
+  assert.equal(h.log.told.length, 1);
+  assert.match(h.log.told[0], /timed out waiting for the host/);
+  h.context.reply = sent(opened);
+  await h.send();
+  const [first, retry] = h.created().map(([, call]) => call.items.map((i) => i.key));
+  assert.equal(first.length, 2);
+  assert.deepEqual(retry, first, "the retry reuses the keys");
+  assert.equal(h.run("nr.text"), "", "the draft goes once it was sent");
+  assert.deepEqual(h.prompts(), []);
+});
+
+test("the header is the chat head's crumb, not a second bar under it", () => {
+  const h = harness();
+  assert.equal(h.run("newRequestCrumbHtml()"), "", "closed: no crumb");
+  h.run("openNewRequest()");
+  const crumb = h.run("newRequestCrumbHtml()");
+  assert.match(crumb, /<button[^>]*data-nr-close[^>]*>Requests<\/button>/);
+  assert.match(crumb, /<span class="nr-sep">\/<\/span>/);
+  assert.match(crumb, /<h2[^>]*>New request<\/h2>/);
+  assert.equal(h.made.some((el) => el.className === "nr-head"), false, "the panel draws no head bar of its own");
+  assert.ok(h.log.threads > 0, "opening redraws the chat head");
+  const before = h.log.threads;
+  h.els.crumb.listeners.click({ target: { closest: (sel) => (sel === "[data-nr-close]" ? {} : null) } });
+  assert.equal(h.panel.hidden, true, "the crumb's Requests link closes the screen");
+  assert.ok(h.log.threads > before, "closing redraws the chat head");
+  assert.equal(h.run("newRequestCrumbHtml()"), "");
+});
+
+test("a card draws no project chip: the routing preview names the Captain", () => {
+  const h = harness();
+  h.type(TWO);
+  const html = h.cards();
+  assert.doesNotMatch(html, /nr-project/);
+  assert.match(html, /Goes to Captain storefront on laptop/);
+});
+
+test("the close match is a dashed row under the cards with Reply there instead", () => {
+  const h = harness({ glances: [glance("q-gift", { title: "Add gift cards to checkout", tab: "tab-12" })] });
+  h.type("#storefront add gift cards to the checkout page");
+  const html = h.cards();
+  const row = html.slice(html.indexOf('class="nr-close-row"'));
+  assert.ok(html.includes('class="nr-close-row"'), "a separate row");
+  assert.ok(html.indexOf('class="nr-close-row"') > html.lastIndexOf("data-nr-card="), "after the cards");
+  assert.doesNotMatch(html.slice(0, html.indexOf('class="nr-close-row"')), /Looks close/, "not inside a card");
+  assert.match(row, /Looks close to an open thread: <b>Add gift cards to checkout<\/b>/);
+  assert.match(row, /<button[^>]*data-nr-join="0"[^>]*>Reply there instead<\/button>/);
+  h.click({ "[data-nr-join]": { dataset: { nrJoin: "0" } } });
+  assert.match(h.cards(), /data-nr-join="0"[^>]*aria-pressed="true"/, "choosing it joins the thread");
+});
+
+test("the text box paints #project and @machine with the composer's tag painting", () => {
+  const h = harness();
+  h.type("#storefront @studio check #nope and <img src=x onerror=alert(1)>");
+  const mirror = h.run("nrMirror").innerHTML;
+  assert.match(mirror, /<span class="tag project">#storefront<\/span>/);
+  assert.match(mirror, /<span class="tag machine">@studio<\/span>/);
+  assert.match(mirror, /<span class="tag project unknown">#nope<\/span>/);
+  assert.doesNotMatch(mirror, /<img/i);
+  assert.match(mirror, /&#60;img/, "the markup shows as text");
+  h.type("");
+  assert.equal(h.run("nrMirror").innerHTML, "", "an empty draft paints nothing");
 });

@@ -395,6 +395,13 @@ test("the header names the request, its project and state, and offers Mark done"
   assert.match(html, /data-request-action="done"[^>]*>Mark done</);
 });
 
+test("while New request is open the header is its crumb, in any global tab", () => {
+  const h = harness({ tabs: [anchorTab(board())] });
+  assert.equal(h.run("requestCrumbHtml(tabs[0])"), "");
+  h.run('globalThis.newRequestCrumbHtml = () => \'<h2 class="nr-title-crumb">New request</h2>\'');
+  assert.equal(h.run("requestCrumbHtml(tabs[0])"), '<h2 class="nr-title-crumb">New request</h2>');
+});
+
 test("Mark done sends user_request_action done for the request", async () => {
   const g = board();
   g[1].tab = "tab-21";
