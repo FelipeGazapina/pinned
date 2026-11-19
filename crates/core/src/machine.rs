@@ -3862,7 +3862,7 @@ impl Machine {
         let at = crate::connectors::unix_millis();
         let (machine, machine_name) = (self.hub_id.lock().unwrap().clone(), crate::account::hostname());
         if remote {
-            return CaptainRef { at, ..CaptainRef::default() };
+            return remote_captain_ref("", "", at);
         }
         let path = self.view(tab).map(|v| v.cwd).unwrap_or_default();
         let folder = Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -4287,7 +4287,7 @@ impl Machine {
                 let answer = self.send_to_captain_box(&project, machine.as_deref(), boxed, &message, &request_id)?;
                 if let Some(session) = session {
                     let repo = repo.or_else(|| self.project_origin(&project, machine.as_deref()).ok()).unwrap_or_else(|| project.clone());
-                    let captain = CaptainRef { project: repo_name(&repo).unwrap_or(repo.as_str()).to_owned(), boxed: true, at: crate::connectors::unix_millis(), ..CaptainRef::default() };
+                    let captain = box_captain_ref(&answer, &repo, crate::connectors::unix_millis());
                     self.requests.lock().unwrap().record_send(&session, &request_id, captain);
                 }
                 text_json(answer)
@@ -8277,6 +8277,18 @@ pub fn git_remote(dir: &Path) -> Option<String> {
         .ok()?;
     let url = String::from_utf8(out.stdout).ok()?.trim().to_owned();
     (out.status.success() && !url.is_empty()).then_some(url)
+}
+
+/// A Capitão in a box as a request records it, from the hub's answer to `send_to_captain`.
+pub(crate) fn box_captain_ref(answer: &Value, repo: &str, at: u64) -> CaptainRef {
+    let _ = answer;
+    CaptainRef { project: repo_name(repo).unwrap_or(repo).to_owned(), boxed: true, at, ..CaptainRef::default() }
+}
+
+/// A Capitão on machine `machine`, in folder `path`, as a request records it.
+pub(crate) fn remote_captain_ref(machine: &str, path: &str, at: u64) -> CaptainRef {
+    let _ = (machine, path);
+    CaptainRef { at, ..CaptainRef::default() }
 }
 
 /// The folder name a clone of `repo` gets under `~/pinned`.
