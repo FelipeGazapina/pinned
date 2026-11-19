@@ -358,14 +358,16 @@ impl Delegates {
         self.persist();
     }
 
-    /// Records what each working task used, and stops the ones past their budget.
-    pub fn meter(&self, used: &[(String, crate::usage::TaskUsage)], path: Option<&str>) {
+    /// Records what each working task used, those in `at_ceiling` priced in part at the ceiling
+    /// rate, and stops the ones past their budget.
+    pub fn meter(&self, used: &[(String, crate::usage::TaskUsage)], at_ceiling: &[String], path: Option<&str>) {
         let over: Vec<(String, String)> = {
             let mut tasks = self.tasks.lock().unwrap();
             used.iter()
                 .filter_map(|(id, usage)| {
                     let task = tasks.iter_mut().find(|task| &task.id == id && task.state == WorkState::Working)?;
                     task.usage = *usage;
+                    task.at_ceiling = at_ceiling.contains(id);
                     task.limits.over_budget(usage.cost_usd).map(|reason| (id.clone(), reason))
                 })
                 .collect()
@@ -2048,6 +2050,7 @@ fn fresh(new: NewTask) -> Task {
         remote_tab: None,
         limits: crate::taste::Limits::default(),
         usage: crate::usage::TaskUsage::default(),
+        at_ceiling: false,
         delegator: Delegator::default(),
         effort: None,
         limit: None,
@@ -2194,6 +2197,8 @@ struct SavedTask {
     /// A task saved before records existed has nothing worth sending, so it counts as sent.
     #[serde(default = "already_recorded")]
     recorded: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    at_ceiling: bool,
     /// The task's own session runs it in a thread, which a restart resumes.
     #[serde(default)]
     thread_runs: bool,
@@ -2304,6 +2309,7 @@ impl SavedTask {
             review: task.review.clone(),
             thread_tab: task.thread_tab.clone(),
             recorded: task.recorded,
+            at_ceiling: task.at_ceiling,
             thread_runs: task.thread.as_ref().is_some_and(|thread| thread.runs) || task.resuming,
             worker_session: task.worker_session.clone(),
             remote: task.remote.as_ref().map(|remote| SavedRemote { machine: remote.machine.clone(), name: remote.name.clone(), tab: remote.tab.clone() }),
@@ -2365,6 +2371,7 @@ impl SavedTask {
             review: self.review,
             thread_tab: self.thread_tab,
             recorded: self.recorded,
+            at_ceiling: self.at_ceiling,
             placement: self.placement,
             reviews: self.reviews,
             profile: self.profile,
@@ -2612,6 +2619,27 @@ mod tests {
             report.text,
             format!("[pinned] Delegated task {id} {quoted} (Claude Code) replied and still runs 1 background task. pinned ends the task when that work finishes and the agent replies again, or, when only shells are left, after 30 min with no activity, and then stops what is still running. Call task_status with taskId \"{id}\" to read the reply and the work, or task_cancel to stop it now.")
         );
+    }
+
+    #[test]
+    fn a_task_priced_at_the_ceiling_still_counts_as_unknown_after_a_reload() {
+        let dir = std::env::temp_dir().join(format!("pinned-saved-ceiling-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("delegates.json");
+        let first = Delegates::load(Some(file.clone()));
+        let task = new_task(&first, "Fix");
+        {
+            let mut tasks = first.tasks.lock().unwrap();
+            let held = tasks.iter_mut().find(|t| t.id == task.id).unwrap();
+            held.usage.cost_usd = Some(7.5);
+            held.at_ceiling = true;
+        }
+        first.persist();
+        assert_eq!(first.work_cost_of_tab("tab-1").unknown, 1, "a known amount, priced in part at the ceiling");
+        let loaded = Delegates::load(Some(file));
+        let cost = loaded.work_cost_of_tab("tab-1");
+        assert_eq!((cost.unknown, cost.agents_usd), (1, 7.5), "the reload keeps it unknown, its amount kept");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -1111,6 +1111,13 @@ pub struct Machine {
     /// A thread is asking after the tasks this machine delegated elsewhere.
     checking_remotes: Arc<AtomicBool>,
     sending_records: AtomicBool,
+    /// Whether this node runs in a team's box (`team_call::TEAM_BOX_ENV`), whose workflow sessions
+    /// report their model cost to the hub (`report_run_costs`).
+    team_box: AtomicBool,
+    /// Each workflow session's model cost in a team's box, by tab, and when it was last sent.
+    run_costs: Mutex<HashMap<String, RunCost>>,
+    /// A thread is sending the hub its runs' model costs.
+    sending_run_costs: AtomicBool,
     /// After the hub refused records, when to offer them again.
     records_retry: Mutex<Option<Instant>>,
     threads_watched: AtomicBool,
@@ -1131,8 +1138,12 @@ pub struct Machine {
     orchestration_dir: Option<PathBuf>,
     /// Each working worker thread's spend so far, by task, across every session it ran.
     meters: Mutex<HashMap<String, usage::Meter>>,
-    /// The price list the meters price with, and when it was read.
-    meter_rates: Mutex<Option<(Instant, Arc<usage::RateTable>)>>,
+    /// The models with no price a team box's worker used, by task, each logged once.
+    worker_unpriced: Mutex<HashMap<String, HashSet<String>>>,
+    /// The price list the meters price with, and when it was read and last tried.
+    meter_rates: Mutex<MeterRates>,
+    /// Where a team box gets the price list: downloaded, held in memory only.
+    list_rates: Mutex<Arc<dyn Fn() -> usage::RateTable + Send + Sync>>,
     /// Whether the hub has seen this machine's own tastes since the link last connected, so the
     /// account can take them.
     tastes_shared: Arc<AtomicBool>,
@@ -1331,6 +1342,9 @@ impl Machine {
             delegate_pass_armed: AtomicBool::new(false),
             checking_remotes: Arc::default(),
             sending_records: AtomicBool::new(false),
+            team_box: AtomicBool::new(crate::team_call::in_team_box()),
+            run_costs: Mutex::default(),
+            sending_run_costs: AtomicBool::new(false),
             records_retry: Mutex::new(None),
             threads_watched: AtomicBool::new(false),
             rest_looked_for: AtomicBool::new(false),
@@ -1344,7 +1358,9 @@ impl Machine {
             memories,
             orchestration_dir: dir.clone(),
             meters: Mutex::default(),
+            worker_unpriced: Mutex::default(),
             meter_rates: Mutex::default(),
+            list_rates: Mutex::new(team_box_rates(LIST_DOWNLOAD)),
             tastes_shared: Arc::default(),
             mcp_loaded: Mutex::default(),
             mcp_waited: AtomicBool::new(false),
@@ -4337,7 +4353,10 @@ impl Machine {
     /// Prices what each working worker thread's transcripts gained, its subagents' included,
     /// records it on its task, and stops the ones past their budget. The `meters` lock is held
     /// through the record, so the 1 s pass and a turn's end never write an older total over a newer
-    /// one. Cursor and Codex children run headless and are not metered.
+    /// one. Cursor and Codex children run headless and are not metered. In a team box, whose
+    /// runs' costs the team pays, a model with no price is priced at the ceiling rate
+    /// (`usage::Meter::priced`) instead of leaving all of a worker's cost unknown, and named in
+    /// the log once per worker.
     fn meter_workers(&self) {
         let threads: Vec<(String, String)> = self
             .tabs
@@ -4349,6 +4368,12 @@ impl Machine {
             .collect();
         let mut meters = self.meters.lock().unwrap();
         meters.retain(|task, _| threads.iter().any(|(working, _)| working == task));
+        if threads.is_empty() {
+            return;
+        }
+        // While a team box's first price download is in flight the pass reads nothing, so the
+        // next one prices what it would have read.
+        let Some(rates) = self.meter_rates() else { return };
         let mut moved = vec![];
         for (task, tab) in threads {
             let Some(file) = self.transcript_of(&tab).ok().flatten() else { continue };
@@ -4360,22 +4385,179 @@ impl Machine {
         if moved.is_empty() {
             return;
         }
-        let (rates, book) = (self.meter_rates(), usage::PriceBook::load(self.prices_file().as_deref()));
-        let used: Vec<_> = moved.into_iter().map(|task| (task.clone(), meters[&task].usage(&rates, &book))).collect();
-        self.delegates.meter(&used, self.launch.path_env.as_deref());
+        let book = self.meter_book();
+        let team_box = self.team_box.load(Ordering::Relaxed);
+        let mut logged = self.worker_unpriced.lock().unwrap();
+        logged.retain(|task, _| meters.contains_key(task));
+        let mut at_ceiling = vec![];
+        let used: Vec<_> = moved
+            .into_iter()
+            .map(|task| {
+                let mut usage = meters[&task].usage(&rates, &book);
+                if team_box {
+                    let (usd, unpriced) = meters[&task].priced(&rates, &book);
+                    if !unpriced.is_empty() {
+                        at_ceiling.push(task.clone());
+                    }
+                    for model in unpriced {
+                        if logged.entry(task.clone()).or_default().insert(model.clone()) {
+                            eprintln!("pinned: worker {task}'s cost prices {model}, which has no listed price, at the ceiling rate or more");
+                        }
+                    }
+                    usage.cost_usd = Some(usd);
+                }
+                (task, usage)
+            })
+            .collect();
+        drop(logged);
+        self.delegates.meter(&used, &at_ceiling, self.launch.path_env.as_deref());
     }
 
-    /// The price list, read again each hour.
-    fn meter_rates(&self) -> Arc<usage::RateTable> {
-        let mut held = self.meter_rates.lock().unwrap();
-        match &*held {
-            Some((read, rates)) if read.elapsed() < Duration::from_secs(3600) => rates.clone(),
-            _ => {
-                let rates = Arc::new(usage::rates(self.rates_file.as_deref()));
-                *held = Some((Instant::now(), rates.clone()));
-                rates
+    /// Sends the hub the model cost so far of each workflow session in this team box
+    /// (`TeamOp::RunModelCost`): its running total, its own session's and the workers it
+    /// delegated, at most every `RUN_COST_EVERY` while the session runs, once when it stops, and
+    /// once more when its tab closes, then nothing. A total, never a delta, so a report lost or
+    /// sent twice never counts twice. A tab keeps its meter until it closes, so a session that
+    /// stops and goes on adds to what it spent before. A model with no price is priced at the
+    /// ceiling rate (`usage::Meter::priced`), and named in the log once per tab. A session that
+    /// spent nothing is not reported. While the box holds no price list and its first download is in
+    /// flight, a pass sends nothing (`meter_rates_at`).
+    /// Waits on the hub: the 1 s pass calls it on a thread of its own (`send_run_costs`).
+    fn report_run_costs(&self, now: Instant) {
+        if !self.team_box.load(Ordering::Relaxed) {
+            return;
+        }
+        let tabs: Vec<(String, (String, crate::agent::Subject), bool)> =
+            self.tabs.lock().unwrap().iter().filter_map(|(id, t)| Some((id.clone(), session_of(&t.env)?, t.live()))).collect();
+        let known: HashSet<String> = self.run_costs.lock().unwrap().keys().cloned().collect();
+        if known.is_empty() && !tabs.iter().any(|(_, _, live)| *live) {
+            return;
+        }
+        let Some(rates) = self.meter_rates() else { return };
+        let book = self.meter_book();
+        let found: Vec<Option<PathBuf>> = tabs.iter().map(|(tab, _, live)| if *live || known.contains(tab) { self.transcript_of(tab).ok().flatten() } else { None }).collect();
+        let mut due = vec![];
+        {
+            let mut costs = self.run_costs.lock().unwrap();
+            let total = |tab: &str, cost: &mut RunCost| {
+                let (own, unpriced) = cost.meter.priced(&rates, &book);
+                for model in unpriced {
+                    if cost.unpriced.insert(model.clone()) {
+                        eprintln!("pinned: a run's model cost prices {model}, which has no listed price, at the ceiling rate or more");
+                    }
+                }
+                own + self.delegates.work_cost_of_tab(tab).agents_usd
+            };
+            for ((tab, work, live), file) in tabs.iter().zip(found) {
+                if !live && !costs.contains_key(tab) {
+                    continue;
+                }
+                let cost = costs.entry(tab.clone()).or_default();
+                cost.work = Some(work.clone());
+                if file.is_some() {
+                    cost.transcript = file;
+                }
+                if let Some(file) = &cost.transcript {
+                    let _ = cost.meter.advance(file);
+                }
+                let send = match live {
+                    true => {
+                        cost.stopped = false;
+                        cost.sent.map_or(true, |sent| now >= sent + RUN_COST_EVERY)
+                    }
+                    false => !std::mem::replace(&mut cost.stopped, true),
+                };
+                if send {
+                    let usd = total(tab, cost);
+                    if usd > 0.0 || !cost.meter.is_empty() {
+                        cost.sent = Some(now);
+                        due.push((work.clone(), usd));
+                    }
+                }
+            }
+            let closed: Vec<String> = costs.keys().filter(|tab| !tabs.iter().any(|(id, ..)| id == *tab)).cloned().collect();
+            for tab in closed {
+                let Some(mut cost) = costs.remove(&tab) else { continue };
+                if let Some(file) = &cost.transcript {
+                    let _ = cost.meter.advance(file);
+                }
+                let usd = total(&tab, &mut cost);
+                if let (Some(work), true) = (cost.work.take(), usd > 0.0 || !cost.meter.is_empty()) {
+                    due.push((work, usd));
+                }
             }
         }
+        for ((workflow, subject), usd) in due {
+            // The hub refuses a total past its cap, which would leave the run's cost where it was.
+            let usd = usd.min(crate::teams::MAX_RUN_MODEL_USD);
+            let op = crate::teams::TeamOp::RunModelCost { workflow, subject, usd };
+            if let Err(e) = self.call_hub(HubCall::Team { team: None, op }) {
+                eprintln!("pinned: the hub did not take a run's model cost: {e}");
+            }
+        }
+    }
+
+    /// Reports the team box's runs' model costs (`report_run_costs`) on a thread, one at a time.
+    fn send_run_costs(&self) {
+        if !self.team_box.load(Ordering::Relaxed) || self.sending_run_costs.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let me = self.me.clone();
+        std::thread::spawn(move || {
+            let Some(machine) = me.upgrade() else { return };
+            machine.report_run_costs(Instant::now());
+            machine.sending_run_costs.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// The prices a meter adds to the list: the user's, but none in a team box, whose sessions
+    /// can write its config dir and so its price file, and whose runs' costs the team pays.
+    fn meter_book(&self) -> usage::PriceBook {
+        match self.team_box.load(Ordering::Relaxed) {
+            true => usage::PriceBook::default(),
+            false => usage::PriceBook::load(self.prices_file().as_deref()),
+        }
+    }
+
+    /// The price list, read again each hour; none while a pass must wait (`meter_rates_at`).
+    fn meter_rates(&self) -> Option<Arc<usage::RateTable>> {
+        self.meter_rates_at(Instant::now())
+    }
+
+    /// The price list as of `now`. A team box downloads it and holds it in memory only, never in
+    /// its config dir, whose file its sessions can write. It downloads with no lock held, at most
+    /// once every `LIST_RETRY`; while a download runs or after one failed, it prices with the last
+    /// list it got, or with none, which prices every model at the ceiling rate. While it has got no
+    /// list yet, no try has failed and the first is in flight, for `FIRST_LIST_WAIT` at most, it
+    /// answers none, and the pass waits for the next.
+    fn meter_rates_at(&self, now: Instant) -> Option<Arc<usage::RateTable>> {
+        let (list, last) = {
+            let mut rates = self.meter_rates.lock().unwrap();
+            match &rates.held {
+                Some((read, held)) if now.saturating_duration_since(*read) < Duration::from_secs(3600) => return Some(held.clone()),
+                _ if self.team_box.load(Ordering::Relaxed) => {}
+                _ => {
+                    let held = Arc::new(usage::rates(self.rates_file.as_deref()));
+                    rates.held = Some((now, held.clone()));
+                    return Some(held);
+                }
+            }
+            let last = rates.held.as_ref().map_or_else(Arc::default, |(_, held)| held.clone());
+            if let Some(tried) = rates.tried.filter(|at| now.saturating_duration_since(*at) < LIST_RETRY) {
+                let first_in_flight = rates.held.is_none() && !rates.failed && now.saturating_duration_since(tried) < FIRST_LIST_WAIT;
+                return (!first_in_flight).then_some(last);
+            }
+            rates.tried = Some(now);
+            (self.list_rates.lock().unwrap().clone(), last)
+        };
+        let got = list();
+        if got.is_empty() {
+            self.meter_rates.lock().unwrap().failed = true;
+            return Some(last);
+        }
+        let got = Arc::new(got);
+        self.meter_rates.lock().unwrap().held = Some((now, got.clone()));
+        Some(got)
     }
 
     /// What the thread in `tab` cost: its own session and every worker it delegated, theirs in turn included.
@@ -6552,6 +6734,7 @@ impl Machine {
                 machine.send_remote_asks(Instant::now());
                 machine.watch_sleep(unix_now());
                 machine.meter_workers();
+                machine.send_run_costs();
                 if !machine.delegates.unrecorded(1).is_empty() {
                     machine.send_records();
                 }
@@ -8028,6 +8211,56 @@ fn save_file(cwd: &Path, path: &str, text: &str) -> Result<String, String> {
     Ok(relative.to_string_lossy().into_owned())
 }
 
+
+/// How often a team box's workflow session tells the hub its model cost so far.
+const RUN_COST_EVERY: Duration = Duration::from_secs(15);
+
+/// Where a team box gets its price list: from `download`, held in memory only, never from its
+/// config dir, whose file its sessions can write.
+fn team_box_rates(download: fn() -> Option<Vec<u8>>) -> Arc<dyn Fn() -> usage::RateTable + Send + Sync> {
+    Arc::new(move || usage::downloaded(download))
+}
+
+/// Where a team box downloads the price list from; a test build never reaches the network, so
+/// its first try fails.
+#[cfg(not(test))]
+const LIST_DOWNLOAD: fn() -> Option<Vec<u8>> = usage::download;
+#[cfg(test)]
+const LIST_DOWNLOAD: fn() -> Option<Vec<u8>> = || None;
+
+/// How long a team box waits after it tried to download the price list before it tries again.
+const LIST_RETRY: Duration = Duration::from_secs(60);
+
+/// How long a team box with no price list waits on its first download before it prices at the
+/// ceiling rate: the download's own timeout.
+const FIRST_LIST_WAIT: Duration = Duration::from_secs(10);
+
+/// The price list a machine's meters price with (`Machine::meter_rates_at`).
+#[derive(Default)]
+struct MeterRates {
+    /// The list, and when it was read.
+    held: Option<(Instant, Arc<usage::RateTable>)>,
+    /// When a team box last began to download it.
+    tried: Option<Instant>,
+    /// A team box's download has failed.
+    failed: bool,
+}
+
+/// A team box's workflow session's model cost (`Machine::report_run_costs`).
+#[derive(Default)]
+struct RunCost {
+    meter: usage::Meter,
+    /// The session's workflow and subject, which name its run to the hub.
+    work: Option<(String, crate::agent::Subject)>,
+    /// The session's transcript as last found, read once more when the session ends.
+    transcript: Option<PathBuf>,
+    sent: Option<Instant>,
+    /// Its tab stopped being live and its total was sent for that.
+    stopped: bool,
+    /// The models priced at the ceiling rate for having no price, each logged once.
+    unpriced: HashSet<String>,
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -8273,9 +8506,9 @@ pub(crate) mod tests {
         };
         let usage = |cost: Option<f64>, tokens: (u64, u64), box_usd: Option<f64>| TaskUsage { tokens_in: tokens.0, tokens_out: tokens.1, cost_usd: cost, wall_ms: 60_000, box_usd, box_ms: box_usd.map(|_| 1_800_000) };
         let local = start(Parent::Tab(captain.clone()), "Local suite", Provider::Claude, "claude-sonnet-5-5");
-        m.delegates.meter(&[(local.clone(), usage(Some(0.42), (1000, 500), None))], None);
+        m.delegates.meter(&[(local.clone(), usage(Some(0.42), (1000, 500), None))], &[], None);
         let grandchild = start(Parent::Task(local.clone()), "Local helper", Provider::Claude, "claude-haiku-5-5");
-        m.delegates.meter(&[(grandchild.clone(), usage(Some(0.08), (200, 100), None))], None);
+        m.delegates.meter(&[(grandchild.clone(), usage(Some(0.08), (200, 100), None))], &[], None);
         let remote = start(Parent::Tab(captain.clone()), "Mini suite", Provider::Claude, "claude-opus-5-5");
         m.delegates.set_remote(&remote, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: None, looked: None, waiting: None });
         let end = |usage| RemoteEnd { state: "result_available".into(), summary: None, error: None, usage: Some(usage) };
@@ -16099,6 +16332,410 @@ Have another model review a risky change before it goes ahead.";
             drop(m);
             let _ = std::fs::remove_dir_all(root);
         }
+    }
+
+    /// A team box's node (`run_costs_box`) whose hub keeps each `RunModelCost` it is sent, in cents.
+    #[cfg(unix)]
+    struct RunCostBox {
+        dir: PathBuf,
+        config: PathBuf,
+        m: Arc<Machine>,
+        sent: Arc<Mutex<Vec<(String, Subject, f64)>>>,
+        subject: Subject,
+        tab: String,
+        transcript: PathBuf,
+    }
+
+    /// A team box running a session of workflow `wf-1` on ENG-7, whose transcript holds a message
+    /// of 10 000 output tokens of claude-sonnet-5-5 (US$ 0.15 at the list's US$ 15 per million).
+    #[cfg(unix)]
+    fn run_costs_box(name: &str) -> RunCostBox {
+        let dir = temp(name);
+        let config = dir.join("config");
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("usage-model-rates.json"), r#"{"claude-sonnet-5-5":{"input_cost_per_token":0.000003,"output_cost_per_token":0.000015}}"#).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Some(config.clone()), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let sent = Arc::new(Mutex::new(vec![]));
+        let seen = sent.clone();
+        m.set_hub(Arc::new(move |call| {
+            if let HubCall::Team { team: None, op: crate::teams::TeamOp::RunModelCost { workflow, subject, usd } } = call {
+                seen.lock().unwrap().push((workflow, subject, (usd * 100.0).round()));
+            }
+            Ok(Value::Null)
+        }));
+        let subject = Subject::LinearIssue { issue: "ENG-7".into() };
+        let spec = RunSpec { folder: dir.join("app").display().to_string(), repo: None, args: vec![], env: session_env("wf-1", &subject), token: None, account: Some("work".into()), budget_usd: None };
+        let tab = m.run(&spec).unwrap();
+        let transcripts = config.join("accounts/work/projects/app");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        let transcript = transcripts.join("s-child.jsonl");
+        std::fs::write(&transcript, format!("{}\n", run_spent("m1", "claude-sonnet-5-5", 10_000))).unwrap();
+        m.record_event(hook_event(&tab, "working", &transcript, Some("Fix ENG-7")));
+        *m.list_rates.lock().unwrap() = Arc::new(|| usage::parse_rates(&json!({ "claude-sonnet-5-5": { "input_cost_per_token": 0.000003, "output_cost_per_token": 0.000015 } })));
+        m.team_box.store(true, Ordering::SeqCst);
+        RunCostBox { dir, config, m, sent, subject, tab, transcript }
+    }
+
+    /// An assistant message of `output` tokens of `model`, as a transcript line.
+    #[cfg(unix)]
+    fn run_spent(id: &str, model: &str, output: u64) -> Value {
+        json!({ "type": "assistant", "requestId": id, "message": { "id": id, "model": model, "content": [], "usage": { "input_tokens": 0, "output_tokens": output } } })
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_session_reports_its_model_cost_at_the_interval_until_it_ends() {
+        let RunCostBox { dir, m, sent, subject, tab, transcript, .. } = run_costs_box("run-costs");
+        let spent = |id: &str, output: u64| run_spent(id, "claude-sonnet-5-5", output);
+        let cents = |usd: f64| ("wf-1".to_owned(), subject.clone(), usd);
+        let t0 = Instant::now();
+
+        m.team_box.store(false, Ordering::SeqCst);
+        m.report_run_costs(t0);
+        assert_eq!(*sent.lock().unwrap(), vec![], "a node outside a team's box reports nothing");
+        m.team_box.store(true, Ordering::SeqCst);
+        m.report_run_costs(t0);
+        m.report_run_costs(t0 + RUN_COST_EVERY / 2);
+        assert_eq!(*sent.lock().unwrap(), vec![cents(15.0)], "the total, then nothing until the interval");
+        // A session waiting on a call spends no tokens: the next report tells the same total.
+        m.report_run_costs(t0 + RUN_COST_EVERY);
+        append(&transcript, &[spent("m2", 30_000)]);
+        m.report_run_costs(t0 + RUN_COST_EVERY * 2);
+        assert_eq!(*sent.lock().unwrap(), vec![cents(15.0), cents(15.0), cents(60.0)], "a running total, never a delta");
+        append(&transcript, &[spent("m3", 10_000)]);
+        m.close_tab(&tab);
+        m.report_run_costs(t0 + RUN_COST_EVERY * 2 + Duration::from_secs(1));
+        m.report_run_costs(t0 + RUN_COST_EVERY * 5);
+        assert_eq!(*sent.lock().unwrap(), vec![cents(15.0), cents(15.0), cents(60.0), cents(75.0)], "its last total once it ended, then nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_prices_a_model_with_no_price_at_the_ceiling_beside_what_is_priced() {
+        let RunCostBox { dir, m, sent, subject, transcript, .. } = run_costs_box("run-costs-unpriced");
+        append(&transcript, &[run_spent("m2", "claude-unlisted-1", 50_000)]);
+        let t0 = Instant::now();
+        m.report_run_costs(t0);
+        append(&transcript, &[run_spent("m3", "claude-sonnet-5-5", 20_000)]);
+        m.report_run_costs(t0 + RUN_COST_EVERY);
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject.clone(), 765.0), ("wf-1".to_owned(), subject, 795.0)], "the priced part, and the unpriced model's 50 000 tokens at the ceiling's US$ 150 per million");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_adds_what_its_delegated_workers_spent() {
+        delegated_run_costs("run-costs-delegated", None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_leaves_out_a_workers_box_cost() {
+        delegated_run_costs("run-costs-delegated-box", Some(0.05));
+    }
+
+    /// A team box's session whose worker, run on a box of `box_usd`, spends US$ 0.42 then 0.50:
+    /// the run's total is its model cost only, the worker's box cost never in it.
+    #[cfg(unix)]
+    fn delegated_run_costs(name: &str, box_usd: Option<f64>) {
+        use crate::delegate::{NewTask, Parent};
+        use crate::usage::TaskUsage;
+        let RunCostBox { dir, m, sent, subject, tab, .. } = run_costs_box(name);
+        let child = m
+            .delegates
+            .begin(NewTask {
+                parent: Parent::Tab(tab.clone()),
+                tool: None,
+                title: "Run the suite".into(),
+                account: "claude".into(),
+                provider: Provider::Claude,
+                model: Some("claude-sonnet-5-5".into()),
+                cwd: dir.clone(),
+                mode: crate::delegate::Mode::Async,
+                access: crate::delegate::Access::Auto,
+                isolated: false,
+                caller_key: format!("tab:{tab}"),
+                client_request_id: None,
+                role: None,
+            })
+            .id;
+        let usage = |usd: f64| TaskUsage { tokens_in: 1000, tokens_out: 500, cost_usd: Some(usd), wall_ms: 60_000, box_usd, box_ms: box_usd.map(|_| 60_000) };
+        m.delegates.meter(&[(child.clone(), usage(0.42))], &[], None);
+        let t0 = Instant::now();
+        m.report_run_costs(t0);
+        m.delegates.meter(&[(child, usage(0.50))], &[], None);
+        m.report_run_costs(t0 + RUN_COST_EVERY);
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject.clone(), 57.0), ("wf-1".to_owned(), subject, 65.0)], "0.15 its own session + its worker's 0.42, then 0.50: a total, box cost {box_usd:?} left out");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_prices_a_workers_model_with_no_price_at_the_ceiling() {
+        let RunCostBox { dir, m, sent, subject, tab, transcript, .. } = run_costs_box("run-costs-worker-unpriced");
+        let reply = delegate_task(&m, &tab, work(Some("claude-sonnet-5-5"), None));
+        let child = reply["tabId"].as_str().unwrap().to_owned();
+        let worker = transcript.with_file_name("s-worker.jsonl");
+        std::fs::write(&worker, format!("{}\n", run_spent("w1", "claude-sonnet-5-5", 200_000))).unwrap();
+        let payload = json!({ "session_id": "s-worker", "transcript_path": worker, "prompt": "Parser" });
+        m.record_event(AgentEvent { tab: Some(child), ..hooks::event_from(Some("working"), &payload.to_string()).unwrap() });
+        let t0 = Instant::now();
+        m.meter_workers();
+        m.report_run_costs(t0);
+        append(&worker, &[run_spent("w2", "claude-unlisted-1", 50_000)]);
+        m.meter_workers();
+        m.report_run_costs(t0 + RUN_COST_EVERY);
+        let cents = |usd: f64| ("wf-1".to_owned(), subject.clone(), usd);
+        assert_eq!(*sent.lock().unwrap(), vec![cents(315.0), cents(1_065.0)], "the worker's US$ 3.00 and its parent's 0.15, then the unpriced model's 50 000 tokens at the ceiling's US$ 7.50");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_worker_priced_at_the_ceiling_counts_as_unknown_in_its_work_cost() {
+        let RunCostBox { dir, m, sent, subject, tab, transcript, .. } = run_costs_box("run-costs-worker-ceiling-unknown");
+        let reply = delegate_task(&m, &tab, work(Some("claude-sonnet-5-5"), None));
+        let child = reply["tabId"].as_str().unwrap().to_owned();
+        let worker = transcript.with_file_name("s-worker.jsonl");
+        std::fs::write(&worker, format!("{}\n", run_spent("w1", "claude-sonnet-5-5", 200_000))).unwrap();
+        let payload = json!({ "session_id": "s-worker", "transcript_path": worker, "prompt": "Parser" });
+        m.record_event(AgentEvent { tab: Some(child), ..hooks::event_from(Some("working"), &payload.to_string()).unwrap() });
+        let seen = |m: &Machine| {
+            let cost = m.work_cost(&tab).unwrap();
+            (cost.unknown, (cost.agents_usd * 100.0).round())
+        };
+        m.meter_workers();
+        assert_eq!(seen(&m), (0, 300.0), "every model priced from the list: known");
+        append(&worker, &[run_spent("w2", "claude-unlisted-1", 50_000)]);
+        m.meter_workers();
+        assert_eq!(seen(&m), (1, 1_050.0), "a model priced at the ceiling: unknown, its US$ 7.50 kept beside the US$ 3.00");
+        m.report_run_costs(Instant::now());
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject, 1_065.0)], "the run total keeps the ceiling's amount");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_past_the_hubs_cap_is_sent_as_the_cap() {
+        let RunCostBox { dir, m, sent, subject, transcript, .. } = run_costs_box("run-costs-cap");
+        append(&transcript, &[run_spent("m2", "claude-sonnet-5-5", 700_000_000)]);
+        m.report_run_costs(Instant::now());
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject, 1_000_000.0)], "US$ 10 500.15 spent, sent as the hub's most, US$ 10 000");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_takes_the_list_price_not_the_boxs_price_file() {
+        let RunCostBox { dir, config, m, sent, subject, .. } = run_costs_box("run-costs-price-file");
+        std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-sonnet-5-5":{"input":0,"output":0}}}"#).unwrap();
+        m.report_run_costs(Instant::now());
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject, 15.0)], "a price file of 0 changes nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_keeps_the_list_price_when_its_session_zeroes_the_rates_file() {
+        let RunCostBox { dir, config, m, sent, subject, transcript, .. } = run_costs_box("run-costs-rates-file");
+        let t0 = Instant::now();
+        m.report_run_costs(t0);
+        std::fs::write(config.join("usage-model-rates.json"), r#"{"claude-sonnet-5-5":{"input_cost_per_token":0,"output_cost_per_token":0}}"#).unwrap();
+        m.meter_rates_at(Instant::now() + Duration::from_secs(3601));
+        append(&transcript, &[run_spent("m2", "claude-sonnet-5-5", 1_000_000)]);
+        m.report_run_costs(t0 + RUN_COST_EVERY);
+        let cents = |usd: f64| ("wf-1".to_owned(), subject.clone(), usd);
+        assert_eq!(*sent.lock().unwrap(), vec![cents(15.0), cents(1515.0)], "US$ 15 more for a million output tokens, whatever the box's file says");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_keeps_its_last_price_list_when_a_download_fails() {
+        let RunCostBox { dir, m, sent, subject, transcript, .. } = run_costs_box("run-costs-download-fails");
+        let t0 = Instant::now();
+        m.report_run_costs(t0);
+        *m.list_rates.lock().unwrap() = Arc::new(usage::RateTable::new);
+        m.meter_rates_at(Instant::now() + Duration::from_secs(3601));
+        append(&transcript, &[run_spent("m2", "claude-sonnet-5-5", 20_000)]);
+        m.report_run_costs(t0 + RUN_COST_EVERY);
+        let cents = |usd: f64| ("wf-1".to_owned(), subject.clone(), usd);
+        assert_eq!(*sent.lock().unwrap(), vec![cents(15.0), cents(45.0)], "the list it last got, not none");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_is_priced_at_the_ceiling_when_its_first_download_fails() {
+        let RunCostBox { dir, m, sent, subject, transcript, .. } = run_costs_box("run-costs-first-download-fails");
+        *m.list_rates.lock().unwrap() = Arc::new(usage::RateTable::new);
+        append(&transcript, &[run_spent("m2", "claude-sonnet-5-5", 1_000_000)]);
+        m.report_run_costs(Instant::now());
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject, 15_150.0)], "1 010 000 output tokens at the ceiling's US$ 150 per million, not 0");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_session_on_a_model_the_list_lacks_is_priced_at_the_ceiling() {
+        let RunCostBox { dir, m, sent, subject, transcript, .. } = run_costs_box("run-costs-unlisted-only");
+        std::fs::write(&transcript, format!("{}\n", run_spent("m1", "claude-unlisted-1", 100_000))).unwrap();
+        m.report_run_costs(Instant::now());
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject, 1_500.0)], "100 000 output tokens at the ceiling's US$ 150 per million, not 0");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_takes_the_list_price_again_after_a_good_download() {
+        let RunCostBox { dir, m, sent, subject, transcript, .. } = run_costs_box("run-costs-download-recovers");
+        *m.list_rates.lock().unwrap() = Arc::new(usage::RateTable::new);
+        let t0 = Instant::now();
+        m.report_run_costs(t0);
+        *m.list_rates.lock().unwrap() = Arc::new(|| usage::parse_rates(&json!({ "claude-sonnet-5-5": { "input_cost_per_token": 0.000003, "output_cost_per_token": 0.000015 } })));
+        m.meter_rates_at(Instant::now() + Duration::from_secs(61));
+        append(&transcript, &[run_spent("m2", "claude-sonnet-5-5", 1_000_000)]);
+        m.report_run_costs(t0 + RUN_COST_EVERY);
+        let cents = |usd: f64| ("wf-1".to_owned(), subject.clone(), usd);
+        assert_eq!(*sent.lock().unwrap(), vec![cents(150.0), cents(1_515.0)], "10 000 tokens at the ceiling, then all 1 010 000 at the list's US$ 15 per million");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_price_download_that_hangs_holds_no_lock_another_caller_needs() {
+        let RunCostBox { dir, m, .. } = run_costs_box("run-costs-download-hangs");
+        let (started, on_start) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        // Dropping `release` lets every download waiting on `gate` go on.
+        let gate = Mutex::new(gate);
+        *m.list_rates.lock().unwrap() = Arc::new(move || {
+            let _ = started.send(());
+            let _ = gate.lock().unwrap().recv();
+            usage::RateTable::new()
+        });
+        let now = Instant::now();
+        let first = { let m = m.clone(); std::thread::spawn(move || m.meter_rates_at(now).map(|rates| rates.len())) };
+        on_start.recv_timeout(Duration::from_secs(5)).expect("the download started");
+        let (answered, answer) = std::sync::mpsc::channel();
+        let second = { let m = m.clone(); std::thread::spawn(move || answered.send(m.meter_rates_at(now).map(|rates| rates.len()))) };
+        let waited = answer.recv_timeout(Duration::from_secs(2));
+        let late = m.meter_rates_at(now + FIRST_LIST_WAIT + Duration::from_secs(1)).map(|rates| rates.len());
+        drop(release);
+        first.join().unwrap();
+        let _ = second.join();
+        assert_eq!(waited, Ok(None), "the second caller is told to wait for its next pass, without waiting on the download");
+        assert_eq!(late, Some(0), "past the download's timeout it gets no list, so the ceiling");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A team box whose first price download, of `list`, is held in flight while a pass runs,
+    /// then lets go: what the box sent during the download, and on the pass after it.
+    #[cfg(unix)]
+    fn passes_around_the_first_download(name: &str, list: fn() -> usage::RateTable) -> (Vec<(String, Subject, f64)>, Vec<(String, Subject, f64)>) {
+        let RunCostBox { dir, m, sent, .. } = run_costs_box(name);
+        let (started, on_start) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        *m.list_rates.lock().unwrap() = Arc::new(move || {
+            let _ = started.send(());
+            let _ = gate.lock().unwrap().recv();
+            list()
+        });
+        let download = { let m = m.clone(); std::thread::spawn(move || { m.meter_rates(); }) };
+        on_start.recv_timeout(Duration::from_secs(5)).expect("the download started");
+        m.report_run_costs(Instant::now());
+        let during = sent.lock().unwrap().clone();
+        drop(release);
+        download.join().unwrap();
+        m.report_run_costs(Instant::now());
+        let after = sent.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(dir);
+        (during, after)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_pass_during_its_first_price_download_sends_nothing() {
+        let (during, after) = passes_around_the_first_download("run-costs-first-download-in-flight", || usage::parse_rates(&json!({ "claude-sonnet-5-5": { "input_cost_per_token": 0.000003, "output_cost_per_token": 0.000015 } })));
+        assert_eq!(during, vec![], "no list yet and none has failed: the pass waits for the download");
+        assert_eq!(after, vec![("wf-1".to_owned(), Subject::LinearIssue { issue: "ENG-7".into() }, 15.0)], "then the list's price, never the ceiling");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_pass_after_its_first_price_download_failed_takes_the_ceiling() {
+        let (during, after) = passes_around_the_first_download("run-costs-first-download-fails-later", usage::RateTable::new);
+        assert_eq!(during, vec![], "the download is still in flight");
+        assert_eq!(after, vec![("wf-1".to_owned(), Subject::LinearIssue { issue: "ENG-7".into() }, 150.0)], "once a try failed, 10 000 output tokens at the ceiling");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_failing_price_download_is_tried_at_most_once_a_minute() {
+        let RunCostBox { dir, m, .. } = run_costs_box("run-costs-download-retry");
+        let tries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = tries.clone();
+        *m.list_rates.lock().unwrap() = Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            usage::RateTable::new()
+        });
+        let t0 = Instant::now();
+        for at in [0, 1, 30, 59, 60, 61, 119, 120] {
+            m.meter_rates_at(t0 + Duration::from_secs(at));
+        }
+        assert_eq!(tries.load(Ordering::SeqCst), 3, "tried at 0 s, 60 s and 120 s");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_default_price_list_reads_no_file_from_its_config_dir() {
+        let RunCostBox { dir, config, m, sent, subject, .. } = run_costs_box("run-costs-default-list");
+        std::fs::write(config.join("usage-model-rates.json"), r#"{"claude-sonnet-5-5":{"input_cost_per_token":0,"output_cost_per_token":0}}"#).unwrap();
+        *m.list_rates.lock().unwrap() = team_box_rates(|| None);
+        m.report_run_costs(Instant::now());
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject, 150.0)], "10 000 output tokens at the ceiling, not the file's 0");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_box_built_as_every_node_is_never_priced_from_a_file_in_its_config_dir() {
+        let dir = temp("team-box-list-wiring");
+        let config = dir.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("usage-model-rates.json"), r#"{"claude-sonnet-5-5":{"input_cost_per_token":1e-12,"output_cost_per_token":1e-12}}"#).unwrap();
+        let m = Machine::new(launch(), Some(config), None, |_| {});
+        m.team_box.store(true, Ordering::SeqCst);
+        let rates = m.meter_rates().expect("a failed first try prices at the ceiling");
+        assert_eq!(rates.len(), 0, "the planted list is never read: the box downloads its list, and a test build's download fails");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_session_not_live_for_a_pass_keeps_its_earlier_total() {
+        let RunCostBox { dir, m, sent, subject, tab, transcript, .. } = run_costs_box("run-costs-not-live");
+        let t0 = Instant::now();
+        m.report_run_costs(t0);
+        let session = m.tab(&tab, |t| t.session.take()).unwrap();
+        assert!(session.is_some());
+        // The transcript moves on to a new file while the tab is not live: the meter keeps the first.
+        let next = transcript.with_file_name("s-next.jsonl");
+        std::fs::write(&next, format!("{}\n", run_spent("m2", "claude-sonnet-5-5", 20_000))).unwrap();
+        m.report_run_costs(t0 + Duration::from_secs(1));
+        m.report_run_costs(t0 + Duration::from_secs(2));
+        m.tab(&tab, |t| t.session = session).unwrap();
+        let payload = json!({ "session_id": "s-next", "transcript_path": next });
+        m.record_event(AgentEvent { tab: Some(tab.clone()), ..hooks::event_from(Some("working"), &payload.to_string()).unwrap() });
+        m.report_run_costs(t0 + RUN_COST_EVERY * 2);
+        let cents = |usd: f64| ("wf-1".to_owned(), subject.clone(), usd);
+        assert_eq!(*sent.lock().unwrap(), vec![cents(15.0), cents(15.0), cents(45.0)], "its last total once when it stopped, then its earlier total and the new file's");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

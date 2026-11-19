@@ -268,6 +268,7 @@ async fn reserve(turn: &Turn, team: &Arc<Account>, workflow: &str, started_by: S
         state: RunState::Working,
         controller: None,
         cost_usd: 0.0,
+        model_usd: None,
         active_secs: 0, waiting_secs: 0,
         started_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64),
         ended_at: None,

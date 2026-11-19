@@ -15,6 +15,20 @@ const SLICE: u64 = 15 * 60;
 /// After a failed download of the price list, the next waits this long, so an offline machine doesn't wait out the timeout on every call.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 static FAILED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+/// What a team box prices a model the price list has no price for at, in USD per token, every
+/// model while it has no list at all, so its runs' spend limits fire early rather than never:
+/// US$ 30 input and US$ 150 output per million, above every Claude rate in LiteLLM's list (the
+/// dearest listed is US$ 27.50 / 137.50 per million). Cache reads take the input rate, cache
+/// writes `ONE_HOUR_WRITE` times it.
+pub const CEILING_INPUT_USD: f64 = 30e-6;
+pub const CEILING_OUTPUT_USD: f64 = 150e-6;
+/// What a 1-hour cache write costs, in times the input rate; a 5-minute write takes the list's
+/// cache write rate.
+const ONE_HOUR_WRITE: f64 = 2.0;
+/// What a fast-mode row costs over its standard price when the list gives its model no fast tier.
+/// A deliberate over-estimate until the provider's figure is sourced; a team box's row priced
+/// this way costs at least the ceiling rate and shows as the ceiling does.
+pub const FAST_MULTIPLE: f64 = 6.0;
 /// A transcript last written this long before the window opens can't hold a line inside it.
 const MTIME_SLACK: u64 = 36 * 3600;
 /// Bare family names span generations, and `<synthetic>` lines were never billed.
@@ -40,6 +54,9 @@ pub struct Row {
     pub cached: u64,
     pub cache_write: u64,
     pub output: u64,
+    /// Of `cache_write`, the 1-hour writes.
+    #[serde(skip)]
+    cache_write_1h: u64,
     /// In USD, per token type; `None` for a model the price list doesn't know.
     pub cost: Option<Cost>,
     /// What fast mode added to `cost`.
@@ -120,13 +137,33 @@ struct Tokens {
     cache_creation_input_tokens: u64,
     #[serde(default)]
     output_tokens: u64,
+    cache_creation: Option<CacheCreation>,
     speed: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CacheCreation {
+    ephemeral_5m_input_tokens: Option<u64>,
+    #[serde(default)]
+    ephemeral_1h_input_tokens: u64,
+}
+
+impl Tokens {
+    /// Input, cache reads, 5-minute cache writes, 1-hour cache writes and output. A line with no
+    /// split of its cache writes counts them all as 5-minute, one whose split falls short of its
+    /// total counts the rest so.
+    fn counts(&self) -> [u64; 5] {
+        let split = self.cache_creation.as_ref();
+        let hour = split.map_or(0, |c| c.ephemeral_1h_input_tokens);
+        let five = split.and_then(|c| c.ephemeral_5m_input_tokens).unwrap_or(0).max(self.cache_creation_input_tokens.saturating_sub(hour));
+        [self.input_tokens, self.cache_read_input_tokens, five, hour, self.output_tokens]
+    }
 }
 
 /// Every transcript under each of `projects` with a line at or after `since`, summed per quarter hour,
 /// model, session and speed, a mapped model counted as the one `book` maps it to. Claude Code
 /// repeats a message's usage on each of its content blocks and copies messages into resumed and
-/// forked sessions, so a message counts once, by id and request.
+/// forked sessions, so a message counts once, by id and request (`add_line`).
 pub fn read(projects: &[PathBuf], since: u64, rates: &RateTable, book: &PriceBook) -> Vec<Row> {
     let targets = book.targets();
     let mut files = vec![];
@@ -134,9 +171,9 @@ pub fn read(projects: &[PathBuf], since: u64, rates: &RateTable, book: &PriceBoo
         walk(dir, since.saturating_sub(MTIME_SLACK), &mut files);
     }
     files.sort();
-    let mut seen = HashSet::new();
+    let mut seen = HashMap::new();
     let mut sessions: HashMap<String, u32> = HashMap::new();
-    let mut sums: HashMap<(u64, String, u32, Speed), [u64; 4]> = HashMap::new();
+    let mut sums: HashMap<(u64, String, u32, Speed), [u64; 5]> = HashMap::new();
     for file in files {
         let Ok(f) = std::fs::File::open(&file) else { continue };
         for line in BufReader::new(f).lines().map_while(Result::ok) {
@@ -147,23 +184,17 @@ pub fn read(projects: &[PathBuf], since: u64, rates: &RateTable, book: &PriceBoo
             let Some(message) = line.message.filter(|_| line.kind == "assistant") else { continue };
             let (Some(tokens), Some(model)) = (message.usage, message.model.filter(|m| !m.is_empty() && m != "<synthetic>")) else { continue };
             let Some(at) = line.timestamp.as_deref().and_then(unix_of).filter(|at| *at >= since) else { continue };
-            if (message.id.is_some() || line.request.is_some()) && !seen.insert((message.id, line.request)) {
-                continue;
-            }
             let next = sessions.len() as u32;
             let session = *sessions.entry(line.session).or_insert(next);
             let speed = if tokens.speed.as_deref() == Some("fast") { Speed::Fast } else { Speed::Standard };
             let model = targets.get(model.as_str()).map_or(model, |&target| target.to_owned());
-            let sum = sums.entry((at - at % SLICE, model, session, speed)).or_default();
-            for (total, n) in sum.iter_mut().zip([tokens.input_tokens, tokens.cache_read_input_tokens, tokens.cache_creation_input_tokens, tokens.output_tokens]) {
-                *total += n;
-            }
+            add_line(&mut seen, &mut sums, (message.id, line.request), (at - at % SLICE, model, session, speed), tokens.counts());
         }
     }
     let mut rows: Vec<Row> = sums
         .into_iter()
-        .map(|((at, model, session, speed), [input, cached, cache_write, output])| {
-            let mut row = Row { at, model, session, speed, input, cached, cache_write, output, cost: None, premium: 0.0, savings: 0.0 };
+        .map(|((at, model, session, speed), [input, cached, five, hour, output])| {
+            let mut row = Row { at, model, session, speed, input, cached, cache_write: five + hour, output, cache_write_1h: hour, cost: None, premium: 0.0, savings: 0.0 };
             price(&mut row, rates, &book.prices);
             row
         })
@@ -194,8 +225,8 @@ pub struct TaskUsage {
 #[derive(Clone, Debug, Default)]
 pub struct Meter {
     offsets: HashMap<PathBuf, u64>,
-    seen: HashSet<(Option<String>, Option<String>)>,
-    sums: HashMap<(String, Speed), [u64; 4]>,
+    seen: HashMap<MessageId, ((String, Speed), [u64; 5])>,
+    sums: HashMap<(String, Speed), [u64; 5]>,
 }
 
 impl Meter {
@@ -226,14 +257,8 @@ impl Meter {
             let Ok(line) = serde_json::from_slice::<Line>(raw) else { continue };
             let Some(message) = line.message.filter(|_| line.kind == "assistant") else { continue };
             let (Some(tokens), Some(model)) = (message.usage, message.model.filter(|m| !m.is_empty() && m != "<synthetic>")) else { continue };
-            if (message.id.is_some() || line.request.is_some()) && !self.seen.insert((message.id, line.request)) {
-                continue;
-            }
             let speed = if tokens.speed.as_deref() == Some("fast") { Speed::Fast } else { Speed::Standard };
-            let sum = self.sums.entry((model, speed)).or_default();
-            for (total, n) in sum.iter_mut().zip([tokens.input_tokens, tokens.cache_read_input_tokens, tokens.cache_creation_input_tokens, tokens.output_tokens]) {
-                *total += n;
-            }
+            add_line(&mut self.seen, &mut self.sums, (message.id, line.request), (model, speed), tokens.counts());
         }
         self.offsets.insert(file.to_owned(), offset + whole as u64);
         Ok(whole > 0)
@@ -245,20 +270,49 @@ impl Meter {
 
     /// The tokens so far, priced with `rates` and the user's `book`. `wall_ms` and `box_usd` are the caller's.
     pub fn usage(&self, rates: &RateTable, book: &PriceBook) -> TaskUsage {
-        let targets = book.targets();
         let mut usage = TaskUsage { cost_usd: Some(0.0), ..TaskUsage::default() };
-        for ((model, speed), [input, cached, cache_write, output]) in &self.sums {
-            usage.tokens_in += input + cached + cache_write;
-            usage.tokens_out += output;
-            let model = targets.get(model.as_str()).map_or(model.clone(), |&target| target.to_owned());
-            let mut row = Row { at: 0, model, session: 0, speed: *speed, input: *input, cached: *cached, cache_write: *cache_write, output: *output, cost: None, premium: 0.0, savings: 0.0 };
-            price(&mut row, rates, &book.prices);
+        for (row, _) in self.priced_rows(rates, book) {
+            usage.tokens_in += row.input + row.cached + row.cache_write;
+            usage.tokens_out += row.output;
             usage.cost_usd = match (usage.cost_usd, row.cost) {
                 (Some(sum), Some(c)) => Some(sum + c.input + c.cache_read + c.cache_write + c.output),
                 _ => None,
             };
         }
         usage
+    }
+
+    /// What `usage` prices, as a team box prices it: a model with no price, at the ceiling rate
+    /// (`CEILING_INPUT_USD`, `CEILING_OUTPUT_USD`) instead of leaving the whole cost unknown, and a
+    /// fast row priced by `FAST_MULTIPLE`, at that or the ceiling, whichever is more. The cost, and
+    /// the models priced either way.
+    pub fn priced(&self, rates: &RateTable, book: &PriceBook) -> (f64, Vec<String>) {
+        let (mut usd, mut unpriced) = (0.0, vec![]);
+        for (row, by_multiple) in self.priced_rows(rates, book) {
+            let ceiling = (row.input + row.cached) as f64 * CEILING_INPUT_USD + row.cache_write as f64 * ONE_HOUR_WRITE * CEILING_INPUT_USD + row.output as f64 * CEILING_OUTPUT_USD;
+            match row.cost {
+                Some(c) if !by_multiple => usd += c.input + c.cache_read + c.cache_write + c.output,
+                cost => {
+                    usd += cost.map_or(ceiling, |c| (c.input + c.cache_read + c.cache_write + c.output).max(ceiling));
+                    unpriced.push(row.model);
+                }
+            }
+        }
+        unpriced.sort();
+        unpriced.dedup();
+        (usd, unpriced)
+    }
+
+    /// One row per model and speed, a mapped model as the one `book` maps it to, priced, and
+    /// whether it was priced by `FAST_MULTIPLE`.
+    fn priced_rows<'a>(&'a self, rates: &'a RateTable, book: &'a PriceBook) -> impl Iterator<Item = (Row, bool)> + 'a {
+        let targets = book.targets();
+        self.sums.iter().map(move |((model, speed), &[input, cached, five, hour, output])| {
+            let model = targets.get(model.as_str()).map_or(model.clone(), |&target| target.to_owned());
+            let mut row = Row { at: 0, model, session: 0, speed: *speed, input, cached, cache_write: five + hour, output, cache_write_1h: hour, cost: None, premium: 0.0, savings: 0.0 };
+            let by_multiple = price(&mut row, rates, &book.prices);
+            (row, by_multiple)
+        })
     }
 }
 
@@ -326,6 +380,34 @@ impl PriceBook {
     }
 }
 
+/// A message's id and request.
+type MessageId = (Option<String>, Option<String>);
+
+/// Adds a line's `counts` to `sums` under `key`. Claude Code writes a message's usage again on
+/// each of its content blocks, and while it streams some of those lines carry partial counts, so
+/// the lines of one message count once, at the most each counter of them reached, under the key
+/// of its first line. A line with neither id nor request always adds.
+fn add_line<K: Clone + Eq + std::hash::Hash>(seen: &mut HashMap<MessageId, (K, [u64; 5])>, sums: &mut HashMap<K, [u64; 5]>, id: MessageId, key: K, counts: [u64; 5]) {
+    let (key, add) = match id {
+        (None, None) => (key, counts),
+        id => match seen.entry(id) {
+            std::collections::hash_map::Entry::Vacant(entry) => entry.insert((key, counts)).clone(),
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let (key, most) = entry.get_mut();
+                let mut add = [0; 5];
+                for ((most, add), n) in most.iter_mut().zip(&mut add).zip(counts) {
+                    *add = n.saturating_sub(*most);
+                    *most = (*most).max(n);
+                }
+                (key.clone(), add)
+            }
+        },
+    };
+    for (total, n) in sums.entry(key).or_default().iter_mut().zip(add) {
+        *total += n;
+    }
+}
+
 fn walk(dir: &Path, since: u64, files: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -344,8 +426,11 @@ fn unix_of(iso: &str) -> Option<u64> {
 }
 
 /// A price the user set for the model wins over the list's, even for a name the list can't price.
-fn price(row: &mut Row, table: &RateTable, prices: &HashMap<String, Price>) {
-    let Some(rate) = prices.get(row.model.trim()).map(Price::rate).or_else(|| lookup(table, &row.model)) else { return };
+/// A fast row whose model has no fast tier costs its standard price times `FAST_MULTIPLE`, and
+/// answers true.
+fn price(row: &mut Row, table: &RateTable, prices: &HashMap<String, Price>) -> bool {
+    let Some(rate) = prices.get(row.model.trim()).map(Price::rate).or_else(|| lookup(table, &row.model)) else { return false };
+    let by_multiple = row.speed == Speed::Fast && rate.fast.is_none();
     let rates = match row.speed {
         Speed::Fast => rate.fast.unwrap_or(rate.standard),
         Speed::Standard => rate.standard,
@@ -353,14 +438,18 @@ fn price(row: &mut Row, table: &RateTable, prices: &HashMap<String, Price>) {
     let cost = |r: Rates| Cost {
         input: row.input as f64 * r.input,
         cache_read: row.cached as f64 * r.cache_read,
-        cache_write: row.cache_write as f64 * r.cache_write,
+        cache_write: (row.cache_write - row.cache_write_1h) as f64 * r.cache_write + row.cache_write_1h as f64 * ONE_HOUR_WRITE * r.input,
         output: row.output as f64 * r.output,
     };
     let total = |c: Cost| c.input + c.cache_read + c.cache_write + c.output;
-    let listed = cost(rates);
+    let mut listed = cost(rates);
+    if by_multiple {
+        listed = Cost { input: listed.input * FAST_MULTIPLE, cache_read: listed.cache_read * FAST_MULTIPLE, cache_write: listed.cache_write * FAST_MULTIPLE, output: listed.output * FAST_MULTIPLE };
+    }
     row.premium = if row.speed == Speed::Standard { 0.0 } else { total(listed) - total(cost(rate.standard)) };
     row.savings = row.cached as f64 * (rates.input - rates.cache_read);
     row.cost = Some(listed);
+    by_multiple
 }
 
 fn lookup(table: &RateTable, model: &str) -> Option<ModelRate> {
@@ -379,9 +468,11 @@ fn number(entry: &Value, key: &str) -> Option<f64> {
 
 /// A tier's rates; a cache price the tier leaves out follows the standard tier's ratio to input,
 /// or else is input's, since a model priced as if cached input were free would under-report.
+/// An input or output rate that is not above zero leaves the tier unpriced, so a team box prices
+/// its model at the ceiling rate.
 fn tier_rates(entry: &Value, suffix: &str, standard: Option<Rates>) -> Option<Rates> {
-    let input = number(entry, &format!("input_cost_per_token{suffix}"))?;
-    let output = number(entry, &format!("output_cost_per_token{suffix}"))?;
+    let input = number(entry, &format!("input_cost_per_token{suffix}")).filter(|n| *n > 0.0)?;
+    let output = number(entry, &format!("output_cost_per_token{suffix}")).filter(|n| *n > 0.0)?;
     let cache = |name: &str, pick: fn(&Rates) -> f64| {
         number(entry, &format!("{name}{suffix}")).unwrap_or_else(|| match standard {
             Some(s) if s.input > 0.0 => pick(&s) / s.input * input,
@@ -444,7 +535,13 @@ pub fn rates(cache: Option<&Path>) -> RateTable {
     body.and_then(|b| serde_json::from_slice::<Value>(&b).ok()).map(|doc| parse_rates(&doc)).unwrap_or_default()
 }
 
-fn download() -> Option<Vec<u8>> {
+/// The price list as `download` gets it, never read from or written to a file; none when the
+/// download fails. The caller spaces its tries (`Machine::meter_rates_at`).
+pub fn downloaded(download: fn() -> Option<Vec<u8>>) -> RateTable {
+    download().and_then(|body| serde_json::from_slice::<Value>(&body).ok()).map(|doc| parse_rates(&doc)).unwrap_or_default()
+}
+
+pub(crate) fn download() -> Option<Vec<u8>> {
     let body = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10)).build().ok()?.get(PRICES_URL).send().ok()?.error_for_status().ok()?.bytes().ok()?.to_vec();
     serde_json::from_slice::<Value>(&body).ok()?;
     Some(body)
@@ -657,6 +754,108 @@ mod tests {
     }
 
     #[test]
+    fn a_fast_row_with_no_fast_tier_costs_the_multiple_at_least_the_ceiling_and_counts_as_unpriced() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        let fast = json!({ "input_tokens": 0, "output_tokens": 1_000_000, "speed": "fast" });
+        let lines = [
+            assistant("m1", "r1", "s", "2026-11-09T10:00:00Z", "claude-opus-5-5", fast.clone()),
+            assistant("m2", "r2", "s", "2026-11-09T10:00:01Z", "claude-haiku-5", fast.clone()),
+            assistant("m3", "r3", "s", "2026-11-09T10:00:02Z", "dear-model", fast),
+        ];
+        std::fs::write(&file, lines.join("\n") + "\n").unwrap();
+        let mut meter = Meter::default();
+        meter.advance(&file).unwrap();
+        let mut rates = table();
+        rates.extend(parse_rates(&json!({ "dear-model": { "input_cost_per_token": 10e-6, "output_cost_per_token": 50e-6 } })));
+        let (usd, unpriced) = meter.priced(&rates, &PriceBook::default());
+        // Opus's listed fast tier: US$ 50. Haiku: 5 x FAST_MULTIPLE is under the ceiling's 150, so 150.
+        // The dear model: 50 x FAST_MULTIPLE, over the ceiling.
+        let expected = 50.0 + 150.0_f64.max(5.0 * FAST_MULTIPLE) + (50.0 * FAST_MULTIPLE).max(150.0);
+        assert!((usd - expected).abs() < 1e-6, "expected {expected}, got {usd}");
+        assert_eq!(unpriced, ["claude-haiku-5", "dear-model"], "a fast row priced by the multiple shows as the ceiling does");
+    }
+
+    #[test]
+    fn a_model_whose_input_or_output_rate_is_not_above_zero_is_unpriced_and_takes_the_ceiling() {
+        let rates = parse_rates(&json!({
+            "zero-model": { "input_cost_per_token": 0.0, "output_cost_per_token": 0.0 },
+            "free-output": { "input_cost_per_token": 3e-6, "output_cost_per_token": 0.0 },
+            "negative-input": { "input_cost_per_token": -3e-6, "output_cost_per_token": 15e-6 },
+        }));
+        for model in ["zero-model", "free-output", "negative-input"] {
+            assert_eq!(lookup(&rates, model), None, "{model}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        let usage = json!({ "input_tokens": 0, "output_tokens": 1_000_000 });
+        std::fs::write(&file, format!("{}\n", assistant("m1", "r1", "s", "2026-11-09T10:00:00Z", "negative-input", usage))).unwrap();
+        let mut meter = Meter::default();
+        meter.advance(&file).unwrap();
+        let (usd, unpriced) = meter.priced(&rates, &PriceBook::default());
+        assert_eq!(((usd * 100.0).round(), unpriced), (15_000.0, vec!["negative-input".to_owned()]), "a million output tokens at the ceiling's US$ 150");
+    }
+
+    #[test]
+    fn a_one_hour_cache_write_costs_twice_the_input_rate_and_the_ceilings_cache_writes_twice_its_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        let split = |model: &str, id: &str| {
+            let usage = json!({ "input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 3_000_000, "cache_creation": { "ephemeral_5m_input_tokens": 1_000_000, "ephemeral_1h_input_tokens": 2_000_000 } });
+            assistant(id, id, "s", "2026-11-09T10:00:00Z", model, usage)
+        };
+        let total_only = assistant("m2", "m2", "s", "2026-11-09T10:00:01Z", "claude-haiku-5", json!({ "input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 1_000_000 }));
+        std::fs::write(&file, format!("{}\n{total_only}\n", split("claude-haiku-5", "m1"))).unwrap();
+        let mut meter = Meter::default();
+        meter.advance(&file).unwrap();
+        let used = meter.usage(&table(), &PriceBook::default());
+        // Haiku's cache writes take its US$ 1 input rate: 2 million at the 5-minute rate (the split's
+        // and the line with no split), 2 million at twice that.
+        assert_eq!((used.tokens_in, used.cost_usd.map(|usd| (usd * 100.0).round())), (4_000_000, Some(600.0)));
+
+        let unlisted = dir.path().join("u.jsonl");
+        std::fs::write(&unlisted, format!("{}\n", split("claude-unlisted-1", "m3"))).unwrap();
+        let mut meter = Meter::default();
+        meter.advance(&unlisted).unwrap();
+        let (usd, unpriced) = meter.priced(&table(), &PriceBook::default());
+        assert_eq!(((usd * 100.0).round(), unpriced), (18_000.0, vec!["claude-unlisted-1".to_owned()]), "3 million cache writes at twice the ceiling's US$ 30");
+    }
+
+    #[test]
+    fn a_meter_keeps_the_most_each_line_of_one_message_reports_counted_once() {
+        // A message streamed in parts: its first line, written before it stopped, carries a
+        // partial output count, and a later line of the same message and request carries more.
+        let fixture = include_str!("../tests/fixtures/delegate/claude-background-agent.jsonl");
+        let lines: Vec<&str> = fixture.lines().collect();
+        let (partial, mut later): (Value, Value) = (serde_json::from_str(lines[1]).unwrap(), serde_json::from_str(lines[2]).unwrap());
+        assert_eq!((&partial["message"]["id"], &partial["message"]["stop_reason"], &partial["message"]["usage"]["output_tokens"]), (&later["message"]["id"], &Value::Null, &json!(5)));
+        later["message"]["usage"]["output_tokens"] = json!(412);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        std::fs::write(&file, format!("{partial}\n")).unwrap();
+        let mut meter = Meter::default();
+        meter.advance(&file).unwrap();
+        let mut more = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        std::io::Write::write_all(&mut more, format!("{later}\n{partial}\n").as_bytes()).unwrap();
+        meter.advance(&file).unwrap();
+        let used = meter.usage(&RateTable::new(), &PriceBook::default());
+        assert_eq!((used.tokens_in, used.tokens_out), (2 + 11_382 + 27_175, 412), "the larger output count, once; the input counts once");
+    }
+
+    #[test]
+    fn the_ceiling_prices_input_cache_reads_and_cache_writes_besides_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        let usage = json!({ "input_tokens": 1_000_000, "cache_read_input_tokens": 2_000_000, "cache_creation_input_tokens": 3_000_000, "output_tokens": 1_000_000 });
+        std::fs::write(&file, format!("{}\n", assistant("m1", "r1", "s", "2026-11-09T10:00:00Z", "claude-unlisted-1", usage))).unwrap();
+        let mut meter = Meter::default();
+        meter.advance(&file).unwrap();
+        let (usd, _) = meter.priced(&table(), &PriceBook::default());
+        // Input and cache reads at US$ 30 per million, cache writes at twice that, output at 150.
+        assert_eq!((usd * 100.0).round(), (30.0 + 60.0 + 180.0 + 150.0) * 100.0);
+    }
+
+    #[test]
     fn a_meter_counts_the_subagents_and_keeps_the_total_across_a_new_session() {
         let dir = tempfile::tempdir().unwrap();
         let usage = |output: u64| json!({ "input_tokens": 0, "output_tokens": output });
@@ -723,14 +922,15 @@ mod tests {
         assert!(close(sum("claude-opus-5-5", |r| r.savings), 3000.0 * 4.5e-6));
         let opus = rows.iter().find(|r| r.model == "claude-opus-5-5").unwrap();
         assert_ne!(haiku.session, opus.session);
-        assert_eq!(haiku.premium, 0.0, "haiku has no fast tier, so fast is priced as standard");
+        let standard = 10.0 * 1e-6 + 20.0 * 5e-6;
+        assert!(close(haiku.premium, standard * (FAST_MULTIPLE - 1.0)), "haiku has no fast tier, so fast is its standard price times FAST_MULTIPLE");
     }
 
     #[test]
     fn prices_fast_mode_and_leaves_unknown_models_unpriced() {
         let rates = table();
         let priced = |model: &str, speed| {
-            let mut row = Row { at: 0, model: model.into(), session: 0, speed, input: 1_000_000, cached: 0, cache_write: 0, output: 0, cost: None, premium: 0.0, savings: 0.0 };
+            let mut row = Row { at: 0, model: model.into(), session: 0, speed, input: 1_000_000, cached: 0, cache_write: 0, output: 0, cache_write_1h: 0, cost: None, premium: 0.0, savings: 0.0 };
             price(&mut row, &rates, &HashMap::from([("opus".to_owned(), Price { input: 2.0, output: 10.0, cache_read: None, cache_write: Some(4.0) })]));
             row
         };

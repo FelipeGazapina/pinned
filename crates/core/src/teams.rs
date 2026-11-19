@@ -403,8 +403,14 @@ pub struct Run {
     /// The member who took it over.
     #[serde(default)]
     pub controller: Option<String>,
+    /// Its box's cost only, as before a run had a model cost, so an older app that reads it as
+    /// the box's still shows the box's. Its `BotLimits::usd` caps this and `model_usd` together.
     #[serde(default)]
     pub cost_usd: f64,
+    /// The model cost its box's node reported, apart from `cost_usd`. None until the node first
+    /// reports one, and from an older hub, which sends none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usd: Option<f64>,
     /// Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's
     /// `BotLimits::minutes` count these only.
     #[serde(default)]
@@ -629,7 +635,16 @@ pub enum TeamOp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         step: Option<String>,
     },
+    /// From a team box's node only: what its session of `workflow` on `subject` has spent on its
+    /// model so far, in USD, a running total sent again at an interval. The hub keeps the most it
+    /// was told for the live run of that workflow and subject bound to this box, so a report lost
+    /// or sent twice never counts twice, and refuses a box that does not run it.
+    RunModelCost { workflow: String, subject: crate::agent::Subject, usd: f64 },
 }
+
+/// The most a run's model cost may be reported as, in USD (`TeamOp::RunModelCost`): the hub
+/// refuses more, and a node sends a larger total as this.
+pub const MAX_RUN_MODEL_USD: f64 = 10_000.0;
 
 impl TeamOp {
     /// The personal call inside `Hub`, as the hub reads it.
@@ -774,11 +789,20 @@ mod tests {
         let run = json!({ "id": "r1", "workflow": "c1", "state": "taken_over", "controller": "a1", "cost_usd": 0.5, "active_secs": 60, "started_at": 1, "ended_at": null, "outcome": null, "started_by": "a1" });
         let event = json!({ "kind": "run_changed", "run": run });
         let parsed: TeamEvent = serde_json::from_value(event.clone()).unwrap();
-        // An older hub sends no `waiting_secs`: it reads as 0, and goes out with the run.
+        // An older hub sends no `waiting_secs`: it reads as 0, and goes out with the run. Nor
+        // `model_usd`, which stays out, so the app tells a run with no model cost from an older hub.
         let mut sent = event.clone();
         sent["run"]["waiting_secs"] = json!(0);
         assert_eq!(serde_json::to_value(parsed).unwrap(), sent);
         let parsed: TeamEvent = serde_json::from_value(sent.clone()).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), sent);
+    }
+
+    #[test]
+    fn a_run_model_cost_report_reads_its_literal_json() {
+        let report = json!({ "op": "run_model_cost", "workflow": "c1", "subject": { "issue": "ENG-7" }, "usd": 0.4 });
+        let op: TeamOp = serde_json::from_value(report.clone()).unwrap();
+        assert!(matches!(&op, TeamOp::RunModelCost { workflow, subject: crate::agent::Subject::LinearIssue { issue }, usd } if workflow == "c1" && issue == "ENG-7" && *usd == 0.4));
+        assert_eq!(serde_json::to_value(&op).unwrap(), report);
     }
 }
