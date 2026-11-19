@@ -831,6 +831,9 @@ struct Tab {
     held: Vec<String>,
     /// Keys typed into a session that was asleep, written once it takes the terminal.
     keys: Vec<u8>,
+    /// A start found no place under `MAX_LIVE_REQUESTS`: the pass starts it once one frees, with
+    /// nothing held for it as with something. Kept in memory only.
+    wants_start: bool,
     /// When a client last showed the tab, as the look for sessions to rest found it.
     seen: Option<SystemTime>,
     /// When the latest submit went in. Cleared by Done, Failed, and a new session.
@@ -2603,11 +2606,13 @@ impl Machine {
                 return None;
             }
             let slept = std::mem::take(&mut t.asleep);
+            t.wants_start = false;
             t.starting = true;
             t.waking = slept;
             t.digest_due = !std::mem::take(&mut t.digest_launched);
             // What was typed for a session this start replaces is not for the next one. What was
             // typed for a session that sleeps is why it starts.
+            let dropped = !slept && !t.held.is_empty();
             if !slept {
                 t.held.clear();
                 t.keys.clear();
@@ -2631,18 +2636,16 @@ impl Machine {
             if let Some(model) = t.model.clone().filter(|_| !args.iter().any(|a| a == "--model")) {
                 args.extend(["--model".to_owned(), model]);
             }
-            Some((t.cwd.clone(), t.account.clone(), t.program, args, t.env.clone(), t.bypass, asked, slept))
+            Some((t.cwd.clone(), t.account.clone(), t.program, args, t.env.clone(), t.bypass, asked, slept, dropped))
         })?;
         // Starting, the tab holds its place: the rest of the start needs no gate.
         drop(gate);
-        let Some((cwd, account, program, args, env, bypass, asked, slept)) = prepared else {
+        let Some((cwd, account, program, args, env, bypass, asked, slept, dropped)) = prepared else {
             return self.tab(tab, |t| t.cwd.display().to_string()).map(Some);
         };
-        // What a restart kept for this start goes with it.
-        match crate::user_requests::of_env(&env) {
-            Some(request) => self.requests.lock().unwrap().clear_held(request),
-            None if global::is_global(&env) => self.requests.lock().unwrap().clear_anchor_held(),
-            None => {}
+        // What a restart kept for this start stays kept until it is typed, or dropped here.
+        if dropped {
+            self.forget_held(&env);
         }
         let mut args = args;
         let mut prompt = vec![];
@@ -2703,7 +2706,7 @@ impl Machine {
     fn hold_for_room(&self, tab: &str, line: Option<&str>) -> Result<bool, String> {
         let (changed, request) = self.tab(tab, |t| {
             let changed = !t.asleep || line.is_some();
-            t.asleep = true;
+            (t.asleep, t.wants_start) = (true, true);
             t.held.extend(line.map(str::to_owned));
             (changed, crate::user_requests::of_env(&t.env).map(str::to_owned))
         })?;
@@ -2716,6 +2719,16 @@ impl Machine {
             }
         }
         Ok(changed)
+    }
+
+    /// The lines a restart keeps for the start of the global tab with `env` were typed, or
+    /// dropped with the tab: its request's, or the anchor's when it has none.
+    fn forget_held(&self, env: &[(String, String)]) {
+        match crate::user_requests::of_env(env) {
+            Some(request) => self.requests.lock().unwrap().clear_held(request),
+            None if global::is_global(env) => self.requests.lock().unwrap().clear_anchor_held(),
+            None => {}
+        }
     }
 
     /// The config file Claude Code keeps `account`'s onboarding and folder trust in.
@@ -3159,7 +3172,7 @@ impl Machine {
             } else if since.elapsed() >= HELD_SETTLE {
                 let digest = machine.open_threads_digest(&tab);
                 let wrote = machine.tab(&tab, |t| {
-                    let Some(s) = t.session.as_mut() else { return false };
+                    let Some(s) = t.session.as_mut() else { return None };
                     let mut wrote = false;
                     let mut held = std::mem::take(&mut t.held);
                     if let Some(digest) = digest.filter(|_| t.digest_due) {
@@ -3171,9 +3184,10 @@ impl Machine {
                             wrote = true;
                         }
                     }
-                    wrote
+                    wrote.then(|| t.env.clone())
                 });
-                if wrote == Ok(true) {
+                if let Ok(Some(env)) = wrote {
+                    machine.forget_held(&env);
                     machine.arm_delegate_pass();
                 }
                 return;
@@ -3296,6 +3310,10 @@ impl Machine {
         };
         if let Some(session) = gone {
             self.plans.lock().unwrap().drop_session(&session);
+        }
+        // A closed tab does not come back on its own for what was held for its start.
+        if let Some(t) = closed.as_ref().filter(|t| !t.held.is_empty() || crate::user_requests::of_env(&t.env).is_some()) {
+            self.forget_held(&t.env);
         }
         let made = closed.as_ref().and_then(|t| t.made.clone());
         drop(closed);
@@ -5351,6 +5369,7 @@ impl Machine {
         // free input would block it, and the reader thread would wait on the lock for good.
         let blocker = self.blocker(tab);
         let digest = self.open_threads_digest(tab);
+        let mut typed_held = None;
         let wrote = self.tab(tab, |t| match t.session.as_mut() {
             Some(s) if s.raw() => {
                 if let Some(blocker) = blocker {
@@ -5361,6 +5380,7 @@ impl Machine {
                     s.write(&std::mem::take(&mut t.keys)).map_err(failed)?;
                 }
                 let mut lines = std::mem::take(&mut t.held);
+                typed_held = (!lines.is_empty()).then(|| t.env.clone());
                 lines.push(text.to_owned());
                 if let Some(digest) = digest.filter(|_| t.digest_due) {
                     t.digest_due = !put_digest(&mut lines, &digest);
@@ -5388,6 +5408,9 @@ impl Machine {
             }
             None => Err(NotTyped::Failed(format!("tab {tab} has no running session"))),
         }).map_err(NotTyped::Failed)??;
+        if let Some(env) = typed_held {
+            self.forget_held(&env);
+        }
         if wrote {
             self.arm_delegate_pass();
         }
@@ -6994,8 +7017,8 @@ impl Machine {
     fn maybe_deliver(&self, tab: &str) {
         if !self.parent_idle(tab) {
             // A sleeping session starts for its news, and a later pass types it.
-            // A request tab that waited for room rests with its first prompt held.
-            if self.tab(tab, |t| t.asleep).unwrap_or(false) && (self.delegates.has_news(tab) || self.tab(tab, |t| !t.held.is_empty() || !t.keys.is_empty()).unwrap_or(false)) {
+            // A request tab that waited for room rests with its first prompt held, or wanting its start.
+            if self.tab(tab, |t| t.asleep).unwrap_or(false) && (self.delegates.has_news(tab) || self.tab(tab, |t| !t.held.is_empty() || !t.keys.is_empty() || t.wants_start).unwrap_or(false)) {
                 // A global session waits for room under the live cap; a later pass looks again.
                 if let Err(error) = self.awake(tab, None) {
                     eprintln!("pinned: could not wake {tab} for its news: {error}");
@@ -7415,6 +7438,7 @@ impl Machine {
             ask_detail: None,
             held: vec![],
             keys: vec![],
+            wants_start: false,
             seen: None,
             turn_pending: None,
             typed_at: None,
