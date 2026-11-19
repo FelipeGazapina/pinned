@@ -291,7 +291,12 @@ impl UserRequests {
     /// Opens a request for the app's `key`, or answers the one that key opened: its id, and
     /// whether it is new.
     pub fn open(&mut self, key: &str, title: &str, project: Option<&str>, now: u64) -> (String, bool) {
-        todo!("{key} {title} {project:?} {now}")
+        if let Some(r) = self.saved.requests.iter().find(|r| r.key == key) {
+            return (r.id.clone(), false);
+        }
+        let project = project.map(|p| cut(p, MAX_NAME)).filter(|p| !p.is_empty());
+        let id = self.add(key.to_owned(), cut(title, MAX_TITLE), project, Kind::Asked, now);
+        (id, true)
     }
 
     /// The request's Orchestrator session started as `session`. False for an unknown id.
@@ -321,7 +326,19 @@ impl UserRequests {
     /// A global `session` sent `request_id` to `captain`. The first session to send an id keeps
     /// it, so a retry answers the first; the session's request remembers the Captain.
     pub fn record_send(&mut self, session: &str, request_id: &str, captain: CaptainRef) {
-        todo!("{session} {request_id} {captain:?}")
+        let captain = captain.cleaned();
+        if !self.saved.sent.iter().any(|s| s.id == request_id) {
+            self.saved.sent.push(SentId { id: request_id.to_owned(), session: session.to_owned(), at: captain.at });
+            let over = self.saved.sent.len().saturating_sub(SENT_KEEP);
+            self.saved.sent.drain(..over);
+        }
+        if let Some(r) = self.saved.requests.iter_mut().find(|r| r.session.as_deref() == Some(session)) {
+            r.captains.retain(|c| !c.serves(&captain));
+            r.captains.push(captain);
+            let over = r.captains.len().saturating_sub(MAX_CAPTAINS);
+            r.captains.drain(..over);
+        }
+        self.save();
     }
 
     /// Where `report`, from `captain` and answering `answers`, goes, leaving out what `delivered`
@@ -331,38 +348,170 @@ impl UserRequests {
     /// 2. Only when none matched: the newest open request that sent to this Captain, else its open
     ///    "Reports from Captain X" request, opened here when there is none.
     pub fn route(&mut self, report: &str, answers: &[String], captain: &CaptainRef, now: u64) -> Vec<Route> {
-        todo!("{report} {answers:?} {captain:?} {now}")
+        let mut to: Vec<Route> = vec![];
+        for sent in answers.iter().filter_map(|a| self.saved.sent.iter().find(|s| &s.id == a)) {
+            let route = match self.of_session(&sent.session) {
+                Some(r) => Route::Request(r.id.clone()),
+                None => Route::Session(sent.session.clone()),
+            };
+            if !to.contains(&route) {
+                to.push(route);
+            }
+        }
+        if to.is_empty() {
+            to.push(Route::Request(self.fallback(captain, now)));
+        }
+        to.retain(|route| !self.saved.delivered.iter().any(|d| d.report == report && &d.to == route));
+        to
+    }
+
+    /// The newest open request that sent to `captain`, else its open "Reports from Captain X"
+    /// request, opened when there is none.
+    fn fallback(&mut self, captain: &CaptainRef, now: u64) -> String {
+        let captain = captain.clone().cleaned();
+        let open_for = |kind: Kind| {
+            self.saved.requests.iter().filter(|r| r.kind == kind && r.closed.is_none() && r.captains.iter().any(|c| c.serves(&captain))).max_by_key(|r| r.opened_at).map(|r| r.id.clone())
+        };
+        if let Some(id) = open_for(Kind::Asked).or_else(|| open_for(Kind::CaptainReports)) {
+            return id;
+        }
+        let name = if captain.project.is_empty() { &captain.path } else { &captain.project };
+        let title = cut(&format!("Reports from Captain {name}"), MAX_TITLE);
+        let project = Some(captain.project.clone()).filter(|p| !p.is_empty());
+        let key = format!("captain-reports/{}/{}/{now}", captain.machine, captain.path);
+        let id = self.add(key, title, project, Kind::CaptainReports, now);
+        if let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id) {
+            r.captains.push(CaptainRef { at: now, ..captain });
+        }
+        self.save();
+        id
     }
 
     /// `report` was typed into `to`.
     pub fn delivered(&mut self, report: &str, to: &Route) {
-        todo!("{report} {to:?}")
+        self.saved.delivered.push(Delivered { report: report.to_owned(), to: to.clone() });
+        let over = self.saved.delivered.len().saturating_sub(DELIVERED_KEEP);
+        self.saved.delivered.drain(..over);
+        self.save();
     }
 
     /// Once ever: the old Orchestrator conversation in `session`, if there was one, becomes the
-    /// Done request "Earlier conversation". Its id when this call made it.
+    /// Done request "Earlier conversation", closed by the machine. Its id when this call made it.
     pub fn migrate(&mut self, session: Option<&str>, now: u64) -> Option<String> {
-        todo!("{session:?} {now}")
+        if self.saved.migrated {
+            return None;
+        }
+        self.saved.migrated = true;
+        let made = session.filter(|s| self.of_session(s).is_none()).map(|session| {
+            let id = self.add("earlier".to_owned(), EARLIER_TITLE.to_owned(), None, Kind::Earlier, now);
+            if let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id) {
+                r.session = Some(session.to_owned());
+                r.closed = Some(Closed { by: ClosedBy::Orchestrator, at: now });
+            }
+            id
+        });
+        self.save();
+        made
+    }
+
+    /// Adds a request with a new id, drops what the cap asks, and saves.
+    fn add(&mut self, key: String, title: String, project: Option<String>, kind: Kind, now: u64) -> String {
+        let id = loop {
+            let id = new_id();
+            if self.get(&id).is_none() {
+                break id;
+            }
+        };
+        self.saved.requests.push(UserRequest {
+            id: id.clone(),
+            key,
+            title,
+            project,
+            opened_at: now,
+            session: None,
+            stands: Stands::default(),
+            closed: None,
+            captains: vec![],
+            last: None,
+            last_user_at: None,
+            replies: 0,
+            kind,
+        });
+        self.trim();
+        self.save();
+        id
+    }
+
+    /// Past `KEEP`, drops the Done requests closed longest ago, with the ids their session sent.
+    /// Open requests stay, even past the cap.
+    fn trim(&mut self) {
+        while self.saved.requests.len() > KEEP {
+            let oldest_done = self.saved.requests.iter().enumerate().filter_map(|(i, r)| r.closed.map(|c| (c.at, i))).min();
+            let Some((_, i)) = oldest_done else { break };
+            let gone = self.saved.requests.remove(i);
+            if let Some(session) = &gone.session {
+                self.saved.sent.retain(|s| &s.session != session);
+            }
+            let route = Route::Request(gone.id);
+            self.saved.delivered.retain(|d| d.to != route);
+        }
     }
 
     /// Open requests, then Done ones from the last 14 days, newest first in each, at most 60.
     /// `tab_of` finds a session's tab.
     pub fn glances(&self, now: u64, tab_of: impl Fn(&str) -> Option<TabId>) -> Vec<RequestGlance> {
-        let _ = tab_of;
-        todo!("{now}")
+        let mut shown: Vec<&UserRequest> = self.saved.requests.iter().filter(|r| r.closed.is_none_or(|c| now.saturating_sub(c.at) <= GLANCE_DONE_MS)).collect();
+        shown.sort_by_key(|r| (r.closed.is_some(), Reverse(r.opened_at)));
+        shown.truncate(MAX_GLANCES);
+        shown.into_iter().map(|r| r.glance(r.session.as_deref().and_then(&tab_of))).collect()
     }
 
     /// Writes "Where this stands" for request `id`: each text cut to one line and capped, the
     /// title at 80 characters, every other text at 300, at most 6 links of 60. Setting `needs`
     /// stamps `needs_at`; clearing it clears that.
     pub fn stands_update(&mut self, id: &str, patch: StandsPatch, now: u64) -> Result<(), String> {
-        todo!("{id} {patch:?} {now}")
+        let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id) else { return Err(format!("No request {id}.")) };
+        if let Some(title) = patch.title.map(|t| cut(&t, MAX_TITLE)).filter(|t| !t.is_empty()) {
+            r.title = title;
+        }
+        let stands = &mut r.stands;
+        for (field, text) in [(&mut stands.asked, patch.asked), (&mut stands.done, patch.done), (&mut stands.left, patch.left)] {
+            if let Some(text) = text {
+                *field = cut(&text, MAX_WHAT);
+            }
+        }
+        if let Some(needs) = patch.needs.map(|n| cut(&n, MAX_WHAT)) {
+            if needs != stands.needs {
+                stands.needs_at = (!needs.is_empty()).then_some(now);
+                stands.needs = needs;
+            }
+        }
+        if let Some(links) = patch.links {
+            stands.links = links.iter().map(|l| cut(l, MAX_NAME)).filter(|l| !l.is_empty()).take(MAX_LINKS).collect();
+        }
+        stands.at = now;
+        self.save();
+        Ok(())
     }
 
     /// One line per open request other than `except`, newest first, at most 12: its id, title,
     /// project and what is done, left and needed, each cut to 120 characters.
     pub fn live_digest(&self, except: Option<&str>) -> Vec<String> {
-        todo!("{except:?}")
+        let mut open: Vec<&UserRequest> = self.saved.requests.iter().filter(|r| r.closed.is_none() && Some(r.id.as_str()) != except).collect();
+        open.sort_by_key(|r| Reverse(r.opened_at));
+        open.into_iter()
+            .take(DIGEST_LINES)
+            .map(|r| {
+                let mut parts = vec![r.id.clone(), r.title.clone()];
+                parts.extend(r.project.as_ref().map(|p| format!("#{p}")));
+                for (name, text) in [("done", &r.stands.done), ("left", &r.stands.left), ("needs", &r.stands.needs)] {
+                    if !text.is_empty() {
+                        parts.push(format!("{name}: {}", text.chars().take(DIGEST_TEXT).collect::<String>()));
+                    }
+                }
+                parts.join(" · ")
+            })
+            .collect()
     }
 
     /// Writes a sibling file only this user may read, flushes it to disk, and renames it over the
@@ -400,7 +549,66 @@ impl UserRequests {
 
 /// The request a prefixed request id names: `q…/r-1` gives `q…`.
 pub fn request_of(request_id: &str) -> Option<&str> {
-    todo!("{request_id}")
+    let (head, _) = request_id.split_once('/')?;
+    let letters = head.strip_prefix('q')?;
+    (letters.len() == ID_LEN && letters.bytes().all(|b| ID_LETTERS.contains(&b))).then_some(head)
+}
+
+/// `q` and 10 letters drawn from the standard library's randomly seeded hasher.
+fn new_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let bits = std::collections::hash_map::RandomState::new().build_hasher().finish();
+    let letters: String = (0..ID_LEN).map(|n| ID_LETTERS[((bits >> (5 * n)) & 31) as usize] as char).collect();
+    format!("q{letters}")
+}
+
+/// `text` as one line of at most `max` characters, by plan.rs's rules for a name: line breaks and
+/// control characters become spaces, direction marks and invisible characters go, and runs of
+/// spaces become one.
+fn cut(text: &str, max: usize) -> String {
+    use crate::plan::{direction_mark, invisible, line_separator};
+    let flat: String = text.chars().filter(|c| !direction_mark(*c) && !invisible(*c)).map(|c| if c.is_control() || line_separator(c) { ' ' } else { c }).collect();
+    let one = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    one.chars().take(max).collect::<String>().trim_end().to_owned()
+}
+
+impl CaptainRef {
+    /// Each field one line: the path at 300 characters, the others at 60.
+    fn cleaned(self) -> Self {
+        CaptainRef { machine: cut(&self.machine, MAX_NAME), path: cut(&self.path, MAX_WHAT), project: cut(&self.project, MAX_NAME), machine_name: cut(&self.machine_name, MAX_NAME), ..self }
+    }
+
+    /// Whether `report`'s Captain is this one: the same machine and folder, or for a box, the same
+    /// machine or repo.
+    fn serves(&self, report: &CaptainRef) -> bool {
+        if self.boxed {
+            (!self.machine.is_empty() && self.machine == report.machine) || (!self.project.is_empty() && self.project == report.project)
+        } else {
+            self.machine == report.machine && self.path == report.path
+        }
+    }
+}
+
+impl UserRequest {
+    fn glance(&self, tab: Option<TabId>) -> RequestGlance {
+        RequestGlance {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            project: self.project.clone(),
+            opened_at: self.opened_at,
+            kind: self.kind,
+            closed_at: self.closed.map(|c| c.at),
+            needs: self.stands.needs.clone(),
+            needs_at: self.stands.needs_at,
+            last_user_at: self.last_user_at,
+            last_who: self.last.as_ref().map(|l| l.who),
+            last_text: self.last.as_ref().map(|l| l.text.clone()).unwrap_or_default(),
+            last_at: self.last.as_ref().map(|l| l.at),
+            replies: self.replies,
+            captains: self.captains.iter().map(|c| GlanceCaptain { machine: c.machine.clone(), path: c.path.clone(), project: c.project.clone(), machine_name: c.machine_name.clone() }).collect(),
+            tab,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -516,16 +724,17 @@ mod tests {
     fn open_requests_survive_the_500_cap() {
         let mut store = UserRequests::load(None);
         let open: Vec<String> = (0..10).map(|n| store.open(&format!("open-{n}"), "Still open", None, n).0).collect();
-        let done: Vec<String> = (0..495)
+        let done: Vec<String> = (0..490)
             .map(|n| {
                 let (id, _) = store.open(&format!("done-{n}"), "Done", None, 100 + n);
                 store.close(&id, ClosedBy::User, 1_000 + n);
                 id
             })
             .collect();
-        assert_eq!(store.all().len(), 505);
-        store.open("one-more", "One more", None, 2_000);
         assert_eq!(store.all().len(), 500);
+        let more: Vec<String> = (0..6).map(|n| store.open(&format!("more-{n}"), "More", None, 2_000 + n).0).collect();
+        assert_eq!(store.all().len(), 500);
+        assert!(more.iter().all(|id| store.get(id).is_some()));
         assert!(open.iter().all(|id| store.get(id).is_some()), "every open request is kept");
         assert_eq!(done.iter().filter(|id| store.get(id).is_none()).count(), 6);
         assert!(done[..6].iter().all(|id| store.get(id).is_none()), "the oldest Done ones go first");
@@ -567,7 +776,7 @@ mod tests {
         assert_eq!(r.stands.left, "l".repeat(300));
         assert_eq!((r.stands.needs.as_str(), r.stands.needs_at, r.stands.at), ("Pick a colour", Some(2_000), 2_000));
         assert_eq!(r.stands.links.len(), 6);
-        assert_eq!(r.stands.links[0], format!("https://a.example/1 {}", "x".repeat(39)));
+        assert_eq!(r.stands.links[0], format!("https://a.example/1 {}", "x".repeat(40)));
         assert_eq!(r.stands.asked, "");
 
         store.stands_update(&id, StandsPatch { needs: Some(" ".into()), ..Default::default() }, 3_000).unwrap();
@@ -665,8 +874,9 @@ mod tests {
         assert_eq!(glance.captains, vec![GlanceCaptain { machine: "m 1".into(), path: format!("/p/ {}", "a".repeat(296)), project: "si te".into(), machine_name: "Mac mini".into() }]);
 
         store.close(&a, ClosedBy::User, 1_500);
-        let [Route::Request(x)] = store.route("rep-1", &[], &odd, 2_000)[..] else { panic!("one request") };
-        assert_eq!(store.get(&x).unwrap().title, "Reports from Captain si te");
+        let routes = store.route("rep-1", &[], &odd, 2_000);
+        let [Route::Request(x)] = routes.as_slice() else { panic!("one request, not {routes:?}") };
+        assert_eq!(store.get(x).unwrap().title, "Reports from Captain si te");
 
         let b = started(&mut store, "b", 3_000);
         for n in 0..10 {
