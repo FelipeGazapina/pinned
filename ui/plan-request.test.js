@@ -436,3 +436,28 @@ test("9r3 item 9: headings return once there is more than one block", async () =
   assert.deepEqual(sections(h.html()), ["Captain storefront · Mac mini"]);
   assert.match(h.html(), /class="pl-plan"/);
 });
+
+test("9r4 item 6: the header and the bar count live plans only, then say how many ended", async () => {
+  const old = view({ id: "p9", title: "Old plan", lists: [{ id: "l9", name: "Cleanup", task: null, steps: [STEP({ id: "s9", name: "Delete the flag", state: "done" }), STEP({ id: "s10", name: "Tell support", state: "done" })] }] });
+  const one = rglance({ captains: [CAPTAINS[0]] });
+  const h = harness({ reply: hub([{ machine: "m1", path: "/work/storefront", plan: old }], one) });
+  const store = captainTab("m1", "tab-1", "/work/storefront", [plan("p1")]);
+  const request = requestTab({}, [], one);
+  h.tabs.push(store, request);
+  await h.open(request);
+  const html = h.html();
+  assert.match(html, /<span class="pl-count">2 lists, 1 of 3 steps, 1 ended<\/span>/, "the snapshot's list and steps are not counted");
+  assert.ok(html.includes('class="pl-progress"><span style="width:33.3'), "the bar is 1 of 3");
+});
+
+test("9r4 item 6: with no live plan the header reads the ended count alone", async () => {
+  const mk = (id) => view({ id, title: id, lists: [{ id: `l${id}`, name: "Cleanup", task: null, steps: [STEP({ id: `s${id}`, name: "Delete", state: "done" })] }] });
+  const one = rglance({ captains: [CAPTAINS[0]] });
+  const h = harness({ reply: hub([{ machine: "m1", path: "/work/storefront", plan: mk("p8") }, { machine: "m1", path: "/work/storefront", plan: mk("p9") }], one) });
+  const request = requestTab({}, [], one);
+  h.tabs.push(request);
+  await h.open(request);
+  const html = h.html();
+  assert.match(html, /<span class="pl-count">2 ended<\/span>/);
+  assert.ok(html.includes('class="pl-progress"><span style="width:0%"'), "the bar is empty");
+});

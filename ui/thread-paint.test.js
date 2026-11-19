@@ -1327,3 +1327,17 @@ test("markup in the divider and in a report row stays text: no img element and n
   assert.deepEqual(all.flatMap((e) => e.attrs).filter(([name, value]) => /^(href|src|xlink:href)$/.test(name) && /^\s*javascript:/i.test(value)), [], "no javascript: link anywhere");
   assert.ok(dividers(html).includes("Sent to Captain &#60;img src=x onerror=alert(1)&#62;"), "the payload reads as text");
 });
+
+test("9r4 item 2: a request thread draws its two reports open on first paint, and a toggle closes them", () => {
+  const prompt = `${reportPrompt("site", "Mac mini", "m1", "Cause found.")}\n${reportPrompt("site", "Mac mini", "m1", "PR #212 merged.")}`;
+  const user = { kind: "user", id: "u2", at: "2026-11-19T11:00:00Z", text: prompt };
+  const request = globalTab("tab-r1", { request: "q1" }, [askedItem(), user]);
+  const html = paintLane([request]);
+  assert.match(html, /class="report-fold reports-head"[^>]*aria-expanded="true"/);
+  assert.equal(blocks(html, '<div class="report-row"').length, 2, "both rows draw");
+  request.thread.open.add("reports:u2");
+  assert.match(paintLane([request]), /class="report-fold reports-head"[^>]*aria-expanded="false"/, "the user's toggle wins");
+  assert.equal(blocks(paintLane([request]), '<div class="report-row"').length, 0);
+  const anchor = globalTab("tab-a1", {}, [user]);
+  assert.match(paintLane([anchor]), /aria-expanded="false"/, "the anchor keeps its fold closed");
+});

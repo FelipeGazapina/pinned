@@ -640,3 +640,43 @@ test("9r3 item 13: a running request tab's composer says 'Reply in this thread';
   assert.equal(run(request(false)), "claude isn't running. Press Enter to start it.");
   assert.equal(run({ view: { running: true, role: "worker" } }), "Ask anything, @ files, $ skills, / commands", "other threads are as before");
 });
+
+test("9r4 item 1: a request tab with its Plan open reads user_request once and the card draws its rows", async () => {
+  const g = board();
+  g[1].tab = "tab-21";
+  const tab = requestTab("q-work", "tab-21");
+  const h = harness({
+    tabs: [anchorTab(g), tab],
+    reply: (call) => (call.cmd === "user_request" ? view("q-work", { glance: g[1], stands: stands() }) : null),
+  });
+  const panel = { open: true, active: "plan", surfaces: [{ id: "plan", kind: "plan" }] };
+  h.context.panelOf = () => panel;
+  h.context.shownSurface = () => panel.surfaces[0];
+  h.context.active = tab;
+  h.run("renderRequests()");
+  assert.equal(h.column.hidden, true, "Plan open: the column is gone");
+  assert.match(h.run("requestCardHtml(active)"), /Loading…/, "while it is read");
+  await flush();
+  const html = h.run("requestCardHtml(active)");
+  assert.doesNotMatch(html, /Loading…/);
+  assert.match(html, /You asked[\s\S]*Find out why codes are late\./);
+  assert.equal(h.log.threads, 1, "the thread redraws once when the reply lands");
+  for (let i = 0; i < 4; i++) h.run("renderRequests()");
+  await flush();
+  assert.equal(h.log.calls.filter(([, c]) => c.cmd === "user_request").length, 1, "one read, not one per paint");
+});
+
+test("9r4 item 3: the Requests crumb is the theme's link colour", () => {
+  assert.match(ruleOf(cssOf("gui-requests.css"), "#chat-head .crumb .request-back"), /color:\s*var\(--g-link\)/);
+});
+
+test("9r4 item 4: the footer facts sit in one row that never wraps, and Cost keeps its size", () => {
+  const css = cssOf("gui-plan.css");
+  assert.match(ruleOf(css, ".pl-foot .facts"), /display:\s*flex;[^}]*flex-wrap:\s*nowrap/);
+  assert.match(ruleOf(css, ".pl-foot .fact"), /min-width:\s*0/);
+  assert.match(ruleOf(css, ".pl-foot .fact:last-child"), /flex:\s*none/);
+});
+
+test("9r4 item 5: the minimap sits at the thread's left edge, not over the Requests column", () => {
+  assert.match(ruleOf(cssOf("gui-requests.css"), "#chat[data-requests] #minimap"), /left:\s*340px/);
+});
