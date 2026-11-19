@@ -964,6 +964,8 @@ impl Tab {
             questions: None,
             read_only: self.child_access() == crate::delegate::Access::ReadOnly,
             plans,
+            requests: vec![],
+            request: crate::user_requests::of_env(&self.env).map(str::to_owned),
         }
     }
 
@@ -1158,6 +1160,10 @@ pub struct Machine {
     questions: Mutex<crate::questions::Questions>,
     /// Every Captain session's plans, by its Claude session id.
     plans: Mutex<crate::plan_store::PlanStore>,
+    /// The user's requests to the global orchestrator, one session each.
+    requests: Mutex<crate::user_requests::UserRequests>,
+    /// `restore_tabs` ran, so a global session no tab holds was not left behind.
+    restored: AtomicBool,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
@@ -1356,6 +1362,8 @@ impl Machine {
             sent: Mutex::new(sent),
             questions: Mutex::new(crate::questions::Questions::load(dir.as_deref())),
             plans: Mutex::new(crate::plan_store::PlanStore::load(dir.as_deref())),
+            requests: Mutex::new(crate::user_requests::UserRequests::load(dir.as_deref())),
+            restored: AtomicBool::new(false),
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
             next_listener: AtomicU64::new(1),
@@ -1640,6 +1648,10 @@ impl Machine {
             Call::Enqueue { path, text, request_id, sender, busy } => json(self.enqueue_to_captain(&path, &text, &request_id, &sender, busy)?),
             Call::OrchestratorReport { request_id, report } => json(self.deliver_report(&request_id, &report)?),
             Call::OpenGlobalOrchestrator => json(self.open_global_orchestrator()?),
+            Call::UserRequests { before } => json(self.user_requests_page(before)),
+            Call::UserRequest { id, items } => json(self.user_request(&id, items.unwrap_or(reading::DEFAULT_ITEMS))?),
+            Call::NewUserRequests { items } => json(self.new_user_requests(items)?),
+            Call::UserRequestAction { id, action } => json(self.user_request_action(&id, action)?),
             Call::OpenTasteChat { scope, path } => json(self.open_taste_chat(&scope, path.as_deref())?),
             Call::Delegate { origin, request, repo, token } => self.start_for_origin(origin, *request, repo, token).and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string())),
             Call::RemoteTask { origin_machine, tab, task, cancel } => self.remote_task(&origin_machine, &tab, &task, cancel.as_deref()),
@@ -3300,6 +3312,26 @@ impl Machine {
         self.emit_tabs();
         Ok(id)
     }
+
+    fn user_requests_page(&self, _before: Option<u64>) -> Vec<crate::user_requests::RequestGlance> {
+        vec![]
+    }
+
+    fn user_request(&self, id: &str, _items: usize) -> Result<crate::user_requests::UserRequestView, String> {
+        Err(format!("No request {id}."))
+    }
+
+    fn new_user_requests(&self, _items: Vec<crate::user_requests::NewRequest>) -> Result<Vec<crate::user_requests::Opened>, String> {
+        Err("not built yet".into())
+    }
+
+    fn user_request_action(&self, id: &str, _action: crate::user_requests::RequestAction) -> Result<crate::user_requests::RequestGlance, String> {
+        Err(format!("No request {id}."))
+    }
+
+    /// Once ever, the global session from before user requests becomes the request "Earlier
+    /// conversation".
+    pub fn migrate_requests(&self) {}
 
     /// A new tab, not yet started, that adjusts `scope`'s way of working: in the project folder
     /// `path`, or else in the folder for threads without a project. Its first prompt names the scope.
@@ -19723,6 +19755,348 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(ask_as(json!({ "name": "plan_step", "step": "s1", "state": "running" })), Ok("p1 rev 2: Ship the form\nl1 Build: s1 running".into()));
         assert_eq!(saved(), before, "the file was not written again");
         m.quit();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A fake `claude` that records each start's folder, role, project and arguments, as
+    /// `recording_claude` does, then takes the terminal and writes what it is typed to
+    /// `<claude>.typed.<tab>`.
+    #[cfg(unix)]
+    fn typing_claude(dir: &Path) -> PathBuf {
+        let claude = dir.join("claude");
+        let script = "#!/bin/sh\nprintf '%s\\0' \"$(pwd -P)\" \"$PINNED_ROLE\" \"$PINNED_PROJECT\" \"$@\" > \"$0.tmp.$PINNED_TAB\" && mv \"$0.tmp.$PINNED_TAB\" \"$0.$PINNED_TAB\"\nstty raw -echo\nexec cat > \"$0.typed.$PINNED_TAB\"\n";
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    #[cfg(unix)]
+    fn requests_machine(dir: &Path, claude: &Path) -> Arc<Machine> {
+        Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.to_owned())]), ..launch() }, Some(dir.join("config")), None, |_| {})
+    }
+
+    fn ask_new(m: &Machine, items: &[(&str, &str)]) -> Result<Value, String> {
+        let items = items.iter().map(|(key, text)| json!({ "key": key, "title": format!("Ask {key}"), "text": text })).collect::<Vec<_>>();
+        m.call(Call::NewUserRequests { items: serde_json::from_value(json!(items)).unwrap() })
+    }
+
+    fn request_glance(m: &Machine, id: &str) -> crate::user_requests::RequestGlance {
+        let page: Vec<crate::user_requests::RequestGlance> = serde_json::from_value(m.call(Call::UserRequests { before: None }).unwrap()).unwrap();
+        page.into_iter().find(|g| g.id == id).unwrap_or_else(|| panic!("no glance of {id}"))
+    }
+
+    fn global_folder_of(dir: &Path) -> PathBuf {
+        dir.join("config/home/.pinned/orquestrador")
+    }
+
+    /// The old single Orchestrator conversation `session`, as a transcript in the global folder's
+    /// Claude project and, when `saved`, a global tab in `sessions.json`.
+    fn old_global_session(m: &Machine, dir: &Path, session: &str, saved: bool) -> PathBuf {
+        let folder = global_folder_of(dir);
+        std::fs::create_dir_all(&folder).unwrap();
+        let folder = dunce::canonicalize(folder).unwrap();
+        let munged: String = folder.display().to_string().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        let project = m.accounts.home(&Account::builtin(Provider::Claude)).join("projects").join(munged);
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = project.join(format!("{session}.jsonl"));
+        std::fs::write(&transcript, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"What runs where?\"},\"sessionId\":\"old\"}\n").unwrap();
+        if saved {
+            let entry: sessions::Saved = serde_json::from_value(json!({ "cwd": folder, "session": session, "env": global::env() })).unwrap();
+            sessions::save(&dir.join("config/sessions.json"), &[entry]).unwrap();
+        }
+        transcript
+    }
+
+    fn live_global(m: &Machine) -> usize {
+        m.tabs().iter().filter(|t| t.orchestrator_global && t.alive).count()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_new_request_opens_its_own_tab_and_starts_with_the_paragraph() {
+        let dir = temp("req-new");
+        let claude = recording_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let paragraph = "Fix the login.\nIt fails on Safari.";
+        let opened = ask_new(&m, &[("k-1", paragraph)]).unwrap();
+        let (id, tab) = (opened[0]["id"].as_str().unwrap().to_owned(), opened[0]["tab"].as_str().unwrap().to_owned());
+        assert_eq!(opened, json!([{ "key": "k-1", "id": id, "tab": tab, "handoff": "started" }]));
+        let folder = global_folder_of(&dir).display().to_string();
+        let args = started(&claude, &tab);
+        assert_eq!(args[..3], [folder.as_str(), "global-orchestrator", ""]);
+        assert!(!args.iter().any(|a| a.contains("Fix the login")), "the paragraph is typed, not passed as an argument: {args:?}");
+        assert_eq!(m.tab(&tab, |t| t.held.clone()).unwrap(), [paragraph], "held until the session takes the terminal");
+        let view = m.view(&tab).unwrap();
+        assert_eq!((view.orchestrator_global, view.request.as_deref()), (true, Some(id.as_str())));
+        assert_eq!(request_glance(&m, &id).title, "Ask k-1");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_new_request_glance_carries_its_asked_text_cut_to_one_line() {
+        let dir = temp("req-asked");
+        let claude = recording_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let paragraph = format!("Fix the login.\n\nIt fails\ton Safari. {}", "x".repeat(400));
+        let opened = ask_new(&m, &[("k-1", &paragraph)]).unwrap();
+        let glance = request_glance(&m, opened[0]["id"].as_str().unwrap());
+        assert_eq!(glance.asked, format!("Fix the login. It fails on Safari. {}", "x".repeat(265)));
+        assert_eq!(glance.asked.chars().count(), 300);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn new_requests_with_the_same_key_open_one_tab() {
+        let dir = temp("req-same-key");
+        let claude = recording_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let first = ask_new(&m, &[("k-1", "Fix the login.")]).unwrap();
+        let tab = first[0]["tab"].as_str().unwrap().to_owned();
+        let _ = started(&claude, &tab);
+        assert_eq!(ask_new(&m, &[("k-1", "Fix the login.")]), Ok(first.clone()), "a retry answers the first request");
+        assert_eq!(m.tabs().iter().filter(|t| t.request.is_some()).count(), 1);
+        assert_eq!(m.tab(&tab, |t| t.held.clone()).unwrap(), ["Fix the login."], "the paragraph is typed once");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_anchor_carries_the_glances_and_request_tabs_carry_their_id() {
+        let dir = temp("req-anchor");
+        let claude = recording_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let anchor = m.open_global_orchestrator().unwrap();
+        let opened = ask_new(&m, &[("k-1", "Fix the login."), ("k-2", "Ship the blog.")]).unwrap();
+        let (a, b) = (opened[0]["tab"].as_str().unwrap().to_owned(), opened[1]["tab"].as_str().unwrap().to_owned());
+        let (ida, idb) = (opened[0]["id"].as_str().unwrap().to_owned(), opened[1]["id"].as_str().unwrap().to_owned());
+        let views = m.tabs();
+        let of = |tab: &str| views.iter().find(|v| v.id == tab).unwrap().clone();
+        let carried: Vec<(String, Option<String>)> = of(&anchor).requests.iter().map(|g| (g.id.clone(), g.tab.clone())).collect();
+        assert_eq!(carried.len(), 2);
+        assert!(carried.contains(&(ida.clone(), Some(a.clone()))) && carried.contains(&(idb.clone(), Some(b.clone()))), "{carried:?}");
+        assert_eq!((of(&anchor).request, of(&a).request, of(&b).request), (None, Some(ida), Some(idb)));
+        assert!(of(&a).requests.is_empty() && of(&b).requests.is_empty(), "only the anchor carries them");
+        m.close_tab(&anchor);
+        let views = m.tabs();
+        let carriers: Vec<&str> = views.iter().filter(|v| !v.requests.is_empty()).map(|v| v.id.as_str()).collect();
+        assert_eq!(carriers, [b.as_str()], "with no anchor, the newest request tab carries them");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_prompt_into_a_request_clears_its_needs() {
+        let dir = temp("req-prompt");
+        let claude = recording_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let opened = ask_new(&m, &[("k-1", "Fix the login.")]).unwrap();
+        let (id, tab) = (opened[0]["id"].as_str().unwrap().to_owned(), opened[0]["tab"].as_str().unwrap().to_owned());
+        m.requests.lock().unwrap().stands_update(&id, crate::user_requests::StandsPatch { needs: Some("Say which browser.".into()), ..Default::default() }, 5).unwrap();
+        assert_eq!(request_glance(&m, &id).needs, "Say which browser.");
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Safari.".into() }), Ok(json!(null)));
+        let glance = request_glance(&m, &id);
+        assert_eq!((glance.needs.as_str(), glance.needs_at), ("", None));
+        assert!(glance.last_user_at.is_some_and(|at| at > 1_000_000_000_000), "{glance:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn migration_leaves_the_transcript_bytes_equal() {
+        use std::hash::{Hash, Hasher};
+        let dir = temp("req-migrate-bytes");
+        let claude = recording_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let transcript = old_global_session(&m, &dir, "s-old", true);
+        let hash = || {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::fs::read(&transcript).unwrap().hash(&mut h);
+            h.finish()
+        };
+        let before = hash();
+        m.restore_tabs();
+        let all = m.requests.lock().unwrap().all().to_vec();
+        assert_eq!(all.iter().map(|r| (r.kind, r.session.as_deref(), r.closed.is_some())).collect::<Vec<_>>(), [(crate::user_requests::Kind::Earlier, Some("s-old"), true)]);
+        assert_eq!(hash(), before);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn migration_finds_the_old_session_after_a_restart_and_runs_once() {
+        let dir = temp("req-migrate-once");
+        let claude = recording_claude(&dir);
+        old_global_session(&requests_machine(&dir, &claude), &dir, "s-old", true);
+        let earlier = |m: &Machine| m.requests.lock().unwrap().all().iter().filter(|r| r.kind == crate::user_requests::Kind::Earlier).map(|r| r.id.clone()).collect::<Vec<_>>();
+        let first = requests_machine(&dir, &claude);
+        let restored = first.restore_tabs();
+        let ids = earlier(&first);
+        assert_eq!(ids.len(), 1);
+        let tab = restored.iter().find(|t| first.tab(t, |t| global::is_global(&t.env)).unwrap()).unwrap().clone();
+        assert_eq!(request_glance(&first, &ids[0]).tab, Some(tab.clone()), "the earlier request's tab is found from its session");
+        assert_eq!(first.open_global_orchestrator(), Ok(tab), "and it is the anchor");
+        first.quit();
+        drop(first);
+        let second = requests_machine(&dir, &claude);
+        second.restore_tabs();
+        assert_eq!(earlier(&second), ids, "a restart migrates nothing again");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn migration_before_restore_tabs_still_finds_it() {
+        let dir = temp("req-migrate-early");
+        let claude = recording_claude(&dir);
+        old_global_session(&requests_machine(&dir, &claude), &dir, "s-old", true);
+        let m = requests_machine(&dir, &claude);
+        m.migrate_requests();
+        let sessions = |m: &Machine| m.requests.lock().unwrap().all().iter().map(|r| r.session.clone()).collect::<Vec<_>>();
+        assert_eq!(sessions(&m), [Some("s-old".to_owned())], "found in sessions.json before any tab is back");
+        m.restore_tabs();
+        assert_eq!(sessions(&m), [Some("s-old".to_owned())]);
+        m.quit();
+        drop(m);
+
+        let bare = temp("req-migrate-bare");
+        let m = requests_machine(&bare, &claude);
+        m.migrate_requests();
+        assert!(m.requests.lock().unwrap().all().is_empty());
+        old_global_session(&m, &bare, "s-folder", false);
+        m.restore_tabs();
+        assert_eq!(sessions(&m), [Some("s-folder".to_owned())], "nothing found before the restore ends is no answer yet; the folder's transcript is");
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(bare);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_crash_between_record_and_start_redelivers_the_first_prompt() {
+        let dir = temp("req-crash");
+        let claude = recording_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let (id, _) = m.requests.lock().unwrap().open("k-1", "Ask k-1", None, 1_000);
+        m.quit();
+        drop(m);
+        let m = requests_machine(&dir, &claude);
+        let opened = ask_new(&m, &[("k-1", "Fix the login.")]).unwrap();
+        let tab = opened[0]["tab"].as_str().unwrap().to_owned();
+        assert_eq!(opened, json!([{ "key": "k-1", "id": id, "tab": tab, "handoff": "started" }]));
+        let _ = started(&claude, &tab);
+        assert_eq!(m.tab(&tab, |t| t.held.clone()).unwrap(), ["Fix the login."], "the retry typed the first prompt the crash lost");
+        assert_eq!(ask_new(&m, &[("k-1", "Fix the login.")]), Ok(opened));
+        assert_eq!(m.tab(&tab, |t| t.held.clone()).unwrap(), ["Fix the login."], "once");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn done_closes_the_tab_and_open_resumes_the_session() {
+        let dir = temp("req-done");
+        let claude = recording_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let opened = ask_new(&m, &[("k-1", "Fix the login.")]).unwrap();
+        let (id, tab) = (opened[0]["id"].as_str().unwrap().to_owned(), opened[0]["tab"].as_str().unwrap().to_owned());
+        let _ = started(&claude, &tab);
+        m.record_event(AgentEvent { session: Some("s-k1".into()), ..hook(&tab, AgentStatus::Done) });
+        let action = |action: &str| m.call(Call::UserRequestAction { id: id.clone(), action: serde_json::from_value(json!(action)).unwrap() });
+        let done = action("done").unwrap();
+        assert!(done["closed_at"].is_u64() && done["tab"].is_null(), "{done}");
+        assert!(m.view(&tab).is_err(), "Done closed the tab");
+        let open = action("open").unwrap();
+        let back = open["tab"].as_str().expect("Open names a tab").to_owned();
+        let view = m.view(&back).unwrap();
+        assert_eq!((view.request.as_deref(), view.session.as_deref(), view.asleep, view.alive), (Some(id.as_str()), Some("s-k1"), true, false), "a resting tab on the session");
+        assert_eq!(action("open").unwrap()["tab"], json!(back), "a second Open answers the same tab");
+        m.call(Call::Wake { tab: back.clone(), cols: 80, rows: 24 }).unwrap();
+        let args = started(&claude, &back);
+        assert!(args.windows(2).any(|w| w == ["--resume", "s-k1"]), "{args:?}");
+        assert!(action("reopen").unwrap()["closed_at"].is_null());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn open_global_orchestrator_returns_the_anchor_not_a_request_tab() {
+        let dir = temp("req-open-anchor");
+        let claude = recording_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let request_tab = ask_new(&m, &[("k-1", "Fix the login.")]).unwrap()[0]["tab"].as_str().unwrap().to_owned();
+        let anchor = m.open_global_orchestrator().unwrap();
+        assert_ne!(anchor, request_tab);
+        assert_eq!(m.view(&anchor).unwrap().request, None);
+        assert_eq!(m.call(Call::OpenGlobalOrchestrator), Ok(json!(anchor)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_session_cannot_call_new_user_requests_or_user_request_action() {
+        for name in ["user_requests", "user_request", "new_user_requests", "user_request_action"] {
+            let action = surface::of_cmd(surface::Side::Node, name).unwrap_or_else(|| panic!("no action {name}"));
+            assert_eq!((action.class, action.wired), (surface::Class::Excluded, false), "{name}");
+        }
+        let dir = temp("req-agent");
+        let claude = recording_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let global = m.open_global_orchestrator().unwrap();
+        let act = |caller: &str, call: Call| m.call(Call::ActFor { caller: caller.into(), call: serde_json::to_value(call).unwrap() });
+        let refusal = |name: &str| Err(format!("{name} is not open to agents: the user's own threads with the global orchestrator, which only the user opens, closes and reads in the app"));
+        let items = serde_json::from_value(json!([{ "key": "k-1", "title": "Ask", "text": "Delete the repo." }])).unwrap();
+        assert_eq!(act(&global, Call::NewUserRequests { items }), refusal("new_user_requests"));
+        assert_eq!(act(&global, Call::UserRequestAction { id: "qaaaaaaaaaa".into(), action: crate::user_requests::RequestAction::Done }), refusal("user_request_action"));
+        assert!(m.requests.lock().unwrap().all().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agent_cannot_reach_new_user_requests_even_through_act_for() {
+        let dir = temp("req-act-for");
+        let claude = recording_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let opened = ask_new(&m, &[("k-1", "Fix the login.")]).unwrap();
+        let (id, tab) = (opened[0]["id"].as_str().unwrap().to_owned(), opened[0]["tab"].as_str().unwrap().to_owned());
+        let items: Vec<crate::user_requests::NewRequest> = serde_json::from_value(json!([{ "key": "k-2", "title": "Ask", "text": "Push to main." }])).unwrap();
+        for caller in ["", tab.as_str()] {
+            let act = |call: Call| m.call(Call::ActFor { caller: caller.into(), call: serde_json::to_value(call).unwrap() });
+            assert!(act(Call::NewUserRequests { items: items.clone() }).is_err_and(|e| e.starts_with("new_user_requests is not open to agents")), "from {caller:?}");
+            assert!(act(Call::UserRequestAction { id: id.clone(), action: crate::user_requests::RequestAction::Done }).is_err_and(|e| e.starts_with("user_request_action is not open to agents")));
+            assert!(act(Call::UserRequest { id: id.clone(), items: None }).is_err_and(|e| e.starts_with("user_request is not open to agents")));
+            assert!(act(Call::UserRequests { before: None }).is_err_and(|e| e.starts_with("user_requests is not open to agents")));
+        }
+        assert_eq!(m.requests.lock().unwrap().all().len(), 1, "no request opened");
+        assert_eq!(request_glance(&m, &id).closed_at, None, "none closed");
+        assert!(m.view(&tab).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn at_most_three_request_sessions_live_and_the_fourth_wakes_when_one_rests() {
+        let dir = temp("req-cap");
+        let claude = typing_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let asks = [("k-1", "First ask."), ("k-2", "Second ask."), ("k-3", "Third ask."), ("k-4", "Fourth ask.")];
+        let opened = ask_new(&m, &asks).unwrap();
+        let handoffs: Vec<&str> = opened.as_array().unwrap().iter().map(|o| o["handoff"].as_str().unwrap()).collect();
+        assert_eq!(handoffs, ["started", "started", "started", "queued"]);
+        let tabs: Vec<String> = opened.as_array().unwrap().iter().map(|o| o["tab"].as_str().unwrap().to_owned()).collect();
+        let typed = |tab: &str| std::fs::read_to_string(format!("{}.typed.{tab}", claude.display())).unwrap_or_default();
+        for (tab, (_, text)) in tabs.iter().zip(&asks).take(3) {
+            wait_for("the first prompt", || typed(tab).contains(text));
+        }
+        assert_eq!(live_global(&m), 3);
+        assert!(typed(&tabs[3]).is_empty() && !m.view(&tabs[3]).unwrap().alive, "the fourth waits while all three are mid-turn");
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(live_global(&m), 3, "nothing rests a session mid-turn");
+        m.record_event(AgentEvent { session: Some("s-k2".into()), ..hook(&tabs[1], AgentStatus::Done) });
+        wait_for("the fourth's first prompt", || typed(&tabs[3]).contains("Fourth ask."));
+        assert_eq!(live_global(&m), 3);
+        let rested = m.view(&tabs[1]).unwrap();
+        assert_eq!((rested.alive, rested.asleep, rested.session.as_deref()), (false, true, Some("s-k2")), "the one whose turn ended rested");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

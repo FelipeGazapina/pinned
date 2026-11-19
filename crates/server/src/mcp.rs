@@ -767,6 +767,8 @@ mod tests {
             questions: None,
             read_only: false,
             plans: vec![],
+            requests: vec![],
+            request: None,
         }
     }
 

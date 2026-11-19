@@ -216,6 +216,13 @@ pub struct TabView {
     /// `Call::Plan`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plans: Vec<crate::plan::PlanGlance>,
+    /// The user requests' glances, on one global tab only: the anchor, else the newest request
+    /// tab. Open ones and Done ones from the last 14 days, at most 60.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests: Vec<crate::user_requests::RequestGlance>,
+    /// The user request this global tab is the session of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -384,6 +391,24 @@ pub enum Call {
     /// The id of this machine's global orchestrator tab: the one already open, else a new one, not
     /// yet started, in `~/.pinned/orquestrador`, made when missing and never listed as a project.
     OpenGlobalOrchestrator,
+    /// `Vec<user_requests::RequestGlance>`: the 60 newest user requests opened before `before`,
+    /// or of all, newest first.
+    UserRequests {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<u64>,
+    },
+    /// `user_requests::UserRequestView`: request `id` with the last `items` things said in it.
+    UserRequest {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        items: Option<usize>,
+    },
+    /// `Vec<user_requests::Opened>`: one request and Orchestrator tab per item, its session
+    /// started on the item's text. A repeat of a key answers the request it opened.
+    NewUserRequests { items: Vec<crate::user_requests::NewRequest> },
+    /// The request's new `user_requests::RequestGlance`. Done closes its tab; Open adds a resting
+    /// tab on its session when none is open.
+    UserRequestAction { id: String, action: crate::user_requests::RequestAction },
     /// The id of a new tab, not yet started, whose session adjusts `scope`'s way of working with
     /// the taste tools and whose first prompt says so. It opens in the project folder `path`, or
     /// in the folder for threads without a project.
@@ -893,6 +918,7 @@ impl Call {
                 | Call::PrList { .. }
                 | Call::PrAction { .. }
                 | Call::Thread { .. }
+                | Call::UserRequest { .. }
                 | Call::ReadSession { .. }
                 | Call::RepoLook { .. }
                 | Call::Workspace { .. }
@@ -1955,6 +1981,8 @@ mod tests {
             questions: None,
             read_only: false,
             plans: vec![],
+            requests: vec![],
+            request: None,
         }
     }
 

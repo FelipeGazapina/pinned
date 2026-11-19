@@ -22,6 +22,8 @@ pub const GLANCE_DONE_MS: u64 = 14 * 24 * 60 * 60 * 1000;
 pub const DIGEST_LINES: usize = 12;
 pub const DIGEST_TEXT: usize = 120;
 pub const EARLIER_TITLE: &str = "Earlier conversation";
+/// The environment variable that marks a global tab as request `<id>`'s own.
+pub const ENV: &str = "PINNED_REQUEST";
 /// Sent ids and deliveries kept; a report answering an id that fell off takes the fallback.
 const SENT_KEEP: usize = 2000;
 const DELIVERED_KEEP: usize = 2000;
@@ -172,6 +174,9 @@ pub struct RequestGlance {
     pub captains: Vec<GlanceCaptain>,
     #[serde(default)]
     pub tab: Option<TabId>,
+    /// What the user first asked, one line of at most 300 characters.
+    #[serde(default)]
+    pub asked: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
@@ -466,6 +471,21 @@ impl UserRequests {
         shown.into_iter().map(|r| r.glance(r.session.as_deref().and_then(&tab_of))).collect()
     }
 
+    /// The 60 newest requests opened before `before`, or of all, newest first.
+    pub fn page(&self, before: Option<u64>, tab_of: impl Fn(&UserRequest) -> Option<TabId>) -> Vec<RequestGlance> {
+        let mut shown: Vec<&UserRequest> = self.saved.requests.iter().filter(|r| before.is_none_or(|b| r.opened_at < b)).collect();
+        shown.sort_by_key(|r| Reverse(r.opened_at));
+        shown.into_iter().take(MAX_GLANCES).map(|r| r.glance(tab_of(r))).collect()
+    }
+
+    /// The user typed into request `id`'s session: nothing waits on them any more.
+    pub fn user_typed(&mut self, id: &str, now: u64) -> bool {
+        let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id) else { return false };
+        (r.stands.needs, r.stands.needs_at, r.last_user_at) = (String::new(), None, Some(now));
+        self.save();
+        true
+    }
+
     /// Writes "Where this stands" for request `id`: each text cut to one line and capped, the
     /// title at 80 characters, every other text at 300, at most 6 links of 60. Setting `needs`
     /// stamps `needs_at`; clearing it clears that.
@@ -547,6 +567,79 @@ impl UserRequests {
     }
 }
 
+/// The request a tab's environment names it the session of.
+pub fn of_env(env: &[(String, String)]) -> Option<&str> {
+    env.iter().find(|(k, _)| k == ENV).map(|(_, v)| v.as_str())
+}
+
+/// What the app asks to open: one paragraph of a new request.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+pub struct NewRequest {
+    /// The app's idempotency key for this paragraph.
+    pub key: String,
+    pub title: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestAction {
+    Done,
+    Reopen,
+    /// A resting tab on the request's session, for one whose tab closed.
+    Open,
+}
+
+/// How a new request's first message went: its session started on it, or it waits for a free
+/// place among the live request sessions.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Start {
+    Started,
+    Queued,
+}
+
+/// The answer to one `NewRequest`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Opened {
+    pub key: String,
+    pub id: String,
+    pub tab: TabId,
+    pub handoff: Start,
+}
+
+/// One said thing of a request's thread.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Item {
+    pub who: Who,
+    pub text: String,
+    pub at: u64,
+    /// The Captain's project, on a report.
+    #[serde(default)]
+    pub captain: Option<String>,
+}
+
+/// A plan kept for a request after its Captain's tab went, named by that Captain.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RequestPlan {
+    pub machine: MachineId,
+    pub path: String,
+    pub plan: crate::plan::PlanView,
+}
+
+/// The answer to `Call::UserRequest`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct UserRequestView {
+    pub glance: RequestGlance,
+    pub stands: Stands,
+    pub items: Vec<Item>,
+    pub plans: Vec<RequestPlan>,
+}
+
 /// The request a prefixed request id names: `q…/r-1` gives `q…`.
 pub fn request_of(request_id: &str) -> Option<&str> {
     let (head, _) = request_id.split_once('/')?;
@@ -573,9 +666,15 @@ fn cut(text: &str, max: usize) -> String {
 }
 
 impl CaptainRef {
-    /// Each field one line: the path at 300 characters, the others at 60.
+    /// Each name one line of at most 60 characters. The path stays byte for byte, since it is
+    /// the Captain tab's exact folder, which the app matches.
     fn cleaned(self) -> Self {
         CaptainRef { machine: cut(&self.machine, MAX_NAME), path: cut(&self.path, MAX_WHAT), project: cut(&self.project, MAX_NAME), machine_name: cut(&self.machine_name, MAX_NAME), ..self }
+    }
+
+    /// A path with a control or line-separator character names no folder a tab runs in.
+    fn path_ok(&self) -> bool {
+        !self.path.chars().any(|c| c.is_control() || crate::plan::line_separator(c))
     }
 
     /// Whether `report`'s Captain is this one: the same machine and folder, or for a box, the same
@@ -590,7 +689,7 @@ impl CaptainRef {
 }
 
 impl UserRequest {
-    fn glance(&self, tab: Option<TabId>) -> RequestGlance {
+    pub fn glance(&self, tab: Option<TabId>) -> RequestGlance {
         RequestGlance {
             id: self.id.clone(),
             title: self.title.clone(),
@@ -607,6 +706,7 @@ impl UserRequest {
             replies: self.replies,
             captains: self.captains.iter().map(|c| GlanceCaptain { machine: c.machine.clone(), path: c.path.clone(), project: c.project.clone(), machine_name: c.machine_name.clone() }).collect(),
             tab,
+            asked: self.stands.asked.clone(),
         }
     }
 }
@@ -865,13 +965,15 @@ mod tests {
     fn captain_fields_with_newlines_are_flattened_and_capped() {
         let mut store = UserRequests::load(None);
         let a = started(&mut store, "a", 1_000);
-        let odd = CaptainRef { machine: "m\r1".into(), path: format!("/p/\n{}", "a".repeat(400)), project: "si\u{2028}te".into(), machine_name: "Mac\nmini".into(), boxed: false, at: 1_100 };
+        let odd = CaptainRef { machine: "m\r1".into(), path: format!("/p/{}", "a".repeat(400)), project: "si\u{2028}te".into(), machine_name: "Mac\nmini".into(), boxed: false, at: 1_100 };
         store.record_send("s-a", &format!("{a}/r-1"), odd.clone());
-        let c = &store.get(&a).unwrap().captains[0];
-        assert_eq!((c.machine.as_str(), c.project.as_str(), c.machine_name.as_str()), ("m 1", "si te", "Mac mini"));
-        assert_eq!(c.path, format!("/p/ {}", "a".repeat(296)));
+        store.record_send("s-a", &format!("{a}/r-2"), CaptainRef { path: "/p/\nsite".into(), ..odd.clone() });
+        let c = &store.get(&a).unwrap().captains;
+        assert_eq!(c.len(), 1, "a path with a line break names no tab's folder");
+        assert_eq!((c[0].machine.as_str(), c[0].project.as_str(), c[0].machine_name.as_str()), ("m 1", "si te", "Mac mini"));
+        assert_eq!(c[0].path, format!("/p/{}", "a".repeat(400)));
         let glance = &store.glances(2_000, |_| None)[0];
-        assert_eq!(glance.captains, vec![GlanceCaptain { machine: "m 1".into(), path: format!("/p/ {}", "a".repeat(296)), project: "si te".into(), machine_name: "Mac mini".into() }]);
+        assert_eq!(glance.captains, vec![GlanceCaptain { machine: "m 1".into(), path: format!("/p/{}", "a".repeat(400)), project: "si te".into(), machine_name: "Mac mini".into() }]);
 
         store.close(&a, ClosedBy::User, 1_500);
         let routes = store.route("rep-1", &[], &odd, 2_000);
@@ -884,6 +986,21 @@ mod tests {
         }
         let kept: Vec<&str> = store.get(&b).unwrap().captains.iter().map(|c| c.machine.as_str()).collect();
         assert_eq!(kept, ["m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9"]);
+    }
+
+    #[test]
+    fn a_captain_path_is_kept_exactly_as_the_tabs_cwd() {
+        let mut store = UserRequests::load(None);
+        let a = started(&mut store, "a", 1_000);
+        let cwd = format!("/Users/ana/My  Projects/{}", "x".repeat(296));
+        assert_eq!(cwd.chars().count(), 320);
+        store.record_send("s-a", &format!("{a}/r-1"), captain("m1", &cwd, "site", 1_100));
+        assert_eq!(store.glances(2_000, |_| None)[0].captains[0].path, cwd);
+        assert_eq!(store.route("rep-1", &[], &captain("m1", &cwd, "site", 0), 3_000), vec![to(&a)], "a report from that tab's folder finds the request");
+        store.close(&a, ClosedBy::User, 3_500);
+        let routes = store.route("rep-2", &[], &captain("m1", &cwd, "site", 0), 4_000);
+        let [Route::Request(x)] = routes.as_slice() else { panic!("one request, not {routes:?}") };
+        assert_eq!(store.get(x).unwrap().captains[0].path, cwd, "the reports request keeps the folder exact too");
     }
 
     #[test]

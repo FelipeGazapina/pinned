@@ -483,7 +483,7 @@ async fn run(hub: &Arc<Hub>, account: &Arc<Account>, caller_tab: &str, actor: Ac
 /// elsewhere bare, except a guarded one, which goes as `act_for` with no session. `Enqueue` is
 /// guarded: a bare one types its own `sender`, while `act_for` stamps the caller's role.
 fn stamped(call: Call, caller_tab: &str, on_origin: bool) -> Result<Call, String> {
-    let guarded = matches!(call, Call::Prompt { .. } | Call::Enqueue { .. } | Call::OpenGlobalOrchestrator | Call::RestartClaude { .. } | Call::SetModel { .. } | Call::SetBypass { .. } | Call::Rewind { .. } | Call::SwitchAccount { .. } | Call::SetWorkspace { .. });
+    let guarded = matches!(call, Call::Prompt { .. } | Call::Enqueue { .. } | Call::OpenGlobalOrchestrator | Call::NewUserRequests { .. } | Call::UserRequestAction { .. } | Call::RestartClaude { .. } | Call::SetModel { .. } | Call::SetBypass { .. } | Call::Rewind { .. } | Call::SwitchAccount { .. } | Call::SetWorkspace { .. });
     Ok(match (on_origin, guarded) {
         (true, _) => Call::ActFor { caller: caller_tab.to_owned(), call: json(&call)? },
         (false, true) => Call::ActFor { caller: String::new(), call: json(&call)? },

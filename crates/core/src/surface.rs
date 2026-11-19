@@ -115,6 +115,7 @@ use Class::{Confirm, Excluded, Read, Write};
 const GIT: &str = "git and GitHub: run git and gh in your own shell";
 const FILES: &str = "files of a session's folder: use your own shell and files";
 const TERMINAL: &str = "the app's terminal plumbing";
+const REQUESTS: &str = "the user's own threads with the global orchestrator, which only the user opens, closes and reads in the app";
 const SYNC: &str = "machines keep their projects in step with the hub by themselves";
 
 /// Every `Call` and `HubCall`, as agents see it. `every_wire_call_has_one_action` fails when a
@@ -162,6 +163,10 @@ pub const ACTIONS: &[Action] = &[
     n("enqueue", Write, "Hands text to the Captain of the project at path: typed when it is idle, its first prompt when stopped, else queued. It is signed with your own role. Starting a stopped Captain is held to the project's tier, effort and workers-at-once limits.").wired().starts_work(),
     n("orchestrator_report", Excluded, "a Captain's report to the global orchestrator: a Captain calls tell_orchestrator"),
     n("open_global_orchestrator", Write, "Opens this machine's global orchestrator tab, not started, and answers its id. Only the global orchestrator's own session may call it.").wired(),
+    n("user_requests", Excluded, REQUESTS),
+    n("user_request", Excluded, REQUESTS),
+    n("new_user_requests", Excluded, REQUESTS),
+    n("user_request_action", Excluded, REQUESTS),
     n("open_taste_chat", Write, "Opens a thread that adjusts a scope's way of working by talking, not started, and answers its id."),
     n("global_orchestrator_settings", Read, "The machine's global orchestrator settings: its name, whether this machine hosts it, and its busy and report policies.").wired(),
     n("set_global_orchestrator_settings", Write, "Saves the machine's global orchestrator settings.").wired(),
