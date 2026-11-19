@@ -224,7 +224,10 @@ fn a_box_being_written_for_the_account_does_not_hold_up_an_agents_reserve() {
     set_workflow(&mut ana.client, "fresh");
     let held = super::teams_locks::Held::new(&hub, &held_row(&ana, "held-1", "other"));
     let shared = hub.hub().clone();
-    let opened = hub.runtime.block_on(tokio::time::timeout(Duration::from_secs(5), shared.open(ana.id, ana.box_run(issue("r-1")))));
+    let (work, runtime, (sent, opened)) = (ana.box_run(issue("r-1")), hub.runtime.handle().clone(), std::sync::mpsc::channel());
+    let id = ana.id;
+    std::thread::spawn(move || sent.send(runtime.block_on(shared.open(id, work))));
+    let opened = opened.recv_timeout(Duration::from_secs(5));
     assert_eq!(opened, Ok(Ok(())), "the reserve did not wait for the other insert");
     drop(held);
 }
