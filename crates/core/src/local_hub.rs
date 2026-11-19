@@ -381,6 +381,7 @@ impl LocalHub<'_> {
             | HubCall::SharedProjects
             | HubCall::ShareProject { .. }
             | HubCall::SyncList { .. }
+            | HubCall::SyncChanges { .. }
             | HubCall::SyncPush { .. }
             | HubCall::SyncPull { .. }
             | HubCall::SyncMarkExecutable { .. }
@@ -587,6 +588,7 @@ mod tests {
         assert_eq!(drive(&signed_out, HubCall::ListMcpServers), Answer::Done(Err(SIGN_IN_MCP.into())));
         assert_eq!(drive(&signed_out, HubCall::LoadMcpServers), Answer::Done(Err(SIGN_IN_MCP.into())));
         assert_eq!(drive(&signed_out, HubCall::Machines), Answer::HubOnly);
+        assert_eq!(drive(&signed_out, HubCall::SyncChanges { project: "github.com/acme/app".into(), since: None }), Answer::HubOnly);
         assert_eq!(drive(&signed_out, HubCall::Mirror { have: String::new(), login: "token".into() }), Answer::HubOnly);
         assert_eq!(drive(&signed_out, HubCall::DisconnectUpstash), Answer::Done(Err(NEEDS_THE_HUB_OFF.into())));
         let ask = HubCall::Team {
