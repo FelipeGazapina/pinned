@@ -1405,6 +1405,8 @@ Deploys go through the VPS."
             "placement": { "prefer": [], "avoid": [], "heavy": "worktree" },
             "reviewer": { "model": null, "rounds": 2, "rules": [], "projects": {} },
             "worker_profiles": { "account": [], "projects": {}, "proposed": [] },
+            "boxes_at_once": 8,
+            "box_cap": 8,
         });
         assert_eq!(serde_json::to_value(&tastes).unwrap(), json);
         let mut before_the_team = json.clone();
