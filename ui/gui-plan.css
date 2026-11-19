@@ -54,10 +54,9 @@
 .pl .seg { width: 9px; height: 4px; border-radius: 2px; background: var(--tone); }
 .pl .seg[data-state="pending"] { background: var(--g-border); }
 .pl .lane-state { font-size: 12px; color: var(--g-muted); }
-.pl .lane-state[data-tone="done"] { color: var(--g-success); }
-.pl .lane-state[data-tone="running"] { color: var(--g-blue); }
-.pl .lane-state[data-tone="failed"] { color: var(--g-error); }
-.pl .lane-state[data-tone="waiting"] { color: var(--g-warning-fg); }
+.pl .lane-state[data-tone="ok"] { color: var(--g-success); }
+.pl .lane-state[data-tone="run"] { color: var(--g-blue); }
+.pl .lane-state[data-tone="fix"] { color: var(--g-warning-fg); }
 .pl .chip { height: 22px; padding: 0 8px; border: 1px solid rgb(var(--g-warning-rgb) / 0.45); border-radius: 11px; font-size: 11px; color: var(--g-warning-fg); background: transparent; }
 .pl .chip:hover { background: rgb(var(--g-warning-rgb) / 0.1); }
 .pl .track { position: relative; overflow: hidden; transition: height 0.5s cubic-bezier(0.2, 0.8, 0.2, 1), width 0.5s; }

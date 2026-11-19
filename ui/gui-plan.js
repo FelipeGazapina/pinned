@@ -31,16 +31,22 @@ const planRunBy = (step) => step.by ?? (step.task ? "Worker" : "Captain");
 const planCost = (cost) => (cost == null ? "" : `$${cost.toFixed(2)}`);
 const planClock = (ms) => new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 
-/** A list's tone and word, from its steps. */
-function planListWord(list) {
-  if (!list.steps.length) return ["pending", "Not started"];
-  const states = list.steps.map((s) => s.state);
-  if (states.every((x) => x === "done")) return list.steps.some(planAfterFix) ? ["done", "Done, after one fix"] : ["done", "Done"];
-  if (states.includes("failed")) return ["failed", list.steps.some((s) => s.state === "failed" && s.fixes.length) ? "Failed, fix in progress" : "Failed"];
-  if (states.includes("waiting")) return ["waiting", "Waiting for your go"];
-  if (states.includes("running")) return ["running", "Running now"];
-  if (states.includes("done")) return ["running", "Between steps"];
-  return ["pending", "Not started"];
+/** A lane head's class and words, the board's formula (PlanTree): "<done> of <steps>", then "Done" (with "1 fix" or "N fixes") once every
+ * step is done, else ", needs you" while a step waits, else ", running". The board has no word for the data's `failed` step or a
+ * fix in progress: a failed step with no running fix reads ", failed", and ", fixing" while its fix runs. */
+function planLaneWord(list) {
+  const steps = list.steps;
+  const done = steps.filter((x) => x.state === "done").length;
+  if (steps.length && done === steps.length) {
+    const fixes = steps.reduce((n, x) => n + x.fixes.length, 0);
+    return ["ok", fixes ? `Done, ${fixes} ${fixes === 1 ? "fix" : "fixes"}` : "Done"];
+  }
+  const head = `${done} of ${steps.length}`;
+  if (steps.some((x) => x.state === "waiting")) return ["fix", `${head}, needs you`];
+  const failed = steps.filter((x) => x.state === "failed");
+  if (failed.length) return failed.some((x) => x.fixes.some((f) => f.steps.some((y) => y.state === "running"))) ? ["run", `${head}, fixing`] : ["fix", `${head}, failed`];
+  if (steps.some((x) => x.state === "running")) return ["run", `${head}, running`];
+  return ["", head];
 }
 
 /** The step the footer shows when none is picked: the first waiting one, else a running fix, else the first running. */
@@ -301,12 +307,12 @@ function planCellHtml(step, x, top, height, Z, zoom, s, scope, fix) {
   return `<button type="button" class="cell${fix ? " fix" : ""}${sel}" data-step="${esc(scope + step.id)}" data-state="${step.state}" style="left:${x - Z.cell / 2}px;top:${top}px;width:${Z.cell}px;height:${height}px" title="${esc(step.name)} · ${esc(word)}" aria-label="${esc(step.name)}: ${esc(word)}"><span class="dot"></span><span class="lbl">${esc(step.name)}</span><span class="meta">${meta}</span></button>`;
 }
 
-/** One list as a lane of the git graph: its head, and under it the track with the base line, the green line to the last done
+/** One list as a lane of the git graph: its head, and under it the track with the base line, the green line to the last non-pending
  * step, the ubranch of every open fix, and a cell per step. `last` stops the trunk at this lane's head. */
 function planListHtml(list, s, zoom, scope = "", last = false) {
   const Z = PLAN_ZOOMS[zoom];
   const folded = (s.folded ?? []).includes(scope + list.id);
-  const [tone, word] = planListWord(list);
+  const [tone, word] = planLaneWord(list);
   const fixSteps = list.steps.filter((x) => x.fixes.length);
   const fixOn = fixSteps.some((x) => planFixOpen(s, x, scope));
   const chip = fixSteps.length ? `<button type="button" class="chip" data-fixchip="${esc(scope + list.id)}" aria-pressed="${fixOn}">${fixOn ? "Hide" : "Show"} the fix branch</button>` : "";
@@ -315,8 +321,8 @@ function planListHtml(list, s, zoom, scope = "", last = false) {
   const trunk = `<div class="trunk" style="height:${last ? "30px" : "100%"}"></div>`;
   if (folded) return `<section class="lane folded">${trunk}${head}</section>`;
   const { xs, fixes, last: lastX, width } = planLayout(list, s, Z, scope);
-  const doneAt = list.steps.findLastIndex((x) => x.state === "done");
-  let body = `<div class="elbow"></div><div class="base" style="width:${xs.length ? lastX - PLAN_LEFT : 0}px"></div><div class="prog" style="width:${doneAt < 0 ? 0 : xs[doneAt] - PLAN_LEFT}px"></div>`;
+  const activeAt = list.steps.findLastIndex((x) => x.state !== "pending");
+  let body = `<div class="elbow"></div><div class="base" style="width:${xs.length ? lastX - PLAN_LEFT : 0}px"></div><div class="prog" style="width:${activeAt < 0 ? 0 : xs[activeAt] - PLAN_LEFT}px"></div>`;
   const fixTop = Z.fixDot - Z.cy;
   for (const f of fixes) {
     const healed = f.steps.every((x) => x.state === "done");
