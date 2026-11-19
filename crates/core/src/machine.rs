@@ -3879,7 +3879,7 @@ impl Machine {
         })?;
         let id = tab.to_owned();
         // Held until the start below, so another start never takes the place this one found.
-        let gate = (ready == Ready::Stopped && self.tab(tab, |t| global::is_global(&t.env))?).then(|| self.request_starts.lock().unwrap());
+        let gate = (ready == Ready::Stopped && self.tab(tab, |t| global::is_global(&t.env))?).then_some(());
         if gate.is_some() && !self.room_for(tab) {
             drop(gate);
             // A session that never started reads no queue, so its line is held for its start.
