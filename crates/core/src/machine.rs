@@ -21311,6 +21311,115 @@ Have another model review a risky change before it goes ahead.";
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// `typing_claude` from here on, except that each start takes the terminal only once
+    /// `<claude>.go.<tab>` exists: until then the session is up and nothing held is typed.
+    #[cfg(unix)]
+    fn gate_claude(claude: &Path, gated: bool) {
+        let wait = if gated { "while [ ! -f \"$0.go.$PINNED_TAB\" ]; do sleep 0.05; done\n" } else { "" };
+        let script = format!("#!/bin/sh\nprintf '%s\\0' \"$(pwd -P)\" \"$PINNED_ROLE\" \"$PINNED_PROJECT\" \"$@\" > \"$0.tmp.$PINNED_TAB\" && mv \"$0.tmp.$PINNED_TAB\" \"$0.$PINNED_TAB\"\n{wait}stty raw -echo\nexec cat > \"$0.typed.$PINNED_TAB\"\n");
+        // A new file in its place: a start reading the old one goes on reading it.
+        let next = claude.with_extension("next");
+        std::fs::write(&next, script).unwrap();
+        std::fs::set_permissions(&next, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::rename(&next, claude).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_held_first_prompt_stays_saved_until_it_is_typed() {
+        let (dir, claude, m, _path, tabs) = at_the_cap("req-held-kept", &FOUR_ASKS);
+        let id = m.view(&tabs[3]).unwrap().request.expect("a request tab");
+        gate_claude(&claude, true);
+        m.record_event(AgentEvent { session: Some("s-k1".into()), ..hook(&tabs[0], AgentStatus::Done) });
+        wait_for("the fourth's session", || m.tab(&tabs[3], |t| t.session.is_some()).unwrap());
+        let saved = || m.requests.lock().unwrap().held().into_iter().find(|(r, _, _)| *r == id).map(|(_, _, lines)| lines);
+        assert_eq!(saved(), Some(vec!["Fourth ask.".to_owned()]), "the record let go of the prompt before it was typed");
+        // A reload while the session is up and the prompt not typed yet.
+        m.restore_tabs();
+        m.quit();
+        drop(m);
+        gate_claude(&claude, false);
+        let again = requests_machine(&dir, &claude);
+        again.restore_tabs();
+        let tab = again.request_tab(&id).expect("the fourth request rests in a tab again");
+        let typed = || std::fs::read_to_string(format!("{}.typed.{tab}", claude.display())).unwrap_or_default();
+        wait_for("the held first prompt", || typed().contains("Fourth ask."));
+        wait_for("the record cleared once typed", || again.requests.lock().unwrap().held().is_empty());
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(typed().matches("Fourth ask.").count(), 1, "typed once");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_reload_before_the_held_prompt_is_typed_does_not_type_it_twice() {
+        let (dir, claude, m, _path, tabs) = at_the_cap("req-held-reload", &FOUR_ASKS);
+        let held = &tabs[3];
+        gate_claude(&claude, true);
+        m.record_event(AgentEvent { session: Some("s-k1".into()), ..hook(&tabs[0], AgentStatus::Done) });
+        wait_for("the fourth's session", || m.tab(held, |t| t.session.is_some()).unwrap());
+        m.restore_tabs();
+        std::fs::write(format!("{}.go.{held}", claude.display()), "").unwrap();
+        let typed = || std::fs::read_to_string(format!("{}.typed.{held}", claude.display())).unwrap_or_default();
+        wait_for("the held first prompt", || typed().contains("Fourth ask."));
+        wait_for("the record cleared once typed", || m.requests.lock().unwrap().held().is_empty());
+        m.restore_tabs();
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(typed().matches("Fourth ask.").count(), 1, "typed once");
+        assert_eq!(live_global(&m), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_global_tab_that_is_not_the_anchor_keeps_the_anchors_held_lines_when_it_starts() {
+        let dir = temp("req-anchor-kept");
+        let claude = typing_claude(&dir);
+        let m = requests_machine(&dir, &claude);
+        let anchor = m.open_global_orchestrator().unwrap();
+        // Held for the anchor at the cap before a restart.
+        m.requests.lock().unwrap().hold_for_anchor("Anchor news.");
+        // Another global tab with no request, as the earlier conversation's.
+        let folder = m.global_folder();
+        let account = m.account_for(None, &folder).unwrap();
+        let other = m.add_tab(folder, account, vec![], global::env(), false, None);
+        m.start_claude(&other, 80, 24).unwrap();
+        wait_for("the other tab's session", || m.view(&other).unwrap().alive);
+        assert_eq!(m.requests.lock().unwrap().anchor_held(), ["Anchor news."], "another tab's start let go of the anchor's line");
+        m.restore_tabs();
+        let typed = || std::fs::read_to_string(format!("{}.typed.{anchor}", claude.display())).unwrap_or_default();
+        wait_for("the anchor's line", || typed().contains("Anchor news."));
+        wait_for("the anchor's saved lines cleared once typed", || m.requests.lock().unwrap().anchor_held().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_start_at_the_cap_with_nothing_held_starts_once_a_place_frees() {
+        let (dir, _claude, m, tabs) = rested_by_the_pass("req-cap-start-bare");
+        let rested = &tabs[0];
+        assert!(m.tab(rested, |t| t.held.is_empty() && t.keys.is_empty()).unwrap(), "nothing held");
+        assert!(m.start_claude(rested, 80, 24).is_ok());
+        assert!(!m.view(rested).unwrap().alive, "the start took no fourth place");
+        m.record_event(AgentEvent { session: Some("s-k2".into()), ..hook(&tabs[1], AgentStatus::Done) });
+        wait_for("the rested tab's start", || m.view(rested).unwrap().alive);
+        assert_eq!(live_global(&m), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn closing_a_held_requests_tab_does_not_bring_it_back() {
+        let (dir, _claude, m, _path, tabs) = at_the_cap("req-cap-close", &FOUR_ASKS);
+        let id = m.view(&tabs[3]).unwrap().request.expect("a request tab");
+        m.close_tab(&tabs[3]);
+        // The webview reloads.
+        m.restore_tabs();
+        assert_eq!(m.request_tab(&id), None, "the closed request's tab came back");
+        assert!(m.requests.lock().unwrap().held().is_empty(), "its held lines stayed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_slash_command_after_a_wake_is_typed_bare_and_the_digest_waits() {
         let digest = "[pinned] Open threads:\nq1 · Ask";
