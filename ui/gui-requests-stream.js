@@ -81,13 +81,12 @@ const streamAsk = (glance) => (glance.kind === "earlier" ? STREAM_EARLIER : glan
 function streamEntryHtml(glance, { tabViews, name, selected }) {
   const state = requestStateOf(glance, tabViews);
   const last = glance.kind === "earlier" ? "" : requestLastLine(glance, name);
-  return `<div class="rqs-ask"><span class="text">${esc(streamAsk(glance))}</span><time>${streamTime(glance.opened_at)}</time></div>
+  return `<div class="rqs-ask"><span class="text">${esc(streamAsk(glance))}</span></div>
     <button type="button" class="rqs-state" data-rqs-entry="${esc(glance.id)}" data-state="${state}" aria-expanded="${selected}"><span class="dot" aria-hidden="true"></span><span class="word">${REQUEST_STATE_WORD[state]}</span>${requestProjectChip(glance)}<span class="n">${streamReplies(glance.replies)}</span><span class="last">${esc(last)}</span>${icon("chevron-right")}</button>`;
 }
 
 const STREAM_WHO = { user: () => "You", orchestrator: (_item, name) => name, captain: (item) => (item.captain ? `Captain ${item.captain}` : "Captain") };
 
-const STREAM_NEW = `<span class="rqs-new">New</span>`;
 const STREAM_SEND = `<svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"></path></svg>`;
 
 /** The side panel: the request's state, the card, its latest items, the reply box and Open full. */
@@ -97,7 +96,7 @@ function streamPanelHtml(glance, have, name, tabViews) {
     const who = STREAM_WHO[item.who]?.(item, name) ?? "";
     return `<div class="rqs-item"><div class="who"><span class="name" data-who="${esc(String(item.who))}">${esc(who)}</span><time>${streamTime(item.at)}</time></div><div class="text md">${markdown(String(item.text ?? ""))}</div></div>`;
   });
-  return `<aside class="rqs-panel" aria-label="Thread"><div class="rqs-phead"><span class="dot" data-state="${state}" aria-hidden="true"></span><h2>${esc(streamTitle(glance))}</h2>${STREAM_NEW}<button type="button" data-rqs-panel-close aria-label="Close thread">${icon("x")}</button></div>
+  return `<aside class="rqs-panel" aria-label="Thread"><div class="rqs-phead"><span class="dot" data-state="${state}" aria-hidden="true"></span><h2>${esc(streamTitle(glance))}</h2><button type="button" data-rqs-panel-close aria-label="Close thread">${icon("x")}</button></div>
     <div class="rqs-pbody">${requestCardFrom(glance, have)}${items.join("")}</div>
     <div class="rqs-pfoot"><div class="rqs-reply"><label class="rqs-label" for="rqs-reply">Reply in this thread</label><input id="rqs-reply" type="text" data-rqs-reply="${esc(glance.id)}" placeholder="Reply in this thread" autocomplete="off"><button type="button" class="rqs-full" data-rqs-open="${esc(glance.id)}">Open full</button></div></div></aside>`;
 }
@@ -106,7 +105,7 @@ function streamPanelHtml(glance, have, name, tabViews) {
 function streamComposeHtml(draft) {
   const ready = draft.text.trim() && !draft.sending;
   return `<div class="rqs-compose">${newRequestCardsHtml(draft, { rename: false })}<div class="rqs-foot"><label class="rqs-label" for="rqs-ask">Ask for something new</label><input id="rqs-ask" type="text" data-rqs-ask placeholder="Ask for something new" autocomplete="off">
-    <div class="rqs-foot-row"><span>Each request opens its own thread</span>${STREAM_NEW}<span class="spacer"></span><button type="button" class="rqs-send" data-rqs-send aria-label="Send"${ready ? "" : " disabled"}>${STREAM_SEND}</button></div></div></div>`;
+    <div class="rqs-foot-row"><span>Each request opens its own thread</span><span class="spacer"></span><button type="button" class="rqs-send" data-rqs-send aria-label="Send"${ready ? "" : " disabled"}>${STREAM_SEND}</button></div></div></div>`;
 }
 
 function requestsStreamHtml({ glances, now, name, tabViews, selected, views, end, ask }) {
