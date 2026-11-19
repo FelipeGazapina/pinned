@@ -1011,7 +1011,8 @@ function globalReportsHtml(user, t, tab, first, by, reports) {
   const label = `<span class="count">${esc(fold.slice(0, cut))}</span><span class="names">${esc(fold.slice(cut + 3))}${dateOf(user.at) ? ` · ${whenHtml(user.at, "when")}` : ""}</span>`;
   if (globalSettings.group_reports !== false && reports.length > 1) {
     const key = `reports:${user.id}`;
-    const open = t.open.has(key);
+    // A request thread draws the board's block open: there the set holds the folds the user closed.
+    const open = requestLane(tab) ? !t.open.has(key) : t.open.has(key);
     return `${lead}<section class="reports" aria-label="Reports from Captains"><button type="button" class="report-fold reports-head" data-toggle="${esc(key)}" aria-expanded="${open}">${label}${icon("chevron-down", "chev")}</button>${open ? rows : ""}</section>`;
   }
   return `${lead}<section class="reports" aria-label="Reports from Captains"><div class="reports-head">${label}</div>${rows}</section>`;

@@ -296,16 +296,18 @@ function planZoomHtml(zoom) {
 const planProgressHtml = (done, total) => `<div class="pl-progress"><span style="width:${total ? (done / total) * 100 : 0}%"></span></div>`;
 
 /** The header both panels draw, the board's: "Plan", "N lists, X of Y steps, K fix branches", the zoom and the progress bar. */
-function planSummary(views) {
+function planSummary(views, ended = 0, live = true) {
   const steps = views.flatMap(planAllSteps);
   const done = steps.filter((x) => x.state === "done").length;
   const lists = views.reduce((n, v) => n + v.lists.length, 0);
   const fixes = views.flatMap(planMains).reduce((n, x) => n + x.fixes.length, 0);
-  const summary = [planPlural(lists, "list"), `${done} of ${planPlural(steps.length, "step")}`, fixes ? planPlural(fixes, "fix branch").replace("branchs", "branches") : ""].filter(Boolean).join(", ");
+  const counts = live ? [planPlural(lists, "list"), `${done} of ${planPlural(steps.length, "step")}`, fixes ? planPlural(fixes, "fix branch").replace("branchs", "branches") : ""] : [];
+  const summary = [...counts, ended ? `${ended} ended` : ""].filter(Boolean).join(", ");
   return { done, total: steps.length, summary };
 }
-const planHeadHtml = (views, zoom) => {
-  const { done, total, summary } = planSummary(views);
+/** `views` are the live plans; `ended` counts the snapshots, which the numbers and the bar leave out. `live` is false when the request has no live plan. */
+const planHeadHtml = (views, zoom, ended = 0, live = true) => {
+  const { done, total, summary } = planSummary(views, ended, live);
   return `<div class="pl-head"><div class="pl-head-row"><span class="pl-title">Plan</span><span class="pl-count">${esc(summary)}</span>${planZoomHtml(zoom)}</div>${planProgressHtml(done, total)}</div>`;
 };
 
@@ -413,7 +415,8 @@ function requestPlanHtml(t, s) {
   const blocks = model.sections.flatMap((x) => x.blocks);
   if (!blocks.length) return none;
   const zoom = s.zoom ?? 1;
-  const head = planHeadHtml(blocks.map((b) => b.view).filter(Boolean), zoom);
+  const liveBlocks = blocks.filter((b) => !b.ended);
+  const head = planHeadHtml(liveBlocks.map((b) => b.view).filter(Boolean), zoom, blocks.length - liveBlocks.length, liveBlocks.length > 0);
   const root = `<div class="root-row">Plan, from your request at ${planClock(model.glance.opened_at)}</div>`;
   const plain = model.sections.length === 1 && blocks.length === 1 && !blocks[0].ended;
   const body = model.sections

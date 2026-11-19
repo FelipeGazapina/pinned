@@ -660,7 +660,7 @@ test("9r4 item 1: a request tab with its Plan open reads user_request once and t
   const html = h.run("requestCardHtml(active)");
   assert.doesNotMatch(html, /Loading…/);
   assert.match(html, /You asked[\s\S]*Find out why codes are late\./);
-  assert.equal(h.log.threads, 1, "the thread redraws once when the reply lands");
+  assert.equal(h.log.threads, 2, "the thread draws the card loading, then once more when the reply lands");
   for (let i = 0; i < 4; i++) h.run("renderRequests()");
   await flush();
   assert.equal(h.log.calls.filter(([, c]) => c.cmd === "user_request").length, 1, "one read, not one per paint");

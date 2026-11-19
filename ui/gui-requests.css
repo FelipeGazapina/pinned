@@ -7,6 +7,7 @@
 #requests-column[hidden] { display: none; }
 #chat[data-requests] { padding-left: 340px; }
 #chat[data-requests] #composer { left: 340px; }
+#chat[data-requests] #minimap { left: 340px; }
 #chat[data-requests] #scroll-end { left: calc(50% + 170px); }
 #chat[data-requests][data-rail] #scroll-end { left: calc(50% + 22px); }
 
@@ -54,8 +55,8 @@
 #chat-head .crumb:has(.request-dot) { overflow: hidden; container-type: inline-size; gap: 8px; }
 #chat-head .crumb .request-state ~ .orchestrator-actions { margin-left: 0; }
 @container (max-width: 420px) { #chat-head .crumb :is(.request-state, .rq-project) { display: none; } #chat-head .crumb .orchestrator-actions { margin-left: auto; } }
-#chat-head .crumb .request-back { flex: none; padding: 4px 0; font-size: 12px; color: var(--g-muted); background: transparent; }
-#chat-head .crumb .request-back:hover { color: var(--g-fg); }
+#chat-head .crumb .request-back { flex: none; padding: 4px 0; font-size: 12px; color: var(--g-link); background: transparent; }
+#chat-head .crumb .request-back:hover { text-decoration: underline; }
 #chat-head .crumb .rq-project { flex: none; }
 #chat-head .crumb .request-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--rq-tone); }
 #chat-head .crumb .request-title { flex: 0 1 auto; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; font-size: 14px; font-weight: 600; }

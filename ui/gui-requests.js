@@ -242,23 +242,25 @@ document.getElementById("chat-head").after(requestsColumn);
 function renderRequests() {
   refreshRequests();
   const chat = document.getElementById("chat");
-  const on = requestsOn() && guiOn() && !!active && isGlobalOrchestratorTab(active) && !narrow(768) && !shellPage() && !requestPlanOpen(active);
+  const inThread = requestsOn() && guiOn() && !!active && isGlobalOrchestratorTab(active) && !shellPage();
+  const on = inThread && !narrow(768) && !requestPlanOpen(active);
   const shown = chat.hasAttribute("data-requests");
   chat.toggleAttribute("data-requests", on);
   requestsColumn.hidden = !on;
   if (shown !== on && typeof renderRail === "function") renderRail();
-  if (!on) {
-    if (requestsColumn.innerHTML) requestsColumn.innerHTML = "";
-    return;
-  }
+  if (!on && requestsColumn.innerHTML) requestsColumn.innerHTML = "";
+  if (!inThread) return;
+  // The card reads its request whether or not the column is beside it: with the Plan open the column is gone, the card stays.
   const glance = requestOf(active);
   if (glance) {
     markRequestSeen(glance);
     rq.lastKey = active.key;
     ensureRequestView(active);
   }
-  const html = requestsColumnHtml({ glances: requestGlances(), filter: rq.filter, seen: rq.seen, current: glance?.id ?? null, name: globalOrchestratorName(), tabViews: requestTabViews() });
-  if (requestsColumn.innerHTML !== html) requestsColumn.innerHTML = html;
+  if (on) {
+    const html = requestsColumnHtml({ glances: requestGlances(), filter: rq.filter, seen: rq.seen, current: glance?.id ?? null, name: globalOrchestratorName(), tabViews: requestTabViews() });
+    if (requestsColumn.innerHTML !== html) requestsColumn.innerHTML = html;
+  }
   const drawn = JSON.stringify([active.key, requestCardKey(active)]);
   if (drawn === rq.drawn) return;
   rq.drawn = drawn;
