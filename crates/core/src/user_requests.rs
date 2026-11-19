@@ -402,7 +402,7 @@ impl UserRequests {
     pub fn routes(&mut self, answers: &[String], captain: &CaptainRef, now: u64) -> Vec<Route> {
         let mut to: Vec<Route> = vec![];
         for sent in answers.iter().filter_map(|a| self.saved.sent.iter().find(|s| &s.id == a)) {
-            let route = match (sent.request.as_deref().and_then(|id| self.get(id)), self.of_session(&sent.session)) {
+            let route = match (None::<&UserRequest>, self.of_session(&sent.session)) {
                 (Some(r), _) | (None, Some(r)) => Route::Request(r.id.clone()),
                 (None, None) if !sent.session.is_empty() => Route::Session(sent.session.clone()),
                 (None, None) => continue,
