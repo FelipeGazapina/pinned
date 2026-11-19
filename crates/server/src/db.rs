@@ -281,7 +281,14 @@ pub struct OpenedBox {
     pub role: Option<String>,
     pub machine: Option<String>,
 }
-const BOX_COLUMNS: &str = "id, account, machine, upstash, connector, subject, spec, size, phase, reason, extract(epoch from now() - created_at)::float8";
+/// The account `$1`'s boxes its agents have open: its rows not ending that a workflow, a worker or a
+/// Captain holds, and the session boxes (connector `$2`) an agent opened, kept in `agent_boxes`. A
+/// session box the user opened is none, and neither is a workflow's Run now, the user's own act.
+const AGENT_BOXES_OPEN: &str = "select count(*) from boxes b where b.account = $1 and b.phase in ('creating', 'booting', 'running') \
+     and not coalesce(b.subject->>'issue' like 'run-now:%', false) \
+     and (b.connector <> $2 or exists (select 1 from agent_boxes a where a.box = b.id and a.account = b.account))";
+
+const BOX_COLUMNS: &str ="id, account, machine, upstash, connector, subject, spec, size, phase, reason, extract(epoch from now() - created_at)::float8";
 /// How often a push reads again what synced projects take and the database's size.
 const SYNC_READ_EVERY: Duration = Duration::from_secs(60);
 /// How long after the last read of what synced projects take a push about to be refused for the
@@ -1628,11 +1635,10 @@ impl Db {
     }
 
     /// `reserve_box` for a box an agent opens, held to `most` of the agents' boxes: how many are
-    /// open when that many already are. The agents' boxes are the account's rows not ending that a
-    /// workflow, a worker or a Captain holds, and the session boxes an agent opened (`opener`, kept in
-    /// `agent_boxes` with the row); a session box the user opened is none. The count and the writes
-    /// run in one transaction that locks the account's row, so two opens at once never both pass. A
-    /// row the subject already has is answered as it is, uncounted.
+    /// open when that many already are. The agents' boxes are those `AGENT_BOXES_OPEN` counts. The
+    /// count and the writes run in one transaction that locks the account's row, so two opens at
+    /// once never both pass. A row the subject already has, or gets from an open that wins the
+    /// insert, is answered as it is, uncounted.
     pub async fn reserve_agent_box(&self, row: &BoxRow, most: u32, opener: Option<&Opener>, started: u64) -> Result<Result<(BoxRow, bool), u32>, String> {
         let (subject, mut spec) = (serde_json::to_value(&row.subject).unwrap(), serde_json::to_value(&row.spec).unwrap());
         if row.work != BoxWork::Run {
@@ -1644,23 +1650,24 @@ impl Db {
         let stored = format!("select {BOX_COLUMNS} from boxes where account = $1 and connector = $2 and subject = $3");
         let mut held = self.transaction_client().await?;
         let tx = held.as_mut().expect("opened above").transaction().await.map_err(err)?;
-        tx.execute("select 1 from accounts where id = $1 for update", &[&row.account]).await.map_err(err)?;
+        // `no key update` serializes the reserves and leaves inserts that reference the account free.
+        tx.execute("select 1 from accounts where id = $1 for no key update", &[&row.account]).await.map_err(err)?;
         if let Some(existing) = tx.query_opt(&stored, &[&row.account, &row.connector, &subject]).await.map_err(err)? {
             return Ok(Ok((readable(box_row(&existing))?, false)));
         }
-        let open: i64 = tx
-            .query_one(
-                "select count(*) from boxes b where b.account = $1 and b.phase in ('creating', 'booting', 'running') \
-                 and (b.connector <> $2 or exists (select 1 from agent_boxes a where a.box = b.id and a.account = b.account))",
-                &[&row.account, &pinned_core::agent::INTERACTIVE_CONNECTOR],
-            )
-            .await
-            .map_err(err)?
-            .get(0);
+        let open: i64 = tx.query_one(AGENT_BOXES_OPEN, &[&row.account, &pinned_core::agent::INTERACTIVE_CONNECTOR]).await.map_err(err)?.get(0);
         if open >= i64::from(most) {
             return Ok(Err(u32::try_from(open).unwrap_or(u32::MAX)));
         }
-        if let Some(opener) = opener {
+        let inserted = tx
+            .execute(
+                "insert into boxes (id, account, machine, connector, subject, spec, size, phase, reason) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 on conflict (account, connector, subject) do nothing",
+                &[&row.id, &row.account, &row.machine, &row.connector, &subject, &spec, &size, &phase, &reason],
+            )
+            .await
+            .map_err(err)?;
+        if let Some(opener) = opener.filter(|_| inserted == 1) {
             tx.execute(
                 "insert into agent_boxes (box, account, machine, tab, role, started) values ($1, $2, $3, $4, $5, $6) on conflict (box) do nothing",
                 &[&row.id, &row.account, &opener.machine, &opener.tab, &opener.role.name(), &started],
@@ -1668,15 +1675,15 @@ impl Db {
             .await
             .map_err(err)?;
         }
-        tx.execute(
-            "insert into boxes (id, account, machine, connector, subject, spec, size, phase, reason) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-            &[&row.id, &row.account, &row.machine, &row.connector, &subject, &spec, &size, &phase, &reason],
-        )
-        .await
-        .map_err(err)?;
         let written = tx.query_one(&stored, &[&row.account, &row.connector, &subject]).await.map_err(err)?;
         tx.commit().await.map_err(err)?;
-        Ok(Ok((readable(box_row(&written))?, true)))
+        Ok(Ok((readable(box_row(&written))?, inserted == 1)))
+    }
+
+    /// How many boxes the account's agents have open now, as `reserve_agent_box` counts them.
+    pub async fn agent_boxes_open(&self, account: Uuid) -> Result<u32, String> {
+        let open: i64 = self.client().await?.query_one(AGENT_BOXES_OPEN, &[&account, &pinned_core::agent::INTERACTIVE_CONNECTOR]).await.map_err(err)?.get(0);
+        Ok(u32::try_from(open).unwrap_or(u32::MAX))
     }
 
     pub async fn boxes(&self, account: Uuid) -> Result<Vec<Result<BoxRow, Remains>>, String> {

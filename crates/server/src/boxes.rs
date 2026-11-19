@@ -1247,6 +1247,12 @@ impl Boxes {
         if permission == BoxPermission::Off {
             return Err("Upstash Box is off for workflows: choose a box permission in Connectors settings".into());
         }
+        // Before any ask. A Run now is the user's act, a reused box is no new one, and a subject's
+        // own box is answered as it is.
+        let run_now = pinned_core::connectors::is_run_now(&run.subject);
+        if !run_now && !matches!(permission, BoxPermission::Fixed { .. }) && hub.db.box_for(account.id, &run.connector, &run.subject).await?.is_none() {
+            self.agents_have_room(hub, account).await?;
+        }
         let folder = run.cwd.to_str().filter(|f| !f.is_empty());
         let signs_in = match run.account.as_deref().filter(|a| !a.is_empty()) {
             Some(named) => named.to_owned(),
@@ -1281,6 +1287,9 @@ impl Boxes {
     pub async fn open_session(&self, hub: &Arc<Hub>, account: &Arc<Account>, repo: String, size: Option<BoxSize>, budget_usd: Option<f64>, opener: Option<Opener>) -> Result<BoxStatus, String> {
         let connectors = hub.connectors(account).await?;
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
+        if opener.is_some() {
+            self.agents_have_room(hub, account).await?;
+        }
         match (connectors.box_access().session, &opener) {
             (BoxPermission::Off, _) => return Err("Upstash Box is off for sessions: choose a box permission in Connectors settings".into()),
             (BoxPermission::Ask, Some(opener)) => {
@@ -1354,6 +1363,7 @@ impl Boxes {
         if let Some(row) = hub.db.box_row_for(account.id, DELEGATE_CONNECTOR, &subject).await? {
             return Ok(started_box(&row));
         }
+        self.agents_have_room(hub, account).await?;
         let asked = Subject::LinearIssue { issue: format!("workers of {} {}", origin.machine_name, origin.tab) };
         allowed(&connectors, connectors.box_access().worker, "Workers", DELEGATE_CONNECTOR, &asked).await?;
         if request.target.driver_kind.as_deref().is_some_and(|kind| kind != "claude") {
@@ -1392,9 +1402,13 @@ impl Boxes {
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
         let repo = origin_repo(repo).ok_or("a box clones a GitHub repository, and this project's origin is none")?;
         let subject = Subject::LinearIssue { issue: format!("the Captain of {repo}") };
+        let existing = hub.db.box_for(account.id, CAPTAIN_CONNECTOR, &subject).await?;
+        if existing.is_none() {
+            self.agents_have_room(hub, account).await?;
+        }
         allowed(&connectors, connectors.box_access().orchestrator, "Captains", CAPTAIN_CONNECTOR, &subject).await?;
         let work = BoxWork::Captain { request_id, text, sender, busy };
-        if let Some(id) = hub.db.box_for(account.id, CAPTAIN_CONNECTOR, &subject).await? {
+        if let Some(id) = existing {
             let row = hub.db.box_by_id(account.id, &id).await?.ok_or("its box just went; send it again")?.map_err(|r| format!("box {} {}", r.id, r.why))?;
             return match row.phase {
                 Phase::Running => {
@@ -1590,7 +1604,9 @@ impl Boxes {
             self.give_back(hub, account, claimed.as_deref()).await;
             return Err("Upstash Box: its box is still booting; the next check tries again".into());
         }
-        let row = match self.reserve_agent(hub, account, &fresh, None).await {
+        // The user's own Run now is no agent's box: neither held to Boxes at once nor counted.
+        let reserved = if pinned_core::connectors::is_run_now(&run.subject) { hub.db.reserve_box(&fresh).await } else { self.reserve_agent(hub, account, &fresh, None).await };
+        let row = match reserved {
             Ok((row, _)) => row,
             Err(e) => {
                 self.give_back(hub, account, claimed.as_deref()).await;
@@ -1625,13 +1641,41 @@ impl Boxes {
     /// each is held to the account's Boxes at once, at most the hub's cap, counted and written at once.
     /// A box the user opens is not held to it and does not count.
     async fn reserve_agent(&self, hub: &Hub, account: &Account, row: &BoxRow, opener: Option<&Opener>) -> Result<(BoxRow, bool), String> {
-        let tastes = hub.db.tastes(account.id).await?.unwrap_or_default();
-        let most = Tastes { box_cap: self.policy.max_open, ..tastes }.boxes_limit();
+        let most = self.agents_limit(hub, account).await?;
         match hub.db.reserve_agent_box(row, most, opener, unix_millis()).await? {
             Ok(reserved) => Ok(reserved),
-            Err(_) if most == 0 => Err(BOXES_AT_ONCE_ZERO.into()),
-            Err(1) => Err(format!("1 box already runs on this account, {BOXES_AT_ONCE_FULL}")),
-            Err(open) => Err(format!("{open} boxes already run on this account, {BOXES_AT_ONCE_FULL}")),
+            Err(open) => Err(self.past_limit(account, most, open)),
+        }
+    }
+
+    /// Refuses an agent's new box when the account's agents already have its limit open, before
+    /// anything is asked or written. The reserve counts again under the account's lock.
+    async fn agents_have_room(&self, hub: &Hub, account: &Account) -> Result<(), String> {
+        let most = self.agents_limit(hub, account).await?;
+        let open = if most == 0 { 0 } else { hub.db.agent_boxes_open(account.id).await? };
+        if most > open {
+            return Ok(());
+        }
+        Err(self.past_limit(account, most, open))
+    }
+
+    /// How many boxes the account's agents may have open: its Boxes at once up to the hub's cap. A
+    /// team has no Boxes at once to set, so its limit is the hub's cap.
+    async fn agents_limit(&self, hub: &Hub, account: &Account) -> Result<u32, String> {
+        if account.team {
+            return Ok(self.policy.max_open);
+        }
+        let tastes = hub.db.tastes(account.id).await?.unwrap_or_default();
+        Ok(Tastes { box_cap: self.policy.max_open, ..tastes }.boxes_limit())
+    }
+
+    /// Why an agent's box is refused when `open` of the account's `most` are open.
+    fn past_limit(&self, account: &Account, most: u32, open: u32) -> String {
+        match (account.team, most, open) {
+            (true, n, _) => format!("Upstash Box: {n} {} already open, and this account's limit is {n}", if n == 1 { "box is" } else { "boxes are" }),
+            (false, 0, _) => BOXES_AT_ONCE_ZERO.into(),
+            (false, _, 1) => format!("1 box already runs on this account, {BOXES_AT_ONCE_FULL}"),
+            (false, _, open) => format!("{open} boxes already run on this account, {BOXES_AT_ONCE_FULL}"),
         }
     }
 

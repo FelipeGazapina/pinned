@@ -143,3 +143,66 @@ fn boxes_at_once_is_8_by_default_and_only_the_user_changes_it() {
     ana.client.hub(json!({ "cmd": "set_taste", "scope": captains, "patch": { "boxes_at_once": 20 } })).unwrap();
     assert_eq!(stored(&mut ana.client), (json!(20), json!(8)), "a value past the cap is kept; every reader takes the cap");
 }
+
+impl Fleet {
+    fn every_box(&mut self, mode: &str) {
+        let access = json!({ "workflow": { "mode": mode }, "session": { "mode": mode }, "worker": { "mode": mode }, "orchestrator": { "mode": mode } });
+        self.ana.client.hub(json!({ "cmd": "set_box_access", "access": access })).unwrap();
+    }
+
+    /// What the Upstash card asks the user now.
+    fn asks(&mut self) -> Value {
+        self.ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["box_asks"].clone()
+    }
+}
+
+#[test]
+fn boxes_at_once_0_refuses_every_agent_before_an_ask_reaches_the_user() {
+    let mut fleet = Fleet::start("boxes_at_once_ask_zero");
+    fleet.every_box("ask");
+    fleet.boxes_at_once(0);
+    assert_eq!(fleet.worker("One"), Err(ZERO.to_owned()), "delegate_task with a box");
+    assert_eq!(fleet.captain_box("r-1"), Err(ZERO.to_owned()), "send_to_captain with a box");
+    assert_eq!(fleet.agents_box(), Err(ZERO.to_owned()), "an agent's open_box");
+    assert_eq!(fleet.workflow("w-1"), Err(ZERO.to_owned()), "a workflow's box");
+    assert_eq!(fleet.asks(), json!([]), "no ask card was made");
+    assert_eq!(fleet.ana.rows(&fleet.hub), 0);
+}
+
+#[test]
+fn boxes_at_once_full_refuses_every_agent_before_an_ask_reaches_the_user() {
+    let mut fleet = Fleet::start("boxes_at_once_ask_full");
+    fleet.boxes_at_once(1);
+    assert_eq!(fleet.worker("One").unwrap()["workState"], "working");
+    fleet.every_box("ask");
+    assert_eq!(fleet.worker("Two"), Err(ONE.to_owned()), "delegate_task with a box");
+    assert_eq!(fleet.captain_box("r-1"), Err(ONE.to_owned()), "send_to_captain with a box");
+    assert_eq!(fleet.agents_box(), Err(ONE.to_owned()), "an agent's open_box");
+    assert_eq!(fleet.workflow("w-1"), Err(ONE.to_owned()), "a workflow's box");
+    assert_eq!(fleet.asks(), json!([]), "no ask card was made");
+    assert_eq!(fleet.ana.rows(&fleet.hub), 1);
+}
+
+#[test]
+fn a_captains_message_again_finds_its_box_when_boxes_at_once_is_full() {
+    let mut fleet = Fleet::start("boxes_at_once_captain_again");
+    fleet.boxes_at_once(1);
+    assert_eq!(fleet.captain_box("r-1").unwrap()["outcome"], "iniciado");
+    let again = fleet.captain_box("r-2");
+    assert_ne!(again, Err(ONE.to_owned()), "the project's own box is no new one");
+    assert_eq!(fleet.ana.rows(&fleet.hub), 1);
+}
+
+#[test]
+fn run_now_is_the_users_act_so_boxes_at_once_neither_refuses_nor_counts_it() {
+    let mut fleet = Fleet::start("boxes_at_once_run_now");
+    fleet.boxes_at_once(0);
+    assert_eq!(fleet.workflow("run-now:a"), Ok(()), "Run now at 0");
+    assert_eq!(fleet.workflow("w-1"), Err(ZERO.to_owned()), "a scheduled or triggered run at 0");
+    fleet.boxes_at_once(2);
+    assert_eq!(fleet.worker("One").unwrap()["workState"], "working");
+    assert_eq!(fleet.worker("Two").unwrap()["workState"], "working", "the Run now box is not counted");
+    assert_eq!(fleet.workflow("run-now:b"), Ok(()), "Run now with the agents' boxes full");
+    assert_eq!(fleet.worker("Three"), Err(TWO.to_owned()), "two agent boxes, not four");
+    assert_eq!(fleet.ana.rows(&fleet.hub), 4);
+}
