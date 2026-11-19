@@ -14,6 +14,8 @@ pub const FILE: &str = "user-requests.json";
 /// first; open ones never do.
 pub const KEEP: usize = 500;
 pub const MAX_CAPTAINS: usize = 8;
+/// The longest Captain folder, in bytes, a request records.
+pub const MAX_PATH: usize = 4096;
 pub const MAX_LINKS: usize = 6;
 pub const MAX_LAST: usize = 120;
 pub const MAX_GLANCES: usize = 60;
@@ -530,10 +532,11 @@ impl UserRequests {
         shown.into_iter().take(MAX_GLANCES).map(|r| r.glance(tab_of(r))).collect()
     }
 
-    /// The user typed into request `id`'s session: nothing waits on them any more.
+    /// The user typed into request `id`'s session: nothing waits on them any more, and a Done
+    /// request opens again.
     pub fn user_typed(&mut self, id: &str, now: u64) -> bool {
         let Some(r) = self.saved.requests.iter_mut().find(|r| r.id == id) else { return false };
-        (r.stands.needs, r.stands.needs_at, r.last_user_at) = (String::new(), None, Some(now));
+        (r.stands.needs, r.stands.needs_at, r.last_user_at, r.closed) = (String::new(), None, Some(now), None);
         self.save();
         true
     }
@@ -724,16 +727,17 @@ impl CaptainRef {
         CaptainRef { machine: cut(&self.machine, MAX_NAME), project: cut(&self.project, MAX_NAME), machine_name: cut(&self.machine_name, MAX_NAME), ..self }
     }
 
-    /// A path with a control or line-separator character names no folder a tab runs in.
+    /// A path with a control or line-separator character names no folder a tab runs in, and one
+    /// over `MAX_PATH` bytes is not kept: cutting it would break the exact match.
     fn path_ok(&self) -> bool {
-        !self.path.chars().any(|c| c.is_control() || crate::plan::line_separator(c))
+        self.path.len() <= MAX_PATH && !self.path.chars().any(|c| c.is_control() || crate::plan::line_separator(c))
     }
 
     /// Whether `report`'s Captain is this one: the same machine and folder, or for a box, the same
-    /// machine or repo.
+    /// box. A box's folder name says nothing: every clone of a repo named `site` is `site`.
     fn serves(&self, report: &CaptainRef) -> bool {
         if self.boxed {
-            (!self.machine.is_empty() && self.machine == report.machine) || (!self.project.is_empty() && self.project == report.project)
+            !self.machine.is_empty() && self.machine == report.machine
         } else {
             self.machine == report.machine && self.path == report.path
         }
@@ -1145,5 +1149,63 @@ mod tests {
         assert_eq!(many.len(), 60);
         assert!(many.iter().all(|g| g.closed_at.is_none()), "open ones come first");
         assert_eq!(many[0].opened_at, 10_069);
+    }
+
+    /// A report from box `machine`, whose folder is `site` like every clone of a repo named site.
+    fn box_report(machine: &str) -> CaptainRef {
+        CaptainRef { machine: machine.into(), path: "/home/box/pinned/site".into(), project: "site".into(), machine_name: "box".into(), boxed: false, at: 0 }
+    }
+
+    #[test]
+    fn two_boxes_with_the_same_folder_name_but_different_repos_do_not_share_a_request() {
+        let mut store = UserRequests::load(None);
+        let a = started(&mut store, "a", 1_000);
+        let b = started(&mut store, "b", 2_000);
+        let one = serde_json::json!({ "outcome": "iniciado", "machine": "box-1", "machineName": "box", "box": "row-1" });
+        let two = serde_json::json!({ "outcome": "iniciado", "machine": "box-2", "machineName": "box", "box": "row-2" });
+        store.record_send("s-a", &format!("{a}/r-1"), crate::machine::box_captain_ref(&one, "github.com/acme/site", 1_100));
+        store.record_send("s-b", &format!("{b}/r-1"), crate::machine::box_captain_ref(&two, "github.com/other/site", 2_100));
+        assert_eq!(store.route("rep-1", &[], &box_report("box-1"), 3_000), vec![to(&a)], "box 1's report goes to the request that sent to box 1");
+        let three = store.route("rep-2", &[], &box_report("box-3"), 4_000);
+        assert!(three != vec![to(&a)] && three != vec![to(&b)], "a third box named site shares neither: {three:?}");
+        let blind = serde_json::json!({ "outcome": "iniciado" });
+        let c = started(&mut store, "c", 5_000);
+        store.record_send("s-c", &format!("{c}/r-1"), crate::machine::box_captain_ref(&blind, "github.com/acme/site", 5_100));
+        assert_eq!(store.route("rep-3", &[], &box_report("box-1"), 6_000), vec![to(&a)], "a box with no id matches nothing in the fallback");
+        assert_eq!(store.route("rep-4", &[format!("{c}/r-1")], &box_report("box-9"), 6_100), vec![to(&c)], "its exact id still routes it");
+    }
+
+    #[test]
+    fn two_remote_captains_are_recorded_apart_with_machine_and_path() {
+        let mut store = UserRequests::load(None);
+        let a = started(&mut store, "a", 1_000);
+        store.record_send("s-a", &format!("{a}/r-1"), crate::machine::remote_captain_ref("m-mini", "/w/site", 1_100));
+        store.record_send("s-a", &format!("{a}/r-2"), crate::machine::remote_captain_ref("m-book", "/u/site", 1_200));
+        let recorded: Vec<(String, String)> = store.get(&a).unwrap().captains.iter().map(|c| (c.machine.clone(), c.path.clone())).collect();
+        assert_eq!(recorded, vec![("m-mini".to_owned(), "/w/site".to_owned()), ("m-book".to_owned(), "/u/site".to_owned())]);
+        assert_eq!(store.route("rep-1", &[], &captain("m-book", "/u/site", "site", 0), 2_000), vec![to(&a)], "the fallback finds a remote Captain");
+    }
+
+    #[test]
+    fn a_path_over_4096_bytes_is_not_recorded() {
+        let mut store = UserRequests::load(None);
+        let a = started(&mut store, "a", 1_000);
+        let long = format!("/{}", "é".repeat(2_048));
+        assert!(long.chars().count() <= 4096 && long.len() > 4096);
+        store.record_send("s-a", &format!("{a}/r-1"), captain("m1", &long, "site", 1_100));
+        let edge = format!("/{}", "p".repeat(4_095));
+        store.record_send("s-a", &format!("{a}/r-2"), captain("m1", &edge, "site", 1_200));
+        let paths: Vec<usize> = store.get(&a).unwrap().captains.iter().map(|c| c.path.len()).collect();
+        assert_eq!(paths, vec![4_096], "only the path of 4096 bytes is kept, byte for byte");
+    }
+
+    #[test]
+    fn a_user_message_in_a_done_request_reopens_it() {
+        let mut store = UserRequests::load(None);
+        let a = started(&mut store, "a", 1_000);
+        assert!(store.close(&a, ClosedBy::Orchestrator, 2_000));
+        assert!(store.user_typed(&a, 3_000));
+        let r = store.get(&a).unwrap();
+        assert_eq!((r.closed.is_none(), r.last_user_at), (true, Some(3_000)));
     }
 }
