@@ -151,8 +151,8 @@ impl Fleet {
     }
 
     /// What the Upstash card asks the user now.
-    fn asks(&mut self) -> Value {
-        self.ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["box_asks"].clone()
+    fn asks(&mut self) -> usize {
+        self.ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["box_asks"].as_array().map_or(0, Vec::len)
     }
 }
 
@@ -165,7 +165,7 @@ fn boxes_at_once_0_refuses_every_agent_before_an_ask_reaches_the_user() {
     assert_eq!(fleet.captain_box("r-1"), Err(ZERO.to_owned()), "send_to_captain with a box");
     assert_eq!(fleet.agents_box(), Err(ZERO.to_owned()), "an agent's open_box");
     assert_eq!(fleet.workflow("w-1"), Err(ZERO.to_owned()), "a workflow's box");
-    assert_eq!(fleet.asks(), json!([]), "no ask card was made");
+    assert_eq!(fleet.asks(), 0, "no ask card was made");
     assert_eq!(fleet.ana.rows(&fleet.hub), 0);
 }
 
@@ -179,7 +179,7 @@ fn boxes_at_once_full_refuses_every_agent_before_an_ask_reaches_the_user() {
     assert_eq!(fleet.captain_box("r-1"), Err(ONE.to_owned()), "send_to_captain with a box");
     assert_eq!(fleet.agents_box(), Err(ONE.to_owned()), "an agent's open_box");
     assert_eq!(fleet.workflow("w-1"), Err(ONE.to_owned()), "a workflow's box");
-    assert_eq!(fleet.asks(), json!([]), "no ask card was made");
+    assert_eq!(fleet.asks(), 0, "no ask card was made");
     assert_eq!(fleet.ana.rows(&fleet.hub), 1);
 }
 
