@@ -21434,13 +21434,152 @@ Have another model review a risky change before it goes ahead.";
     #[test]
     #[cfg(unix)]
     fn closing_a_held_requests_tab_does_not_bring_it_back() {
-        let (dir, _claude, m, _path, tabs) = at_the_cap("req-cap-close", &FOUR_ASKS);
+        let (dir, claude, m, _path, tabs) = at_the_cap("req-cap-close", &FOUR_ASKS);
         let id = m.view(&tabs[3]).unwrap().request.expect("a request tab");
         m.close_tab(&tabs[3]);
         // The webview reloads.
         m.restore_tabs();
         assert_eq!(m.request_tab(&id), None, "the closed request's tab came back");
-        assert!(m.requests.lock().unwrap().held().is_empty(), "its held lines stayed");
+        assert_eq!(m.requests.lock().unwrap().get(&id).map(|r| r.held.clone()), Some(vec!["Fourth ask.".to_owned()]), "its held lines went with the tab");
+        m.call(Call::UserRequestAction { id: id.clone(), action: crate::user_requests::RequestAction::Open }).unwrap();
+        let tab = m.request_tab(&id).expect("Open gives the request a tab");
+        m.record_event(AgentEvent { session: Some("s-k1".into()), ..hook(&tabs[0], AgentStatus::Done) });
+        let typed = || std::fs::read_to_string(format!("{}.typed.{tab}", claude.display())).unwrap_or_default();
+        wait_for("the held line in the opened tab", || typed().contains("Fourth ask."));
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(typed().matches("Fourth ask.").count(), 1, "typed once");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn closing_the_anchor_keeps_its_held_lines_for_its_next_tab() {
+        let (dir, claude, m, _path, tabs) = at_the_cap("req-cap-close-anchor", &FOUR_ASKS[..3]);
+        let anchor = m.open_global_orchestrator().unwrap();
+        assert_eq!(m.launch_gated(&anchor, 80, 24, false, Some("Anchor news."), |_| {}), Ok(None), "no place free");
+        m.close_tab(&anchor);
+        m.restore_tabs();
+        assert!(!m.tabs().iter().any(|v| v.orchestrator_global && v.request.is_none()), "the closed anchor came back");
+        assert_eq!(m.requests.lock().unwrap().anchor_held(), ["Anchor news."], "its held lines went with the tab");
+        let anchor = m.open_global_orchestrator().unwrap();
+        m.record_event(AgentEvent { session: Some("s-k1".into()), ..hook(&tabs[0], AgentStatus::Done) });
+        let typed = || std::fs::read_to_string(format!("{}.typed.{anchor}", claude.display())).unwrap_or_default();
+        wait_for("the held line in the new anchor", || typed().contains("Anchor news."));
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(typed().matches("Anchor news.").count(), 1, "typed once");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `at_the_cap` with three live requests, the sessionless anchor not started, and the earlier
+    /// conversation's request on session `s-old` resting in its tab.
+    #[cfg(unix)]
+    fn earlier_at_the_cap(name: &str) -> (PathBuf, PathBuf, Arc<Machine>, Vec<String>, String, String, String) {
+        let (dir, claude, m, _path, tabs) = at_the_cap(name, &FOUR_ASKS[..3]);
+        let anchor = m.open_global_orchestrator().unwrap();
+        let id = m.requests.lock().unwrap().migrate(Some("s-old"), 1).expect("the earlier conversation's request");
+        let earlier = m.open_request_tab(&id).unwrap();
+        assert_eq!(m.request_tab(&id), Some(earlier.clone()));
+        (dir, claude, m, tabs, anchor, earlier, id)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_line_held_for_the_earlier_tab_is_its_requests_and_the_anchor_gets_none() {
+        let (dir, claude, m, tabs, anchor, earlier, id) = earlier_at_the_cap("req-earlier-held");
+        assert_eq!(m.launch_gated(&earlier, 80, 24, false, Some("Earlier ask."), |_| {}), Ok(None), "no place free");
+        let saved = |m: &Machine| m.requests.lock().unwrap().get(&id).map(|r| r.held.clone());
+        assert_eq!(saved(&m), Some(vec!["Earlier ask.".to_owned()]), "not held in the earlier request's record");
+        assert!(m.requests.lock().unwrap().anchor_held().is_empty(), "held in the anchor's record");
+        // The webview reloads.
+        m.restore_tabs();
+        assert!(m.tab(&anchor, |t| t.held.is_empty()).unwrap(), "the anchor got the earlier tab's line");
+        m.record_event(AgentEvent { session: Some("s-k1".into()), ..hook(&tabs[0], AgentStatus::Done) });
+        let typed = |tab: &str| std::fs::read_to_string(format!("{}.typed.{tab}", claude.display())).unwrap_or_default();
+        wait_for("the earlier tab's line", || typed(&earlier).contains("Earlier ask."));
+        wait_for("its record cleared once typed", || saved(&m) == Some(vec![]));
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(typed(&earlier).matches("Earlier ask.").count(), 1, "typed once");
+        assert_eq!(typed(&anchor), "", "the anchor typed the earlier tab's line");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_earlier_tab_typing_its_line_keeps_the_anchors_saved_report() {
+        let (dir, claude, m, tabs, _anchor, earlier, _id) = earlier_at_the_cap("req-earlier-anchor");
+        m.requests.lock().unwrap().hold_for_anchor("Anchor news.");
+        assert_eq!(m.launch_gated(&earlier, 80, 24, false, Some("Earlier ask."), |_| {}), Ok(None), "no place free");
+        m.record_event(AgentEvent { session: Some("s-k1".into()), ..hook(&tabs[0], AgentStatus::Done) });
+        wait_for("the earlier tab's line", || std::fs::read_to_string(format!("{}.typed.{earlier}", claude.display())).unwrap_or_default().contains("Earlier ask."));
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(m.requests.lock().unwrap().anchor_held(), ["Anchor news."], "the earlier tab's line let go of the anchor's report");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_session_named_before_its_held_line_is_typed_keeps_the_line_saved() {
+        let (dir, claude, m, _path, tabs) = at_the_cap("req-held-named", &FOUR_ASKS);
+        let id = m.view(&tabs[3]).unwrap().request.expect("a request tab");
+        gate_claude(&claude, true);
+        m.record_event(AgentEvent { session: Some("s-k1".into()), ..hook(&tabs[0], AgentStatus::Done) });
+        wait_for("the fourth's session", || m.tab(&tabs[3], |t| t.session.is_some()).unwrap());
+        m.record_event(AgentEvent { session: Some("s-k4".into()), ..hook(&tabs[3], AgentStatus::Working) });
+        let saved = || m.requests.lock().unwrap().get(&id).map(|r| r.held.clone());
+        assert_eq!(saved(), Some(vec!["Fourth ask.".to_owned()]), "naming the session let go of the line before it was typed");
+        std::fs::write(format!("{}.go.{}", claude.display(), tabs[3]), "").unwrap();
+        let typed = || std::fs::read_to_string(format!("{}.typed.{}", claude.display(), tabs[3])).unwrap_or_default();
+        wait_for("the held line", || typed().contains("Fourth ask."));
+        wait_for("the record cleared once typed", || saved() == Some(vec![]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_held_line_whose_session_exits_before_raw_goes_to_the_next_start() {
+        let (dir, claude, m, _path, tabs) = at_the_cap("req-held-exit", &FOUR_ASKS);
+        let held = &tabs[3];
+        let next = claude.with_extension("next");
+        std::fs::write(&next, "#!/bin/sh\ntouch \"$0.ran.$PINNED_TAB\"\nexit 0\n").unwrap();
+        std::fs::set_permissions(&next, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::rename(&next, &claude).unwrap();
+        m.record_event(AgentEvent { session: Some("s-k1".into()), ..hook(&tabs[0], AgentStatus::Done) });
+        wait_for("the fourth's claude ran and exited", || Path::new(&format!("{}.ran.{held}", claude.display())).exists() && m.tab(held, |t| t.session.is_none() && !t.starting).unwrap());
+        gate_claude(&claude, false);
+        m.start_claude(held, 80, 24).unwrap();
+        let typed = || std::fs::read_to_string(format!("{}.typed.{held}", claude.display())).unwrap_or_default();
+        wait_for("the held line in the new session", || typed().contains("Fourth ask."));
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(typed().matches("Fourth ask.").count(), 1, "typed once");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_wake_at_the_cap_with_nothing_held_does_not_start_once_a_place_frees() {
+        let (dir, _claude, m, tabs) = rested_by_the_pass("req-cap-wake-bare");
+        let rested = &tabs[0];
+        assert_eq!(m.wake(rested, 80, 24), Ok(()));
+        m.record_event(AgentEvent { session: Some("s-k2".into()), ..hook(&tabs[1], AgentStatus::Done) });
+        std::thread::sleep(Duration::from_millis(2_500));
+        let view = m.view(rested).unwrap();
+        assert_eq!((view.alive, view.asleep), (false, true), "a tab on screen started with nothing asked of it");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn keys_with_no_enter_at_the_cap_wait_for_the_next_start() {
+        let (dir, claude, m, tabs) = rested_by_the_pass("req-cap-keys-draft");
+        let rested = &tabs[0];
+        m.write_input(rested, b"half a thought").unwrap();
+        m.record_event(AgentEvent { session: Some("s-k2".into()), ..hook(&tabs[1], AgentStatus::Done) });
+        std::thread::sleep(Duration::from_millis(2_500));
+        let view = m.view(rested).unwrap();
+        assert_eq!((view.alive, view.asleep), (false, true), "keys with no Enter woke the tab");
+        assert_eq!(m.tab(rested, |t| t.keys.clone()).unwrap(), b"half a thought", "the keys were not kept");
+        m.start_claude(rested, 80, 24).unwrap();
+        wait_for("the kept keys in the next start", || std::fs::read_to_string(format!("{}.typed.{rested}", claude.display())).unwrap_or_default().contains("half a thought"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
