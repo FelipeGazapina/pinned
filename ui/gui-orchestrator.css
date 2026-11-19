@@ -29,6 +29,10 @@ html:not([data-chat-width="wide"], [data-chat-width="full"]) #chat[data-rail] { 
 .turn .bubble .tag.unknown { padding: 0; background: none; color: inherit; font-weight: inherit; }
 .turn .user .routed { margin: 6px 0 0; font-size: 12px; color: var(--g-muted); text-align: right; }
 
+/* A request thread's "Sent to Captain X · how it went" line: a hairline each side of the words. */
+.turn .sent-divider { display: flex; align-items: center; gap: 10px; margin: 0 0 16px; font-size: 12px; color: var(--g-muted); }
+.turn .sent-divider::before, .turn .sent-divider::after { content: ""; flex: 1; height: 1px; background: rgb(var(--g-ink-rgb) / 0.07); }
+
 /* Captain reports: one card under "N reports", a row per report. */
 .reports { margin-bottom: 16px; border: 1px solid rgb(var(--g-ink-rgb) / 0.08); border-radius: 12px; background: color-mix(in srgb, var(--g-raised) 70%, var(--g-canvas));
   overflow: hidden; }

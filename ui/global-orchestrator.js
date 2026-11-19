@@ -79,6 +79,37 @@ function reportCaptainState({ state, working = 0, needs = [] }) {
   return { chips, where: chips.length || !now ? "" : ` · ${now}` };
 }
 
+/** A `send_to_captain` tool step, which is what the thread's "Sent to Captain" divider reads. */
+const SEND_TO_CAPTAIN = /(?:^|__)send_to_captain$/;
+/** What the host answers (`Handoff` in global_orchestrator.rs), worded for the divider. */
+const SEND_OUTCOMES = { entregue: "delivered", na_fila: "queued", iniciado: "started", ocupado: "busy, not sent" };
+
+/** The Captain a `send_to_captain` step handed a message to and how that went, or null for any other
+ * step. `name` is the folder of the step's `project` argument (a repo key, a path or `<machine>:<path>`),
+ * `outcome` the host's answer when it is one of SEND_OUTCOMES, `position` the queue place of a
+ * `na_fila`, and `failed` whether the call came back as an error. Nothing else of the answer is kept. */
+function sendToCaptainOf(step) {
+  if (step?.kind !== "tool" || !SEND_TO_CAPTAIN.test(step.name ?? "")) return null;
+  const project = String(step.args?.find(([key]) => key === "project")?.[1] ?? "").trim();
+  let answer = null;
+  try {
+    answer = JSON.parse(step.result?.text ?? "");
+  } catch {}
+  const outcome = Object.hasOwn(SEND_OUTCOMES, answer?.outcome) ? answer.outcome : null;
+  const position = Number.isInteger(answer?.position) && answer.position > 0 ? answer.position : null;
+  return { name: project.replace(/[\\/]+$/, "").split(/[\\/:]/).pop() || project, outcome, position, failed: step.result?.error === true };
+}
+
+/** The divider's words: "Sent to Captain site · delivered", or, once that Captain has a plan for the
+ * request, "· plan with 3 lists". `lists` is how many lists those plans hold, 0 for none. */
+function sentToCaptainLine({ name, outcome, position, failed }, lists = 0) {
+  if (failed) return `Could not send to Captain ${name}`;
+  const head = `Sent to Captain ${name}`;
+  if (lists && outcome !== "ocupado") return `${head} · plan with ${lists} ${lists === 1 ? "list" : "lists"}`;
+  if (!outcome) return head;
+  return `${head} · ${outcome === "na_fila" && position ? `queued, position ${position}` : SEND_OUTCOMES[outcome]}`;
+}
+
 /** One line per machine the save could not reach, in the machine's own words: too old, offline, or
  * failed. Machines that took the settings stay quiet. */
 function globalSettingsNotes(machines) {
