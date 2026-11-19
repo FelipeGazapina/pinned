@@ -36,7 +36,7 @@
 #all-activity .rqs-state .n { flex: none; color: rgb(var(--g-fg-rgb) / 0.85); }
 #all-activity .rqs-state .last { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--g-muted); }
 #all-activity .rqs-state .i { flex: none; width: 12px; height: 12px; color: var(--g-muted); }
-#all-activity .rqs-empty, #all-activity .rqs-end { margin: 24px auto; font-size: 13px; color: var(--g-muted); text-align: center; }
+#all-activity .rqs-empty { margin: 24px auto; font-size: 13px; color: var(--g-muted); text-align: center; }
 
 #all-activity .rqs-compose { display: flex; flex: none; flex-direction: column; width: 680px; max-width: calc(100% - 48px); box-sizing: border-box; margin: 8px auto 18px; }
 #all-activity .rqs-compose .nr-threads { max-height: 30vh; overflow-y: auto; }
@@ -60,7 +60,7 @@
 #all-activity .rqs-item { display: flex; flex-direction: column; gap: 3px; }
 #all-activity .rqs-item .who { display: flex; align-items: baseline; gap: 8px; }
 #all-activity .rqs-item .name { font-size: 12.5px; font-weight: 600; }
-#all-activity .rqs-item .name[data-who="orchestrator"], #all-activity .rqs-item .name[data-who="captain"] { color: color-mix(in srgb, var(--g-link) 75%, white); }
+#all-activity .rqs-item .name[data-who="orchestrator"] { color: color-mix(in srgb, var(--g-link) 75%, white); }
 #all-activity .rqs-item .text { font-size: 13.5px; line-height: 1.55; color: rgb(var(--g-fg-rgb) / 0.88); overflow-wrap: anywhere; }
 #all-activity .rqs-item .text > :first-child { margin-top: 0; }
 #all-activity .rqs-item .text > :last-child { margin-bottom: 0; }

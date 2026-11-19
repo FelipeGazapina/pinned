@@ -180,8 +180,8 @@ function requestCardHtml(tab) {
   const glance = requestHere(tab);
   return glance ? requestCardFrom(glance, rq.views.get(glance.id), { kept: !requestPlanOpen(tab) }) : "";
 }
-/** The card of `glance` from `have`, a `{ view }` read of its `user_request` or undefined while it loads. `asked: false` leaves out the You asked row (All activity shows the message right under the card); `kept` adds the Orchestrator line to the title. */
-function requestCardFrom(glance, have, { asked = true, kept = false } = {}) {
+/** The card of `glance` from `have`, a `{ view }` read of its `user_request` or undefined while it loads. `asked: false` leaves out the You asked row (All activity shows the message right under the card); `kept` adds the Orchestrator line to the title; `bare` leaves out the heading and the pill row, as the board's side panel in All activity has it. */
+function requestCardFrom(glance, have, { asked = true, kept = false, bare = false } = {}) {
   if (have && !have.view) return "";
   const stands = have?.view?.stands ?? {};
   const waiting = requestStateOf(glance) === "needs";
@@ -190,9 +190,9 @@ function requestCardFrom(glance, have, { asked = true, kept = false } = {}) {
   const pills = [...(glance.captains ?? []).map(requestCaptainName), ...(stands.links ?? [])].filter((pill, i, all) => pill && all.indexOf(pill) === i);
   const links = pills.map((link) => `<span class="rc-link">${esc(link)}</span>`).join("");
   const body = have
-    ? `<div class="rc-grid">${asked ? row("You asked", stands.asked) : ""}${row("Done", stands.done)}${row("Left", stands.left)}${row("Needs you", needs, ` data-needs="${waiting}"`)}</div>${links ? `<div class="rc-links">${links}</div>` : ""}`
+    ? `<div class="rc-grid">${asked ? row("You asked", stands.asked) : ""}${row("Done", stands.done)}${row("Left", stands.left)}${row("Needs you", needs, ` data-needs="${waiting}"`)}</div>${links && !bare ? `<div class="rc-links">${links}</div>` : ""}`
     : `<p class="rc-loading" role="status">Loading…</p>`;
-  return `<section class="request-card" aria-label="Where this request stands"><div class="rc-head"><span class="rc-title">Where this stands</span>${kept ? `<span class="rc-kept">kept up to date by the Orchestrator</span>` : ""}</div>${body}</section>`;
+  return `<section class="request-card" aria-label="Where this request stands">${bare ? "" : `<div class="rc-head"><span class="rc-title">Where this stands</span>${kept ? `<span class="rc-kept">kept up to date by the Orchestrator</span>` : ""}</div>`}${body}</section>`;
 }
 
 /** The composer footer in a request thread: the reply stays here, and a new subject is a new request. */
@@ -252,7 +252,8 @@ function renderRequests() {
   const chat = document.getElementById("chat");
   const inThread = requestsOn() && guiOn() && !!active && isGlobalOrchestratorTab(active) && !shellPage();
   const streamOpen = typeof rqs !== "undefined" && rqs.open && rqs.key === active?.key;
-  const on = inThread && !narrow(768) && !requestPlanOpen(active) && !streamOpen;
+  const newOpen = typeof nr !== "undefined" && nr.open && nr.from === (active?.key ?? null);
+  const on = inThread && !narrow(768) && !requestPlanOpen(active) && !streamOpen && !newOpen;
   const shown = chat.hasAttribute("data-requests");
   chat.toggleAttribute("data-requests", on);
   requestsColumn.hidden = !on;

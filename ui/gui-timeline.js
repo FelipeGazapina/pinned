@@ -1001,21 +1001,22 @@ const laneTagsHtml = (tab, html) => (globalLane(tab) ? orchestratorTagsHtml(html
 
 /** A prompt that carries Captain reports: the sender's own words above, if any, then a card under
  * "N reports" with one row per report. While the settings group reports, a card of several folds
- * to its header, which opens it. */
+ * to its header, which opens it. A request thread draws the board's block: no time in the header or on a row, and no line between rows. */
 function globalReportsHtml(user, t, tab, first, by, reports) {
   const mine = user.text.slice(0, reports[0].start).trim();
   const lead = mine ? userBubbleHtml({ ...user, text: mine }, t, tab, first, by) : "";
-  const rows = reports.map((report) => reportRowHtml(report, user.at, t, `full:${user.id}:${report.start}`, requestLane(tab) ? undefined : reportCaptainHtml(report))).join("");
+  const inRequest = requestLane(tab);
+  const rows = reports.map((report) => reportRowHtml(report, inRequest ? null : user.at, t, `full:${user.id}:${report.start}`, inRequest ? undefined : reportCaptainHtml(report))).join("");
   const fold = reportFoldLabel(reports);
   const cut = fold.indexOf(" · ");
-  const label = `<span class="count">${esc(fold.slice(0, cut))}</span><span class="names">${esc(fold.slice(cut + 3))}${dateOf(user.at) ? ` · ${whenHtml(user.at, "when")}` : ""}</span>`;
+  const label = `<span class="count">${esc(fold.slice(0, cut))}</span><span class="names">${esc(fold.slice(cut + 3))}${!inRequest && dateOf(user.at) ? ` · ${whenHtml(user.at, "when")}` : ""}</span>`;
   if (globalSettings.group_reports !== false && reports.length > 1) {
     const key = `reports:${user.id}`;
     // A request thread draws the board's block open: there the set holds the folds the user closed.
-    const open = requestLane(tab) ? !t.open.has(key) : t.open.has(key);
-    return `${lead}<section class="reports" aria-label="Reports from Captains"><button type="button" class="report-fold reports-head" data-toggle="${esc(key)}" aria-expanded="${open}">${label}${icon("chevron-down", "chev")}</button>${open ? rows : ""}</section>`;
+    const open = inRequest ? !t.open.has(key) : t.open.has(key);
+    return `${lead}<section class="${inRequest ? "reports request-reports" : "reports"}" aria-label="Reports from Captains"><button type="button" class="report-fold reports-head" data-toggle="${esc(key)}" aria-expanded="${open}">${label}${icon("chevron-down", "chev")}</button>${open ? rows : ""}</section>`;
   }
-  return `${lead}<section class="reports" aria-label="Reports from Captains"><div class="reports-head">${label}</div>${rows}</section>`;
+  return `${lead}<section class="${inRequest ? "reports request-reports" : "reports"}" aria-label="Reports from Captains"><div class="reports-head">${label}</div>${rows}</section>`;
 }
 
 /** One Captain's report: its project's tile, who sent it, its machine and the Captain's state now,

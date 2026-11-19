@@ -172,7 +172,7 @@ test("two #projects make two cards, each with its title and project", () => {
   assert.equal(items[1].title, "the monthly export is missing refunds");
   const html = h.cards();
   assert.equal(cardCount(html), 2);
-  assert.match(html, /show the delivery estimate on the cart page, before the…/);
+  assert.match(html, /Show the delivery estimate on the cart page, before the…/, "9r7: the card shows the title with a capital; the item keeps the paragraph's own text");
   assert.match(html, /This opens 2 threads/);
 });
 

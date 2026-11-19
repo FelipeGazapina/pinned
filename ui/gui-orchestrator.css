@@ -46,6 +46,7 @@ button.reports-head:hover { background: var(--g-accent); }
 .reports-head[aria-expanded="true"] .chev { transform: rotate(180deg); }
 .report-row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; }
 .report-row:not(:last-child) { border-bottom: 1px solid var(--g-border); }
+.request-reports .report-row:not(:last-child) { border-bottom: 0; }
 .captain-mono { display: flex; flex: none; align-items: center; justify-content: center; width: 20px; height: 20px; margin-top: 1px; border-radius: 6px;
   background: color-mix(in srgb, var(--mono) 20%, var(--g-canvas)); color: var(--mono); font-size: 9px; font-weight: 700; line-height: 1; }
 .report-row .main { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }

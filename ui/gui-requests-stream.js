@@ -86,7 +86,7 @@ function streamEntryHtml(glance, { tabViews, name, selected }) {
   const state = requestStateOf(glance, tabViews);
   const last = glance.kind === "earlier" ? "" : glance.last_text;
   return `<div class="rqs-ask"><span class="text">${esc(streamAsk(glance))}</span></div>
-    <button type="button" class="rqs-state" data-rqs-entry="${esc(glance.id)}" data-state="${state}" aria-expanded="${selected}"><span class="dot" aria-hidden="true"></span><span class="word">${REQUEST_STATE_WORD[state]}</span>${requestProjectChip(glance)}<span class="n">${streamReplies(glance.replies)}</span><span class="last">${esc(last)}</span>${icon("chevron-right")}</button>`;
+    <button type="button" class="rqs-state" data-rqs-entry="${esc(glance.id)}" data-state="${state}" aria-expanded="${selected}"><span class="dot" aria-hidden="true"></span><span class="word">${REQUEST_STATE_WORD[state]}</span>${requestProjectChip(glance)}<span class="n">${streamReplies(glance.replies)}</span><span class="last">${esc(capitalFirst(last))}</span>${icon("chevron-right")}</button>`;
 }
 
 const STREAM_WHO = { user: () => "You", orchestrator: (_item, name) => name, captain: (item) => (item.captain ? `Captain ${item.captain}` : "Captain") };
@@ -98,10 +98,10 @@ function streamPanelHtml(glance, have, name, tabViews) {
   const state = requestStateOf(glance, tabViews);
   const items = (have?.view?.items ?? []).map((item) => {
     const who = STREAM_WHO[item.who]?.(item, name) ?? "";
-    return `<div class="rqs-item"><div class="who"><span class="name" data-who="${esc(String(item.who))}">${esc(who)}</span><time>${streamTime(item.at)}</time></div><div class="text md">${markdown(String(item.text ?? ""))}</div></div>`;
+    return `<div class="rqs-item"><div class="who"><span class="name" data-who="${esc(String(item.who))}">${esc(who)}</span>${item.who === "user" ? "" : `<time>${streamTime(item.at)}</time>`}</div><div class="text md">${markdown(String(item.text ?? ""))}</div></div>`;
   });
   return `<aside class="rqs-panel" aria-label="Thread"><div class="rqs-phead"><span class="dot" data-state="${state}" aria-hidden="true"></span><h2>${esc(streamTitle(glance))}</h2><button type="button" data-rqs-panel-close aria-label="Close thread">${icon("x")}</button></div>
-    <div class="rqs-pbody">${requestCardFrom(glance, have, { asked: false })}${items.join("")}</div>
+    <div class="rqs-pbody">${requestCardFrom(glance, have, { asked: false, bare: true })}${items.join("")}</div>
     <div class="rqs-pfoot"><div class="rqs-reply"><label class="rqs-label" for="rqs-reply">Reply in this thread</label><input id="rqs-reply" type="text" data-rqs-reply="${esc(glance.id)}" placeholder="Reply in this thread" autocomplete="off"><button type="button" class="rqs-full" data-rqs-open="${esc(glance.id)}">Open full</button></div></div></aside>`;
 }
 
@@ -112,13 +112,13 @@ function streamComposeHtml(draft) {
     <div class="rqs-foot-row"><span>Each request opens its own thread</span><span class="spacer"></span><button type="button" class="rqs-send" data-rqs-send aria-label="Send"${ready ? "" : " disabled"}>${STREAM_SEND}</button></div></div></div>`;
 }
 
-function requestsStreamHtml({ glances, now, name, tabViews, selected, views, end, ask }) {
+function requestsStreamHtml({ glances, now, name, tabViews, selected, views, ask }) {
   const days = requestDays(glances, now).map(
     (day) => `<section class="rqs-day"><div class="rqs-dayhead"><span>${esc(day.label)}</span></div>${day.glances.map((g) => `<div class="rqs-entry">${streamEntryHtml(g, { tabViews, name, selected: g.id === selected })}</div>`).join("")}</section>`,
   );
   const picked = glances.find((g) => g.id === selected);
   return `<div class="rqs-main"><header class="rqs-head"><h1>Orchestrator</h1><span class="spacer"></span><nav class="rqs-tabs" aria-label="Orchestrator views"><button type="button" data-rqs-close>Requests</button><span aria-current="page">All activity</span></nav></header>
-    <div class="rqs-list" data-rqs-list>${days.join("") || `<p class="rqs-empty">Nothing here yet.</p>`}${end && days.length ? `<p class="rqs-end">That is everything.</p>` : ""}</div>
+    <div class="rqs-list" data-rqs-list>${days.join("") || `<p class="rqs-empty">Nothing here yet.</p>`}</div>
     ${streamComposeHtml(ask)}</div>${picked ? streamPanelHtml(picked, views.get(picked.id), name, tabViews) : ""}`;
 }
 
@@ -149,7 +149,7 @@ function renderStream() {
     return;
   }
   if (rqs.composing) return;
-  const html = requestsStreamHtml({ glances: streamGlances(), now: Date.now(), name: globalOrchestratorName(), tabViews: requestTabViews(), selected: rqs.selected, views: rqs.views, end: rqs.end, ask: rqs.ask });
+  const html = requestsStreamHtml({ glances: streamGlances(), now: Date.now(), name: globalOrchestratorName(), tabViews: requestTabViews(), selected: rqs.selected, views: rqs.views, ask: rqs.ask });
   if (html !== rqs.drawn) {
     const was = requestsStream.querySelector("[data-rqs-list]");
     const top = was?.scrollTop ?? 0;

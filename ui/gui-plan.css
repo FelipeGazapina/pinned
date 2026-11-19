@@ -96,8 +96,8 @@
 .pl-foot-name { font-size: 14px; font-weight: 600; }
 .pl-foot-what { color: var(--g-text); line-height: 1.45; }
 .pl-why { color: var(--tone); line-height: 1.45; }
-.pl-foot .facts { display: grid; grid-template-columns: repeat(3, auto); justify-content: start; gap: 6px 22px; font-size: 12px; color: var(--g-muted); }
-.pl-foot .fact { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.pl-foot .facts { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 12px; color: var(--g-muted); }
+.pl-foot .fact { display: flex; flex: none; flex-direction: column; gap: 1px; max-width: 100%; min-width: 0; }
 .pl-foot .fact b { font-weight: 500; color: var(--g-text); overflow-wrap: anywhere; }
 .pl-foot .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .pl-foot-btns { display: flex; flex-wrap: wrap; gap: 8px; }

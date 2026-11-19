@@ -57,6 +57,9 @@ const CLOSE_TO = 0.4;
 const REQUEST_ORDER = { needs: 0, working: 1, done: 2 };
 const REQUEST_TITLE_MAX = 60;
 
+/** `text` with its first letter upper-cased; the rest is left as it is. */
+const capitalFirst = (text) => String(text).charAt(0).toUpperCase() + String(text).slice(1);
+
 function requestState(glance, { planGlances = [], tabWaits = false } = {}) {
   if (glance.closed_at != null) return "done";
   const stale = glance.needs_at != null && glance.last_user_at != null && glance.last_user_at > glance.needs_at;

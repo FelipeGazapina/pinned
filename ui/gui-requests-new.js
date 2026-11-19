@@ -36,7 +36,7 @@ const nr = Object.assign(newRequestDraft(() => renderNewRequest()), {
   open: false,
   /** The key of the tab open when the screen opened: choosing another tab closes the screen. */
   from: null,
-  box: Object.assign(document.createElement("textarea"), { className: "nr-text", rows: 4, placeholder: "Describe it. Add #project and @machine to route a paragraph." }),
+  box: Object.assign(document.createElement("textarea"), { className: "nr-text", rows: 2, placeholder: "Describe it. Add #project and @machine to route a paragraph." }),
   onClear: () => {
     nr.box.value = "";
     renderNewRequestMirror();
@@ -76,8 +76,7 @@ function newRequestPreview(item) {
   const catalog = composerTagCatalog();
   const first = composerParagraphs(item.text)[0]?.text ?? item.text;
   const route = routeParagraph(first, catalog);
-  const upper = (text) => text.charAt(0).toUpperCase() + text.slice(1);
-  if (route.kind !== "routed") return upper(route.text);
+  if (route.kind !== "routed") return capitalFirst(route.text);
   const fact = captainFacts().find((f) => f.slug === tagSlug(route.project));
   if (!fact || fact.machine.name !== route.machine) return route.text;
   const goes = `Goes to Captain ${route.project} on ${route.machine}`;
@@ -111,7 +110,7 @@ function newRequestCardsHtml(draft = nr, { rename = true } = {}) {
     const title =
       draft.renaming === i
         ? `<input class="nr-title-input" type="text" data-nr-title="${i}" value="${esc(item.title)}" maxlength="${NR_TITLE_MAX}" aria-label="Thread title">`
-        : `<span class="nr-title">${esc(item.title)}</span>`;
+        : `<span class="nr-title">${esc(capitalFirst(item.title))}</span>`;
     const route = joined[i] ? "Goes into that thread as a reply" : newRequestPreview(item);
     return `<div class="nr-card" data-nr-card="${i}" data-joined="${!!joined[i]}"><span class="dot" aria-hidden="true"></span><div class="nr-body"><span class="nr-top">${title}</span><span class="nr-route">${esc(route)}</span></div>${rename ? `<button type="button" class="nr-rename" data-nr-rename="${i}">Rename</button>` : ""}</div>`;
   });
@@ -150,6 +149,13 @@ function renderNewRequestMirror() {
   nrMirror.innerHTML = html;
   nrEdit.dataset.tags = String(!!html);
   nrMirror.scrollTop = nr.box.scrollTop ?? 0;
+  fitNewRequestBox();
+}
+
+/** The box is as tall as its text, from the small minimum the style gives it. While the screen is hidden nothing is measured. */
+function fitNewRequestBox() {
+  nr.box.style.height = "auto";
+  if (nr.box.scrollHeight > 0) nr.box.style.height = `${nr.box.scrollHeight}px`;
 }
 
 /** The chat head's crumb while this screen is open: Requests, a slash and the title. The head's other
@@ -162,9 +168,12 @@ const redrawHead = () => typeof renderThread === "function" && renderThread();
 
 /** Draws the screen, or takes it down: it closes when another tab is chosen. */
 function renderNewRequest() {
+  const wasOpen = !newRequestPanel.hidden;
   if (nr.open && nr.from !== (active?.key ?? null)) nr.open = false;
   newRequestPanel.hidden = !nr.open;
   document.getElementById("chat").toggleAttribute("data-new-request", nr.open);
+  // The Requests column is hidden while this screen is the view, as it is for All activity.
+  if (wasOpen !== nr.open && typeof renderRequests === "function") renderRequests();
   if (!nr.open) return;
   renderNewRequestMirror();
   nrCards.innerHTML = newRequestCardsHtml();

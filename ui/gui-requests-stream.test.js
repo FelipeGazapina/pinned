@@ -352,7 +352,7 @@ test("choosing an entry opens the side panel with the card and the compact items
   assert.match(html, /You[\s\S]*Find out why\./);
   assert.match(html, /Captain storefront[\s\S]*The code expires after 10 minutes\./);
   assert.match(html, /Orchestrator[\s\S]*One thing is left for you\./);
-  assert.match(html, /13:48/);
+  assert.doesNotMatch(html, /13:48/, "9r7: the user's line carries no time");
   assert.equal(h.run("rq.views.size"), 0, "the card's cache of the open thread is not touched");
 });
 
