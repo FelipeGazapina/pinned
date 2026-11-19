@@ -827,7 +827,7 @@ test("nudged reads and poll-only reads leave the screen a fresh read shows, for 
 /** A thread view with layout: 600px on screen, each drawn turn 100px tall, the spacers as tall as
  * their style says, so a scroll puts a known turn at the top. */
 function laidOutView() {
-  const view = { dataset: {}, clientHeight: 600, html: "", top: 0, firstElementChild: {} };
+  const view = { dataset: {}, clientHeight: 600, html: "", top: 0, firstElementChild: {}, toggleAttribute() {} };
   const parts = () => [...view.html.matchAll(/<div class="spacer" style="height:(\d+)px"><\/div>|<section class="turn" data-turn-id="([^"]+)"/g)];
   const layout = () => {
     let y = 0;

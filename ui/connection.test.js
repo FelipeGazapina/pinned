@@ -166,43 +166,60 @@ test("a machine that dropped is named in the sidebar by a note with its name and
   assert.equal(note.innerHTML, `<span class="dot"></span><span class="text"><b>mini</b> offline · seen 1 min ago</span>`);
 });
 
-test("the sidebar's timers stop where the hub link dropped and run again when it is back", () => {
-  const rows = [{ dataset: { since: "1000" }, textContent: "" }];
+test("with the hub link down a thread on another machine holds its timer and this computer's keeps counting", () => {
+  const timer = (remote) => ({ dataset: { since: "1000" }, textContent: "", closest: (selector) => (selector === "[data-remote]" && remote ? {} : null) });
+  const here = timer(false);
+  const away = timer(true);
   let now = 1600;
   const context = {
+    LOCAL: "local",
     nowS: () => now,
     durationLabel: (s) => `${s}s`,
-    threadList: { querySelectorAll: () => rows },
+    threadList: { querySelectorAll: () => [here, away] },
     document: { querySelectorAll: () => [] },
   };
   vm.createContext(context);
   vm.runInContext(`let linkDownAt = null;\n${fn(sidebarSrc, "noteHubLink")}\n${line(sidebarSrc, "const clockMs")}\n${fn(sidebarSrc, "tickDurations")}\nObject.assign(globalThis, { noteHubLink, tickDurations, clockMs });`, context);
   context.tickDurations();
-  assert.equal(rows[0].textContent, "600s");
+  assert.deepEqual([here.textContent, away.textContent], ["600s", "600s"]);
   context.noteHubLink(false);
   now = 1900;
   context.tickDurations();
-  assert.equal(rows[0].textContent, "600s", "held at the moment the link dropped");
+  assert.deepEqual([here.textContent, away.textContent], ["900s", "600s"], "the remote one held at the moment the link dropped");
   context.noteHubLink(false);
   now = 2000;
   context.tickDurations();
-  assert.equal(rows[0].textContent, "600s", "a second drop report doesn't move it");
+  assert.deepEqual([here.textContent, away.textContent], ["1000s", "600s"], "a second drop report doesn't move it");
   context.noteHubLink(true);
   context.tickDurations();
-  assert.equal(rows[0].textContent, "1000s");
+  assert.deepEqual([here.textContent, away.textContent], ["1000s", "1000s"]);
 });
 
-test("the thread's own timer reads the same held clock", () => {
-  const context = { nowS: () => 1900, Date: { now: () => 1_900_000 } };
+test("the open thread's timer holds at the drop only for a thread on another machine", () => {
+  const context = { LOCAL: "local", nowS: () => 1900, Date: { now: () => 1_900_000 } };
   vm.createContext(context);
   vm.runInContext(`let linkDownAt = null;\n${fn(sidebarSrc, "noteHubLink")}\n${line(sidebarSrc, "const clockMs")}\nObject.assign(globalThis, { noteHubLink, clockMs });`, context);
-  assert.equal(context.clockMs(), 1_900_000);
+  assert.equal(context.clockMs("mini"), 1_900_000);
   context.nowS = () => 1700;
   context.noteHubLink(false);
-  assert.equal(context.clockMs(), 1_700_000, "held at the drop, in ms");
+  assert.equal(context.clockMs("mini"), 1_700_000, "held at the drop, in ms");
+  assert.equal(context.clockMs("local"), 1_900_000, "this computer's thread keeps the real clock");
   context.noteHubLink(true);
-  assert.equal(context.clockMs(), 1_900_000);
-  assert.match(read("gui-timeline.js"), /ticking\(clockMs\(\) - Number\(ticker\.dataset\.since\)\)/);
+  assert.equal(context.clockMs("mini"), 1_900_000);
+  assert.match(read("gui-timeline.js"), /ticking\(clockMs\(active\?\.machine\) - Number\(ticker\.dataset\.since\)\)/);
+});
+
+test("the live states held still and dimmed with the hub link down are those of threads on other machines", () => {
+  const css = read("gui-sidebar.css") + read("gui-glyph.css");
+  const offline = css.split("\n").filter((rule) => rule.startsWith('body[data-hub="offline"]') && !rule.includes("#reconnect-bar"));
+  assert.deepEqual(offline, [
+    'body[data-hub="offline"] :is(.thread-row[data-remote] .stamp.status.info, .project-head[data-remote] .state.running, .thread-row[data-remote] .term-run) { opacity: 0.45; }',
+    'body[data-hub="offline"] :is(.thread-row[data-remote] .stamp.status.info .i, .thread-row[data-remote] .term-run .i, #thread[data-remote] .shimmer) { animation-play-state: paused; }',
+    'body[data-hub="offline"] #thread[data-remote] :is(.work.live, .live-tool) { opacity: 0.45; }',
+    'body[data-hub="offline"] #chat-sidebar-toggle .running[data-remote] { opacity: 0.45; }',
+    'body[data-hub="offline"] [data-remote] .status-glyph[data-glyph="working"] { opacity: 0.45; animation-play-state: paused; }',
+  ]);
+  assert.match(read("gui-glyph.css"), /^html\[data-shell="web"\] body\[data-hub="offline"\] \.status-glyph\[data-glyph="working"\],$/m, "the web app, where every thread is remote, dims them all");
 });
 
 /** hub.js on sockets the test closes itself. `draws` are the jitter draws in order; waits are what the

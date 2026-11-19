@@ -551,19 +551,20 @@ function drawThreadList(scope = projectGroups().find((g) => g.key === ui.project
 }
 
 /** What the closed sidebar holds: how many things wait on you (agents' approvals and blocked
- * threads, as the Orchestrator's row counts them) and whether any thread is working. */
+ * threads, as the Orchestrator's row counts them) and where a thread is working: "here" when one
+ * on this computer is, "remote" when only threads on other machines are, else false. */
 function sidebarSummary() {
   let waiting = agentConfirmations.length;
   let running = false;
   for (const tab of tabs) {
     if (waitingKindOf(tab.view)) waiting++;
-    if (["working", "delegating"].includes(phaseOf(tab))) running = true;
+    if (["working", "delegating"].includes(phaseOf(tab))) running = tab.machine === LOCAL ? "here" : running || "remote";
   }
   return { waiting, running };
 }
 /** The chat header's sidebar toggle with a pill for what waits and a dot while something works. */
 function sidebarToggleHtml({ waiting, running }) {
-  return `<span class="glyph">${icon("panel-left")}${running ? `<span class="running" aria-hidden="true"></span>` : ""}</span>${waiting ? `<span class="count">${waiting}</span>` : ""}`;
+  return `<span class="glyph">${icon("panel-left")}${running ? `<span class="running"${running === "remote" ? " data-remote" : ""} aria-hidden="true"></span>` : ""}</span>${waiting ? `<span class="count">${waiting}</span>` : ""}`;
 }
 const sidebarToggleLabel = ({ waiting, running }) => `Toggle sidebar (${MOD_LABEL}B)${waiting ? `, ${waiting} waiting on you` : ""}${running ? ", something is working" : ""}`;
 let sidebarTouched = false;
@@ -752,6 +753,7 @@ function projectHead(key, roots, kids) {
   head.className = "project-head";
   head.dataset.project = key;
   head.dataset.headTab = roots[0].key;
+  head.toggleAttribute("data-remote", all.every((t) => t.machine !== LOCAL));
   const captain = roots.some(isOrchestrator) || threadOf(roots[0]).workspace?.scratch
     ? ""
     : `<button type="button" class="head-act" data-head-act="captain" aria-label="Open the ${esc(name)} Captain" data-tip="Open the ${esc(name)} Captain">${icon("side-bot")}</button>`;
@@ -775,6 +777,7 @@ function rowShell(tab, cls) {
   row.setAttribute("role", "button");
   row.tabIndex = 0;
   row.dataset.tab = tab.key;
+  row.toggleAttribute("data-remote", tab.machine !== LOCAL);
   row.classList.toggle("active", tab === active);
   row.classList.toggle("selected", selected.has(tab.key));
   row.classList.toggle("titling", titling.has(tab.key));
@@ -1187,17 +1190,22 @@ function scheduleWake() {
   if (Number.isFinite(next)) wakeTimer = setTimeout(() => guiOn() && renderSidebar(), Math.min((next - nowS()) * 1000 + 50, 2 ** 31 - 1));
 }
 
-/** When the app's hub link dropped, in seconds, while it is down. The timers stop there, so a "Working 7m"
- * the app can no longer vouch for doesn't keep counting. */
+/** When the app's hub link dropped, in seconds, while it is down. The timers of threads on other machines
+ * stop there, so a "Working 7m" the app can no longer vouch for doesn't keep counting. This computer's
+ * own threads report without the hub, so theirs keep running. */
 let linkDownAt = null;
 function noteHubLink(on) {
   linkDownAt = on ? null : (linkDownAt ?? nowS());
 }
-/** The time the timers show against, in milliseconds: now, or where the hub link dropped. */
-const clockMs = () => (linkDownAt === null ? Date.now() : linkDownAt * 1000);
+/** The time the timers of a thread on `machine` show against, in milliseconds: now, or where the hub
+ * link dropped for a thread on another machine. */
+const clockMs = (machine) => (linkDownAt === null || machine === LOCAL ? Date.now() : linkDownAt * 1000);
 function tickDurations() {
-  const now = linkDownAt ?? nowS();
-  for (const el of threadList.querySelectorAll("[data-since]")) el.textContent = Number(el.dataset.since) ? durationLabel(Math.max(0, now - el.dataset.since)) : "";
+  const now = nowS();
+  for (const el of threadList.querySelectorAll("[data-since]")) {
+    const at = el.closest("[data-remote]") ? (linkDownAt ?? now) : now;
+    el.textContent = Number(el.dataset.since) ? durationLabel(Math.max(0, at - el.dataset.since)) : "";
+  }
   for (const el of document.querySelectorAll("[data-stats]")) {
     const tab = tabByKey(el.dataset.stats);
     for (const [part, text] of [[".long", statsLabel(tab)], [".usd", statsLabel(tab, true)]]) {

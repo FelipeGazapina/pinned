@@ -70,7 +70,7 @@ function sidebar({ screen }) {
     drawSidebarToggle() {},
     scheduleWake() {},
     modelChanged: () => state.modelChanges++,
-    shelfRows: (inScope) => inScope.map((tab) => ({ dataset: { tab: tab.key }, since: { dataset: { since: "100" }, textContent: "" } })),
+    shelfRows: (inScope) => inScope.map((tab) => ({ dataset: { tab: tab.key }, since: { dataset: { since: "100" }, textContent: "", closest: () => null } })),
     searchRows: () => [],
   };
   vm.createContext(context);

@@ -88,7 +88,7 @@ function modelLabel(name) {
   return m ? `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? `.${m[3]}` : ""}` : name;
 }
 
-const tickerHtml = (since) => `<span class="ticker" data-since="${since}">${ticking(clockMs() - since)}</span>`;
+const tickerHtml = (since, machine) => `<span class="ticker" data-since="${since}">${ticking(clockMs(machine) - since)}</span>`;
 /** The thread that started a worker, while it is open. */
 const parentOf = (tab) => {
   const key = spawnerKey(tab);
@@ -185,7 +185,7 @@ function workerRowHtml(tab, row, t) {
   const cwd = row.tab?.view.cwd ?? tab.view.cwd;
   const line = workerLine(tab, row);
   const model = modelLabel(row.model);
-  const time = row.state === "working" && row.since ? tickerHtml(row.since) : row.elapsedMs != null ? duration(row.elapsedMs) : row.since ? tickerHtml(row.since) : "";
+  const time = row.state === "working" && row.since ? tickerHtml(row.since, tab.machine) : row.elapsedMs != null ? duration(row.elapsedMs) : row.since ? tickerHtml(row.since, tab.machine) : "";
   const review = row.state === "needs" && row.tab ? `<button type="button" class="worker-review" data-worker-open="${id}">Review</button>` : "";
   const head = `<div class="worker-head"><button type="button" class="worker-toggle" data-toggle="${esc(key)}" aria-expanded="${open}" aria-label="${open ? "Collapse" : "Expand"} ${esc(row.title)}"></button>${glyphHtml(row.state, 12)}
     <span class="worker-text"><span class="worker-title">${esc(row.title || "Agent")}</span>${line.text ? `<span class="worker-step${line.tone ? ` ${line.tone}` : ""}" title="${esc(line.text)}">${esc(line.text)}</span>` : ""}</span>
@@ -223,7 +223,7 @@ function workersBlockHtml(tab, t, home = true) {
   const rows = all.filter((row) => home || row.state !== "done");
   if (!rows.length) return "";
   const s = workersSummary(all);
-  const working = s.working ? `<span class="workers-working">${s.working} working${s.since ? ` · ${tickerHtml(s.since)}` : ""}</span>` : "";
+  const working = s.working ? `<span class="workers-working">${s.working} working${s.since ? ` · ${tickerHtml(s.since, tab.machine)}` : ""}</span>` : "";
   const needs = s.needs ? `<span class="workers-needs">${s.needs} needs you</span>` : "";
   return `<section class="workers" aria-label="Workers"><div class="workers-head">${icon("worker", "lead")}<span class="workers-title">Workers</span><span class="workers-count">${s.done} of ${s.total} done</span><span class="spacer"></span>${working}${needs}</div>
     <div class="worker-rows">${rows.map((row) => workerRowHtml(tab, row, t)).join("")}</div></section>`;

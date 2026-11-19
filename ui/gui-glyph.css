@@ -8,7 +8,9 @@
 .status-glyph[data-glyph="idle"] { border: var(--glyph-ring) solid var(--g-glyph-idle); }
 @keyframes glyph-spin { to { transform: rotate(360deg); } }
 @media (max-width: 639px) { .status-glyph { --glyph-ring: 2px; } }
-body[data-hub="offline"] .status-glyph[data-glyph="working"] { opacity: 0.45; animation-play-state: paused; }
+/* With the hub link down, a working thread on another machine holds still. Every thread in the web app is one. */
+html[data-shell="web"] body[data-hub="offline"] .status-glyph[data-glyph="working"],
+body[data-hub="offline"] [data-remote] .status-glyph[data-glyph="working"] { opacity: 0.45; animation-play-state: paused; }
 /* A hidden sidebar keeps its rows laid out, so a spinner there would still recalculate style every frame. */
 body[data-mode="gui"][data-sidebar="closed"]:not(.sidebar-animating, [data-phone-screen="threads"]) #sidebar :is(.status-glyph, .term-run .i),
 body[data-phone-screen]:not([data-phone-screen="threads"]) #sidebar :is(.status-glyph, .term-run .i) { animation-play-state: paused; }

@@ -13,7 +13,7 @@ const MARK = `<span class="box-mark" role="img" aria-label="Running in an Upstas
 
 /** The model's two helpers and the sidebar's three row builders, over the machines the hub listed. */
 function page(machines) {
-  const row = () => ({ className: "", dataset: {}, classList: { toggle() {}, contains: () => false }, setAttribute(name, value) { this[name] = value; }, tabIndex: 0 });
+  const row = () => ({ className: "", dataset: {}, classList: { toggle() {}, contains: () => false }, setAttribute(name, value) { this[name] = value; }, toggleAttribute(name, on) { this.attributes[name] = on; }, attributes: {}, tabIndex: 0 });
   const context = {
     machines: new Map(machines),
     document: { createElement: row },
@@ -108,4 +108,11 @@ test("a box row says so in its accessible name", () => {
   const p = page(MACHINES);
   assert.equal(p.childRow(thread("box-1", { role: "worker" }))["aria-label"], "A thread, worker, running in an Upstash Box");
   assert.equal(p.childRow(thread("local", { role: "worker" }))["aria-label"], "A thread, worker");
+});
+
+test("every row of a thread on another machine is marked remote, and one on this computer is not", () => {
+  const p = page(MACHINES);
+  const remote = (row) => row.attributes["data-remote"];
+  assert.deepEqual([p.cardRow(thread("mini")), p.childRow(thread("mini", { role: "worker" })), p.slimRow(thread("box-1"), "unsettle")].map(remote), [true, true, true]);
+  assert.deepEqual([p.cardRow(thread("local")), p.childRow(thread("local", { role: "worker" })), p.slimRow(thread("local"), "unsettle")].map(remote), [false, false, false]);
 });

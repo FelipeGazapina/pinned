@@ -17,6 +17,7 @@ function sidebar(extra = {}) {
   const toggle = { innerHTML: "", title: "", attrs: {}, setAttribute(name, value) { this.attrs[name] = value; } };
   const calls = [];
   const context = {
+    LOCAL: "local",
     tabs: [],
     agentConfirmations: [],
     waitingKindOf: (view) => view.waits ?? null,
@@ -44,12 +45,21 @@ const tab = (phase, waits = null, project = "p", machine = "m1") => ({ phase, ma
 
 test("the sidebar toggle shows how many things wait and a dot while a thread works", () => {
   const { context, toggle } = sidebar();
-  context.tabs.push(tab("working"), tab("asking", "needs_input"), tab("failed", "failed"), tab("done"));
+  context.tabs.push(tab("working", null, "p", "local"), tab("working"), tab("asking", "needs_input"), tab("failed", "failed"), tab("done"));
   context.agentConfirmations.push({}, {});
   context.drawSidebarToggle();
   assert.equal(toggle.innerHTML, `<span class="glyph"><i panel-left><span class="running" aria-hidden="true"></span></span><span class="count">4</span>`);
   assert.equal(toggle.title, "Toggle sidebar (⌘B), 4 waiting on you, something is working");
   assert.equal(toggle.attrs["aria-label"], toggle.title);
+});
+
+test("the toggle's dot is marked remote when only threads on other machines work, so a dropped hub link dims it", () => {
+  const { context, toggle } = sidebar();
+  context.tabs.push(tab("working", null, "p", "m1"), tab("delegating", null, "p", "m2"));
+  context.drawSidebarToggle();
+  assert.equal(toggle.innerHTML, `<span class="glyph"><i panel-left><span class="running" data-remote aria-hidden="true"></span></span>`);
+  assert.equal(toggle.title, "Toggle sidebar (⌘B), something is working");
+  assert.match(read("gui-sidebar.css"), /^body\[data-hub="offline"\] #chat-sidebar-toggle \.running\[data-remote\] \{ opacity: 0\.45; \}$/m);
 });
 
 test("with nothing waiting or working the toggle is the bare icon", () => {
