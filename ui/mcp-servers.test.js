@@ -42,6 +42,7 @@ function app({ answer = async () => [], onMachine = async () => [] } = {}) {
   const dom = {};
   const byId = (id) => (dom[id] ??= element(id));
   const context = {
+    visibleInterval: () => 0,
     console,
     addEventListener() {},
     load: () => null,

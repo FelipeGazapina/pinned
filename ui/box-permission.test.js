@@ -16,6 +16,7 @@ function element() {
 
 test("the Upstash card offers a box permission for each actor kind", () => {
   const context = {
+    visibleInterval: () => 0,
     console,
     addEventListener() {},
     account: { email: "ana@acme.dev" },
@@ -55,6 +56,7 @@ test("the Upstash card offers a box permission for each actor kind", () => {
 test("an ask that arrives while the Upstash card is open is drawn", () => {
   const asks = element();
   const context = {
+    visibleInterval: () => 0,
     console,
     addEventListener() {},
     account: { email: "ana@acme.dev" },
