@@ -153,3 +153,86 @@ test("the GitHub picker asks to connect GitHub only when GitHub is the one not c
   assert.equal(await githubPicker("GitHub is not connected"), "Connect GitHub under Settings → Connectors first.");
   assert.equal(await githubPicker("not connected to the hub"), "not connected to the hub");
 });
+
+const LAST_SENT = { linear: { name: "Owner", email: "owner@example.test", organization: "Acme" }, slack: null, slack_bots: [], connectors: [], checked: null };
+
+const HUB_ANSWERS = { get_settings: LAST_SENT, linear_suggestions: { labels: [], columns: [], teams: [] }, vercel_models: [] };
+
+/** settings.js in the app signed in to a hub that answers or not (`up`), with the settings the hub sent
+ * this run (`sent`, none when null). */
+function settingsApp({ up, sent }) {
+  const elements = new Map();
+  const byId = (id) => {
+    if (!elements.has(id)) elements.set(id, { id, innerHTML: "", textContent: "", value: "", dataset: {}, listeners: {}, addEventListener(type, f) { (this.listeners[type] ??= []).push(f); }, querySelector: () => null, querySelectorAll: () => [], focus() {} });
+    return elements.get(id);
+  };
+  const asked = [];
+  const context = {
+    URL,
+    console: { error() {}, warn() {}, log() {} },
+    addEventListener() {},
+    setTimeout() {},
+    TAURI: {},
+    LOCAL: "local",
+    account: { email: "owner@example.test", machine_id: "m-local" },
+    hub: { online: up, hub: (call) => (asked.push(call.cmd), up ? Promise.resolve(HUB_ANSWERS[call.cmd] ?? null) : Promise.reject("not connected to the hub")) },
+    invoke: (cmd) => Promise.reject(`${cmd} should not run here while signed in`),
+    machines: new Map([["local", { view: { online: true }, projects: [] }]]),
+    load: () => null,
+    save() {},
+    listen() {},
+    tilde: (path) => path,
+    agentApproval: () => null,
+    agentAsking: () => null,
+    agentAskingHtml: () => "",
+    agentConsentHtml: () => "",
+    externalAgentsCardHtml: () => "",
+    convexCardHtml: () => "",
+    loadConvexProjects() {},
+    loadExternalAgents() {},
+    icon: (name) => `<svg data-icon="${name}"></svg>`,
+    document: { body: { dataset: {} }, getElementById: byId, querySelector: () => byId("nav"), querySelectorAll: () => [] },
+  };
+  context.globalThis = context;
+  vm.createContext(context);
+  vm.runInContext(`${read("connection.js")}\n${line(read("main.js"), "const hubUp = ")}\n${settingsSrc}\nglobalThis.__actions = actions; globalThis.__onHubSettings = onHubSettings; globalThis.__showPage = showPage;`, context);
+  if (sent) {
+    context.hub.online = true;
+    context.__onHubSettings(sent);
+    context.hub.online = up;
+  }
+  const show = (page) => (context.__showPage(page), byId("settings-page").innerHTML);
+  return { context, byId, show, asked };
+}
+
+test("signed in before the hub ever answered, Connectors and Workflows say the hub can't be reached, not that nothing is connected", () => {
+  const { show } = settingsApp({ up: false, sent: null });
+  assert.equal(show("integrations"), `<h2>Connectors</h2><div class="card"><p>Can't reach the hub, and this needs it.</p></div>`);
+  assert.equal(show("connectors"), `<h2>Workflows</h2><div class="card"><p>Can't reach the hub, and this needs it.</p></div>`);
+});
+
+test("with the hub gone after it sent settings, Connectors and Workflows show those settings read-only under the line", () => {
+  const { show } = settingsApp({ up: false, sent: LAST_SENT });
+  const connectors = show("integrations");
+  assert.ok(connectors.startsWith(`<h2>Connectors</h2><div class="card"><p>Can't reach the hub, and this needs it. These are the last settings it sent.</p></div><fieldset class="hub-out" disabled>`), connectors.slice(0, 200));
+  assert.match(connectors, /Connected as <b>Owner<\/b> \(owner@example\.test\) in Acme\./);
+  assert.ok(connectors.endsWith("</fieldset>"));
+  const workflows = show("connectors");
+  assert.ok(workflows.startsWith(`<h2>Workflows</h2><div class="card"><p>Can't reach the hub, and this needs it. These are the last settings it sent.</p></div><fieldset class="hub-out" disabled>`), workflows.slice(0, 200));
+  assert.doesNotMatch(workflows, /Connect Linear or Slack first/);
+  assert.match(workflows, /＋ New workflow/);
+});
+
+test("with the hub answering, the pages are drawn as before", () => {
+  const { show } = settingsApp({ up: true, sent: LAST_SENT });
+  assert.ok(show("integrations").startsWith(`<h2>Connectors</h2>\n    <p class="hint">Services the harness can read from and act on.</p>`));
+  assert.doesNotMatch(show("connectors"), /hub-out|Can't reach/);
+});
+
+test("a change made while the hub doesn't answer fails with the same plain sentence, without asking the hub", async () => {
+  const { context, byId, asked } = settingsApp({ up: false, sent: null });
+  byId("linear-key").value = "lin_api_123";
+  await context.__actions["connect-linear"]();
+  assert.equal(byId("linear-error").textContent, "Can't reach the hub, and this needs it.");
+  assert.deepEqual(asked, []);
+});

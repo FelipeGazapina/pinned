@@ -80,6 +80,7 @@ function app({ answer, machines = [] } = {}) {
     account: { machine_id: "this-mac", email: "ana@acme.dev" },
     machines: new Map([["local", { view: { online: true }, hubView: { name: "MacBook" } }], ...machines]),
     hub: { hub: (call) => (calls.push(call), answer(call)) },
+    hubUp: () => true,
     picker: {},
     active: null,
     icon: () => "",

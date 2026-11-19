@@ -48,6 +48,7 @@ function load({ bots = [], connectors = [], reply = () => ({}) } = {}) {
     TAURI: false,
     LOCAL: "local",
     account: { email: "test@example.test" },
+    hubUp: () => true,
     hub: {
       async hub(call) {
         calls.push(call);

@@ -139,9 +139,22 @@ let suggestions = { labels: [], columns: [], teams: [], channels: [], folders: [
 
 const settingsOpen = () => document.body.dataset.page === "settings";
 
-/** A call to the hub, or to this machine without one. The form that Approve on an agent's request
- * opened approves that request with it instead (`agentApproval`). */
-const connectorCall = (cmd, args = {}) => agentApproval({ cmd, ...args }) ?? (hub ? hub.hub({ cmd, ...args }) : invoke(cmd, args));
+/** A call to the hub, or to this machine when signed out. Signed in, it fails with `HUB_NEEDED` while
+ * the hub doesn't answer. The form that Approve on an agent's request opened approves that request
+ * with it instead (`agentApproval`). */
+const connectorCall = (cmd, args = {}) => agentApproval({ cmd, ...args }) ?? (!hub ? invoke(cmd, args) : hubUp() ? hub.hub({ cmd, ...args }) : Promise.reject(HUB_NEEDED));
+
+/** The hub whose settings `settings` holds, once it sent some this run. */
+let settingsHub = null;
+/** A page of the account's settings, `title` and its `html`. Signed in while the hub doesn't answer, the
+ * empty defaults would read as nothing connected, so it shows the last settings the hub sent, read-only
+ * under a line that says why, or before it sent any that line alone. */
+function hubSettingsHtml(title, html) {
+  if (!hub || hubUp()) return html;
+  if (settingsHub !== hub) return `<h2>${title}</h2><div class="card"><p>${HUB_NEEDED}</p></div>`;
+  const at = html.startsWith("<h2>") ? html.indexOf("</h2>") + 5 : 0;
+  return `${html.slice(0, at)}<div class="card"><p>${HUB_NEEDED} These are the last settings it sent.</p></div><fieldset class="hub-out" disabled>${html.slice(at)}</fieldset>`;
+}
 
 async function toggleSettings() {
   if (settingsOpen()) return active ? activate(active) : delete document.body.dataset.page;
@@ -158,6 +171,7 @@ async function toggleSettings() {
 
 function onHubSettings(latest) {
   settings = latest;
+  settingsHub = hub;
   if (!settingsOpen()) return;
   if (page === "integrations") {
     const asks = document.getElementById("box-asks");
@@ -1635,7 +1649,7 @@ function refresh() {
 
 function redraw() {
   settingsPage.dataset.view = view.name;
-  settingsPage.innerHTML = connectorsHtml();
+  settingsPage.innerHTML = hubSettingsHtml("Workflows", connectorsHtml());
   if (view.name === "edit") refresh();
 }
 
@@ -2393,7 +2407,7 @@ settingsSection({ page: "general", label: "General", icon: "settings", show: () 
   { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },
   { title: "Send shortcut", terms: ["enter new line multiline cmd ctrl composer"] },
 ] });
-settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = integrationsHtml()), loadExternalAgents(), loadBoxLogins(), loadConvexProjects()), search: [
+settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = hubSettingsHtml("Connectors", integrationsHtml())), loadExternalAgents(), loadBoxLogins(), loadConvexProjects()), search: [
   { title: "External agents (MCP)", terms: ["mcp oauth grok external agent remote connector orchestrator captain capitao capitão token revoke"], id: "external-agents" },
   { title: "Linear", terms: ["api key issues labels connector"] },
   { title: "Slack", terms: ["bot token channels mentions connector"] },

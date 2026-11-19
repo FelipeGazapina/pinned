@@ -1612,6 +1612,7 @@ function connectHub(signedIn) {
       noteHubLink(on);
       if (on) retryUploadImages();
       if (settingsOpen() && page === "account") showAccount();
+      if (settingsOpen() && ["integrations", "connectors"].includes(page)) showPage(page);
     },
     refused: () => (TAURI ? (document.body.dataset.hub = "refused") : signOutWeb("You were signed out. Sign in again.")),
   });

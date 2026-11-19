@@ -47,5 +47,8 @@ function hubOutOfReach(hub, computer) {
   return `Can't reach the hub${host ? ` at ${host}` : ""}. ${computer ? `This ${computer} keeps working and reconnects` : "This page reconnects"} once the hub answers.`;
 }
 
+/** What a feature that lives on the hub says while the signed-in hub doesn't answer. */
+const HUB_NEEDED = "Can't reach the hub, and this needs it.";
+
 /** Whether `error` is the kind `signInProblem` words as "can't reach", so the form offers Retry. */
 const hubUnreachable = (error) => NO_ANSWER.test(String(error));
