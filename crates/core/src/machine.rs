@@ -3755,7 +3755,7 @@ impl Machine {
             (tab, lines, HeldIn::Request(id))
         });
         // The anchor's lines go to the tab they were held for, else to the anchor.
-        let anchor = (!anchor.is_empty()).then(|| (self.anchor_held_tab().map_or_else(|| self.open_global_orchestrator(), Ok), anchor, HeldIn::Anchor));
+        let anchor = (!anchor.is_empty()).then(|| (self.open_global_orchestrator(), anchor, HeldIn::Anchor));
         for (tab, lines, record) in tabs.chain(anchor) {
             let Ok(tab) = tab else { continue };
             let _ = self.tab(&tab, |t| {
