@@ -39,6 +39,9 @@ const machines = new Map();
 const viewListeners = [];
 let account = null;
 let hub = null;
+/** Whether the hub answers now. A feature this computer can run by itself routes on this, never on
+ * being signed in (`hub`), so it keeps working while the hub is out of reach. */
+const hubUp = () => hub?.online === true;
 
 const tabs = [];
 let active = null;
@@ -444,7 +447,7 @@ async function cloneFromGithub() {
     repos = await connectorCall("github_repos");
   } catch (e) {
     list.innerHTML = "";
-    document.getElementById("picker-error").textContent = /not connected/.test(e) ? "Connect GitHub under Settings → Connectors first." : String(e);
+    document.getElementById("picker-error").textContent = /^GitHub is not connected/.test(e) ? "Connect GitHub under Settings → Connectors first." : String(e);
     return;
   }
   const show = () => {
@@ -459,11 +462,19 @@ async function cloneFromGithub() {
   show();
 }
 
+/** Clones `repo` on `machine`, into `dest` when given: through the hub while it answers, which clones
+ * with the account's GitHub token, else here with this computer's own. Another machine is reached only
+ * through the hub. */
+function cloneOn(machine, repo, dest) {
+  if (hub && (machine !== LOCAL || hubUp())) return hub.hub({ cmd: "clone", machine: hubIdOf(machine), repo, dest });
+  return invoke("clone_repo", { repo, dest });
+}
+
 async function cloneAndOpen(machine, repo) {
   choices = [];
   picker.querySelector(".choices").innerHTML = `<p class="loading">Cloning ${esc(repo)} on ${esc(machineName(machine))}…</p><p class="error" id="picker-error"></p>`;
   try {
-    const path = hub ? await hub.hub({ cmd: "clone", machine: hubIdOf(machine), repo }) : await invoke("clone_repo", { repo });
+    const path = await cloneOn(machine, repo);
     if (await pickFolder(path)) closeProjects();
   } catch (e) {
     document.getElementById("picker-error").textContent = String(e);

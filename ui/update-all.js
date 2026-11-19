@@ -59,6 +59,13 @@ function land(id, call) {
   });
 }
 
+/** Asks machine `id` of the account to update itself: through the hub while it answers, else this
+ * computer through its own installer. */
+function updateMachine(id) {
+  if (TAURI && id === account?.machine_id && !hubUp()) return invoke("install_update");
+  return hub.call(id, { cmd: "update_self" });
+}
+
 async function updateEveryMachine() {
   if (updateEveryMachine.busy) return;
   updateEveryMachine.busy = true;
@@ -66,8 +73,8 @@ async function updateEveryMachine() {
     const self = account?.machine_id ?? null;
     const online = accountMachines().filter((view) => view.online && !view.upstash_box);
     const others = online.filter((view) => view.id !== self);
-    await Promise.all(others.map((view) => land(view.id, hub.call(view.id, { cmd: "update_self" }))));
-    if (self && online.some((view) => view.id === self)) await land(self, hub.call(self, { cmd: "update_self" }));
+    await Promise.all(others.map((view) => land(view.id, updateMachine(view.id))));
+    if (self && online.some((view) => view.id === self)) await land(self, updateMachine(self));
   } finally {
     updateEveryMachine.busy = false;
   }

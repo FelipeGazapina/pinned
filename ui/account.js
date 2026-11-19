@@ -472,7 +472,7 @@ Object.assign(actions, {
     if (!id) return;
     machinesUi.error = "";
     try {
-      await hub.call(id, { cmd: "update_self" });
+      await updateMachine(id);
     } catch (e) {
       machinesUi.error = String(e);
     }

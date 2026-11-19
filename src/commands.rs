@@ -90,7 +90,7 @@ pub async fn vercel_models(connectors: State<'_, Connectors>) -> Result<Vec<verc
     connectors.vercel_models().await
 }
 
-/// Clones on this Mac while it's signed out, with this Mac's own GitHub token.
+/// Clones on this Mac while it's signed out or the hub doesn't answer, with this Mac's own GitHub token.
 #[tauri::command]
 pub async fn clone_repo(connectors: State<'_, Connectors>, machine: State<'_, Arc<Machine>>, repo: String, dest: Option<String>) -> Result<Value, String> {
     let repo = github::clone_url(&repo);

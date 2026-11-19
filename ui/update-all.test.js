@@ -4,8 +4,9 @@ import test from "node:test";
 
 const source = readFileSync(new URL("./update-all.js", import.meta.url), "utf8");
 
-/** update-all.js in the app (`TAURI` set) or the web page (null), signed in as `account`. */
-function open(account, { TAURI = {}, version = "v0.18.7" } = {}) {
+/** update-all.js in the app (`TAURI` set) or the web page (null), signed in as `account`, with the hub
+ * answering or not (`up`). `invoke` stands for this computer's own commands. */
+function open(account, { TAURI = {}, version = "v0.18.7", up = true, invoke = () => Promise.reject("not in this test") } = {}) {
   const machines = new Map();
   const calls = [];
   const pending = [];
@@ -32,8 +33,10 @@ function open(account, { TAURI = {}, version = "v0.18.7" } = {}) {
     "seedAccount",
     "TAURI",
     "document",
+    "hubUp",
+    "invoke",
     `let account = seedAccount;\n${source}\nreturn { updateEveryMachine, updateLabel, rowUpdate, accountMachines };`,
-  )(machines, hub, viewListeners, "local", account, TAURI, { body: { dataset: { version } } });
+  )(machines, hub, viewListeners, "local", account, TAURI, { body: { dataset: { version } } }, () => up, invoke);
   return {
     machines,
     calls,
