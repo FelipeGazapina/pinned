@@ -1098,6 +1098,8 @@ pub struct Machine {
     /// background so new gateway models show up without a pinned release.
     go_models: Mutex<Vec<crate::claude_models::ClaudeModel>>,
     go_models_at: Mutex<Option<Instant>>,
+    /// The last fetch failed, so the next one waits a minute instead of the hour.
+    go_models_failed: Mutex<bool>,
     go_models_file: Option<PathBuf>,
     /// The review guides claude wrote for pull requests.
     guides: PathBuf,
@@ -1332,6 +1334,7 @@ impl Machine {
                     .unwrap_or_else(crate::opencode_go::fallback_models),
             ),
             go_models_at: Mutex::new(None),
+            go_models_failed: Mutex::new(false),
             go_models_file: dir.as_ref().map(|d| d.join(crate::opencode_go::GO_MODELS_FILE)),
             guides: dir.as_ref().map(|d| d.join("guides")).unwrap_or_else(|| std::env::temp_dir().join("pinned-guides")),
             shells: Shells::default(),
@@ -2237,23 +2240,30 @@ impl Machine {
         if models.is_empty() { crate::opencode_go::fallback_models() } else { models }
     }
 
-    /// Refreshes the cached gateway list at most hourly, without blocking the caller.
+    /// Refreshes the cached gateway list hourly after a success and a minute after a failure,
+    /// without blocking the caller.
     fn refresh_go_models(&self) {
         if test_binary() && std::env::var_os("PINNED_OPENCODE_GO_MODELS_BASE").is_none() {
             return;
         }
-        let stale = self.go_models_at.lock().unwrap().is_none_or(|at| at.elapsed() > Duration::from_secs(3600));
-        if !stale {
+        let now = Instant::now();
+        let due = {
+            let last = *self.go_models_at.lock().unwrap();
+            let failed = *self.go_models_failed.lock().unwrap();
+            crate::opencode_go::refresh_due(last, failed, now)
+        };
+        if !due {
             return;
         }
         // A fetch is already running when the timestamp is set before it answers.
-        *self.go_models_at.lock().unwrap() = Some(Instant::now());
+        *self.go_models_at.lock().unwrap() = Some(now);
         let Some(me) = self.me.upgrade() else { return };
         std::thread::spawn(move || {
             match crate::opencode_go::fetch_models() {
                 Ok(models) => {
                     *me.go_models.lock().unwrap() = models.clone();
                     *me.go_models_at.lock().unwrap() = Some(Instant::now());
+                    *me.go_models_failed.lock().unwrap() = false;
                     if let Some(file) = &me.go_models_file {
                         let _ = std::fs::create_dir_all(file.parent().unwrap_or(std::path::Path::new(".")));
                         if let Ok(body) = serde_json::to_vec_pretty(&models) {
@@ -2263,8 +2273,10 @@ impl Machine {
                 }
                 Err(e) => {
                     eprintln!("pinned: could not refresh the OpenCode Go model list: {e}");
-                    // Let the next caller retry soon, instead of waiting out the hour.
-                    *me.go_models_at.lock().unwrap() = None;
+                    // Ask again a minute from now, not on the next read, so a down gateway does
+                    // not cost a request per account view.
+                    *me.go_models_at.lock().unwrap() = Some(Instant::now());
+                    *me.go_models_failed.lock().unwrap() = true;
                 }
             }
         });
@@ -11111,6 +11123,91 @@ pub(crate) mod tests {
         let (choices, _) = m.catalog_of(&account, true);
         assert_eq!(choices.len(), models.len());
         assert!(choices.iter().find(|c| c.id == "beam-free").unwrap().free, "the delegate catalog marks free too");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A gateway listing `body` at `status`, counting every request it answers.
+    #[cfg(unix)]
+    fn go_models_endpoint(status: Arc<AtomicU64>, hits: Arc<AtomicU64>, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request);
+                hits.fetch_add(1, Ordering::SeqCst);
+                let code = status.load(Ordering::SeqCst);
+                let _ = write!(stream, "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        url
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_failed_go_models_refresh_waits_a_minute_before_asking_again() {
+        let root = temp("go-models-backoff");
+        write_go_account(&root);
+        let m = accounts_machine(&root);
+        let hits = Arc::new(AtomicU64::new(0));
+        let status = Arc::new(AtomicU64::new(500));
+        let body: &'static str = r#"{"data":[{"id":"fresh-model","name":"Fresh Model","limit":{"context":200000}}]}"#;
+        std::env::set_var("PINNED_OPENCODE_GO_MODELS_BASE", go_models_endpoint(status.clone(), hits.clone(), body));
+        // The caller stamps the attempt before the fetch answers; the fetch stamps it again. A
+        // timestamp newer than the attempt's means the answer landed.
+        let answered = |spawned: Instant| m.go_models_at.lock().unwrap().is_some_and(|at| at > spawned);
+        m.go_models();
+        let spawned = m.go_models_at.lock().unwrap().unwrap();
+        wait_for("the first attempt", || hits.load(Ordering::SeqCst) == 1 && answered(spawned));
+        m.go_models();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "a read right after a failure does not ask a down gateway again");
+        *m.go_models_at.lock().unwrap() = Some(Instant::now() - Duration::from_secs(61));
+        m.go_models();
+        let spawned = m.go_models_at.lock().unwrap().unwrap();
+        wait_for("the retry", || hits.load(Ordering::SeqCst) == 2 && answered(spawned));
+        status.store(200, Ordering::SeqCst);
+        *m.go_models_at.lock().unwrap() = Some(Instant::now() - Duration::from_secs(61));
+        m.go_models();
+        let spawned = m.go_models_at.lock().unwrap().unwrap();
+        wait_for("the success", || answered(spawned) && !*m.go_models_failed.lock().unwrap());
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        assert!(m.go_models().iter().any(|model| model.slug == "fresh-model"), "the refreshed list is what the picker reads");
+        *m.go_models_at.lock().unwrap() = Some(Instant::now() - Duration::from_secs(61));
+        m.go_models();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(hits.load(Ordering::SeqCst), 3, "a success restores the hourly gate");
+        *m.go_models_at.lock().unwrap() = Some(Instant::now() - Duration::from_secs(3601));
+        m.go_models();
+        wait_for("the hourly refresh", || hits.load(Ordering::SeqCst) == 4);
+        std::env::remove_var("PINNED_OPENCODE_GO_MODELS_BASE");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_cached_go_models_file_lists_the_same_models_when_the_gateway_never_answers() {
+        let root = temp("go-models-cache");
+        write_go_account(&root);
+        let cached = crate::opencode_go::parse_models(
+            r#"{"data":[{"id":"qwen4-max","name":"Qwen4 Max","capabilities":{"reasoning":{"effort":["none","low","high","xhigh"]}},"limit":{"context":1000000}},{"id":"beam-free","name":"Beam Free","limit":{"context":1048576},"cost":{"text":{"input":{"price":0},"output":{"price":0}}}}]}"#,
+        );
+        let file = root.join("config").join(crate::opencode_go::GO_MODELS_FILE);
+        std::fs::write(&file, serde_json::to_vec_pretty(&cached).unwrap()).unwrap();
+        let closed = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            drop(listener);
+            format!("http://{address}")
+        };
+        std::env::set_var("PINNED_OPENCODE_GO_MODELS_BASE", &closed);
+        let m = accounts_machine(&root);
+        let models = m.go_models();
+        std::env::remove_var("PINNED_OPENCODE_GO_MODELS_BASE");
+        let listed: Vec<(&str, bool)> = models.iter().map(|model| (model.slug.as_str(), model.free)).collect();
+        assert_eq!(listed, [("qwen4-max", false), ("beam-free", true)], "the cached list answers with the gateway down");
+        assert_eq!(models[0].efforts, ["low", "high", "xhigh"], "the cached list was filtered before it was written");
         let _ = std::fs::remove_dir_all(root);
     }
 

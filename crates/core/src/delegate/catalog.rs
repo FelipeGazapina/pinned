@@ -1,9 +1,7 @@
 use super::*;
 
-use crate::claude_models::ClaudeModel;
+use crate::claude_models::{ClaudeModel, CLAUDE_EFFORT};
 
-/// The levels `claude --effort` takes; the composer's ultracode and ultrathink are not among them.
-const CLAUDE_EFFORT: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 const CURSOR_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "fast"];
 
 /// What a model costs to run, coarsely: routing by tier beats stale per-token prices.
