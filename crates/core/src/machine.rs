@@ -16337,7 +16337,7 @@ Have another model review a risky change before it goes ahead.";
         std::fs::write(config.join("usage-model-rates.json"), r#"{"glm-5.3": {"input_cost_per_token": 0.2e-6, "output_cost_per_token": 0.8e-6}}"#).unwrap();
         assert_eq!(
             refused(&m, &captain, work(Some("mystery-9"), None)),
-            "mystery-9 has no price, so a worker on it can't be held to this project's budget. Set one in Settings › Usage › Model prices, or set the budget to 0"
+            "mystery-9 has no price, so a worker on it can't be held to this project's budget. Set one in Settings › Usage › Model prices, or set the budget to 0."
         );
         std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-sonnet-5-5":{"input":3,"output":15}}}"#).unwrap();
         let priced_table = delegate_task(&m, &captain, work(Some("glm-5.3"), None));
@@ -16358,7 +16358,7 @@ Have another model review a risky change before it goes ahead.";
         std::fs::write(config.join("usage-model-rates.json"), "{}").unwrap();
         assert_eq!(
             refused(&m, &captain, work(Some("claude-sonnet-5-5"), None)),
-            "claude-sonnet-5-5 has no price, so a worker on it can't be held to this project's budget. Set one in Settings › Usage › Model prices, or set the budget to 0. The price list could not be loaded, so no model has a price"
+            "claude-sonnet-5-5 has no price, so a worker on it can't be held to this project's budget. Set one in Settings › Usage › Model prices, or set the budget to 0. The price list could not be loaded, so no model has a price."
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -16370,7 +16370,7 @@ Have another model review a risky change before it goes ahead.";
         let config = dir.join("config");
         std::fs::write(config.join("usage-model-rates.json"), r#"{"claude-sonnet-5-5": {"input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6}}"#).unwrap();
         let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
-        let refusal = "mystery-9 has no price, so a worker on it can't be held to this project's budget. Set one in Settings › Usage › Model prices, or set the budget to 0";
+        let refusal = "mystery-9 has no price, so a worker on it can't be held to this project's budget. Set one in Settings › Usage › Model prices, or set the budget to 0.";
         let run_now = |spec: RunSpec| m.call(Call::RunNow { run: spec, title: "Nightly · Run now".into() });
         assert_eq!(run_now(run_now_spec(&path, "mystery-9", "auto")), Err(refusal.into()));
         let tab: String = serde_json::from_value(run_now(run_now_spec(&path, "claude-sonnet-5-5", "auto")).unwrap()).unwrap();
