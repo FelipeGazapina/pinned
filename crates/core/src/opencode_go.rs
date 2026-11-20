@@ -209,10 +209,14 @@ pub fn fetch_models() -> Result<Vec<crate::claude_models::ClaudeModel>, String> 
     Ok(models)
 }
 
-/// Reads a cached gateway list, when it parses.
+/// Reads a cached gateway list, when it parses. A cache written before the efforts were filtered
+/// still lists `none` and `minimal`, so the read drops them too.
 pub fn load_cached(path: &std::path::Path) -> Option<Vec<crate::claude_models::ClaudeModel>> {
     let body = std::fs::read(path).ok()?;
-    let models: Vec<crate::claude_models::ClaudeModel> = serde_json::from_slice(&body).ok()?;
+    let mut models: Vec<crate::claude_models::ClaudeModel> = serde_json::from_slice(&body).ok()?;
+    for model in &mut models {
+        model.efforts.retain(|e| CLAUDE_EFFORT.contains(&e.as_str()));
+    }
     (!models.is_empty()).then_some(models)
 }
 
@@ -515,6 +519,8 @@ mod tests {
         let cached = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(cached.path(), serde_json::to_vec(&models).unwrap()).unwrap();
         assert_eq!(load_cached(cached.path()).unwrap().len(), 5);
+        std::fs::write(cached.path(), r#"[{"slug":"old-cache","name":"Old Cache","efforts":["none","minimal","high"],"context":1000000,"cost":"high"}]"#).unwrap();
+        assert_eq!(load_cached(cached.path()).unwrap()[0].efforts, ["high"], "a cache written before the filter drops none and minimal too");
         assert_eq!(load_cached(std::path::Path::new("/nonexistent-pinned-go-models.json")), None);
     }
 
