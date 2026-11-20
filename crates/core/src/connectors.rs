@@ -5884,6 +5884,30 @@ impl Connectors {
         run.log.iter().any(|entry| entry.what.get("reply").is_some() || entry.what.get("page").is_some())
     }
 
+    /// The open failed after `posted_in_thread`. The subject stays claimed.
+    /// A box that failed to boot is marked the way `unclaim` marks it, without freeing the subject:
+    /// this run retries the open once, and a later boot failure inside `BOX_RELEASE_WINDOW_MS`
+    /// stops the run. The boot marker is consumed either way, so a later `unclaim` cannot spend it.
+    fn posted_open_failed(&self, connector: &str, subject: &Subject, folder: &Path, why: &str) -> String {
+        let booted = self.boot_failed.lock().unwrap().remove(&subject_key(subject));
+        let again = format!("{TRY_OPEN_AGAIN}could not open a session in {}: {why}; the next check tries again", folder.display());
+        if !booted {
+            return again;
+        }
+        let now = unix_millis();
+        let key = subject_key(subject);
+        let mut store = self.store.lock().unwrap();
+        let live = box_release_is_live(store.box_released_at.get(connector).and_then(|keys| keys.get(&key)).copied(), now);
+        if live {
+            return format!("could not open a session in {}: {why}; its box failed before, so it starts again only when you run it", folder.display());
+        }
+        store.box_released_at.entry(connector.to_owned()).or_default().insert(key, now);
+        match self.save(&store) {
+            Ok(()) => again,
+            Err(e) => format!("{again}; {e}"),
+        }
+    }
+
     async fn perform_open<F, Fut, R>(&self, run: &runner::Run, owner: &str, prompt: &str, seeded: bool, session: &SessionSetup, library: &runner::Library, open: &F) -> Result<Supplied, String>
     where
         F: Fn(Work) -> Fut,
@@ -5942,7 +5966,7 @@ impl Connectors {
             // check treat the same message as new and post that reply again.
             Err(why) if Self::posted_in_thread(run) => {
                 self.restore_inbox(inbox);
-                Err(format!("{TRY_OPEN_AGAIN}could not open a session in {}: {why}; the next check tries again", folder.display()))
+                Err(self.posted_open_failed(owner, &run.subject, &folder, &why))
             }
             Err(why) => {
                 self.restore_inbox(inbox);
@@ -12764,6 +12788,8 @@ mod tests {
         let _api = slack::lock_api();
         let _restore = RestoreSlack;
         let _model = TestReply::set(r#"{"kind":"bug"}"#.into());
+        // An earlier test that held this gate can leave its model input in the process buffer.
+        crate::vercel::take_test_inputs();
         install_rustls();
         let now = Utc::now();
         let ago = |seconds: i64| slack_ts(now - chrono::Duration::seconds(seconds));
@@ -12822,6 +12848,7 @@ mod tests {
             assert_eq!(subject_key(&runs[0].subject), key);
         }
         assert_eq!(connectors.store.lock().unwrap().connectors[0].handled, [key.as_str()]);
+        assert!(marked_subjects(&connectors).is_empty(), "an open that is not a failed boot writes no release mark");
 
         thread.push(slack_message(&ago(30), &parent, "U1", "any update?"));
         publish(&thread);
@@ -12837,6 +12864,78 @@ mod tests {
         assert_eq!(third.error, None, "{third:?}");
         assert_eq!(posts(), 1, "opening the session still does not post the acknowledgement again");
         assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Waiting), "{:?}", connectors.runs.lock().unwrap()[0].status);
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A failed box boot after the acknowledgement still retries this run once. The thread stays
+    /// claimed, so the graph does not start over. The next boot failure inside 30 days stops the
+    /// run. An open failure that is not a boot, in between, does not spend that retry.
+    #[test]
+    fn a_posted_reply_retries_one_failed_box_boot_and_keeps_the_thread() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        let _model = TestReply::set(r#"{"kind":"bug"}"#.into());
+        crate::vercel::take_test_inputs();
+        install_rustls();
+        let now = Utc::now();
+        let ago = |seconds: i64| slack_ts(now - chrono::Duration::seconds(seconds));
+        let parent = ago(180);
+        let thread = vec![
+            slack_message(&parent, &parent, "U1", "<@UBOT> the export is broken"),
+            slack_message(&ago(120), &parent, "U2", "same on my side"),
+        ];
+        let channel = std::sync::Arc::new(Mutex::new(Value::Null));
+        *channel.lock().unwrap() = json!({ "history": [thread_root(&thread)], "threads": { parent.clone(): thread } });
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let root = serve_channel_and_linear(seen.clone(), stop.clone(), channel.clone());
+        slack::set_api_root(Some(root));
+        let mut router = ticket_router();
+        router.since = (now - chrono::Duration::minutes(10)).to_rfc3339();
+        {
+            let graph = router.graph.as_mut().unwrap();
+            graph.nodes.push(node("ack", "Acknowledge", NodeKind::Reply { text: "Thanks, this looks like a bug.".into() }));
+            graph.edges = vec![edge("t", "out", "route"), edge("route", "bug", "ack"), edge("ack", "out", "session")];
+        }
+        let (connectors, dir) = stored("ack-boot-once", vec![router]);
+        for (name, key) in [("slack-key", "xoxb-test"), ("vercel-key", "vck-test")] {
+            std::fs::write(dir.join(name), key).unwrap();
+        }
+        connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
+        connectors.channels.lock().unwrap().insert(("UBOT".into(), "#support".into()), "C0123ABCD".into());
+        let open = |work: Work| {
+            let _ = work;
+            async { Err::<Option<Placement>, String>("Upstash Box: the box did not connect within 5 min".to_owned()) }
+        };
+        let posts = || seen.lock().unwrap().iter().filter(|request| request.contains("/chat.postMessage")).count();
+        let key = format!("C0123ABCD:{parent}");
+        let subject = Subject::SlackThread { channel: "C0123ABCD".into(), thread: parent.clone() };
+
+        connectors.box_boot_failed(&subject);
+        let first = block_on(connectors.check_once(&open));
+        assert!(first.error.as_deref().is_some_and(|error| error.contains("the next check tries again")), "{first:?}");
+        assert_eq!(posts(), 1, "the acknowledgement posts once");
+        assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Running), "{:?}", connectors.runs.lock().unwrap()[0].status);
+        assert_eq!(connectors.store.lock().unwrap().connectors[0].handled, [key.as_str()]);
+        assert_eq!(marked_subjects(&connectors), BTreeMap::from([("c2".to_owned(), vec![key.clone()])]));
+
+        // The boot marker was consumed. This open is not a boot, so the run keeps retrying.
+        let between = block_on(connectors.check_once(&open));
+        assert!(between.error.as_deref().is_some_and(|error| error.contains("the next check tries again")), "{between:?}");
+        assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Running), "{:?}", connectors.runs.lock().unwrap()[0].status);
+        assert_eq!(posts(), 1);
+
+        connectors.box_boot_failed(&subject);
+        let second = block_on(connectors.check_once(&open));
+        assert!(
+            second.error.as_deref().is_some_and(|error| error.contains("its box failed before, so it starts again only when you run it")),
+            "{second:?}"
+        );
+        assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Failed { .. }), "{:?}", connectors.runs.lock().unwrap()[0].status);
+        assert_eq!(connectors.store.lock().unwrap().connectors[0].handled, [key.as_str()], "the thread stays claimed");
+        assert_eq!(posts(), 1, "stopping the run does not post the acknowledgement again");
+        assert_eq!(connectors.runs.lock().unwrap().len(), 1);
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = std::fs::remove_dir_all(dir);
     }
