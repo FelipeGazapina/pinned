@@ -363,6 +363,16 @@ fn price(row: &mut Row, table: &RateTable, prices: &HashMap<String, Price>) {
     row.cost = Some(listed);
 }
 
+/// Whether `price` would price `model`: the user's book first, then the downloaded table, with
+/// the book's aliases applied. The dispatch guard and the meter agree with `price` through this,
+/// so a model they let run is one `price` prices, model for model.
+pub fn priced(model: &str, book: &PriceBook, table: &RateTable) -> bool {
+    let targets = book.targets();
+    let model = model.trim();
+    let target = targets.get(model).map_or(model, |&target| target);
+    book.prices.get(target).is_some() || lookup(table, target).is_some()
+}
+
 fn lookup(table: &RateTable, model: &str) -> Option<ModelRate> {
     let key = model.trim().to_lowercase();
     let key = key.split('[').next().unwrap_or_default();
@@ -632,6 +642,24 @@ mod tests {
 
     fn assistant(id: &str, request: &str, session: &str, at: &str, model: &str, usage: Value) -> String {
         json!({ "type": "assistant", "timestamp": at, "sessionId": session, "requestId": request, "message": { "id": id, "model": model, "role": "assistant", "content": [], "usage": usage } }).to_string()
+    }
+
+    #[test]
+    fn the_guard_accepts_exactly_the_models_price_prices() {
+        let mut book = PriceBook::default();
+        book.prices.insert("my-own-model".to_owned(), Price { input: 1.0, output: 2.0, cache_read: None, cache_write: None });
+        book.aliases.insert("my-alias".to_owned(), "claude-opus-5-5".to_owned());
+        book.aliases.insert("my-dead-alias".to_owned(), "nowhere".to_owned());
+        let table = table();
+        for model in ["claude-opus-5-5", "anthropic/claude-haiku-5", "claude-haiku-5", "half-priced", "my-own-model", "My-Own-Model ", "my-alias", "claude-opus-5-5[1m]", "opus", "glm-5.3", "", "my-dead-alias"] {
+            let targets = book.targets();
+            let target = targets.get(model.trim()).map_or(model.trim(), |&target| target).to_owned();
+            let mut row = Row { at: 0, model: target, session: 0, speed: Speed::Standard, input: 1, cached: 0, cache_write: 0, output: 1, cost: None, premium: 0.0, savings: 0.0 };
+            price(&mut row, &table, &book.prices);
+            assert_eq!(row.cost.is_some(), priced(model, &book, &table), "{model}: the guard and price() disagree");
+        }
+        assert!(priced("my-own-model", &book, &table) && priced("claude-opus-5-5", &PriceBook::default(), &table), "a model priced only in the book, and one priced only in the table, are both admitted");
+        assert!(!priced("glm-5.3", &book, &table), "an unpriced model is not");
     }
 
     #[test]

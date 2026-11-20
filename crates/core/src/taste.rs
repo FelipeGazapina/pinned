@@ -571,10 +571,18 @@ impl Limits {
         u64::from(self.time_limit_min) * 60_000
     }
 
-    /// Why a worker that spent `cost_usd` must stop, if it passed the budget.
-    pub fn over_budget(&self, cost_usd: Option<f64>) -> Option<String> {
-        let spent = cost_usd?;
-        (self.budget_cents > 0 && spent * 100.0 >= f64::from(self.budget_cents)).then(|| format!("pinned stopped it after it spent US$ {spent:.2}, its budget of {}", usd(self.budget_cents)))
+    /// Why a worker that spent `cost_usd` must stop, if it passed the budget — or one whose spend
+    /// can't be known at all: a cap that can't be seen can't hold, so it stops instead of running
+    /// free in silence. `model` is the one it ran on, when its record names it.
+    pub fn over_budget(&self, cost_usd: Option<f64>, model: Option<&str>) -> Option<String> {
+        if self.budget_cents == 0 {
+            return None;
+        }
+        let Some(spent) = cost_usd else {
+            let model = model.filter(|m| !m.is_empty()).unwrap_or("its model");
+            return Some(format!("{model} has no price, so pinned can't hold it to its budget of {}. Set one in Settings › Usage › Model prices, or set the budget to 0", usd(self.budget_cents)));
+        };
+        (spent * 100.0 >= f64::from(self.budget_cents)).then(|| format!("pinned stopped it after it spent US$ {spent:.2}, its budget of {}", usd(self.budget_cents)))
     }
 
     /// A box's budget in USD: the one asked for, at most the box budget, which is also the default.
@@ -615,7 +623,7 @@ impl Limits {
     }
 }
 
-fn usd(cents: u32) -> String {
+pub(crate) fn usd(cents: u32) -> String {
     format!("US$ {}.{:02}", cents / 100, cents % 100)
 }
 
@@ -1719,10 +1727,16 @@ Deploys go through the VPS."
             tight.hint(),
             "pinned enforces these delegation limits on delegate_task: one worker at a time, models up to the low tier, effort up to medium (low when a call names none), 45 minutes per worker, US$ 1.50 per worker, US$ 10.00 per box. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it. The tier covers the model each worker runs on, not the models it picks for its own subagents."
         );
-        assert_eq!(tight.over_budget(Some(1.49)), None);
-        assert_eq!(tight.over_budget(None), None, "an unpriced worker can't be held to a budget");
-        assert_eq!(tight.over_budget(Some(1.5)), Some("pinned stopped it after it spent US$ 1.50, its budget of US$ 1.50".into()));
-        assert_eq!(Limits::default().over_budget(Some(1000.0)), None, "no budget, no stop");
+        assert_eq!(tight.over_budget(Some(1.49), None), None);
+        assert_eq!(
+            tight.over_budget(None, Some("glm-5.3")),
+            Some("glm-5.3 has no price, so pinned can't hold it to its budget of US$ 1.50. Set one in Settings › Usage › Model prices, or set the budget to 0".into()),
+            "a spend that can't be known stops the run instead of leaving it with no cap"
+        );
+        assert_eq!(tight.over_budget(None, None), Some("its model has no price, so pinned can't hold it to its budget of US$ 1.50. Set one in Settings › Usage › Model prices, or set the budget to 0".into()));
+        assert_eq!(tight.over_budget(Some(1.5), None), Some("pinned stopped it after it spent US$ 1.50, its budget of US$ 1.50".into()));
+        assert_eq!(Limits::default().over_budget(Some(1000.0), None), None, "no budget, no stop");
+        assert_eq!(Limits::default().over_budget(None, None), None, "no budget, an unknown spend stops nothing");
     }
 
     #[test]
