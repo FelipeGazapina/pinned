@@ -61,6 +61,7 @@ pub mod reminders;
 pub mod repo_look;
 pub mod reports;
 pub mod reviewer;
+pub mod room;
 pub mod scaffold;
 pub mod schedule;
 pub mod scripts;

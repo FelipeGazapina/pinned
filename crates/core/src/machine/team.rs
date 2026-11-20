@@ -15,6 +15,11 @@ impl Machine {
             TeamTool::BoardNote(call) => self.board_note(tab, task, call),
             TeamTool::BoardRead(call) => self.board_read(tab, task, call),
             TeamTool::AskWorker(call) => self.ask_worker(tab, task, call),
+            TeamTool::RoomOpen(call) => self.room_open(tab, call),
+            TeamTool::RoomPost(call) => self.room_post(tab, task, call),
+            TeamTool::RoomRead(call) => self.room_read(tab, task, call),
+            TeamTool::RoomDone(call) => self.room_done(tab, task, call),
+            TeamTool::RoomClose(call) => self.room_close(tab, task, call),
         }
     }
 }
@@ -63,6 +68,9 @@ mod tests {
     fn every_team_tool_answers_that_it_is_not_available_yet() {
         let m = Machine::new(launch(), None, None, |_| {});
         for name in crate::team_tools::NAMES {
+            if name.starts_with("room_") {
+                continue;
+            }
             let args = match name {
                 "task_fix" | "board_read" => json!({ "taskId": "t1" }),
                 "feature_map_set" => json!({ "feature": "login", "files": [] }),
@@ -74,5 +82,9 @@ mod tests {
             let tool = crate::team_tools::request(name, &args).unwrap();
             assert_eq!(m.team_tool(Some("tab-1"), None, tool), Err(format!("{name} is not available in this build")));
         }
+        let opened = crate::team_tools::request("room_open", &json!({ "brief": "Fix it.", "seats": [{ "name": "Ana" }, { "name": "Beto" }] })).unwrap();
+        let err = m.team_tool(Some("tab-1"), None, opened).unwrap_err();
+        assert!(!err.contains("not available"), "{err}");
+        assert!(err.contains("no tab") || err.contains("Captain"), "{err}");
     }
 }

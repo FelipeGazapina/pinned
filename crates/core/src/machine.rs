@@ -27,6 +27,7 @@ mod feature_map;
 mod profiles;
 mod propose;
 mod reviewer;
+mod room;
 mod send_back;
 mod team;
 
@@ -1093,6 +1094,11 @@ pub struct Machine {
     model_menu: Mutex<Vec<crate::claude_models::MenuRow>>,
     setup_tokens: crate::setup_token::SetupTokens,
     model_menu_file: Option<PathBuf>,
+    /// The last OpenCode Go gateway model list, kept in `go_models_file`. Refreshed in the
+    /// background so new gateway models show up without a pinned release.
+    go_models: Mutex<Vec<crate::claude_models::ClaudeModel>>,
+    go_models_at: Mutex<Option<Instant>>,
+    go_models_file: Option<PathBuf>,
     /// The review guides claude wrote for pull requests.
     guides: PathBuf,
     shells: Shells,
@@ -1158,6 +1164,8 @@ pub struct Machine {
     questions: Mutex<crate::questions::Questions>,
     /// Every Captain session's plans, by its Claude session id.
     plans: Mutex<crate::plan_store::PlanStore>,
+    /// Shared threads. The lock is taken before `tabs`, and never across a start, a delivery or an emit.
+    rooms: Mutex<crate::room::Store>,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
@@ -1363,6 +1371,7 @@ impl Machine {
             sent: Mutex::new(sent),
             questions: Mutex::new(crate::questions::Questions::load(dir.as_deref())),
             plans: Mutex::new(crate::plan_store::PlanStore::load(dir.as_deref())),
+            rooms: Mutex::new(crate::room::Store::load(dir.as_deref())),
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
             next_listener: AtomicU64::new(1),
@@ -1374,6 +1383,7 @@ impl Machine {
             hub_name: Mutex::default(),
             window: std::sync::OnceLock::new(),
         });
+        machine.reconcile_rooms();
         machine.start_auto_archive();
         machine
     }
@@ -1686,7 +1696,14 @@ impl Machine {
                 Ok(json!(views))
             }
             Call::Board { tab, task } => json(self.board(&tab, task.as_deref())?),
-            Call::Prompt { tab, text } => json(self.type_line(&tab, &text, true).map_err(NotTyped::for_person)?),
+            Call::Prompt { tab, text } => {
+                if self.is_room_tab(&tab) {
+                    self.room_user_post(&tab, &text)?;
+                    json(())
+                } else {
+                    json(self.type_line(&tab, &text, true).map_err(NotTyped::for_person)?)
+                }
+            }
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
                 json(workspace::Workspace { scratch: cwd == self.scratch, ..workspace::of(&cwd) })
@@ -1980,6 +1997,9 @@ impl Machine {
     /// `Call::Thread`: from byte `from` on, or with `limit` the newest turns before `before`, read
     /// back from there. A page holds at most `THREAD_PAGE_MAX` items asked for.
     pub fn thread_page(&self, tab: &str, from: u64, limit: Option<u32>, before: Option<u64>) -> Result<ThreadPage, String> {
+        if self.is_room_tab(tab) {
+            return self.room_page(tab, from, limit, before);
+        }
         let (session, process) = self.tab(tab, |t| (t.claude_session.clone(), t.session.as_ref().and(t.started)))?;
         let Some(file) = self.transcript_of(tab)? else {
             let start = limit.map(|_| 0);
@@ -2583,6 +2603,10 @@ impl Machine {
     }
 
     fn launch_tab(&self, tab: &str, cols: u16, rows: u16, replace: bool) -> Result<String, String> {
+        // A room thread is the shared log. It has no Claude session to start.
+        if self.is_room_tab(tab) {
+            return self.tab(tab, |t| t.cwd.display().to_string());
+        }
         // A headless child's thread has no session of its own while the child works.
         if self.thread_task(tab, false).is_some_and(|task| self.delegates.get(&task).is_some_and(|t| t.thread.is_some_and(|thread| !thread.runs))) {
             return self.tab(tab, |t| t.cwd.display().to_string());
@@ -4956,6 +4980,7 @@ impl Machine {
         // A reloaded webview must not duplicate the tabs that are already open.
         let Some(file) = self.sessions_file.as_ref().filter(|_| self.tabs.lock().unwrap().is_empty()) else {
             self.delegates.end_unresumed();
+            self.reopen_rooms();
             return vec![];
         };
         let now = unix_now();
@@ -5009,6 +5034,7 @@ impl Machine {
         if self.delegates.has_pending() {
             self.arm_delegate_pass();
         }
+        self.reopen_rooms();
         ids
     }
 
@@ -6236,6 +6262,7 @@ impl Machine {
             }
         });
         self.delegates.link_thread(child.task, crate::delegate::Thread { tab: id.clone(), runs: true });
+        self.note_room_env(&id, child.task);
         if let Err(error) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
             self.delegates.fail(child.task, error.clone(), self.launch.path_env.as_deref());
             self.close_tab(&id);
@@ -6304,6 +6331,12 @@ impl Machine {
         // A cap the finished turn crossed ended the task with this reply; the pass delivers its notice.
         if self.delegates.is_terminal(&task) {
             self.arm_delegate_pass();
+            return true;
+        }
+        // A room seat outlives the first turn. room_done, a failed turn, or the room closing ends it.
+        if let Some(message) = error.as_deref() {
+            self.room_seat_failed(&task, message);
+        } else if self.room_keeps_seat(&task) {
             return true;
         }
         if error.is_none() && self.review_turn_end(&task, tab) {
