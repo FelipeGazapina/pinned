@@ -21,17 +21,18 @@ const filed = () => ({
     unsettled: { "session:s3": 1700000200 },
     snoozed: { "session:s5": { until: 1700090000, at: 1700000300, limit: 1700090000 } },
     titles: { "session:s1": "Fix login" },
+    selfTitles: { "session:s2": { text: "Libera o formulário", author: "captain", at: 1700000700 } },
     noAutoSettle: { "session:s2": true },
   },
   seenAt: { "session:s1": 1700000400, "session:s3": 1700000500 },
   archived: [{ machine: "m1", cwd: "/w/site", name: "Old work", project: "site", at: 1700000600, created: 1699990000, title: "Old work", pinned: true, session: "s6" }],
 });
-const blank = () => ({ sideMarks: { pins: [], order: [], settled: {}, unsettled: {}, snoozed: {}, titles: {}, noAutoSettle: {} }, seenAt: {}, archived: [] });
+const blank = () => ({ sideMarks: { pins: [], order: [], settled: {}, unsettled: {}, snoozed: {}, titles: {}, selfTitles: {}, noAutoSettle: {} }, seenAt: {}, archived: [] });
 
 test("the sidebar's marks become one hub row per session and come back the same", () => {
   assert.deepEqual(rowsOf(filed()), {
     s1: { session: "s1", title: "Fix login", pin: 1, seen: 1700000400 },
-    s2: { session: "s2", pin: 0, no_auto_settle: true },
+    s2: { session: "s2", pin: 0, no_auto_settle: true, self_title: { text: "Libera o formulário", author: "captain", at: 1700000700 } },
     s3: { session: "s3", order: 0, unsettled: 1700000200, seen: 1700000500 },
     s4: { session: "s4", settled: 1700000100.5 },
     s5: { session: "s5", snoozed: { until: 1700090000, at: 1700000300, limit: 1700090000 } },
@@ -46,6 +47,12 @@ test("a rename is one title change", () => {
   assert.deepEqual(changes(filed(), renamed), [{ session: "s1", mark: { title: "x" } }]);
 });
 
+test("a session naming itself is one self_title change, never a title change", () => {
+  const named = filed();
+  named.sideMarks.selfTitles["session:s2"] = { text: "Libera o rodapé", author: "captain", at: 1700000800 };
+  assert.deepEqual(changes(filed(), named), [{ session: "s2", mark: { self_title: { text: "Libera o rodapé", author: "captain", at: 1700000800 } } }]);
+});
+
 test("reordering the pins moves each pin that changed place", () => {
   const reordered = filed();
   reordered.sideMarks.pins = ["session:s1", "session:s2"];
@@ -57,7 +64,7 @@ test("reordering the pins moves each pin that changed place", () => {
 
 test("closing a thread clears its row, and the pins after it move up", () => {
   const closed = filed();
-  for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) delete closed.sideMarks[m]["session:s2"];
+  for (const m of ["settled", "unsettled", "snoozed", "titles", "selfTitles", "noAutoSettle"]) delete closed.sideMarks[m]["session:s2"];
   for (const m of ["pins", "order"]) closed.sideMarks[m] = closed.sideMarks[m].filter((k) => k !== "session:s2");
   assert.deepEqual(changes(filed(), closed), [
     { session: "s2", mark: "clear" },

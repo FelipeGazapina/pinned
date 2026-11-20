@@ -255,18 +255,66 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_may_not_archive_or_clear_through_marks() {
+    fn an_agent_may_not_archive_clear_or_write_the_users_own_title() {
         let refused = Err("mark_sessions sets no archived mark and no clear for an agent: call archive_session, unarchive_session or delete_session".to_string());
+        let no_title = Err("mark_sessions writes no user title for an agent: name your own session with set_session_title".to_string());
         let asked = |changes: Vec<MarkChange>| Parsed::Hub(HubCall::MarkSessions { changes });
         assert_eq!(agent_check(&asked(vec![change("s1", Mark::Title(Some("Fix login".into()))), change("s1", Mark::Clear)])), refused);
         assert_eq!(agent_check(&asked(vec![change("s1", Mark::Archived(None))])), refused);
+        assert_eq!(agent_check(&asked(vec![change("s1", Mark::Title(Some("Fix login".into())))])), no_title);
+        assert_eq!(
+            agent_check(&asked(vec![change("s1", Mark::SelfTitle(Some(SelfTitle { text: "Libera o formulário".into(), author: "captain".into(), at: 1.0 })))])),
+            Ok(())
+        );
         assert_eq!(agent_check(&asked(vec![change("s1", Mark::Seen(None)), change("s1", Mark::Pin(Some(0)))])), Ok(()));
         assert_eq!(agent_check(&asked(vec![change("", Mark::Seen(None))])), Err("a mark needs a session id".into()));
         assert_eq!(agent_check(&Parsed::Hub(HubCall::SessionMarks)), Ok(()));
     }
 
     #[test]
+    fn a_self_title_reads_as_the_mark_it_sets_and_old_marks_load_without_it() {
+        let parsed: Vec<MarkChange> = serde_json::from_value(json!([
+            { "session": "s1", "mark": { "self_title": { "text": "Libera o formulário", "author": "captain", "at": 1700000000.0 } } },
+            { "session": "s1", "mark": { "self_title": null } },
+        ]))
+        .unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                change("s1", Mark::SelfTitle(Some(SelfTitle { text: "Libera o formulário".into(), author: "captain".into(), at: 1700000000.0 }))),
+                change("s1", Mark::SelfTitle(None)),
+            ]
+        );
+        let old: SessionMarks = serde_json::from_value(json!({ "session": "s1", "title": "Fix login" })).unwrap();
+        assert_eq!(old, SessionMarks { title: Some("Fix login".into()), ..SessionMarks::new("s1") }, "a row written before self titles loads with none");
+    }
+
+    #[test]
+    fn a_self_title_never_overwrites_the_users_own_title() {
+        let mut rows = BTreeMap::new();
+        apply(&mut rows, vec![
+            change("s1", Mark::Title(Some("Nome que eu dei".into()))),
+            change("s1", Mark::SelfTitle(Some(SelfTitle { text: "Libera o formulário".into(), author: "captain".into(), at: 1.0 }))),
+        ]);
+        let row = &rows[&"s1".to_string()];
+        assert_eq!(row.title.as_deref(), Some("Nome que eu dei"), "the user's own title survives a session naming itself");
+        assert_eq!(row.self_title.as_ref().unwrap().text, "Libera o formulário");
+        let rebuilt = apply(&mut rows, rows[&"s1".to_string()].rebuild());
+        assert_eq!(rebuilt[0].title.as_deref(), Some("Nome que eu deu"));
+        assert_eq!(rebuilt[0].self_title.as_ref().unwrap().text, "Libera o formulário");
+    }
+
+    #[test]
+    fn a_literal_title_is_one_trimmed_line_without_emoji() {
+        assert_eq!(clean_title("  Libera o formulário  \nsegunda linha\n"), "Libera o formulário");
+        assert_eq!(clean_title(&"x".repeat(100)), "x".repeat(70));
+        assert_eq!(clean_title("Ship 🚀"), "Ship");
+        assert_eq!(clean_title(""), "");
+    }
+
+    #[test]
     fn overlong_text_and_missing_ids_are_refused() {
+        assert_eq!(check(&[change("s1", Mark::SelfTitle(Some(SelfTitle { text: "x".repeat(MAX_TEXT + 1), author: "captain".into(), at: 0.0 })))]), Err(format!("a mark's text may be at most {MAX_TEXT} bytes")));
         assert_eq!(check(&[change("", Mark::Clear)]), Err("a mark needs a session id".into()));
         assert_eq!(check(&[change("s1", Mark::Title(Some("x".repeat(MAX_TEXT + 1))))]), Err(format!("a mark's text may be at most {MAX_TEXT} bytes")));
         assert_eq!(check(&vec![change("s1", Mark::Clear); MAX_CHANGES + 1]), Err(format!("make at most {MAX_CHANGES} mark changes at once")));

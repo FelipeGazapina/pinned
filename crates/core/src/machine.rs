@@ -13552,6 +13552,59 @@ while True:
 
     #[test]
     #[cfg(unix)]
+    fn a_capitao_names_its_own_thread_and_a_request_that_carries_a_title_names_it_first() {
+        let dir = temp("captain-title");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+        m.tab(&tab, |t| t.claude_session = Some("sess-1".into())).unwrap();
+
+        let written: Arc<Mutex<Vec<crate::marks::MarkChange>>> = Arc::new(Mutex::new(vec![]));
+        let seen = written.clone();
+        m.set_hub(Arc::new(move |call| {
+            if let HubCall::MarkSessions { changes } = call {
+                seen.lock().unwrap().extend(changes);
+            }
+            Ok(json!([]))
+        }));
+        let act = |call: Value| m.call(Call::ActFor { caller: tab.clone(), call });
+
+        assert_eq!(act(json!({ "cmd": "set_session_title", "tab": tab, "title": "  Libera o formulário\nsegunda linha" })), Ok(json!("Libera o formulário")));
+        {
+            let rows = written.lock().unwrap();
+            let crate::marks::Mark::SelfTitle(Some(title)) = &rows[0].mark else { panic!("no self title written: {:?}", rows[0].mark) };
+            assert_eq!((rows[0].session.as_str(), title.text.as_str(), title.author.as_str()), ("sess-1", "Libera o formulário", "captain"));
+        }
+
+        let other = m.open_tab(Some(path.clone()), false).unwrap();
+        assert_eq!(
+            act(json!({ "cmd": "set_session_title", "tab": other, "title": "x" })),
+            Err(format!("set_session_title names a session's own title: {other} is not your session"))
+        );
+
+        m.record_event(hook(&tab, AgentStatus::Working));
+        let request = Call::Enqueue { path: path.clone(), text: "Then the footer.".into(), request_id: "r-1".into(), sender: String::new(), busy: Some(BusyPolicy::Queue), title: None };
+        assert_eq!(m.call(request).unwrap()["outcome"], json!("na_fila"));
+        let (line, _) = m.delegates.claim_notice(&tab).unwrap();
+        assert!(line.ends_with("Renomeie a sua sessão para o que você vai fazer agora, com set_session_title."), "{line}");
+
+        let titled = Call::Enqueue { path: path.clone(), text: "Ship the form.".into(), request_id: "r-2".into(), sender: String::new(), busy: Some(BusyPolicy::Queue), title: Some("  Libera o formulário 🚀\nsegunda linha".into()) };
+        assert_eq!(m.call(titled).unwrap()["outcome"], json!("na_fila"));
+        let (line, _) = m.delegates.claim_notice(&tab).unwrap();
+        assert!(!line.contains("Renomeie"), "a request that carries a title needs no instruction: {line}");
+        {
+            let rows = written.lock().unwrap();
+            let crate::marks::Mark::SelfTitle(Some(title)) = &rows[1].mark else { panic!("no self title written on delivery: {:?}", rows[1].mark) };
+            assert_eq!((title.text.as_str(), title.author.as_str()), ("Libera o formulário", "auto"), "delivery writes the suggested title, cleaned to one line");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn the_global_orchestrator_opens_once_in_its_own_folder_which_is_no_project_but_keeps_memory() {
         let dir = temp("global-tab");
         let project = dir.join("site");
