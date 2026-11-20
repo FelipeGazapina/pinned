@@ -30,6 +30,9 @@ pub struct ClaudeModel {
     /// Has a fast mode.
     #[serde(default)]
     pub fast: bool,
+    /// Costs nothing to run: a free gateway model. The picker draws it in a different color.
+    #[serde(default)]
+    pub free: bool,
 }
 
 /// A row of claude's /model menu that names a model: "Fable" picks Fable 5.2.
@@ -105,6 +108,7 @@ pub fn known() -> Vec<ClaudeModel> {
             legacy: k.menu.is_none(),
             new: k.new,
             fast: k.fast,
+            free: false,
         })
         .collect()
 }
@@ -130,7 +134,7 @@ pub fn merged(known: Vec<ClaudeModel>, menu: &[MenuRow]) -> Vec<ClaudeModel> {
             .position(|m| m.menu.as_deref() == Some(row.menu.as_str()))
             .or_else(|| list.iter().position(|m| m.slug.starts_with(&family)));
         let model = match like.map(|at| &list[at]) {
-            Some(like) => ClaudeModel { slug, name: row.name(), menu: Some(row.menu.clone()), legacy: false, new: true, ..like.clone() },
+            Some(like) => ClaudeModel { slug, name: row.name(), menu: Some(row.menu.clone()), legacy: false, new: true, free: false, ..like.clone() },
             None => ClaudeModel {
                 slug: slug.clone(),
                 name: row.name(),
@@ -141,6 +145,7 @@ pub fn merged(known: Vec<ClaudeModel>, menu: &[MenuRow]) -> Vec<ClaudeModel> {
                 legacy: false,
                 new: true,
                 fast: false,
+                free: false,
             },
         };
         list.insert(like.unwrap_or(0), model);

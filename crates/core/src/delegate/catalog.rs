@@ -35,6 +35,9 @@ pub struct ModelChoice {
     pub label: String,
     pub efforts: Vec<String>,
     pub cost: Cost,
+    /// Costs nothing to run: the picker draws it in a different color.
+    #[allow(dead_code)]
+    pub free: bool,
 }
 
 pub fn provider_models(provider: Provider) -> Vec<ModelChoice> {
@@ -56,6 +59,7 @@ pub fn claude_choices(models: &[ClaudeModel]) -> Vec<ModelChoice> {
                 label: if m.legacy { format!("{name} (legacy)") } else { name.into() },
                 efforts: m.efforts.iter().filter(|e| CLAUDE_EFFORT.contains(&e.as_str())).cloned().collect(),
                 cost: m.cost,
+                free: m.free,
             }
         })
         .collect()
@@ -101,7 +105,7 @@ pub fn cursor_models(list: &str) -> Vec<ModelChoice> {
                     .position(|known| known == effort)
                     .unwrap_or(CURSOR_EFFORTS.len())
             });
-            ModelChoice { id: id.clone(), label, efforts, cost: cost_of(&id) }
+            ModelChoice { id: id.clone(), label, efforts, cost: cost_of(&id), free: false }
         })
         .collect()
 }
@@ -284,7 +288,7 @@ fn model_json(model: &ModelChoice) -> Value {
     } else {
         vec![json!({"id": "effort", "values": model.efforts, "default": null})]
     };
-    json!({"id": model.id, "label": model.label, "cost": model.cost.name(), "options": options})
+    json!({"id": model.id, "label": model.label, "cost": model.cost.name(), "free": model.free, "options": options})
 }
 
 pub fn codex_constraints() -> Vec<String> {

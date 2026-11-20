@@ -38,13 +38,13 @@ const CLAUDE_FALLBACK_MODELS = [
   { slug: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", menu: "Sonnet", efforts: NO_ULTRACODE, context: 1e6 },
   { slug: "claude-haiku-5-5", name: "Claude Haiku 5.5", menu: "Haiku", efforts: NO_ULTRACODE, context: 1e6, new: true },
 ];
-/** The OpenCode Go gateway's models and context windows, from `GET /inference/go/v1/models` on
- * 2026-11-02. They change with the gateway; keep this list in step with `opencode_go.rs`. Every
- * one is picked with `--model`, not Claude's own /model menu. */
+/** The OpenCode Go gateway's models and context windows, as a fallback when the machine has
+ * not sent its live list in `list_accounts` yet. The machine refreshes the live list from
+ * `GET /inference/go/v1/models` in the background, so new gateway models show up without a
+ * release. Every one is picked with `--model`, not Claude's own /model menu. */
 const OPENCODE_GO_MODELS = [
-  { slug: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", provider: "opencode-go", legacy: true, efforts: ["low", "high", "max"], context: 1e6 },
-  { slug: "deepseek-v4-pro", name: "DeepSeek V4 Pro (New)", provider: "opencode-go", legacy: true, efforts: ["high", "max"], context: 1e6 },
-  { slug: "glm-5.2", name: "GLM-5.2", provider: "opencode-go", legacy: true, efforts: ["high", "max"], context: 1e6 },
+  { slug: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash 1017", provider: "opencode-go", legacy: true, efforts: ["low", "high", "max"], context: 1e6 },
+  { slug: "deepseek-v4-pro", name: "DeepSeek V4 Pro", provider: "opencode-go", legacy: true, efforts: ["high", "max"], context: 1e6 },
   { slug: "glm-5.3", name: "GLM-5.3", provider: "opencode-go", legacy: true, efforts: ["low", "high", "max"], context: 1e6 },
   { slug: "grok-4.7", name: "Grok 4.7", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high", "xhigh"], context: 5e5 },
   { slug: "muse-spark-1.2-contributor", name: "Muse Spark 1.2 Contributor", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high", "xhigh"], context: 1048576 },
@@ -63,13 +63,17 @@ const OPENCODE_GO_MODELS = [
   { slug: "minimax-m3.1-flash", name: "MiniMax M3.1 Flash", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high", "xhigh", "max"], context: 1e6 },
   { slug: "longcat-2.0", name: "LongCat-2.0", provider: "opencode-go", legacy: true, efforts: [], context: 1e6 },
   { slug: "step-5-preview", name: "Step 5 Preview", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high"], context: 1e6 },
-  { slug: "beam-free", name: "Beam Free", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high", "xhigh", "max"], context: 1048576 },
+  { slug: "beam-free", name: "Beam Free", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high", "xhigh", "max"], context: 1048576, free: true },
   { slug: "qwen3.8-max", name: "Qwen3.8 Max", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "xhigh"], context: 1e6 },
   { slug: "qwen3.8-flash", name: "Qwen3.8 Flash", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "xhigh"], context: 1e6 },
   { slug: "qwen3.7-plus", name: "Qwen3.7 Plus", provider: "opencode-go", legacy: true, efforts: [], context: 1e6 },
   { slug: "kimi-k3.1-pro", name: "Kimi K3.1 Pro", provider: "opencode-go", legacy: true, efforts: ["low", "high", "max"], context: 1048576 },
-  { slug: "iceman-contributor-free", name: "Iceman Contributor Free", provider: "opencode-go", legacy: true, efforts: [], context: 262144 },
+  { slug: "iceman-contributor-free", name: "Iceman Contributor Free", provider: "opencode-go", legacy: true, efforts: [], context: 262144, free: true },
   { slug: "gemini-4-argon", name: "Gemini 4 Argon", provider: "opencode-go", legacy: true, efforts: ["low", "medium", "high"], context: 1048576 },
+  { slug: "hy4", name: "Hy4", provider: "opencode-go", legacy: true, efforts: ["high"], context: 1048576 },
+  { slug: "longcat-2.5-free", name: "LongCat 2.5 Free", provider: "opencode-go", legacy: true, efforts: [], context: 1e6, free: true },
+  { slug: "hy4-flash-free", name: "Hy4 flash Free", provider: "opencode-go", legacy: true, efforts: ["high"], context: 1048576, free: true },
+  { slug: "qwen4-max", name: "Qwen4 Max", provider: "opencode-go", legacy: true, efforts: ["low", "high", "xhigh"], context: 1e6 },
 ];
 const ULTRATHINK = "Ultrathink:\n";
 
@@ -1327,12 +1331,18 @@ function modelName(tab) {
 const authOf = (tab) => accountOf(tab.machine, tab.view.account)?.auth ?? "login";
 /** Claude's models as the machine's catalog lists them, newest first. `menu` names the row of
  * claude's own /model menu that picks one for the session alone; a model it doesn't list restarts
- * claude with --model. */
-const modelsForAccount = (account) => (account?.auth === "opencode-go" ? OPENCODE_GO_MODELS : account?.models?.length ? account.models : CLAUDE_FALLBACK_MODELS);
+ * claude with --model. A machine with the live OpenCode Go list sends it in `account.models`,
+ * so new gateway models show up without a T3 Code release; the static list is only the fallback. */
+const modelsForAccount = (account) => (account?.models?.length ? account.models : account?.auth === "opencode-go" ? OPENCODE_GO_MODELS : CLAUDE_FALLBACK_MODELS);
 /** Claude's models where no account is at hand: the active machine's, else any machine's. */
 function claudeModels() {
   const listed = (m) => m?.accounts?.find((a) => a.provider === "claude" && a.auth !== "opencode-go" && a.models?.length)?.models;
   return listed(machines.get(active?.machine)) ?? [...machines.values()].map(listed).find(Boolean) ?? CLAUDE_FALLBACK_MODELS;
+}
+/** OpenCode Go's models where no account is at hand, for the way-of-working page. */
+function goModels() {
+  const listed = (m) => m?.accounts?.find((a) => a.provider === "claude" && a.auth === "opencode-go" && a.models?.length)?.models;
+  return listed(machines.get(active?.machine)) ?? [...machines.values()].map(listed).find(Boolean) ?? OPENCODE_GO_MODELS;
 }
 /** Hands claude's /model menu on `tab`'s screen to its machine, which keeps the models it names,
  * so one Claude Code adds shows up without a pinned release. Each menu goes once per machine. */
@@ -1500,7 +1510,7 @@ function renderModels(tab) {
     const go = account.auth === "opencode-go";
     const checked = account.id === tab.view.account && !!current && (m.slug === current.slug || m.name === current.name);
     const favorited = modelFavorites.includes(m.slug);
-    return `<div class="model" data-row="${esc(m.slug)}" data-account="${esc(account.id)}" role="option"><div class="text"><div class="name"><span>${esc(m.name)}</span>${m.new ? `<span class="new" aria-label="New model">New</span>` : ""}</div>
+    return `<div class="model${m.free ? " is-free" : ""}" data-row="${esc(m.slug)}" data-account="${esc(account.id)}" role="option"><div class="text"><div class="name"><span>${esc(m.name)}</span>${m.free ? `<span class="free" aria-label="Free model">Free</span>` : ""}${m.new ? `<span class="new" aria-label="New model">New</span>` : ""}</div>
       <div class="sub">${icon(go ? "opencode" : "claude")}<span>${esc(providerLabel(account))}</span></div></div>${checked ? icon("check", "check") : ""}
       <button type="button" class="fav${favorited ? " on" : ""}" data-fav="${esc(m.slug)}" aria-label="${favorited ? "Remove from favorites" : "Add to favorites"}" title="${favorited ? "Remove from favorites" : "Add to favorites"}">${icon("star")}</button></div>`;
   };

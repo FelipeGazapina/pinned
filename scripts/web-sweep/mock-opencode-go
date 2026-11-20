@@ -15,8 +15,9 @@ const http = require("http");
 const port = Number(process.argv[2] || 8798);
 const KEY = "oc_sk_sweep";
 const MODELS = [
-  { id: "kimi-k3", name: "Kimi K3" },
-  { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+  { id: "kimi-k3", name: "Kimi K3", capabilities: { reasoning: { effort: ["max"] } }, limit: { context: 1048576 }, cost: { text: { input: { price: 3 }, output: { price: 15 } } } },
+  { id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", capabilities: { reasoning: { effort: ["low", "high", "max"] } }, limit: { context: 1000000 }, cost: { text: { input: { price: 0.15 }, output: { price: 0.6 } } } },
+  { id: "beam-free", name: "Beam Free", capabilities: { reasoning: { effort: ["low", "medium", "high", "xhigh", "max"] } }, limit: { context: 1048576 }, cost: { text: { input: { price: 0 }, output: { price: 0 } } } },
 ];
 const meter = (percent, seconds) => ({ status: percent >= 100 ? "rate-limited" : "ok", percent, resetsAt: new Date(Date.now() + seconds * 1000).toISOString() });
 const script = {

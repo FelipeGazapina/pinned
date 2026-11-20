@@ -1158,12 +1158,14 @@ grok-4.7-high - Grok 4.7  High
                     label: "Composer 2.5".into(),
                     efforts: vec!["fast".into()],
                     cost: Cost::Mid,
+                    free: false,
                 },
                 ModelChoice {
                     id: "grok-4.7".into(),
                     label: "Grok 4.7".into(),
                     efforts: vec!["low".into(), "high".into()],
                     cost: Cost::Mid,
+                    free: false,
                 },
             ]
         );
@@ -1239,7 +1241,7 @@ grok-4.7-high - Grok 4.7  High
         assert_eq!(value["providers"][1]["models"], json!([]));
         assert_eq!(
             value["providers"][2]["models"][0],
-            json!({"id": "grok-4.7", "label": "Grok 4.7", "cost": "mid", "options": [{"id": "effort", "values": ["high"], "default": null}]})
+            json!({"id": "grok-4.7", "label": "Grok 4.7", "cost": "mid", "free": false, "options": [{"id": "effort", "values": ["high"], "default": null}]})
         );
         assert_eq!(value["providers"][2]["limited"], true);
         assert_eq!(value["providers"][0]["models"][3]["cost"], "low");

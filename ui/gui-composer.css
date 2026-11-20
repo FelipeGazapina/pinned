@@ -284,6 +284,9 @@ body.resizing-rows { cursor: row-resize; user-select: none; }
 #composer-menu .model .name > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #composer-menu .model .new { flex: none; padding: 1px 2px; border-radius: 4px; border: 1px solid rgb(var(--g-info-rgb) / 0.35); background: rgb(var(--g-info-rgb) / 0.15);
   font-size: 9px; font-weight: 700; line-height: 1; letter-spacing: 0.04em; text-transform: uppercase; color: var(--g-info); }
+#composer-menu .model .free { flex: none; padding: 1px 2px; border-radius: 4px; border: 1px solid color-mix(in srgb, var(--g-success) 35%, transparent); background: color-mix(in srgb, var(--g-success) 12%, transparent);
+  font-size: 9px; font-weight: 700; line-height: 1; letter-spacing: 0.04em; text-transform: uppercase; color: var(--g-success); }
+#composer-menu .model.is-free .name > span:first-child { color: var(--g-success); }
 #composer-menu .model .sub { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 12px; color: rgb(var(--g-muted-rgb) / 0.7); }
 #composer-menu .model .sub .i { width: 12px; height: 12px; }
 #composer-menu .model .check { width: 14px; height: 14px; color: var(--g-fg); }

@@ -58,6 +58,10 @@ function page({ answer = () => tastesWith(), projects = {}, machineViews = null,
       { slug: "claude-sonnet-5-5", name: "Claude Sonnet 5.5" },
       { slug: "claude-opus-5", name: "Claude Opus 5", legacy: true },
     ],
+    goModels: () => [
+      { slug: "glm-5.3", name: "GLM-5.3", legacy: true },
+      { slug: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", legacy: true },
+    ],
     OPENCODE_GO_MODELS: [
       { slug: "glm-5.3", name: "GLM-5.3", legacy: true },
       { slug: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash", legacy: true },

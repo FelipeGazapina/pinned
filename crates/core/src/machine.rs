@@ -1318,6 +1318,13 @@ impl Machine {
             model_menu: Mutex::new(dir.as_ref().and_then(|d| std::fs::read(d.join(MODEL_MENU_FILE)).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()),
             setup_tokens: Default::default(),
             model_menu_file: dir.as_ref().map(|d| d.join(MODEL_MENU_FILE)),
+            go_models: Mutex::new(
+                dir.as_ref()
+                    .and_then(|d| crate::opencode_go::load_cached(&d.join(crate::opencode_go::GO_MODELS_FILE)))
+                    .unwrap_or_else(crate::opencode_go::fallback_models),
+            ),
+            go_models_at: Mutex::new(None),
+            go_models_file: dir.as_ref().map(|d| d.join(crate::opencode_go::GO_MODELS_FILE)),
             guides: dir.as_ref().map(|d| d.join("guides")).unwrap_or_else(|| std::env::temp_dir().join("pinned-guides")),
             shells: Shells::default(),
             device_hub: DeviceHub::default(),
@@ -2187,6 +2194,8 @@ impl Machine {
         let mut view = accounts::View::new(account, status);
         if view.account.provider == Provider::Claude && view.account.auth != Auth::OpenCodeGo {
             view.models = self.claude_models();
+        } else if view.account.provider == Provider::Claude {
+            view.models = self.go_models();
         }
         if let Some((limit, true)) = self.standing(&view.account) {
             (view.limited, view.limit_reason, view.limit_resume_at) = (true, Some(limit.reason), limit.resume_at);
@@ -2198,6 +2207,47 @@ impl Machine {
     /// /model menu.
     pub fn claude_models(&self) -> Vec<crate::claude_models::ClaudeModel> {
         crate::claude_models::merged(crate::claude_models::known(), &self.model_menu.lock().unwrap())
+    }
+
+    /// OpenCode Go's models: the last gateway list, refreshed in the background so new gateway
+    /// models show up without a pinned release. Falls back to the shipped list offline.
+    pub fn go_models(&self) -> Vec<crate::claude_models::ClaudeModel> {
+        let models = self.go_models.lock().unwrap().clone();
+        self.refresh_go_models();
+        if models.is_empty() { crate::opencode_go::fallback_models() } else { models }
+    }
+
+    /// Refreshes the cached gateway list at most hourly, without blocking the caller.
+    fn refresh_go_models(&self) {
+        if test_binary() && std::env::var_os("PINNED_OPENCODE_GO_MODELS_BASE").is_none() {
+            return;
+        }
+        let stale = self.go_models_at.lock().unwrap().is_none_or(|at| at.elapsed() > Duration::from_secs(3600));
+        if !stale {
+            return;
+        }
+        // A fetch is already running when the timestamp is set before it answers.
+        *self.go_models_at.lock().unwrap() = Some(Instant::now());
+        let Some(me) = self.me.upgrade() else { return };
+        std::thread::spawn(move || {
+            match crate::opencode_go::fetch_models() {
+                Ok(models) => {
+                    *me.go_models.lock().unwrap() = models.clone();
+                    *me.go_models_at.lock().unwrap() = Some(Instant::now());
+                    if let Some(file) = &me.go_models_file {
+                        let _ = std::fs::create_dir_all(file.parent().unwrap_or(std::path::Path::new(".")));
+                        if let Ok(body) = serde_json::to_vec_pretty(&models) {
+                            let _ = crate::fsx::replace(file, &body, None, None);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("pinned: could not refresh the OpenCode Go model list: {e}");
+                    // Let the next caller retry soon, instead of waiting out the hour.
+                    *me.go_models_at.lock().unwrap() = None;
+                }
+            }
+        });
     }
 
     /// Keeps the model rows of claude's /model menu when `lines`, a screen, shows it, and answers
@@ -6598,7 +6648,10 @@ impl Machine {
     /// The models an account offers a delegated child, and what constrains it.
     fn catalog_of(&self, account: &Account, found: bool) -> (Vec<crate::delegate::ModelChoice>, Vec<String>) {
         match account.provider {
-            Provider::Claude if account.auth == Auth::OpenCodeGo => (crate::opencode_go::models(), vec!["Runs through Claude Code against the OpenCode Go gateway.".into()]),
+            Provider::Claude if account.auth == Auth::OpenCodeGo => (
+                crate::delegate::claude_choices(&self.go_models()),
+                vec!["Runs through Claude Code against the OpenCode Go gateway.".into()],
+            ),
             Provider::Claude => (crate::delegate::claude_choices(&self.claude_models()), vec![]),
             Provider::Codex => (vec![], crate::delegate::codex_constraints()),
             Provider::Cursor => {
@@ -11007,6 +11060,24 @@ pub(crate) mod tests {
         std::fs::write(root.join("config/accounts/go/.claude.json"), "not json").unwrap();
         let account = m.accounts.get("go").unwrap();
         assert!(m.prepare_go_home(&account).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_go_account_lists_the_gateway_models_with_free_marked() {
+        let root = temp("go-list");
+        write_go_account(&root);
+        let m = accounts_machine(&root);
+        // Offline the refresh stays off in tests, so the shipped fallback answers.
+        let models = m.go_models();
+        assert_eq!(models.len(), crate::opencode_go::fallback_models().len());
+        assert!(models.iter().any(|m| m.slug == "qwen4-max"), "a new gateway model is listed");
+        assert!(models.iter().find(|m| m.slug == "beam-free").unwrap().free, "beam-free is marked free");
+        let account = m.accounts.get("go").unwrap();
+        let (choices, _) = m.catalog_of(&account, true);
+        assert_eq!(choices.len(), models.len());
+        assert!(choices.iter().find(|c| c.id == "beam-free").unwrap().free, "the delegate catalog marks free too");
         let _ = std::fs::remove_dir_all(root);
     }
 

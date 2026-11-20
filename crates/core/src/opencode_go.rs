@@ -1,8 +1,8 @@
 //! OpenCode Go, as an auth mode of the Claude Code provider. The `claude` CLI talks to Go's
-//! Anthropic Messages gateway. The model list is the one `GET /inference/go/v1/models` returned
-//! on 2026-11-02. It can change. An id that is not in this list still works when a caller passes
-//! it as `target.model`. `ui/gui-composer.js` keeps the same ids, labels, efforts and context
-//! windows. Change the two lists together.
+//! Anthropic Messages gateway. The model list is fetched live from `GET /inference/go/v1/models`
+//! and cached on disk, so a model the gateway adds shows up without a pinned release. The table
+//! below is only the fallback when the gateway cannot be reached. An id that is not in any list
+//! still works when a caller passes it as `target.model`.
 
 use crate::agent::{LimitWindow, Usage};
 use crate::delegate::ModelChoice;
@@ -44,55 +44,82 @@ pub const STRIP_ENV: [&str; 16] = [
 
 /// `claude --effort` accepts these, so the delegate catalog offers only the gateway's values in
 /// this set. `none` and `minimal` stay off the CLI flag.
-const SUPPORTED_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+pub(crate) const SUPPORTED_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 const USER_AGENT: &str = concat!("pinned/", env!("CARGO_PKG_VERSION"));
 const NO_EFFORT: &[&str] = &[];
 
-/// `(id, label, efforts)` in the order the gateway listed them.
-const MODELS: &[(&str, &str, &[&str])] = &[
-    ("deepseek-v4.1-flash", "DeepSeek V4.1 Flash", &["low", "high", "max"]),
-    ("deepseek-v4-pro", "DeepSeek V4 Pro (New)", &["high", "max"]),
-    ("glm-5.2", "GLM-5.2", &["high", "max"]),
-    ("glm-5.3", "GLM-5.3", &["low", "high", "max"]),
-    ("grok-4.7", "Grok 4.7", &["low", "medium", "high", "xhigh"]),
-    ("muse-spark-1.2-contributor", "Muse Spark 1.2 Contributor", &["minimal", "low", "medium", "high", "xhigh"]),
-    ("muse-spark-1.3-contributor", "Muse Spark 1.3 Contributor", &["minimal", "low", "medium", "high", "xhigh"]),
-    ("glm-5.3-flash", "GLM-5.3-Flash", &["low", "high", "max"]),
-    ("gpt-5.6-luna", "GPT-5.6 Luna", &["none", "low", "medium", "high", "xhigh", "max"]),
-    ("gpt-6-luna", "GPT-6 Luna", &["none", "low", "medium", "high", "xhigh", "max"]),
-    ("claude-haiku-5-5", "Claude Haiku 5.5", &["low", "medium", "high", "xhigh", "max"]),
-    ("hy3", "Hy3", &["none", "low", "high"]),
-    ("hy4-preview", "Hy4 preview", &["none", "high"]),
-    ("kimi-k2.7-code", "Kimi K2.7 Code", NO_EFFORT),
-    ("kimi-k3", "Kimi K3", &["max"]),
-    ("mimo-v2.6-flash", "MiMo-V2.6-Flash", NO_EFFORT),
-    ("mimo-v2.6-pro", "MiMo-V2.6-Pro", NO_EFFORT),
-    ("minimax-m3", "MiniMax-M3", NO_EFFORT),
-    ("minimax-m3.1-flash", "MiniMax M3.1 Flash", &["low", "medium", "high", "xhigh", "max"]),
-    ("longcat-2.0", "LongCat-2.0", NO_EFFORT),
-    ("step-5-preview", "Step 5 Preview", &["low", "medium", "high"]),
-    ("beam-free", "Beam Free", &["low", "medium", "high", "xhigh", "max"]),
-    ("qwen3.8-max", "Qwen3.8 Max", &["low", "medium", "xhigh"]),
-    ("qwen3.8-flash", "Qwen3.8 Flash", &["low", "medium", "xhigh"]),
-    ("qwen3.7-plus", "Qwen3.7 Plus", NO_EFFORT),
-    ("kimi-k3.1-pro", "Kimi K3.1 Pro", &["low", "high", "max"]),
-    ("iceman-contributor-free", "Iceman Contributor Free", NO_EFFORT),
-    ("gemini-4-argon", "Gemini 4 Argon", &["low", "medium", "high"]),
+/// The file a machine keeps the last gateway model list in, so the picker lists new models
+/// without a pinned release. The gateway remains the source of truth on every refresh.
+pub const GO_MODELS_FILE: &str = "opencode-go-models.json";
+
+/// `(id, label, efforts, context, free)`: the last gateway list pinned shipped. It only runs
+/// when the gateway cannot be reached and no fresher cache exists.
+const MODELS: &[(&str, &str, &[&str], u64, bool)] = &[
+    ("deepseek-v4.1-flash", "DeepSeek V4.1 Flash 1017", &["low", "high", "max"], 1_000_000, false),
+    ("deepseek-v4-pro", "DeepSeek V4 Pro", &["high", "max"], 1_000_000, false),
+    ("glm-5.3", "GLM-5.3", &["low", "high", "max"], 1_000_000, false),
+    ("grok-4.7", "Grok 4.7", &["low", "medium", "high", "xhigh"], 500_000, false),
+    ("muse-spark-1.2-contributor", "Muse Spark 1.2 Contributor", &["minimal", "low", "medium", "high", "xhigh"], 1_048_576, false),
+    ("muse-spark-1.3-contributor", "Muse Spark 1.3 Contributor", &["minimal", "low", "medium", "high", "xhigh"], 1_048_576, false),
+    ("glm-5.3-flash", "GLM-5.3-Flash", &["low", "high", "max"], 1_000_000, false),
+    ("gpt-5.6-luna", "GPT-5.6 Luna", &["none", "low", "medium", "high", "xhigh", "max"], 1_050_000, false),
+    ("gpt-6-luna", "GPT-6 Luna", &["none", "low", "medium", "high", "xhigh", "max"], 1_050_000, false),
+    ("claude-haiku-5-5", "Claude Haiku 5.5", &["low", "medium", "high", "xhigh", "max"], 1_000_000, false),
+    ("hy3", "Hy3", &["none", "low", "high"], 256_000, false),
+    ("hy4-preview", "Hy4 preview", &["none", "high"], 1_024_000, false),
+    ("kimi-k2.7-code", "Kimi K2.7 Code", NO_EFFORT, 262_144, false),
+    ("kimi-k3", "Kimi K3", &["max"], 1_048_576, false),
+    ("mimo-v2.6-flash", "MiMo-V2.6-Flash", NO_EFFORT, 1_048_576, false),
+    ("mimo-v2.6-pro", "MiMo-V2.6-Pro", NO_EFFORT, 1_048_576, false),
+    ("minimax-m3", "MiniMax-M3", NO_EFFORT, 1_000_000, false),
+    ("minimax-m3.1-flash", "MiniMax M3.1 Flash", &["low", "medium", "high", "xhigh", "max"], 1_000_000, false),
+    ("longcat-2.0", "LongCat-2.0", NO_EFFORT, 1_000_000, false),
+    ("step-5-preview", "Step 5 Preview", &["low", "medium", "high"], 1_000_000, false),
+    ("beam-free", "Beam Free", &["low", "medium", "high", "xhigh", "max"], 1_048_576, true),
+    ("qwen3.8-max", "Qwen3.8 Max", &["low", "medium", "xhigh"], 1_000_000, false),
+    ("qwen3.8-flash", "Qwen3.8 Flash", &["low", "medium", "xhigh"], 1_000_000, false),
+    ("qwen3.7-plus", "Qwen3.7 Plus", NO_EFFORT, 1_000_000, false),
+    ("kimi-k3.1-pro", "Kimi K3.1 Pro", &["low", "high", "max"], 1_048_576, false),
+    ("iceman-contributor-free", "Iceman Contributor Free", NO_EFFORT, 262_144, true),
+    ("gemini-4-argon", "Gemini 4 Argon", &["low", "medium", "high"], 1_048_576, false),
+    ("hy4", "Hy4", &["none", "high"], 1_048_576, false),
+    ("longcat-2.5-free", "LongCat 2.5 Free", NO_EFFORT, 1_000_000, true),
+    ("hy4-flash-free", "Hy4 flash Free", &["none", "high"], 1_048_576, true),
+    ("qwen4-max", "Qwen4 Max", &["low", "high", "xhigh"], 1_000_000, false),
 ];
 
 pub fn models() -> Vec<ModelChoice> {
+    fallback_models()
+        .into_iter()
+        .map(|m| ModelChoice {
+            id: m.slug.clone(),
+            label: m.name.clone(),
+            efforts: m.efforts.iter().filter(|e| SUPPORTED_EFFORTS.contains(&e.as_str())).cloned().collect(),
+            cost: m.cost,
+            free: m.free,
+        })
+        .collect()
+}
+
+/// The fallback list as picker models, with context windows and free flags, in gateway order.
+pub fn fallback_models() -> Vec<crate::claude_models::ClaudeModel> {
     MODELS
         .iter()
-        .map(|(id, label, efforts)| ModelChoice {
-            id: (*id).into(),
-            label: (*label).into(),
-            efforts: efforts
-                .iter()
-                .filter(|effort| SUPPORTED_EFFORTS.contains(effort))
-                .map(|effort| (*effort).into())
-                .collect(),
-            cost: crate::delegate::cost_of(id),
+        .map(|(id, label, efforts, context, free)| {
+            let free = *free;
+            crate::claude_models::ClaudeModel {
+                slug: (*id).into(),
+                name: (*label).into(),
+                menu: None,
+                efforts: efforts.iter().map(|e| (*e).to_string()).collect(),
+                context: *context,
+                cost: if free { crate::delegate::Cost::Low } else { crate::delegate::cost_of(id) },
+                legacy: false,
+                new: false,
+                fast: false,
+                free,
+            }
         })
         .collect()
 }
@@ -119,6 +146,64 @@ pub fn env(key: &str) -> Vec<(String, String)> {
         SMALL_FAST_MODEL.into(),
     ];
     std::iter::once((KEY_ENV.to_owned(), key)).chain(SESSION_ENV.iter().map(|name| name.to_string()).zip(values)).collect()
+}
+
+/// The gateway model list as picker models, in the order the gateway listed them. A model the
+/// gateway stops listing simply drops out, and one it adds shows up, with no pinned release.
+/// `free` is true when both token prices are zero. Unknown shapes are skipped.
+pub fn parse_models(body: &str) -> Vec<crate::claude_models::ClaudeModel> {
+    let value: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let data = value.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut models = Vec::with_capacity(data.len());
+    for item in data {
+        let Some(id) = item.get("id").and_then(Value::as_str) else { continue };
+        if id.trim().is_empty() {
+            continue;
+        }
+        let name = item.get("name").and_then(Value::as_str).filter(|n| !n.trim().is_empty()).unwrap_or(id).to_owned();
+        let efforts: Vec<String> = item
+            .pointer("/capabilities/reasoning/effort")
+            .and_then(Value::as_array)
+            .map(|list| list.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+            .unwrap_or_default();
+        let context = item.pointer("/limit/context").and_then(Value::as_u64).filter(|c| *c > 0).unwrap_or(1_000_000);
+        let price = |path: &str| item.pointer(path).and_then(Value::as_f64).unwrap_or(-1.0);
+        let free = price("/cost/text/input/price") == 0.0 && price("/cost/text/output/price") == 0.0;
+        models.push(crate::claude_models::ClaudeModel {
+            slug: id.to_owned(),
+            name,
+            menu: None,
+            efforts,
+            context,
+            cost: if free { crate::delegate::Cost::Low } else { crate::delegate::cost_of(id) },
+            legacy: false,
+            new: false,
+            fast: false,
+            free,
+        });
+    }
+    models
+}
+
+/// Fetches the gateway model list. The endpoint is public, so no key is sent.
+pub fn fetch_models() -> Result<Vec<crate::claude_models::ClaudeModel>, String> {
+    let url = format!("{}/v1/models", models_base());
+    let (status, body) = get_public(&url, Duration::from_secs(10))?;
+    if !(200..300).contains(&status) {
+        return Err(format!("OpenCode Go answered {status}."));
+    }
+    let models = parse_models(&body);
+    if models.is_empty() {
+        return Err("OpenCode Go listed no models.".into());
+    }
+    Ok(models)
+}
+
+/// Reads a cached gateway list, when it parses.
+pub fn load_cached(path: &std::path::Path) -> Option<Vec<crate::claude_models::ClaudeModel>> {
+    let body = std::fs::read(path).ok()?;
+    let models: Vec<crate::claude_models::ClaudeModel> = serde_json::from_slice(&body).ok()?;
+    (!models.is_empty()).then_some(models)
 }
 
 /// The gateway a Go session gets when `BASE_ENV` is `value`.
@@ -227,6 +312,17 @@ fn get(url: &str, key: &str, timeout: Duration) -> Result<(u16, String), String>
     Ok((status, body))
 }
 
+fn get_public(url: &str, timeout: Duration) -> Result<(u16, String), String> {
+    let response = client(timeout)?
+        .get(url)
+        .header(reqwest::header::USER_AGENT, USER_AGENT)
+        .send()
+        .map_err(|e| format!("could not reach OpenCode Go: {e}"))?;
+    let status = response.status().as_u16();
+    let body = response.text().map_err(|e| format!("could not reach OpenCode Go: {e}"))?;
+    Ok((status, body))
+}
+
 fn client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     // The statusline is a fresh process and can reach here before the binary's own install.
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -288,11 +384,11 @@ mod tests {
     #[test]
     fn models_have_unique_ids_and_the_default_models() {
         let models = models();
-        assert_eq!(models.len(), 28);
+        assert_eq!(models.len(), 31);
         let mut ids: Vec<_> = models.iter().map(|model| model.id.clone()).collect();
         ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), 28);
+        assert_eq!(ids.len(), 31);
         for id in [DEFAULT_OPUS_MODEL, DEFAULT_SONNET_MODEL, DEFAULT_HAIKU_MODEL, SMALL_FAST_MODEL] {
             assert!(models.iter().any(|model| model.id == id), "{id}");
         }
@@ -300,6 +396,17 @@ mod tests {
         assert_eq!((kimi.label.as_str(), kimi.efforts.as_slice()), ("Kimi K3", &["max".to_owned()][..]));
         assert!(models.iter().find(|model| model.id == "kimi-k2.7-code").unwrap().efforts.is_empty());
         assert!(models.iter().flat_map(|model| &model.efforts).all(|effort| SUPPORTED_EFFORTS.contains(&effort.as_str())), "an effort the CLI rejects");
+        assert!(models.iter().find(|model| model.id == "beam-free").unwrap().free, "beam-free costs nothing");
+        assert!(models.iter().find(|model| model.id == "iceman-contributor-free").unwrap().free, "iceman costs nothing");
+        assert!(models.iter().find(|model| model.id == "longcat-2.5-free").unwrap().free, "longcat-2.5-free costs nothing");
+        assert!(models.iter().find(|model| model.id == "hy4-flash-free").unwrap().free, "hy4-flash-free costs nothing");
+        assert!(models.iter().any(|model| model.id == "qwen4-max"), "qwen4-max is listed");
+        assert!(models.iter().any(|model| model.id == "hy4"), "hy4 is listed");
+        assert!(!models.iter().find(|model| model.id == "kimi-k3").unwrap().free, "kimi-k3 is paid");
+        let fallback = fallback_models();
+        assert_eq!(fallback.len(), models.len());
+        assert_eq!(fallback.iter().find(|m| m.slug == "beam-free").unwrap().context, 1_048_576);
+        assert!(fallback.iter().find(|m| m.slug == "beam-free").unwrap().free);
         let env = env("  oc_sk_test  ");
         assert_eq!(
             env,
@@ -369,6 +476,29 @@ mod tests {
         assert!(request.to_ascii_lowercase().contains("authorization: bearer oc_sk_ok"), "{request}");
         assert_eq!(usage_at(&serve_body(401, "{}", Arc::new(Mutex::new(String::new()))), "bad").unwrap_err(), "OpenCode Go answered 401.");
         assert_eq!(usage_at(&serve_body(200, "{}", Arc::new(Mutex::new(String::new()))), "bad").unwrap_err(), "OpenCode Go usage could not be read.");
+    }
+
+    #[test]
+    fn parse_models_reads_the_gateway_order_and_marks_free_by_price() {
+        let body = r#"{"object":"list","data":[
+            {"id":"qwen4-max","name":"Qwen4 Max","capabilities":{"reasoning":{"effort":["low","high","xhigh"]}},"limit":{"context":1000000},"cost":{"text":{"input":{"price":1.5},"output":{"price":4.5}}}},
+            {"id":"hy4-flash-free","name":"Hy4 flash Free","capabilities":{"reasoning":{"effort":["none","high"]}},"limit":{"context":1048576},"cost":{"text":{"input":{"price":0},"output":{"price":0}}}},
+            {"id":"kimi-k2.7-code","name":"Kimi K2.7 Code","limit":{"context":262144},"cost":{"text":{"input":{"price":0.95},"output":{"price":4}}}},
+            {"id":"","name":"Nope"},
+            {"name":"Missing"}
+        ]}"#;
+        let models = parse_models(body);
+        assert_eq!(models.iter().map(|m| m.slug.as_str()).collect::<Vec<_>>(), ["qwen4-max", "hy4-flash-free", "kimi-k2.7-code"]);
+        assert_eq!(models[0].efforts, ["low", "high", "xhigh"]);
+        assert_eq!((models[0].context, models[0].free), (1_000_000, false));
+        assert_eq!((models[1].context, models[1].free, models[1].cost), (1_048_576, true, crate::delegate::Cost::Low));
+        assert!(models[2].efforts.is_empty() && !models[2].free);
+        assert_eq!(parse_models("{}"), Vec::new());
+        assert_eq!(parse_models("nope"), Vec::new());
+        let cached = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(cached.path(), serde_json::to_vec(&models).unwrap()).unwrap();
+        assert_eq!(load_cached(cached.path()).unwrap().len(), 3);
+        assert_eq!(load_cached(std::path::Path::new("/nonexistent-pinned-go-models.json")), None);
     }
 
     #[test]
