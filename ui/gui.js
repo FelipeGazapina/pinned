@@ -100,7 +100,7 @@ const ago = (unix) => {
 const projectName = (tab) => (typeof isGlobalTab === "function" && isGlobalTab(tab) ? globalSettings.name : threadOf(tab).workspace?.scratch ? "No project" : (threadOf(tab).workspace?.project ?? tab.view.cwd).split(/[\\/]/).filter(Boolean).pop() || "/");
 /** A thread holding only its newest pages has its first prompt from the machine. */
 const firstPrompt = (tab) => ((threadOf(tab).start > 0 && threadOf(tab).opening) || threadOf(tab).items.find((i) => i.kind === "user")?.text)?.split("\n")[0];
-const threadTitle = (tab) => sideMarks.titles[threadKey(tab)] || tab.view.title || firstPrompt(tab) || "New thread";
+const threadTitle = (tab) => sideMarks.titles[threadKey(tab)] || sideMarks.selfTitles[threadKey(tab)]?.text || tab.view.title || firstPrompt(tab) || "New thread";
 /** `text` as a head that CSS truncates and its last 8 characters, once it is longer than `over`. */
 /** Puts `html` in `el` unless it is already there. A redraw that rewrites a control swaps the node a press
  * landed on, and WebKit then drops the click, so controls that redraw on every render draw through this. */

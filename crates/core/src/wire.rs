@@ -367,6 +367,8 @@ pub enum Call {
     /// opening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt
     /// when it is stopped, else queued until it is idle, or refused as busy when `busy` (else this
     /// machine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.
+    /// With `title`, the machine also writes it as the Capitão's own thread name before the
+    /// Capitão reads the message; without one, the message tells the Capitão to name itself.
     Enqueue {
         path: String,
         text: String,
@@ -376,6 +378,9 @@ pub enum Call {
         sender: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         busy: Option<BusyPolicy>,
+        /// A suggested name for the Capitão's thread, written as its own title on delivery.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
     },
     /// `global_orchestrator::Handoff`. Hands a Capitão's report to this machine's global
     /// orchestrator, opening it when missing, as `CaptainReport::line`. It never refuses as busy. A
@@ -522,6 +527,9 @@ pub enum Call {
     /// `String`: a new title for the tab's conversation, which `claude -p` writes from `thread`, its
     /// messages, and the `previous` title. An empty `thread` reads the tab's own conversation.
     RegenerateTitle { tab: TabId, previous: String, thread: String },
+    /// The cleaned `title`, one line trimmed to 70 characters, as the session in `tab`'s own name
+    /// for itself. The user's own name for the thread, if they gave one, still shows over it.
+    SetSessionTitle { tab: TabId, title: String },
     /// What `gh pr list` answers in the tab's folder: number, title, state, isDraft, url, headRefName.
     PrList { tab: TabId },
     /// `null`. Merges `pr`, or marks it ready, through gh in the tab's folder.
@@ -2086,11 +2094,11 @@ mod tests {
     #[test]
     fn global_orchestrator_calls_keep_their_wire_shape() {
         round_trip(
-            Call::Enqueue { path: "/w/site".into(), text: "Ship the form.".into(), request_id: "r-1".into(), sender: "Orchestrator".into(), busy: Some(BusyPolicy::Refuse) },
+            Call::Enqueue { path: "/w/site".into(), text: "Ship the form.".into(), request_id: "r-1".into(), sender: "Orchestrator".into(), busy: Some(BusyPolicy::Refuse), title: None },
             json!({ "cmd": "enqueue", "path": "/w/site", "text": "Ship the form.", "request_id": "r-1", "sender": "Orchestrator", "busy": "refuse" }),
         );
         let bare: Call = serde_json::from_value(json!({ "cmd": "enqueue", "path": "/w/site", "text": "x", "request_id": "r-2" })).unwrap();
-        assert_eq!(bare, Call::Enqueue { path: "/w/site".into(), text: "x".into(), request_id: "r-2".into(), sender: String::new(), busy: None });
+        assert_eq!(bare, Call::Enqueue { path: "/w/site".into(), text: "x".into(), request_id: "r-2".into(), sender: String::new(), busy: None, title: None });
         round_trip(Call::OpenGlobalOrchestrator, json!({ "cmd": "open_global_orchestrator" }));
         round_trip(Call::GlobalOrchestratorSettings, json!({ "cmd": "global_orchestrator_settings" }));
         let partial: Call = serde_json::from_value(json!({ "cmd": "set_global_orchestrator_settings", "settings": { "name": "Almirante", "host": true } })).unwrap();

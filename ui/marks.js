@@ -2,9 +2,9 @@
  * per Claude session. These turn the sidebar's marks, seen times and archive into those rows and
  * back, and `marksSync` keeps the page and the hub in step. */
 
-const MARK_FIELDS = ["title", "pin", "order", "settled", "unsettled", "snoozed", "seen", "no_auto_settle", "archived"];
+const MARK_FIELDS = ["title", "self_title", "pin", "order", "settled", "unsettled", "snoozed", "seen", "no_auto_settle", "archived"];
 /** Row fields `sideMarks` keeps by thread key, and those it keeps as ordered lists of thread keys. */
-const KEYED_MARKS = { title: "titles", settled: "settled", unsettled: "unsettled", snoozed: "snoozed", no_auto_settle: "noAutoSettle" };
+const KEYED_MARKS = { title: "titles", self_title: "selfTitles", settled: "settled", unsettled: "unsettled", snoozed: "snoozed", no_auto_settle: "noAutoSettle" };
 const LISTED_MARKS = { pin: "pins", order: "order" };
 const MARKS_PER_CALL = 2000;
 
@@ -21,6 +21,7 @@ function markValue(field, value) {
   if (field === "seen") return value || null;
   if (field === "no_auto_settle") return true;
   if (field === "snoozed") return { until: value.until, at: value.at, ...(Number.isInteger(value.limit) && value.limit >= 0 && { limit: value.limit }) };
+  if (field === "self_title") return { text: markText(value.text), author: markText(value.author ?? "session"), at: Number(value.at) || 0 };
   if (field !== "archived") return value;
   const { machine = "", cwd = "", name = "", project = "", at, created, title, pinned } = value;
   return { machine: markText(machine), cwd: markText(cwd), name: markText(name), project: markText(project), at: Number(at) || 0, ...(created && { created }), ...(title && { title: markText(title) }), ...(pinned && { pinned: true }) };
@@ -45,7 +46,7 @@ function markRows({ sideMarks, seenAt, archived }) {
 
 /** The page's marks from the hub's rows: `markRows` turned around. */
 function markState(rows) {
-  const sideMarks = { pins: [], order: [], settled: {}, unsettled: {}, snoozed: {}, titles: {}, noAutoSettle: {} };
+  const sideMarks = { pins: [], order: [], settled: {}, unsettled: {}, snoozed: {}, titles: {}, selfTitles: {}, noAutoSettle: {} };
   const seenAt = {};
   const archived = [];
   const placed = { pin: [], order: [] };

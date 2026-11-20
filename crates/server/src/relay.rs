@@ -54,7 +54,7 @@ async fn relay(hub: &Arc<Hub>, account: &Arc<Account>, from: Source<'_>, request
         RelayTo::Captain { machine, path, text, sender, busy } => {
             only_host(hub, account, &from, "send to a Capitão").await?;
             let _held = hub.hold_captain(account, &machine, &path).await;
-            call(hub, account, &machine, Call::Enqueue { path, text, request_id, sender, busy }).await
+            call(hub, account, &machine, Call::Enqueue { path, text, request_id, sender, busy, title: None }).await
         }
         RelayTo::Orchestrator { mut report } => {
             let from = match from {

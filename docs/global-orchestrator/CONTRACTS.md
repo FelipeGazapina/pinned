@@ -56,7 +56,7 @@ Every field has a serde default, so a partial object reads. `Machine::global_set
 
 | Call | JSON | Reply |
 |---|---|---|
-| `Enqueue` | `{"cmd":"enqueue","path":"/w/site","text":"Ship it.","request_id":"r-1","sender":"Orquestrador","busy":"refuse"}`. `sender` defaults to `""` (this machine's settings name). `busy` is optional (this machine's setting). | `Handoff`. Errors: `request_id is required`, `the message is empty`, `request_id <id> was already used for another message`, `<path> is not a folder on this machine`, `<path> is the global orchestrator's folder, which has no Capitão`, `account <id> runs <provider>, which can't be a project's orchestrator`. |
+| `Enqueue` | `{"cmd":"enqueue","path":"/w/site","text":"Ship it.","request_id":"r-1","sender":"Orquestrador","busy":"refuse"}`. `sender` defaults to `""` (this machine's settings name). `busy` is optional (this machine's setting). `title` is optional: the machine writes it, cleaned to one line, as the Capitão's own thread name before the message reaches it, and without it the message ends with a line telling the Capitão to name itself with `set_session_title`. | `Handoff`. Errors: `request_id is required`, `the message is empty`, `request_id <id> was already used for another message`, `<path> is not a folder on this machine`, `<path> is the global orchestrator's folder, which has no Capitão`, `account <id> runs <provider>, which can't be a project's orchestrator`. |
 | `OrchestratorReport` | `{"cmd":"orchestrator_report","request_id":"report-1","report":{CaptainReport}}` | `Handoff` with the global tab's id. Never `ocupado`. |
 | `OpenGlobalOrchestrator` | `{"cmd":"open_global_orchestrator"}` | the tab id (string). Not started. |
 | `GlobalOrchestratorSettings` | `{"cmd":"global_orchestrator_settings"}` | `Settings` |
@@ -218,7 +218,7 @@ The per-session MCP server (`crates/core/src/reminders.rs`) offers tools by `Sea
 | Tool | Arguments | Result (tool text) |
 |---|---|---|
 | `projects` | none | `Overview` as one line of JSON |
-| `send_to_captain` | `project` (key from `projects`, a folder on this machine, or `<machine>:<folder>`), `message`, `request_id` (new per message; repeats are safe), `machine` (optional id or name, with or without `@`; pass it when `projects` lists the project on more than one machine), `box` (optional `true` or `{ "size" }`: the Capitão runs in an Upstash Box, through `RelayTo::CaptainBox`, with the project's origin as `repo`) | `Handoff` as one line of JSON, or the `captain_box` answer |
+| `send_to_captain` | `project` (key from `projects`, a folder on this machine, or `<machine>:<folder>`), `message`, `request_id` (new per message; repeats are safe), `machine` (optional id or name, with or without `@`; pass it when `projects` lists the project on more than one machine), `box` (optional `true` or `{ "size" }`: the Capitão runs in an Upstash Box, through `RelayTo::CaptainBox`, with the project's origin as `repo`), `title` (optional, this machine's Capitão only: written as its own thread name on delivery) | `Handoff` as one line of JSON, or the `captain_box` answer |
 | `read_captain` | `project`, `machine` (optional), as `send_to_captain` takes them | the read as one line of JSON, from this machine or through `HubCall::ReadCaptain` |
 | `waiting` | none | `Vec<Waiting>` as one line of JSON |
 | `sessions` | `project` (optional: a key from `projects`, a name in any case, or a folder), `machine` (optional id or name, with or without `@`) | `{"sessions":[Session],"machines":[OverviewMachine]}` as one line of JSON |

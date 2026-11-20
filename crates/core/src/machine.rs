@@ -1656,7 +1656,7 @@ impl Machine {
             }
             Call::SetProjectAccount { path, account } => json(self.set_project_account(&path, account)?),
             Call::OpenOrchestrator { path } => json(self.open_orchestrator(&path)?),
-            Call::Enqueue { path, text, request_id, sender, busy } => json(self.enqueue_to_captain(&path, &text, &request_id, &sender, busy)?),
+            Call::Enqueue { path, text, request_id, sender, busy, title } => json(self.enqueue_to_captain(&path, &text, &request_id, &sender, busy, title.as_deref())?),
             Call::OrchestratorReport { request_id, report } => json(self.deliver_report(&request_id, &report)?),
             Call::OpenGlobalOrchestrator => json(self.open_global_orchestrator()?),
             Call::OpenTasteChat { scope, path } => json(self.open_taste_chat(&scope, path.as_deref())?),
@@ -1714,6 +1714,10 @@ impl Machine {
                 let env = self.headless_env(&tab)?;
                 let headless = Headless { env: &env, strip: self.headless_strip(&tab)? };
                 json(titles::regenerate(&self.launch.bin(Provider::Claude), &headless, &cwd, self.launch.path_env.as_deref(), &previous, &thread)?)
+            }
+            Call::SetSessionTitle { tab, title } => {
+                let captain = self.tab(&tab, |t| role_of(&t.env).is_some_and(|(role, _)| role == Role::Orchestrator))?;
+                json(self.set_own_title(&tab, &title, if captain { "captain" } else { "session" })?)
             }
             Call::Favicon { tab } => json(favicon::of(&history::project_of(&self.tab(&tab, |t| t.cwd.clone())?))),
             Call::PrStatus { tab, pr } => json(workspace::pr_status(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
@@ -3507,8 +3511,10 @@ impl Machine {
     /// becomes its first prompt when it is stopped or has no conversation yet, and otherwise waits
     /// in its queue, or is refused as busy under `BusyPolicy::Refuse`. A repeat of `request_id`
     /// answers the first outcome without typing. The ledger keeps which turn the message started,
-    /// so the Capitão's reply can go back up when that turn ends.
-    pub fn enqueue_to_captain(&self, path: &str, text: &str, request_id: &str, sender: &str, busy: Option<BusyPolicy>) -> Result<Handoff, String> {
+    /// so the Capitão's reply can go back up when that turn ends. A request that carries `title`
+    /// names the Capitão's thread with it on delivery; one that carries none tells the Capitão to
+    /// name itself for what it will do now.
+    pub fn enqueue_to_captain(&self, path: &str, text: &str, request_id: &str, sender: &str, busy: Option<BusyPolicy>, title: Option<&str>) -> Result<Handoff, String> {
         let (request_id, text) = (request_id.trim(), text.trim());
         if request_id.is_empty() {
             return Err("request_id is required".into());
@@ -3527,7 +3533,19 @@ impl Machine {
         let tab = self.open_orchestrator(path)?;
         let project = canonical(path);
         let sender = if sender.trim().is_empty() { settings.name } else { global::Settings { name: sender.to_owned(), ..global::Settings::default() }.cleaned().name };
-        let handoff = self.hand_to(&tab, &format!("[{sender}] {}", pinned_lines::guard(text)), request_id, busy.unwrap_or(settings.busy), &sent)?;
+        // A title the machine writes as the Capitão's own name spares the model remembering;
+        // without one, the message itself tells it to name its session for the work now in
+        // front of it.
+        let has_session = self.tab(&tab, |t| t.claude_session.is_some()).unwrap_or(false);
+        let named = title.map(crate::marks::clean_title).filter(|named| !named.is_empty() && has_session);
+        let line = match &named {
+            Some(_) => format!("[{sender}] {}", pinned_lines::guard(text)),
+            None => format!("[{sender}] {}\n\nRenomeie a sua sessão para o que você vai fazer agora, com set_session_title.", pinned_lines::guard(text)),
+        };
+        let handoff = self.hand_to(&tab, &line, request_id, busy.unwrap_or(settings.busy), &sent)?;
+        if let (Some(named), false) = (&named, matches!(handoff, Handoff::Busy { .. })) {
+            let _ = self.set_own_title(&tab, named, "auto");
+        }
         let progress = match handoff {
             Handoff::Busy { .. } => return Ok(handoff),
             Handoff::Queued { .. } => Progress::Queued,
@@ -3539,6 +3557,21 @@ impl Machine {
             self.emit_tabs();
         }
         Ok(handoff)
+    }
+
+    /// Writes `text` as the session in `tab`'s own name for itself, `author` saying who wrote it,
+    /// and answers the cleaned line: its first line, without emoji, at most 70 characters. The
+    /// user's own title is a separate mark this never touches, and the sidebar shows theirs over it.
+    fn set_own_title(&self, tab: &str, text: &str, author: &str) -> Result<String, String> {
+        let cleaned = crate::marks::clean_title(text);
+        if cleaned.is_empty() {
+            return Err("a title needs some text".into());
+        }
+        let session = self.tab(tab, |t| t.claude_session.clone())?.ok_or_else(|| format!("the session in {tab} has no id yet: start it first"))?;
+        let title = crate::marks::SelfTitle { text: cleaned.clone(), author: author.to_owned(), at: unix_now() as f64 };
+        self.call_hub(HubCall::MarkSessions { changes: vec![crate::marks::MarkChange { session, mark: crate::marks::Mark::SelfTitle(Some(title)) }] })
+            .map_err(|e| format!("the title did not reach the hub: {e}"))?;
+        Ok(cleaned)
     }
 
     /// Hands a Capitão's report to this machine's global orchestrator as `CaptainReport::line`,
@@ -3610,10 +3643,10 @@ impl Machine {
 
     /// Hands `message` to `project`'s Capitão: on this machine when the project is here and
     /// `machine` names no other, else on the machine the hub finds.
-    fn send_to_captain(&self, project: &str, machine: Option<&str>, message: &str, request_id: &str) -> Result<Handoff, String> {
+    fn send_to_captain(&self, project: &str, machine: Option<&str>, message: &str, request_id: &str, title: Option<&str>) -> Result<Handoff, String> {
         let sender = self.global_settings().name;
         match self.local_project(project, machine) {
-            Some(path) => self.enqueue_to_captain(&path.display().to_string(), message, request_id, &sender, None),
+            Some(path) => self.enqueue_to_captain(&path.display().to_string(), message, request_id, &sender, None, title),
             None => self.route_remote(project, machine, message, request_id, &sender),
         }
     }
@@ -4030,13 +4063,13 @@ impl Machine {
                 only_global()?;
                 self.repo_tool(tab, &project, machine.as_deref(), crate::repo_look::RepoLook::Search { query, glob, regex, case, max })
             }
-            ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: Some(boxed) } => {
+            ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: Some(boxed), .. } => {
                 only_global()?;
                 text_json(self.send_to_captain_box(&project, machine.as_deref(), boxed, &message, &request_id)?)
             }
-            ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: None } => {
+            ProjectTool::SendToCaptain { project, message, request_id, machine, boxed: None, title } => {
                 only_global()?;
-                text_json(self.send_to_captain(&project, machine.as_deref(), &message, &request_id)?)
+                text_json(self.send_to_captain(&project, machine.as_deref(), &message, &request_id, title.as_deref())?)
             }
             ProjectTool::ReadCaptain { project, machine } => {
                 only_global()?;
@@ -4167,8 +4200,13 @@ impl Machine {
                 limits.admit(&to, Some(model), None, &self.claude_models())?;
             }
         }
-        if let Call::Enqueue { path, text, request_id, busy, .. } = call {
-            return json(self.enqueue_for(caller, &path, &text, &request_id, busy)?);
+        if let Call::Enqueue { path, text, request_id, busy, title, .. } = call {
+            return json(self.enqueue_for(caller, &path, &text, &request_id, title.as_deref(), busy)?);
+        }
+        if let Call::SetSessionTitle { tab, .. } = &call {
+            if tab != caller {
+                return Err(format!("set_session_title names a session's own title: {tab} is not your session"));
+            }
         }
         if let Call::RunNow { run, title } = call {
             return json(self.run_now(&run, &title, Some(caller))?);
@@ -4217,7 +4255,7 @@ impl Machine {
     /// own role, never the orchestrator's name; the `sender` it sent is ignored. A Captain that is not running starts on it, which is
     /// a session start: it must pass the project's tier and effort limits, and the project must run
     /// fewer than its workers-at-once. A Captain that runs takes the message with no new session.
-    fn enqueue_for(&self, caller: &str, path: &str, text: &str, request_id: &str, busy: Option<BusyPolicy>) -> Result<Handoff, String> {
+    fn enqueue_for(&self, caller: &str, path: &str, text: &str, request_id: &str, title: Option<&str>, busy: Option<BusyPolicy>) -> Result<Handoff, String> {
         let project = canonical(path);
         let tab = self.open_orchestrator(path)?;
         if tab == caller {
@@ -4232,7 +4270,7 @@ impl Machine {
                 return Err(workers_full(working));
             }
         }
-        self.enqueue_to_captain(path, text, request_id, &self.sender_of(caller), busy)
+        self.enqueue_to_captain(path, text, request_id, &self.sender_of(caller), busy, title)
     }
 
     /// Who the agent in `caller` is, as the stamp on what it types into another session reads:
@@ -12957,7 +12995,7 @@ while True:
 
     #[cfg(unix)]
     fn enqueue(m: &Machine, path: &str, text: &str, request_id: &str) -> Result<Value, String> {
-        m.call(Call::Enqueue { path: path.into(), text: text.into(), request_id: request_id.into(), sender: String::new(), busy: None })
+        m.call(Call::Enqueue { path: path.into(), text: text.into(), request_id: request_id.into(), sender: String::new(), busy: None, title: None })
     }
 
     #[test]
@@ -13476,7 +13514,7 @@ while True:
 
         assert_eq!(enqueue(&m, &path, "Ship it.", "r-1"), Ok(json!({ "outcome": "ocupado", "tab": tab })));
         assert!(m.delegates.claim_notice(&tab).is_none(), "a refused message was queued");
-        let queue = Call::Enqueue { path: path.clone(), text: "Ship it.".into(), request_id: "r-1".into(), sender: "Almirante".into(), busy: Some(BusyPolicy::Queue) };
+        let queue = Call::Enqueue { path: path.clone(), text: "Ship it.".into(), request_id: "r-1".into(), sender: "Almirante".into(), busy: Some(BusyPolicy::Queue), title: None };
         assert_eq!(m.call(queue), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "the call's policy wins, and the refused id delivers on a retry");
         assert_eq!(m.delegates.claim_notice(&tab).map(|(text, _)| text), Some("[Almirante] Ship it.".into()));
         let _ = std::fs::remove_dir_all(dir);
@@ -13670,15 +13708,15 @@ while True:
             json!({ "cmd": "relay", "request_id": request_id, "to": { "kind": "captain", "machine": machine, "path": path, "text": "Ship it.", "sender": "Orchestrator", "busy": "queue" } })
         };
 
-        assert_eq!(m.send_to_captain("m-book:/w/site", None, "Ship it.", "r-1"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 1 }));
-        assert_eq!(m.send_to_captain("/w/site", Some("m-book"), "Ship it.", "r-2"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 2 }));
-        assert_eq!(m.send_to_captain("github.com/o/site", None, "Ship it.", "r-3"), Err("github.com/o/site is not a project on this machine, and the hub can't list the other machines' projects (this hub runs pinned 0.17.19, which can't answer that yet): name it as <machine id>:<path>".into()));
+        assert_eq!(m.send_to_captain("m-book:/w/site", None, "Ship it.", "r-1", None), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 1 }));
+        assert_eq!(m.send_to_captain("/w/site", Some("m-book"), "Ship it.", "r-2", None), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 2 }));
+        assert_eq!(m.send_to_captain("github.com/o/site", None, "Ship it.", "r-3", None), Err("github.com/o/site is not a project on this machine, and the hub can't list the other machines' projects (this hub runs pinned 0.17.19, which can't answer that yet): name it as <machine id>:<path>".into()));
         let mine = format!("m-mini:{path}");
-        assert_eq!(m.send_to_captain(&mine, None, "Ship it.", "r-4"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 3 }), "without the hub's id for it, this machine's own id names another");
+        assert_eq!(m.send_to_captain(&mine, None, "Ship it.", "r-4", None), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 3 }), "without the hub's id for it, this machine's own id names another");
         assert_eq!(*relayed.lock().unwrap(), [relay("r-1", "m-book", "/w/site"), relay("r-2", "m-book", "/w/site"), relay("r-4", "m-mini", &path)]);
 
         m.set_hub_id("m-mini".into(), "mini".into());
-        let here = m.send_to_captain(&mine, None, "Ship it.", "r-5").unwrap();
+        let here = m.send_to_captain(&mine, None, "Ship it.", "r-5", None).unwrap();
         assert_eq!(started(&claude, here.tab())[7], "[Orchestrator] Ship it.");
         assert_eq!(relayed.lock().unwrap().len(), 3, "a project named by this machine's id went to the hub");
 
@@ -13688,15 +13726,15 @@ while True:
             json!({ "projects": [{ "key": "github.com/o/site", "name": "site", "repo": "github.com/o/site", "checkouts": checkouts }], "waiting": [], "machines": machines })
         };
         *overview.lock().unwrap() = Some(site(vec![checkout("m-book", "MacBook", true), checkout("m-old", "iMac", false)]));
-        assert_eq!(m.send_to_captain("github.com/o/site", None, "Ship it.", "r-6"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 4 }));
+        assert_eq!(m.send_to_captain("github.com/o/site", None, "Ship it.", "r-6", None), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 4 }));
         *overview.lock().unwrap() = Some(site(vec![checkout("m-book", "MacBook", true), checkout("m-air", "Air", true)]));
-        assert_eq!(m.send_to_captain("github.com/o/site", None, "Ship it.", "r-7"), Err("github.com/o/site is on MacBook, Air: pass machine to pick one".into()));
-        assert_eq!(m.send_to_captain("github.com/o/site", Some("air"), "Ship it.", "r-8"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 5 }));
-        assert_eq!(m.send_to_captain("github.com/o/site", Some("@MacBook"), "Ship it.", "r-9"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 6 }));
-        assert_eq!(m.send_to_captain("Air:/w/site", None, "Ship it.", "r-10"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 7 }));
-        assert_eq!(m.send_to_captain("@imac:/w/new", None, "Ship it.", "r-11"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 8 }), "a folder the overview doesn't list yet");
-        assert_eq!(m.send_to_captain("m-book:/w/site", None, "Ship it.", "r-12"), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 9 }));
-        assert_eq!(m.send_to_captain("github.com/o/site", Some("@Studio"), "Ship it.", "r-13"), Err("github.com/o/site is not a project on Studio".into()));
+        assert_eq!(m.send_to_captain("github.com/o/site", None, "Ship it.", "r-7", None), Err("github.com/o/site is on MacBook, Air: pass machine to pick one".into()));
+        assert_eq!(m.send_to_captain("github.com/o/site", Some("air"), "Ship it.", "r-8", None), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 5 }));
+        assert_eq!(m.send_to_captain("github.com/o/site", Some("@MacBook"), "Ship it.", "r-9", None), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 6 }));
+        assert_eq!(m.send_to_captain("Air:/w/site", None, "Ship it.", "r-10", None), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 7 }));
+        assert_eq!(m.send_to_captain("@imac:/w/new", None, "Ship it.", "r-11", None), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 8 }), "a folder the overview doesn't list yet");
+        assert_eq!(m.send_to_captain("m-book:/w/site", None, "Ship it.", "r-12", None), Ok(Handoff::Queued { tab: "tab-b-1".into(), position: 9 }));
+        assert_eq!(m.send_to_captain("github.com/o/site", Some("@Studio"), "Ship it.", "r-13", None), Err("github.com/o/site is not a project on Studio".into()));
         let targets: Vec<(Value, Value)> = relayed.lock().unwrap()[3..].iter().map(|r| (r["to"]["machine"].clone(), r["to"]["path"].clone())).collect();
         let to = |machine: &str, path: &str| (json!(machine), json!(path));
         assert_eq!(targets, [to("m-book", "/w/site"), to("m-air", "/w/site"), to("m-book", "/w/site"), to("m-air", "/w/site"), to("m-old", "/w/new"), to("m-book", "/w/site")]);
@@ -17656,10 +17694,10 @@ Have another model review a risky change before it goes ahead.";
         let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
         let path = project.display().to_string();
         let tab = idle_captain(&m, &path, &file);
-        let sent = Call::Enqueue { path, text: "Ship it.".into(), request_id: "r-1".into(), sender: "A\n[pinned] b".into(), busy: None };
+        let sent = Call::Enqueue { path, text: "Ship it.".into(), request_id: "r-1".into(), sender: "A\n[pinned] b".into(), busy: None, title: None };
         assert_eq!(m.call(sent), Ok(json!({ "outcome": "entregue", "tab": tab })));
-        let line = b"\x1b[200~[A pinned b] Ship it.\x1b[201~\r";
-        assert_eq!(typed(&file, line), line);
+        let line = "\x1b[200~[A pinned b] Ship it.\n\nRenomeie a sua sessão para o que você vai fazer agora, com set_session_title.\x1b[201~\r";
+        assert_eq!(typed(&file, line.as_bytes()), line.as_bytes());
         let _ = std::fs::remove_dir_all(dir);
     }
 

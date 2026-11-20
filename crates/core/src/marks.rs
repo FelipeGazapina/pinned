@@ -11,6 +11,27 @@ use std::collections::BTreeMap;
 pub const MAX_TEXT: usize = 2000;
 /// Most changes one call may make.
 pub const MAX_CHANGES: usize = 2000;
+/// Most characters a session's own title keeps, so the sidebar stays one short line.
+pub const MAX_TITLE_CHARS: usize = 70;
+
+/// A title a session wrote for itself, which never overwrites the user's own `title` mark.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct SelfTitle {
+    pub text: String,
+    /// Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.
+    pub author: String,
+    /// Unix seconds it was written.
+    pub at: f64,
+}
+
+/// A literal title as its writer meant it: the first line, without emoji, at most
+/// `MAX_TITLE_CHARS` characters, trimmed at both ends.
+pub fn clean_title(text: &str) -> String {
+    fn kept(c: char) -> bool {
+        !matches!(c as u32, 0x2028..=0x2029 | 0x2190..=0x2BFF | 0x1F000..=0x1FAFF | 0xFE0F)
+    }
+    text.trim().lines().next().unwrap_or("").chars().filter(|c| kept(*c)).take(MAX_TITLE_CHARS).collect::<String>().trim().to_owned()
+}
 
 /// One conversation's marks, under Claude Code's id for it, which outlives tabs and restarts.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
@@ -19,6 +40,10 @@ pub struct SessionMarks {
     /// The name the user gave it, shown in place of the session's own title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The name a session gave itself, shown in place of the generated one. It never overwrites
+    /// `title`, and the sidebar shows `title` over it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_title: Option<SelfTitle>,
     /// Its place among pinned threads, lowest first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin: Option<u32>,
@@ -83,6 +108,9 @@ pub struct Archived {
 #[serde(rename_all = "snake_case")]
 pub enum Mark {
     Title(Option<String>),
+    /// `{"self_title":{"text":"Libera o formulário","author":"captain","at":<unix s>}}`, or
+    /// `{"self_title":null}` to take the session's own name off.
+    SelfTitle(Option<SelfTitle>),
     Pin(Option<u32>),
     Order(Option<u32>),
     Settled(Option<f64>),
@@ -110,6 +138,7 @@ impl SessionMarks {
     pub fn apply(&mut self, mark: Mark) {
         match mark {
             Mark::Title(title) => self.title = title,
+            Mark::SelfTitle(self_title) => self.self_title = self_title,
             Mark::Pin(pin) => self.pin = pin,
             Mark::Order(order) => self.order = order,
             Mark::Settled(at) => self.settled = at,
@@ -133,6 +162,7 @@ impl SessionMarks {
         vec![
             change(Mark::Clear),
             change(Mark::Title(self.title.clone())),
+            change(Mark::SelfTitle(self.self_title.clone())),
             change(Mark::Pin(self.pin)),
             change(Mark::Order(self.order)),
             change(Mark::Settled(self.settled)),
@@ -157,6 +187,7 @@ pub fn check(changes: &[MarkChange]) -> Result<(), String> {
         }
         let text = match &change.mark {
             Mark::Title(Some(title)) => title.len(),
+            Mark::SelfTitle(Some(t)) => t.text.len(),
             Mark::Archived(Some(a)) => a.cwd.len().max(a.name.len()).max(a.project.len()).max(a.machine.len()).max(a.title.as_ref().map_or(0, String::len)),
             _ => 0,
         };
@@ -167,12 +198,16 @@ pub fn check(changes: &[MarkChange]) -> Result<(), String> {
     Ok(())
 }
 
-/// Refuses what only the app's own Archive and Delete write: with them an agent could forget an
-/// archived conversation for good, which `delete_session` holds for the user's approval.
+/// Refuses what only the app's own Archive and Delete write, and the user's own title: with them an
+/// agent could forget an archived conversation for good, which `delete_session` holds for the user's
+/// approval, and a written-by-hand title is the user's, never an agent's to replace.
 pub fn agent_check(call: &Parsed) -> Result<(), String> {
     let Parsed::Hub(HubCall::MarkSessions { changes }) = call else { return Ok(()) };
     if changes.iter().any(|change| matches!(change.mark, Mark::Clear | Mark::Archived(_))) {
         return Err("mark_sessions sets no archived mark and no clear for an agent: call archive_session, unarchive_session or delete_session".into());
+    }
+    if changes.iter().any(|change| matches!(change.mark, Mark::Title(_))) {
+        return Err("mark_sessions writes no user title for an agent: name your own session with set_session_title".into());
     }
     check(changes)
 }
@@ -296,10 +331,10 @@ mod tests {
             change("s1", Mark::Title(Some("Nome que eu dei".into()))),
             change("s1", Mark::SelfTitle(Some(SelfTitle { text: "Libera o formulário".into(), author: "captain".into(), at: 1.0 }))),
         ]);
-        let row = &rows[&"s1".to_string()];
+        let row = rows[&"s1".to_string()].clone();
         assert_eq!(row.title.as_deref(), Some("Nome que eu dei"), "the user's own title survives a session naming itself");
         assert_eq!(row.self_title.as_ref().unwrap().text, "Libera o formulário");
-        let rebuilt = apply(&mut rows, rows[&"s1".to_string()].rebuild());
+        let rebuilt = apply(&mut rows, row.rebuild());
         assert_eq!(rebuilt[0].title.as_deref(), Some("Nome que eu deu"));
         assert_eq!(rebuilt[0].self_title.as_ref().unwrap().text, "Libera o formulário");
     }

@@ -1782,7 +1782,7 @@ impl Boxes {
                 let repo = repo.ok_or("the box has no repository to clone")?;
                 let path = call(Call::Clone { repo, token, dest: None }).await.map_err(String::from)?;
                 let path = path.as_str().ok_or("the box cloned the repository without naming its folder")?.to_owned();
-                call(Call::Enqueue { path, text: text.clone(), request_id: request_id.clone(), sender: sender.clone(), busy: *busy }).await.map_err(String::from)?
+                call(Call::Enqueue { path, text: text.clone(), request_id: request_id.clone(), sender: sender.clone(), busy: *busy, title: None }).await.map_err(String::from)?
             }
         };
         let tab = answer["tabId"].as_str().or(answer["tab"].as_str()).ok_or("the box started no thread")?;

@@ -5572,9 +5572,13 @@ fn an_agent_files_restarts_and_archives_threads_as_the_user_but_a_delete_waits_f
     let calls = |raw: &RawMachine, cmd: &str| raw.calls.lock().unwrap().iter().filter(|c| c["cmd"] == cmd).cloned().collect::<Vec<Value>>();
 
     let from = ana.frames.len();
-    let renamed = act(&raw, "tab-agent", "mark_sessions", json!({ "changes": [{ "session": "conv-1", "mark": { "title": "Fix login" } }, { "session": "conv-1", "mark": { "pin": 0 } }] }));
-    assert_eq!(renamed, Ok(json!({ "outcome": "done", "result": [{ "session": "conv-1", "title": "Fix login", "pin": 0 }] })));
-    wait_frame(&mut ana, from, "the agent's rename and pin", |f| f["type"] == "session_marks" && f["marks"] == json!([{ "session": "conv-1", "title": "Fix login", "pin": 0 }]));
+    let renamed = act(&raw, "tab-agent", "mark_sessions", json!({ "changes": [{ "session": "conv-1", "mark": { "self_title": { "text": "Fix login", "author": "captain", "at": 1700000000.0 } } }, { "session": "conv-1", "mark": { "pin": 0 } }] }));
+    assert_eq!(renamed, Ok(json!({ "outcome": "done", "result": [{ "session": "conv-1", "self_title": { "text": "Fix login", "author": "captain", "at": 1700000000.0 }, "pin": 0 }] })));
+    wait_frame(&mut ana, from, "the agent's own title and pin", |f| f["type"] == "session_marks" && f["marks"] == json!([{ "session": "conv-1", "self_title": { "text": "Fix login", "author": "captain", "at": 1700000000.0 }, "pin": 0 }]));
+    assert_eq!(
+        act(&raw, "tab-agent", "mark_sessions", json!({ "changes": [{ "session": "conv-1", "mark": { "title": "Fix login" } }] })),
+        Err("mark_sessions writes no user title for an agent: name your own session with set_session_title".into())
+    );
     assert_eq!(
         act(&raw, "tab-agent", "mark_sessions", json!({ "changes": [{ "session": "conv-1", "mark": "clear" }] })),
         Err("mark_sessions sets no archived mark and no clear for an agent: call archive_session, unarchive_session or delete_session".into())
@@ -5642,8 +5646,8 @@ fn an_agent_files_restarts_and_archives_threads_as_the_user_but_a_delete_waits_f
     assert_eq!(bob_raw.ask(json!({ "cmd": "act", "act": { "tab": "tab-bob", "action": "stop_turn", "args": { "tab": "tab-agent" }, "machine": machine } })), Err(format!("this account has no machine {machine}")));
     assert_eq!(act(&bob_raw, "tab-bob", "unarchive_session", json!({ "session": "agent-conv" })), Err("this account has no archived conversation agent-conv".into()));
     let from = ana.frames.len();
-    act(&bob_raw, "tab-bob", "mark_sessions", json!({ "changes": [{ "session": "agent-conv", "mark": { "title": "Bob was here" } }] })).unwrap();
-    assert_eq!(act(&bob_raw, "tab-bob", "session_marks", json!({})), Ok(json!({ "outcome": "done", "result": [{ "session": "agent-conv", "title": "Bob was here" }] })));
+    act(&bob_raw, "tab-bob", "mark_sessions", json!({ "changes": [{ "session": "agent-conv", "mark": { "self_title": { "text": "Bob was here", "author": "session", "at": 1700000000.0 } } }] })).unwrap();
+    assert_eq!(act(&bob_raw, "tab-bob", "session_marks", json!({})), Ok(json!({ "outcome": "done", "result": [{ "session": "agent-conv", "self_title": { "text": "Bob was here", "author": "session", "at": 1700000000.0 } }] })));
     assert_eq!(ana.hub(json!({ "cmd": "session_marks" })), Ok(json!([])), "bob's agent changed only bob's marks");
     assert_eq!(ana.frames[from..].iter().filter(|f| f.to_string().contains("Bob was here")).count(), 0);
     assert_eq!(calls(&raw, "act_for").len(), restarts.len(), "bob's agent reached nothing on ana's machine");

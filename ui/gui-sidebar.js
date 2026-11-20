@@ -48,14 +48,14 @@ const MONOGRAM_COLORS = ["#9ca3af", "#f87171", "#fb923c", "#fbbf24", "#facc15", 
 
 /** What the user did to threads, by `threadKey`: pins in order, active threads dragged into an order,
  * manual settles and un-settles, snoozes, renames, and threads kept out of auto-settle. */
-const sideMarks = { pins: [], order: [], settled: {}, unsettled: {}, snoozed: {}, titles: {}, noAutoSettle: {} };
+const sideMarks = { pins: [], order: [], settled: {}, unsettled: {}, snoozed: {}, titles: {}, selfTitles: {}, noAutoSettle: {} };
 try {
   Object.assign(sideMarks, storedSideMarks(JSON.parse(load("gui-marks"))));
 } catch {}
 const saveMarks = () => storeMarks("gui-marks");
 onRekey((from, to) => {
   for (const m of ["pins", "order"]) sideMarks[m] = sideMarks[m].map((k) => (k === from ? to : k));
-  for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) {
+  for (const m of ["settled", "unsettled", "snoozed", "titles", "selfTitles", "noAutoSettle"]) {
     if (!(from in sideMarks[m])) continue;
     sideMarks[m][to] = sideMarks[m][from];
     delete sideMarks[m][from];
@@ -1306,7 +1306,7 @@ function renderSyncAlert() {
 
 /** Runs `change` on the marks and returns a function that puts back what it touched. */
 function changeMarks(key, change) {
-  const before = JSON.stringify({ pins: sideMarks.pins, order: sideMarks.order, ...Object.fromEntries(["settled", "unsettled", "snoozed", "titles", "noAutoSettle"].map((m) => [m, sideMarks[m][key]])) });
+  const before = JSON.stringify({ pins: sideMarks.pins, order: sideMarks.order, ...Object.fromEntries(["settled", "unsettled", "snoozed", "titles", "selfTitles", "noAutoSettle"].map((m) => [m, sideMarks[m][key]])) });
   change();
   saveMarks();
   renderSidebar();
@@ -1314,7 +1314,7 @@ function changeMarks(key, change) {
     const was = JSON.parse(before);
     sideMarks.pins = was.pins;
     sideMarks.order = was.order;
-    for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) {
+    for (const m of ["settled", "unsettled", "snoozed", "titles", "selfTitles", "noAutoSettle"]) {
       if (was[m] === undefined) delete sideMarks[m][key];
       else sideMarks[m][key] = was[m];
     }
@@ -2160,7 +2160,7 @@ const closedEntry = (tab) => ({ machine: tab.machine, cwd: tab.view.cwd, session
 /** Called as a tab closes, so ⌘⇧T can bring its conversation back, unless it was archived or deleted. */
 function rememberClosed(tab) {
   if (!tab.forget) pushClosed({ thread: closedEntry(tab) });
-  for (const m of ["settled", "unsettled", "snoozed", "titles", "noAutoSettle"]) delete sideMarks[m][threadKey(tab)];
+  for (const m of ["settled", "unsettled", "snoozed", "titles", "selfTitles", "noAutoSettle"]) delete sideMarks[m][threadKey(tab)];
   for (const m of ["pins", "order"]) sideMarks[m] = sideMarks[m].filter((k) => k !== threadKey(tab));
   saveMarks();
 }

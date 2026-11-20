@@ -386,7 +386,7 @@ test("a hub that loses the calls on a reconnect sends the page back to storage, 
   hub.old = true;
   await mine.marks.hello(ACCOUNT);
   assert.equal(mine.marks.saved(), false);
-  assert.deepEqual(stored(mine.storage).sideMarks, { pins: ["session:s1"], order: [], settled: {}, unsettled: {}, snoozed: {}, titles: {}, noAutoSettle: {} });
+  assert.deepEqual(stored(mine.storage).sideMarks, { pins: ["session:s1"], order: [], settled: {}, unsettled: {}, snoozed: {}, titles: {}, selfTitles: {}, noAutoSettle: {} });
 });
 
 test("an undo made while the change is on its way survives the hub's echo of it", async () => {
@@ -438,7 +438,7 @@ test("signing out of the app keeps the hub's marks in storage, and of the web pa
   await mine.marks.hello(ACCOUNT);
   mine.marks.leave(true);
   assert.deepEqual(stored(mine.storage), {
-    sideMarks: { pins: [], order: [], settled: {}, unsettled: {}, snoozed: {}, titles: { "session:s1": "Kept" }, noAutoSettle: {} },
+    sideMarks: { pins: [], order: [], settled: {}, unsettled: {}, snoozed: {}, titles: { "session:s1": "Kept" }, selfTitles: {}, noAutoSettle: {} },
     seenAt: { "session:s1": 7 },
     archived: [],
   });
