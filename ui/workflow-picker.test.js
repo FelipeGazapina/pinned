@@ -77,7 +77,7 @@ function load({ linear = null, bots = [], reply = () => ({}) } = {}) {
   };
   context.globalThis = context;
   vm.runInNewContext(
-    `${settingsSrc}\nglobalThis.__actions = actions; globalThis.__state = () => ({ page, view }); globalThis.__setSettings = (next) => { settings = next; }; globalThis.__settings = () => settings;`,
+    `${settingsSrc}\nglobalThis.__actions = actions; globalThis.__tidy = tidy; globalThis.__state = () => ({ page, view }); globalThis.__setSettings = (next) => { settings = next; }; globalThis.__settings = () => settings;`,
     context,
   );
   context.__setSettings({ linear, slack: bots[0] ?? null, slack_bots: bots, connectors: [], checked: null });
@@ -111,6 +111,41 @@ test("with Linear connected, clicking the Linear option opens the new workflow, 
   assert.notEqual(env.state().page, "integrations");
   assert.equal(env.state().view.name, "edit");
   assert.equal(env.state().view.draft.trigger.kind, "linear-label");
+});
+
+test("with Linear connected, every Linear option opens a workflow on that same connector", async () => {
+  for (const kind of ["linear-label", "linear-status", "linear-assigned"]) {
+    const env = load({ linear: LINEAR });
+    await openPicker(env);
+    assert.equal(env.option(kind).action, "pick-trigger", kind);
+    assert.doesNotMatch(env.option(kind).text, /Connect .* first/);
+    await env.click(kind);
+    assert.equal(env.state().view.name, "edit", kind);
+    assert.equal(env.state().view.draft.trigger.kind, kind);
+    assert.equal(env.state().view.draft.graph.nodes[0].watch.kind, kind);
+  }
+});
+
+test("a linear status draft keeps its columns on the graph the hub stores", async () => {
+  const env = load({ linear: LINEAR });
+  await openPicker(env);
+  await env.click("linear-status");
+  const draft = env.state().view.draft;
+  draft.trigger.from = "Todo";
+  draft.trigger.to = " Ready to Dev ";
+  draft.trigger.scope = { team: " ENG ", project: "" };
+  draft.trigger.by = "not-me";
+  const saved = env.context.__tidy(draft);
+  // tidy runs in the settings vm, so compare the JSON, not the vm's objects.
+  const plain = (value) => JSON.parse(JSON.stringify(value));
+  assert.deepEqual(plain(saved.trigger), {
+    kind: "linear-status",
+    from: "Todo",
+    to: "Ready to Dev",
+    scope: { team: "ENG", project: "" },
+    by: "not-me",
+  });
+  assert.deepEqual(plain(saved.graph.nodes[0].watch), plain(saved.trigger));
 });
 
 test("with Slack connected, every Slack option opens the new workflow with its own trigger", async () => {

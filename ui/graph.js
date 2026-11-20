@@ -438,11 +438,37 @@ export function switchProblem(graph, node) {
   return null;
 }
 
-function watchOf(trigger) {
+function scopeOf(scope) {
+  return { team: scope?.team ?? "", project: scope?.project ?? "" };
+}
+
+/** An assignee the hub's `Assignee` reads. A leftover id on Anyone, Me or Nobody is dropped. */
+function assigneeOf(to) {
+  const kind = to?.kind;
+  if (kind === "anyone" || kind === "nobody" || kind === "me") return { kind };
+  if (kind === "user") return { kind: "user", id: to.id ?? "", name: to.name ?? "" };
+  return { kind: "me" };
+}
+
+/** The graph watch for a workflow trigger. Unknown kinds stay Called, as a graph with no watch does. */
+export function watchOf(trigger) {
   const kind = trigger?.kind ?? "called";
   if (kind === "linear-label") return { kind, label: trigger.label ?? "" };
+  if (kind === "linear-status") return { kind, from: trigger.from ?? "", to: typeof trigger.to === "string" ? trigger.to : "", scope: scopeOf(trigger.scope), by: trigger.by || "anyone" };
+  if (kind === "linear-assigned") return { kind, to: assigneeOf(trigger.to), scope: scopeOf(trigger.scope), by: trigger.by || "anyone" };
   if (kind === "slack-message") return { kind, channel: trigger.channel ?? "", ...(trigger.apps ? { apps: true } : {}) };
   if (kind === "slack-mention") return { kind, channel: trigger.channel ?? "" };
+  return { kind: "called" };
+}
+
+/** The workflow trigger a graph watch projects, without a Slack message workflow's `decide`. */
+export function triggerFromWatch(watch) {
+  const kind = watch?.kind ?? "called";
+  if (kind === "linear-label") return { kind, label: watch.label ?? "" };
+  if (kind === "linear-status") return { kind, from: watch.from ?? "", to: watch.to ?? "", scope: scopeOf(watch.scope), by: watch.by || "anyone" };
+  if (kind === "linear-assigned") return { kind, to: assigneeOf(watch.to), scope: scopeOf(watch.scope), by: watch.by || "anyone" };
+  if (kind === "slack-message") return { kind, channel: watch.channel ?? "", ...(watch.apps ? { apps: true } : {}) };
+  if (kind === "slack-mention") return { kind, channel: watch.channel ?? "" };
   return { kind: "called" };
 }
 

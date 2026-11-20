@@ -47,19 +47,65 @@ const DEFAULT_CATEGORIES = [
   { name: "ignore", description: "Anything else", workflow: null, mention: null },
 ];
 const sessionSteps = (c, event) => [["ask", event], ["agent", ""], ["reply", ""], ["bug", ""], ...(c.fix === "off" ? [] : [["coding", "starts the fix"], ["review", "pull request opened"], ["proof", ""]])];
+const ISSUE_STEPS = () => [["ask", "new issue"], ["picked", ""], ["agent", ""], ["coding", "starts changing code"], ["review", "pull request opened"], ["proof", ""]];
+const LINEAR_SCOPE = () => ({ team: "", project: "" });
+const CHANGED_BY = { anyone: "Anyone", me: "Me", "not-me": "Someone else" };
+const statusMove = (trigger) => {
+  const from = (trigger?.from ?? "").trim();
+  const to = (trigger?.to ?? "").trim();
+  if (from && to) return `moves from “${from}” to “${to}”`;
+  if (to) return `moves to “${to}”`;
+  if (from) return `leaves “${from}”`;
+  return "changes status";
+};
+const assignedTo = (to) => {
+  if (to?.kind === "anyone") return "anyone";
+  if (to?.kind === "nobody") return "nobody";
+  if (to?.kind === "user") return (to.name ?? "").trim() || "a person";
+  return "you";
+};
 const TRIGGERS = {
   "linear-label": {
     text: "A Linear issue gets a label",
     pitch: "Claude resolves the issue, opens a pull request and moves the issue through your columns.",
     needs: "linear",
     step: "linear-trigger",
-    steps: () => [["ask", "new issue"], ["picked", ""], ["agent", ""], ["coding", "starts changing code"], ["review", "pull request opened"], ["proof", ""]],
+    steps: ISSUE_STEPS,
     subject: "issue",
     name: "Resolve labeled Linear issues",
     defaults: { worktree: true, columns: { picked: "Analyzing", coding: "In Dev", review: "Ready to Review" } },
     trigger: () => ({ kind: "linear-label", label: "claude" }),
     instructions: () => DEFAULT_INSTRUCTIONS,
     sentence: (c, where) => `When an issue gets the label “${c.trigger.label ?? ""}”, ${who(c)} picks it up${where}.`,
+  },
+  "linear-status": {
+    text: "A Linear issue changes status",
+    pitch: "Claude picks up the issue when it moves between columns.",
+    needs: "linear",
+    step: "linear-status-trigger",
+    steps: ISSUE_STEPS,
+    subject: "issue",
+    name: "Pick up moved Linear issues",
+    defaults: { worktree: true },
+    trigger: () => ({ kind: "linear-status", from: "", to: "", scope: LINEAR_SCOPE(), by: "anyone" }),
+    instructions: () => DEFAULT_INSTRUCTIONS,
+    sentence: (c, where) => `When an issue ${statusMove(c.trigger)}, ${who(c)} picks it up${where}.`,
+  },
+  "linear-assigned": {
+    text: "A Linear issue is assigned",
+    pitch: "Claude picks up the issue when it is assigned, or when its assignee is cleared.",
+    needs: "linear",
+    step: "linear-assigned-trigger",
+    steps: ISSUE_STEPS,
+    subject: "issue",
+    name: "Pick up assigned Linear issues",
+    defaults: { worktree: true },
+    trigger: () => ({ kind: "linear-assigned", to: { kind: "me" }, scope: LINEAR_SCOPE(), by: "anyone" }),
+    instructions: () => DEFAULT_INSTRUCTIONS,
+    sentence: (c, where) => {
+      const whoTo = c.trigger.to?.kind === "nobody" ? "is unassigned" : `is assigned to ${assignedTo(c.trigger.to)}`;
+      return `When an issue ${whoTo}, ${who(c)} picks it up${where}.`;
+    },
   },
   "slack-mention": {
     text: "The bot is @mentioned in Slack",
@@ -662,6 +708,29 @@ const moveStep = (stage) => ({
     <p class="hint">Matched by name, ignoring case, within the issue's team.${subject(c) === "thread" ? " A thread has no issue until the session files one, so this applies from then on." : ""}</p>`,
 });
 
+const linearScopeFields = (c) => {
+  const scope = c.trigger.scope ?? LINEAR_SCOPE();
+  return `<div class="grid">
+      <label>Team ${input("trigger.scope.team", scope.team ?? "", 'list="linear-teams" placeholder="Any team"')}</label>
+      <label>Project ${input("trigger.scope.project", scope.project ?? "", 'placeholder="Any project"')}</label>
+    </div>
+    <label>Changed by ${select("trigger.by", Object.keys(CHANGED_BY), (k) => CHANGED_BY[k], c.trigger.by || "anyone")}</label>`;
+};
+
+/** Anyone, you, or nobody. A person already saved on the workflow stays as its own choice. */
+function assignedToHtml(c) {
+  const to = c.trigger.to ?? { kind: "me" };
+  const labels = { anyone: "Anyone", me: "Me", nobody: "Nobody" };
+  const values = ["anyone", "me", "nobody"];
+  let selected = labels[to.kind] ? to.kind : "me";
+  if (to.kind === "user") {
+    selected = `user:${to.id ?? ""}`;
+    values.push(selected);
+    labels[selected] = (to.name ?? "").trim() || "A saved person";
+  }
+  return `<label>Assigned to ${select("trigger.to.kind", values, (id) => labels[id], selected)}</label>`;
+}
+
 /** Every step a connector can run. `flowOf` puts them in order; the backend runs them. */
 const STEPS = {
   "linear-trigger": {
@@ -675,6 +744,48 @@ const STEPS = {
     fields: (c) => `${kindHtml(c)}${connectForHtml("linear-label")}
       <label>Label ${input("trigger.label", c.trigger.label, 'list="linear-labels" placeholder="claude"')}</label>
       <p class="hint">pinned checks Linear every minute, only for issues created after the workflow is saved, and starts each issue once.</p>`,
+  },
+  "linear-status-trigger": {
+    tone: "linear",
+    icon: "→",
+    app: "Linear",
+    title: "Issue changes status",
+    trigger: true,
+    summary: (c) => {
+      const from = (c.trigger.from ?? "").trim();
+      const to = (c.trigger.to ?? "").trim();
+      if (from && to) return `From “${from}” to “${to}”`;
+      if (to) return `To “${to}”`;
+      if (from) return `Leaves “${from}”`;
+      return "Any status change";
+    },
+    issues: (c) => [!settings.linear && "Connect Linear under Connectors."].filter(Boolean),
+    fields: (c) => `${kindHtml(c)}${connectForHtml("linear-status")}
+      <div class="grid">
+        <label>From ${input("trigger.from", c.trigger.from ?? "", 'list="linear-columns" placeholder="Any column"')}</label>
+        <label>To ${input("trigger.to", c.trigger.to ?? "", 'list="linear-columns" placeholder="Any column"')}</label>
+      </div>
+      ${linearScopeFields(c)}
+      <p class="hint">pinned checks Linear every minute. Empty From or To means any column. Each matching change after the workflow is saved starts one session. With both empty, a column this workflow moves the issue to starts it again.</p>`,
+  },
+  "linear-assigned-trigger": {
+    tone: "linear",
+    icon: "◉",
+    app: "Linear",
+    title: "Issue is assigned",
+    trigger: true,
+    summary: (c) => {
+      const to = c.trigger.to ?? {};
+      if (to.kind === "anyone") return "Assigned to anyone";
+      if (to.kind === "nobody") return "Unassigned";
+      if (to.kind === "user") return (to.name ?? "").trim() ? `Assigned to ${(to.name ?? "").trim()}` : "Assigned to a person";
+      return "Assigned to me";
+    },
+    issues: (c) => [!settings.linear && "Connect Linear under Connectors.", c.trigger.to?.kind === "user" && !(c.trigger.to.id ?? "").trim() && "Name the person."].filter(Boolean),
+    fields: (c) => `${kindHtml(c)}${connectForHtml("linear-assigned")}
+      ${assignedToHtml(c)}
+      ${linearScopeFields(c)}
+      <p class="hint">pinned checks Linear every minute. Me is the Linear user of the connected key. Each matching assignment after the workflow is saved starts one session.</p>`,
   },
   "slack-trigger": {
     tone: "slack",
@@ -1140,29 +1251,29 @@ const MENU_W = 280;
 const graphApi = () => globalThis.PinnedGraph;
 const WATCH_STEP = {
   "linear-label": "linear-trigger",
+  "linear-status": "linear-status-trigger",
+  "linear-assigned": "linear-assigned-trigger",
   "slack-mention": "slack-trigger",
   "slack-message": "message-trigger",
   called: "called-trigger",
 };
+const LINEAR_TRIGGER = new Set(["linear-label", "linear-status", "linear-assigned"]);
 
 const graphNodeKind = (node) => node.type ?? node.kind;
 
 function syncTriggerFromWatch(c, watch) {
   if (!watch) return;
-  if (watch.kind === "linear-label") c.trigger = { kind: "linear-label", label: watch.label ?? "" };
-  else if (watch.kind === "slack-mention") c.trigger = { kind: "slack-mention", channel: watch.channel ?? "" };
-  else if (watch.kind === "slack-message") c.trigger = { kind: "slack-message", channel: watch.channel ?? "", ...(watch.apps ? { apps: true } : {}), decide: c.trigger?.decide ?? { model: "", instructions: "", categories: [], fallback: null } };
-  else if (watch.kind === "called") c.trigger = { kind: "called" };
+  const next = graphApi()?.triggerFromWatch?.(watch);
+  if (!next) return;
+  if (next.kind === "slack-message") c.trigger = { ...next, decide: c.trigger?.decide ?? { model: "", instructions: "", categories: [], fallback: null } };
+  else c.trigger = next;
 }
 
 function syncWatchFromTrigger(c) {
   const node = c.graph?.nodes?.find((n) => graphNodeKind(n) === "trigger");
-  if (!node || !c.trigger) return;
-  const t = c.trigger;
-  if (t.kind === "linear-label") node.watch = { kind: "linear-label", label: t.label ?? "" };
-  else if (t.kind === "slack-mention") node.watch = { kind: "slack-mention", channel: t.channel ?? "" };
-  else if (t.kind === "slack-message") node.watch = { kind: "slack-message", channel: t.channel ?? "", ...(t.apps ? { apps: true } : {}) };
-  else node.watch = { kind: "called" };
+  const watch = graphApi()?.watchOf?.(c.trigger);
+  if (!node || !watch) return;
+  node.watch = watch;
 }
 
 const OLDER_HUB = "This workflow comes from an older hub; update the hub.";
@@ -1234,12 +1345,12 @@ function graphNodeSummary(node, c) {
   return node.name ?? "";
 }
 
-/** Whether the draft's graph watches a Slack subject. Only a Linear label trigger cannot feed
- * thread steps; a called workflow may be called with either subject. */
+/** Whether the draft's graph watches a Slack subject. A Linear trigger has an issue, not a thread.
+ * A called workflow may be called with either subject. */
 function slackRun(c) {
   const watch = c.graph?.nodes?.find((n) => graphNodeKind(n) === "trigger")?.watch;
   const kind = watch?.kind ?? c.trigger?.kind ?? "called";
-  return kind !== "linear-label";
+  return !LINEAR_TRIGGER.has(kind);
 }
 /** A session step's one-line summary: its prompt, or where and how it opens. Empty fields read
  * as the connector's own session settings, so the summary falls back to those. */
@@ -1258,10 +1369,9 @@ function sessionNodeIssues(node, c) {
   return [!folder && !repo && "Choose the folder or the repository the session opens in."].filter(Boolean);
 }
 function legacyTriggerFromWatch(watch) {
-  if (watch?.kind === "linear-label") return { kind: "linear-label", label: watch.label ?? "" };
-  if (watch?.kind === "slack-message") return { kind: "slack-message", channel: watch.channel ?? "", ...(watch.apps ? { apps: true } : {}), decide: { model: "", instructions: "", categories: [], fallback: null } };
-  if (watch?.kind === "slack-mention") return { kind: "slack-mention", channel: watch.channel ?? "" };
-  return { kind: "called" };
+  const next = graphApi()?.triggerFromWatch?.(watch) ?? { kind: "called" };
+  if (next.kind === "slack-message") return { ...next, decide: { model: "", instructions: "", categories: [], fallback: null } };
+  return next;
 }
 
 function graphNodeIssues(node, c) {
@@ -1799,13 +1909,20 @@ function checkedText() {
 
 const trimmed = (s) => (s ?? "").trim();
 
-function tidyTrigger({ kind, label, channel, decide, apps }) {
-  const trigger = { kind };
-  if (label !== undefined) trigger.label = trimmed(label);
-  if (channel !== undefined) trigger.channel = trimmed(channel);
-  if (kind === "slack-message" && apps) trigger.apps = true;
+function tidyAssignee(to) {
+  if (to?.kind === "anyone" || to?.kind === "nobody") return { kind: to.kind };
+  if (to?.kind === "user") return { kind: "user", id: trimmed(to.id), name: trimmed(to.name) };
+  return { kind: "me" };
+}
+
+function tidyTrigger(trigger) {
+  const { kind, label, channel, decide, apps } = trigger ?? {};
+  const out = { kind };
+  if (label !== undefined) out.label = trimmed(label);
+  if (channel !== undefined) out.channel = trimmed(channel);
+  if (kind === "slack-message" && apps) out.apps = true;
   if (decide) {
-    trigger.decide = {
+    out.decide = {
       model: trimmed(decide.model),
       instructions: trimmed(decide.instructions),
       categories: decide.categories.map((cat) => ({
@@ -1817,7 +1934,16 @@ function tidyTrigger({ kind, label, channel, decide, apps }) {
       fallback: decide.fallback || null,
     };
   }
-  return trigger;
+  if (kind === "linear-status" || kind === "linear-assigned") {
+    out.scope = { team: trimmed(trigger.scope?.team), project: trimmed(trigger.scope?.project) };
+    out.by = trigger.by || "anyone";
+  }
+  if (kind === "linear-status") {
+    out.from = trimmed(trigger.from);
+    out.to = trimmed(trigger.to);
+  }
+  if (kind === "linear-assigned") out.to = tidyAssignee(trigger.to);
+  return out;
 }
 
 /** The draft with its typed names trimmed, as the backend matches them. */
@@ -1844,8 +1970,11 @@ function tidy(c) {
     };
   } else delete out.ask;
   if (c.graph) {
-    syncLegacyFromGraph(c);
+    // The hub stores the graph watch and projects this trigger from it.
+    c.trigger = out.trigger;
+    syncWatchFromTrigger(c);
     out.graph = c.graph;
+    out.trigger = c.trigger;
   }
   return out;
 }
@@ -1855,6 +1984,14 @@ const defaultText = (c) => TRIGGERS[c.trigger.kind].instructions(c);
 /** Fields that change which steps the flow has, so the draft is reshaped and the editor redrawn. */
 const RESHAPES = {
   "trigger.kind": (c, kind) => ({ ...c, trigger: TRIGGERS[kind].trigger(c.trigger) }),
+  "trigger.to.kind": (c, value) => {
+    if (String(value).startsWith("user:")) {
+      const id = String(value).slice("user:".length);
+      const kept = c.trigger.to?.kind === "user" && c.trigger.to.id === id ? c.trigger.to.name : "";
+      return { ...c, trigger: { ...c.trigger, to: { kind: "user", id, name: kept ?? "" } } };
+    }
+    return { ...c, trigger: { ...c.trigger, to: { kind: value } } };
+  },
   fix: (c, fix) => ({ ...c, fix }),
   machine: (c, machine) => ({ ...c, machine: machine === BOX ? { kind: BOX, size: "medium" } : machine }),
 };
@@ -1865,10 +2002,8 @@ function reshape(change) {
   const after = change(clone(before));
   if (before.name === TRIGGERS[before.trigger.kind].name) after.name = TRIGGERS[after.trigger.kind].name;
   if (before.instructions.trim() === defaultText(before).trim()) after.instructions = defaultText(after);
-  if (before.trigger.kind !== after.trigger.kind) {
-    syncWatchFromTrigger(after);
-    view.open = after.graph?.nodes?.find((n) => graphNodeKind(n) === "trigger")?.id ?? view.open;
-  }
+  if (before.trigger.kind !== after.trigger.kind) view.open = after.graph?.nodes?.find((n) => graphNodeKind(n) === "trigger")?.id ?? view.open;
+  if (after.graph) syncWatchFromTrigger(after);
   view.draft = after;
   if (JSON.stringify(before.machine) !== JSON.stringify(after.machine)) {
     loadFolders(after);
@@ -2473,7 +2608,7 @@ settingsPage.addEventListener("input", (e) => {
       }
     }
   }
-  if (path === "trigger.label" || path === "trigger.channel" || path === "trigger.apps") syncWatchFromTrigger(view.draft);
+  if (path.startsWith("trigger.")) syncWatchFromTrigger(view.draft);
   if (path.startsWith("graph.nodes") && path.includes(".watch.")) syncLegacyFromGraph(view.draft);
   refresh();
 });
@@ -2539,7 +2674,7 @@ settingsSection({ page: "connectors", label: "Workflows", icon: "workflow", show
   refreshCopy().then(() => {
     if (page === "connectors") redraw();
   });
-}, search: [{ title: "Workflows", terms: ["linear label slack mention automation trigger"] }] });
+}, search: [{ title: "Workflows", terms: ["linear label status assigned column slack mention automation trigger"] }] });
 settingsSection({ page: "account", label: "Account", icon: "circle-user", show: () => showAccount(), search: [{ title: "Password", terms: ["account change sign in out email"] }] });
 settingsSection({ page: "machines", label: "Machines", icon: "server", show: () => showMachinesAndRecheckSync(), search: [{ title: "Machines", terms: ["pair rename remove server node computer run in the background window"] }] });
 settingsSection({ page: "archive", label: "Archive", icon: "archive", show: () => showArchive(), search: [{ title: "Archive", terms: ["archived threads unarchive delete restore"] }] });

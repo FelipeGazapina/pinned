@@ -17,6 +17,8 @@ import {
   resetIds,
   splice,
   startingGraph,
+  watchOf,
+  triggerFromWatch,
   validate,
   COL,
   OUT,
@@ -422,6 +424,20 @@ test("starting graph is a trigger and a session, with no migrated classify", () 
   assert.deepEqual(graph.edges, [{ from: "trigger-1", port: OUT, to: "session-2" }]);
   assert.equal(graph.nodes[1].folder, "/repo");
   assert.equal(graph.nodes[1].model, "sonnet");
+});
+
+test("a linear change trigger round-trips through the graph watch", () => {
+  const status = { kind: "linear-status", from: "Todo", to: "Done", scope: { team: "ENG", project: "Hub" }, by: "not-me" };
+  assert.deepEqual(watchOf(status), status);
+  assert.deepEqual(triggerFromWatch(watchOf(status)), status);
+  const assigned = { kind: "linear-assigned", to: { kind: "user", id: "u-ana", name: "Ana" }, scope: { team: "", project: "" }, by: "anyone" };
+  assert.deepEqual(triggerFromWatch(watchOf(assigned)), assigned);
+  assert.deepEqual(watchOf({ kind: "linear-assigned", to: { kind: "me", id: "stale" } }).to, { kind: "me" });
+});
+
+test("starting graph keeps a linear status watch", () => {
+  const graph = startingGraph({ trigger: { kind: "linear-status", from: "", to: "Ready", scope: { team: "ENG", project: "" }, by: "anyone" } });
+  assert.deepEqual(graph.nodes[0].watch, { kind: "linear-status", from: "", to: "Ready", scope: { team: "ENG", project: "" }, by: "anyone" });
 });
 
 test("talk and session steps wire an error port", () => {

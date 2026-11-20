@@ -8,7 +8,7 @@ const src = readFileSync(new URL("./settings.js", import.meta.url), "utf8");
 // The Workflows list renders every saved connector through cardHtml; one connector the app
 // doesn't know must never blank the page, or its switch can't be reached to turn it off.
 function listWorld(connectors) {
-  const start = src.indexOf("const TRIGGERS = {");
+  const start = src.indexOf("const ISSUE_STEPS = ");
   const end = src.indexOf("\nfunction triggerChoiceHtml()");
   const context = {
     console,
@@ -52,6 +52,30 @@ test("an unknown trigger still renders a card instead of blanking the page", () 
   assert.match(html, /Future thing/);
   assert.match(html, /repair its trigger/);
   assert.match(html, /data-toggle="enabled"/);
+});
+
+test("a linear status workflow names the move on its card", () => {
+  const context = listWorld([
+    {
+      id: "c3",
+      name: "Ready for dev",
+      enabled: true,
+      trigger: { kind: "linear-status", from: "", to: "Ready to Dev", scope: { team: "", project: "" }, by: "anyone" },
+      folder: "/repo",
+      machine: "",
+      model: "",
+      effort: "high",
+      permissionMode: "auto",
+      worktree: false,
+      instructions: "Pick it up.",
+      fix: "off",
+      proof: false,
+      columns: { picked: "", coding: "", review: "" },
+    },
+  ]);
+  const html = context.connectorsHtml();
+  assert.match(html, /Ready for dev/);
+  assert.match(html, /moves to “Ready to Dev”/);
 });
 
 test("a connector without a trigger still renders a card", () => {
