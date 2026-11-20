@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.18.8 (2026-11-19)
+
+### Added
+
+- This Mac keeps working when the hub is stopped or unreachable. Threads on this Mac stay live. Threads on other machines dim and freeze where the link dropped. The bar reads "Can't reach the hub. This Mac keeps working." This Mac counts as online. Clone and update run here. Connectors and workflows show the last saved copy and stay read-only. A tool that can answer on this Mac does. The others say the hub can't be reached.
+- After the hub has been unreachable for five minutes, the Mac named as the offline runner checks Linear and Slack and runs the account's workflows from a copy it kept while the hub was up. Settings, MCP servers and tastes on that Mac come from the copy. Another desktop keeps its own sessions, and workflows stay on the runner. When the hub returns, the runner sends those edits back. The hub holds workflows until that handback, or until you choose "Run them on the hub now". Signing out while this Mac still has edits to send back asks first. Confirming drops them.
+
+### Changed
+
+- Sync fetches a project when the hub says it changed, and only the files written since the revision this Mac already has. A machine also checks ten minutes after its last read, and reads the whole list once a day. A hub older than 0.18.8 still answers the full list every 20 seconds.
+
 ## 0.18.7 (2026-11-18)
 
 ### Added
