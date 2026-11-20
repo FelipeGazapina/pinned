@@ -851,6 +851,21 @@ enum Filing {
     New { team: String, label: String },
 }
 
+/// The decision model the connector's message router sorts messages with: a `slack-message`
+/// workflow's model, or the graph classify's when the router moved into a graph. The check for
+/// an existing issue borrows it. None when the connector has no router model to borrow.
+fn decision_model(connector: &Connector) -> Option<&str> {
+    let Trigger::SlackMessage { decide, .. } = &connector.trigger else { return None };
+    let from_decide = Some(decide.model.trim()).filter(|model| !model.is_empty());
+    let from_graph = connector.graph.as_ref().and_then(|graph| {
+        graph.nodes.iter().find_map(|node| match &node.kind {
+            NodeKind::Classify(classify) => Some(classify.model.trim()).filter(|model| !model.is_empty()),
+            _ => None,
+        })
+    });
+    from_decide.or(from_graph)
+}
+
 impl Connector {
     /// A message router that sorts with its own categories: a `slack-message` workflow whose
     /// graph is none or still the one `migrate` builds. Its poller asks the decision model, looks
@@ -2516,6 +2531,10 @@ pub struct Connectors {
     /// Held while a session files or takes a Linear issue, and while a check hands out issues, so
     /// two calls from one thread can't both file one and a check never starts an issue a thread holds.
     filing: tokio::sync::Mutex<()>,
+    /// A team's open Linear issues, read at most once per `TITLES_TTL`, so a burst of filings for
+    /// one alert reads Linear once. An issue a filing creates drops its team's list, so the next
+    /// filing's decision model sees it.
+    titles: Mutex<BTreeMap<String, (std::time::Instant, Vec<linear::OpenIssue>)>>,
     /// Graph runs. A restart reads them back and `drive` continues each one.
     runs: Mutex<Vec<runner::Run>>,
     /// Slack replies waiting to be typed into a graph run's session.
@@ -2593,6 +2612,9 @@ pub enum BoxEndRelease {
 
 /// How long a Slack, Linear or GitHub call may take, so a stalled one cannot hold the drive lock.
 pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a team's open-issue list may serve a filing before Linear is read again.
+const TITLES_TTL: Duration = Duration::from_secs(60);
 
 /// What one account's connectors hold, for the hub's census.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2702,6 +2724,7 @@ impl Connectors {
             wake: Notify::new(),
             channels: Mutex::new(HashMap::new()),
             filing: tokio::sync::Mutex::new(()),
+            titles: Mutex::new(BTreeMap::new()),
             runs: Mutex::new(runs),
             inbox: Mutex::new(vec![]),
             driving: tokio::sync::Mutex::new(()),
@@ -3793,8 +3816,9 @@ impl Connectors {
     }
 
     /// Files a Linear issue for the Slack thread in the given team, linking back to the thread.
-    /// An issue the thread already filed is answered, never filed twice. The caller holds the
-    /// filing lock.
+    /// An issue the thread already filed is answered, never filed twice, and so is an open issue
+    /// the filing connector's decision model says already covers the report. The caller holds
+    /// the filing lock.
     async fn file_issue(
         &self,
         connector: &str,
@@ -3817,6 +3841,19 @@ impl Connectors {
         {
             return Ok(filed.clone());
         }
+        // An alert that re-emits while it persists reaches this as a new thread every time, and
+        // each thread would file its own copy. The decision model reads every open issue's title
+        // and says which one already covers the report, if any; its issue is answered instead.
+        if let Some(existing) = self.duplicate(connector, team, title, description).await? {
+            let filed = Filed { id: existing.id, identifier: existing.identifier, url: existing.url };
+            let mut store = self.store.lock().unwrap();
+            // The connector may have been deleted while the model answered; the issue exists all the same.
+            if let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) {
+                c.created.insert(thread_key(channel, thread), filed.clone());
+                self.save(&store)?;
+            }
+            return Ok(filed);
+        }
         let key = self.key(LINEAR_KEY).ok_or("Linear is not connected: connect it in pinned's Connectors settings")?;
         let token = self.thread_bot(Some(connector), channel, thread)?.token;
         let link = slack::permalink(&token, channel, thread).await?;
@@ -3825,6 +3862,8 @@ impl Connectors {
         // Whatever status and assignee the new issue got, pinned set them.
         self.wrote(&issue.id, Field::State, None);
         self.wrote(&issue.id, Field::Assignee, None);
+        // The next filing's decision model must see the issue this one created.
+        self.titles.lock().unwrap().remove(team);
         let filed = Filed { id: issue.id, identifier: issue.identifier, url: issue.url };
         let mut store = self.store.lock().unwrap();
         // The connector may have been deleted while Linear answered; the issue exists all the same.
@@ -3833,6 +3872,56 @@ impl Connectors {
             self.save(&store)?;
         }
         Ok(filed)
+    }
+
+    /// The open issue in `team` that already covers this report, by the filing connector's
+    /// decision model reading every open issue's title, or None when it answers that none does.
+    /// None when the connector has no decision model: the check borrows a message router's.
+    async fn duplicate(&self, connector: &str, team: &str, title: &str, description: &str) -> Result<Option<linear::OpenIssue>, String> {
+        let Some(model) = self
+            .store
+            .lock()
+            .unwrap()
+            .connectors
+            .iter()
+            .find(|c| c.id == connector)
+            .and_then(|c| decision_model(c))
+            .map(str::to_owned)
+        else {
+            return Ok(None);
+        };
+        let key = self.key(VERCEL_KEY).ok_or_else(|| {
+            "Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".to_owned()
+        })?;
+        let issues = self.open_issues(team).await?;
+        if issues.is_empty() {
+            return Ok(None);
+        }
+        let mut choices: Vec<(&str, &str)> = issues.iter().map(|issue| (issue.identifier.as_str(), issue.title.as_str())).collect();
+        choices.push(("new", "none of these issues covers the report; it needs a new issue"));
+        let state = json!({ "team": team, "report": { "title": title, "description": description } });
+        let instructions = "The report may already exist as one of the issues: the same problem, reported again. \
+                            Read each issue's title and decide whether the report is that issue. If it is, choose the \
+                            issue by its identifier. If no issue covers it, choose new.";
+        let chosen = vercel::choose(&key, &model, instructions, &choices, &state).await?;
+        Ok(issues.into_iter().nth(chosen.index))
+    }
+
+    /// Every open issue in `team`, as Linear has them. A team's list serves filings for
+    /// `TITLES_TTL`, so a burst of them reads Linear once; a filed issue drops it.
+    async fn open_issues(&self, team: &str) -> Result<Vec<linear::OpenIssue>, String> {
+        {
+            let titles = self.titles.lock().unwrap();
+            if let Some((at, issues)) = titles.get(team) {
+                if at.elapsed() < TITLES_TTL {
+                    return Ok(issues.clone());
+                }
+            }
+        }
+        let key = self.key(LINEAR_KEY).ok_or("Linear is not connected: connect it in pinned's Connectors settings")?;
+        let issues = linear::open_issues(&key, team).await?;
+        self.titles.lock().unwrap().insert(team.to_owned(), (std::time::Instant::now(), issues.clone()));
+        Ok(issues)
     }
 
     /// Lets the Slack thread's session work on the existing issue `issue`, an identifier such as
@@ -7609,6 +7698,170 @@ mod tests {
         assert!(block_on(connectors.perform_file_issue(&mut run, "c2", "ENG", "", "", "  ", "D")).is_err());
         assert!(block_on(connectors.perform_take_issue(&mut run, "c2", "")).is_err());
         assert!(block_on(connectors.perform_move_column(&mut run, "c2", "  ")).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A stand-in for Linear, the gateway's decide and Slack's permalink on one port, for filing
+    /// tests. It answers the workspace read the way Linear does, the teams read with team BLO
+    /// (id team-1), the open-issues read with `open`, an issueCreate with BLO-1, and `/evaluate`
+    /// with the choice `choice` holds. Each request's path and body is kept, in order.
+    fn serve_dedupe(open: Vec<Value>, choice: std::sync::Arc<Mutex<String>>) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
+        install_rustls();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let kept = seen.clone();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while started.elapsed() < std::time::Duration::from_secs(60) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(accepted) => accepted,
+                    Err(_) => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 65536];
+                let complete = |buf: &[u8]| {
+                    let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { return false };
+                    let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                    let length = head.lines().find_map(|line| line.strip_prefix("content-length:")).and_then(|n| n.trim().parse::<usize>().ok()).unwrap_or(0);
+                    buf.len() >= end + 4 + length
+                };
+                while !complete(&buf) {
+                    match std::io::Read::read(&mut stream, &mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let request = String::from_utf8_lossy(&buf).to_string();
+                let path = request.split_whitespace().nth(1).unwrap_or_default().to_owned();
+                let body = request.split("\r\n\r\n").nth(1).unwrap_or_default().to_owned();
+                kept.lock().unwrap().push(format!("{path} {body}"));
+                let answer = if body.contains("issueCreate") {
+                    r#"{"data":{"issueCreate":{"success":true,"issue":{"id":"lin-1","identifier":"BLO-1","title":"t","description":"d","url":"https://linear.example/BLO-1"}}}}"#.to_owned()
+                } else if path.starts_with("/evaluate") {
+                    json!({ "answers": { "category": { "choice": choice.lock().unwrap().clone(), "probabilities": {} } } }).to_string()
+                } else if body.contains("viewer { id }") {
+                    r#"{"data":{"viewer":{"id":"u1"},"users":{"nodes":[]},"teams":{"nodes":[{"id":"team-1","key":"BLO","name":"Bloom"}]},"issueLabels":{"nodes":[]}}}"#.to_owned()
+                } else if body.contains("teams(first: 250)") {
+                    r#"{"data":{"teams":{"nodes":[{"id":"team-1","key":"BLO","name":"Bloom"}]}}}"#.to_owned()
+                } else if body.contains("pageInfo") {
+                    json!({ "data": { "issues": { "nodes": open, "pageInfo": { "hasNextPage": false, "endCursor": null } } } }).to_string()
+                } else {
+                    r#"{"ok":true,"permalink":"https://slack.example/archives/C0123ABCD/p1792400050000200"}"#.to_owned()
+                };
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len());
+                let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            }
+        });
+        (format!("http://{address}/"), seen)
+    }
+
+    /// A Slack message router that files what its sessions decide, with the decision model the
+    /// existing-issue check borrows.
+    fn filing_router() -> Connector {
+        let mut router = slack_connector();
+        router.trigger = Trigger::SlackMessage {
+            channel: "#support".into(),
+            decide: Decide { model: "typesafe-ai/jev".into(), instructions: "Sort.".into(), categories: vec![], fallback: None },
+            apps: false,
+        };
+        router.fix = Fix::Auto;
+        router.team = "BLO".into();
+        router
+    }
+
+    /// A router whose decide moved into a graph, whose classify carries the model instead.
+    #[test]
+    fn a_routers_decision_model_comes_from_its_decide_or_its_graph_classify() {
+        assert_eq!(decision_model(&ticket_router()), Some("typesafe-ai/jev"));
+        assert_eq!(decision_model(&filing_router()), Some("typesafe-ai/jev"));
+        assert_eq!(decision_model(&slack_connector()), None);
+    }
+
+    #[test]
+    fn a_filing_whose_model_finds_the_issue_answers_it_instead_of_filing() {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreLinear, RestoreVercelRoot);
+        let open = vec![json!({ "id": "lin-9", "identifier": "BLO-9", "title": "Broken footer on staging", "url": "https://linear.example/BLO-9" })];
+        let (root, seen) = serve_dedupe(open, std::sync::Arc::new(Mutex::new("BLO-9".into())));
+        slack::set_api_root(Some(root.clone()));
+        linear::set_api(Some(format!("{root}graphql")));
+        std::env::set_var(crate::vercel::API_ROOT_ENV, root.trim_end_matches('/'));
+        let (connectors, dir) = stored("filing-dedupe-hit", vec![filing_router()]);
+        for (name, key) in [("linear-key", "lin-test"), ("vercel-key", "vck_testa1b2"), ("slack-key", "xoxb-test")] {
+            std::fs::write(dir.join(name), key).unwrap();
+        }
+        connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
+        let file = |connectors: &Connectors, thread: &str| {
+            block_on(connectors.linear_create("c2", "C0123ABCD", thread, "Broken footer on staging", "The footer 500s on staging", ""))
+        };
+        assert_eq!(file(&connectors, "1792400050.000200"), Ok("BLO-9 https://linear.example/BLO-9".into()));
+        assert!(!seen.lock().unwrap().iter().any(|request| request.contains("issueCreate")), "nothing was filed");
+        // The thread's bookkeeping answers the next ask from the store, without the model again.
+        assert_eq!(file(&connectors, "1792400050.000200"), Ok("BLO-9 https://linear.example/BLO-9".into()));
+        // Another thread's report of the same thing reads the cached list, asks the model and
+        // answers the same issue.
+        assert_eq!(file(&connectors, "1792400060.000100"), Ok("BLO-9 https://linear.example/BLO-9".into()));
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.iter().filter(|request| request.starts_with("/evaluate")).count(), 2);
+        assert_eq!(requests.iter().filter(|request| request.contains("teams(first: 250)")).count(), 1, "the burst read Linear once");
+        drop(requests);
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
+        assert_eq!(
+            reloaded[0].created.get("C0123ABCD:1792400050.000200").map(|filed| filed.identifier.clone()),
+            Some("BLO-9".into())
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_filing_whose_model_finds_no_issue_files_one() {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreLinear, RestoreVercelRoot);
+        let (root, seen) = serve_dedupe(vec![], std::sync::Arc::new(Mutex::new("new".into())));
+        slack::set_api_root(Some(root.clone()));
+        linear::set_api(Some(format!("{root}graphql")));
+        std::env::set_var(crate::vercel::API_ROOT_ENV, root.trim_end_matches('/'));
+        let (connectors, dir) = stored("filing-dedupe-miss", vec![filing_router()]);
+        for (name, key) in [("linear-key", "lin-test"), ("vercel-key", "vck_testa1b2"), ("slack-key", "xoxb-test")] {
+            std::fs::write(dir.join(name), key).unwrap();
+        }
+        connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
+        assert_eq!(
+            block_on(connectors.linear_create("c2", "C0123ABCD", "1792400050.000200", "Broken footer on staging", "The footer 500s on staging", "")),
+            Ok("BLO-1 https://linear.example/BLO-1".into())
+        );
+        assert!(seen.lock().unwrap().iter().any(|request| request.contains("issueCreate")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_filing_connector_with_no_router_model_files_without_asking() {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreLinear, RestoreVercelRoot);
+        let (root, seen) = serve_dedupe(vec![], std::sync::Arc::new(Mutex::new(String::new())));
+        slack::set_api_root(Some(root.clone()));
+        linear::set_api(Some(format!("{root}graphql")));
+        std::env::set_var(crate::vercel::API_ROOT_ENV, root.trim_end_matches('/'));
+        let mut mention = slack_connector();
+        mention.fix = Fix::Auto;
+        mention.team = "BLO".into();
+        let (connectors, dir) = stored("filing-no-model", vec![mention]);
+        for (name, key) in [("linear-key", "lin-test"), ("vercel-key", "vck_testa1b2"), ("slack-key", "xoxb-test")] {
+            std::fs::write(dir.join(name), key).unwrap();
+        }
+        connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
+        assert_eq!(
+            block_on(connectors.linear_create("c2", "C0123ABCD", "1792400050.000200", "Broken footer on staging", "The footer 500s on staging", "")),
+            Ok("BLO-1 https://linear.example/BLO-1".into())
+        );
+        assert!(!seen.lock().unwrap().iter().any(|request| request.starts_with("/evaluate")));
         let _ = std::fs::remove_dir_all(dir);
     }
 

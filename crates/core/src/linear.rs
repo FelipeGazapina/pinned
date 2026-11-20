@@ -26,6 +26,16 @@ pub struct Issue {
     pub url: String,
 }
 
+/// One open issue's identity, for the decision model that decides whether a report already
+/// exists as an issue.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+pub struct OpenIssue {
+    pub id: String,
+    pub identifier: String,
+    pub title: String,
+    pub url: String,
+}
+
 fn api() -> String {
     #[cfg(test)]
     if let Some(root) = API_ROOT.lock().unwrap().clone() {
@@ -252,6 +262,41 @@ pub async fn labeled_issues(key: &str, label: &str, since: &str) -> Result<Vec<I
     )
     .await?;
     labeled(&data, label, since)
+}
+
+/// Every open issue in `team`, a team name or key: id, identifier, title and url. Reads every
+/// page Linear sends, however many issues there are, so a decision about an existing issue
+/// sees all of them. An issue counts as open while its column is none of completed, canceled
+/// or duplicate.
+pub async fn open_issues(key: &str, team: &str) -> Result<Vec<OpenIssue>, String> {
+    let data = query(key, "{ teams(first: 250) { nodes { id key name } } }", json!({})).await?;
+    let names: Vec<String> = nodes(&data["teams"])
+        .map(|t| format!("{} ({})", t["name"].as_str().unwrap_or("?"), t["key"].as_str().unwrap_or("?")))
+        .collect();
+    let team_id = nodes(&data["teams"])
+        .find(|t| [&t["name"], &t["key"]].iter().any(|v| v.as_str().is_some_and(|n| n.eq_ignore_ascii_case(team.trim()))))
+        .and_then(|t| t["id"].as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| format!("Linear has no team named {team:?}; its teams are {}", names.join(", ")))?;
+    let mut issues = vec![];
+    let mut after: Option<String> = None;
+    loop {
+        let data = query(
+            key,
+            "query($team: ID!, $after: String) { issues(first: 100, after: $after, \
+             filter: { team: { id: { eq: $team } }, state: { type: { nin: [\"completed\", \"canceled\", \"duplicate\"] } } }) { \
+             nodes { id identifier title url } pageInfo { hasNextPage endCursor } } }",
+            json!({ "team": team_id, "after": after }),
+        )
+        .await?;
+        for node in nodes(&data["issues"]) {
+            issues.push(serde_json::from_value(node.clone()).map_err(|e| format!("Linear sent a bad issue: {e}"))?);
+        }
+        match (data["issues"]["pageInfo"]["hasNextPage"].as_bool(), data["issues"]["pageInfo"]["endCursor"].as_str()) {
+            (Some(true), Some(cursor)) => after = Some(cursor.to_owned()),
+            _ => return Ok(issues),
+        }
+    }
 }
 
 /// A person in Linear: who made a change, or who an issue is assigned to.
@@ -604,6 +649,65 @@ mod tests {
         assert_eq!(
             labeled(&json!({ "issues": { "nodes": [] } }), "AGENTIC", "yesterday"),
             Err("bad time \"yesterday\": premature end of input".into())
+        );
+    }
+
+    #[test]
+    fn open_issues_reads_every_page_of_a_teams_open_issues() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        let (root, seen) = stand_in(|body| {
+            if body["query"].as_str().is_some_and(|q| q.contains("teams")) {
+                (200, r#"{"data":{"teams":{"nodes":[{"id":"t-eng","key":"ENG","name":"Engineering"}]}}}"#.into())
+            } else if body["variables"]["after"].is_null() {
+                (
+                    200,
+                    r#"{"data":{"issues":{"nodes":[
+                        {"id":"i-1","identifier":"ENG-1","title":"a","url":"u1"},
+                        {"id":"i-2","identifier":"ENG-2","title":"b","url":"u2"}],
+                        "pageInfo":{"hasNextPage":true,"endCursor":"c1"}}}}"#.into(),
+                )
+            } else {
+                (
+                    200,
+                    r#"{"data":{"issues":{"nodes":[
+                        {"id":"i-3","identifier":"ENG-3","title":"c","url":"u3"}],
+                        "pageInfo":{"hasNextPage":false,"endCursor":"c2"}}}}"#.into(),
+                )
+            }
+        });
+        set_api(Some(root));
+        let issues = block_on(open_issues("lin-cap", "eng")).unwrap();
+        assert_eq!(
+            issues,
+            vec![
+                OpenIssue { id: "i-1".into(), identifier: "ENG-1".into(), title: "a".into(), url: "u1".into() },
+                OpenIssue { id: "i-2".into(), identifier: "ENG-2".into(), title: "b".into(), url: "u2".into() },
+                OpenIssue { id: "i-3".into(), identifier: "ENG-3".into(), title: "c".into(), url: "u3".into() },
+            ]
+        );
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1]["variables"]["after"].is_null());
+        assert_eq!(requests[2]["variables"]["after"], "c1");
+        let read = requests[1]["query"].as_str().unwrap();
+        assert!(read.contains("nin"), "{read}");
+    }
+
+    #[test]
+    fn open_issues_names_the_teams_when_none_matches() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        let (root, _seen) = stand_in(|_| {
+            (
+                200,
+                r#"{"data":{"teams":{"nodes":[{"id":"t-des","key":"DES","name":"Design"}]}}}"#.into(),
+            )
+        });
+        set_api(Some(root));
+        assert_eq!(
+            block_on(open_issues("lin-cap", "ENG")),
+            Err("Linear has no team named \"ENG\"; its teams are Design (DES)".into())
         );
     }
 
