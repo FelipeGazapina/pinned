@@ -247,7 +247,7 @@ fn error_kind(error: &str) -> String {
 /// The class of a check's error, from the prefix of its first part (the parts are joined by "; "):
 /// the connector or the step that failed. A prefix that no class names is `other`.
 fn error_class(error: &str) -> &'static str {
-    const CLASSES: [(&str, &str); 7] = [
+    const CLASSES: [(&str, &str); 8] = [
         ("Slack", "slack"),
         ("Linear", "linear"),
         ("Vercel", "vercel"),
@@ -255,6 +255,7 @@ fn error_class(error: &str) -> &'static str {
         ("could not open a session", "session"),
         ("workflow ", "workflow"),
         ("could not read workflow runs", "runs"),
+        ("workflows wait", "held"),
     ];
     let first = error.split("; ").next().unwrap_or_default();
     CLASSES.iter().find(|(prefix, _)| first.starts_with(prefix)).map_or("other", |&(_, class)| class)
@@ -2587,6 +2588,8 @@ mod tests {
         for text in ["Workflow Alpha", "Step Beta", "/home/u/acme-site", "names a step"] {
             assert!(!lines[0].contains(text), "{lines:?} holds {text:?}");
         }
+        let (_, lines) = log_check(&CheckLog::default(), id, &check_at("", Some("workflows wait for macbook to hand back what it ran while the hub was off")), 0);
+        assert!(lines[0].contains("class=held"), "{lines:?} names the offline hold, not other");
     }
 
     #[test]

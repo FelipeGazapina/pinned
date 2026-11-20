@@ -2444,9 +2444,42 @@ fn replace_file(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
 fn read_runs(bytes: Option<Vec<u8>>) -> (Vec<runner::Run>, Option<String>) {
     let Some(bytes) = bytes else { return (Vec::new(), None) };
     match serde_json::from_slice(&bytes) {
-        Ok(runs) => (runs, None),
+        Ok(mut runs) => {
+            prune_finished_runs(&mut runs);
+            (runs, None)
+        }
         Err(e) => (Vec::new(), Some(format!("could not read workflow runs: {e}"))),
     }
+}
+
+/// Finished graph runs kept beside the live ones. A hub that ran for months
+/// would otherwise hold every run it ever started (6260 runs, 18 MB in one
+/// account on 0.18.8), cloning and saving them on every check. Live runs
+/// (`Running`, `Waiting`) are always kept; only the most recent finished
+/// (`Done`, `Failed`) ones are.
+const RUNS_FINISHED_KEPT: usize = 200;
+
+fn prune_finished_runs(runs: &mut Vec<runner::Run>) {
+    let live = runs.iter().filter(|run| matches!(run.status, Status::Running | Status::Waiting)).count();
+    if runs.len() <= live + RUNS_FINISHED_KEPT {
+        return;
+    }
+    let mut finished_seen = 0;
+    let mut keep = vec![false; runs.len()];
+    for (i, run) in runs.iter().enumerate().rev() {
+        if matches!(run.status, Status::Running | Status::Waiting) {
+            keep[i] = true;
+        } else if finished_seen < RUNS_FINISHED_KEPT {
+            keep[i] = true;
+            finished_seen += 1;
+        }
+    }
+    let mut i = 0;
+    runs.retain(|_| {
+        let keep = keep[i];
+        i += 1;
+        keep
+    });
 }
 
 /// How long a box-end release mark keeps its subject from being freed by another box end: a
@@ -5346,7 +5379,11 @@ impl Connectors {
         if let Some(why) = self.runs_broken.lock().unwrap().clone() {
             return Err(why);
         }
-        let bytes = serde_json::to_vec(&*self.runs.lock().unwrap()).map_err(|e| e.to_string())?;
+        let bytes = {
+            let mut runs = self.runs.lock().unwrap();
+            prune_finished_runs(&mut runs);
+            serde_json::to_vec(&*runs).map_err(|e| e.to_string())?
+        };
         self.storage.save_runs(&bytes)
     }
 
@@ -7651,6 +7688,27 @@ mod tests {
         let runs = connectors.runs.lock().unwrap().clone();
         let settled = connectors.store.lock().unwrap().settle(&["c1".into()], vec![("c1".into(), Found::Issue(issue()))], checked_at(), "/bin/pinned", &runs, false);
         settled.work.len() + settled.starts.len()
+    }
+
+    fn finished_run(id: &str) -> runner::Run {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "connector": "c1",
+            "subject": { "kind": "slack_thread", "channel": "C1", "thread": id },
+            "status": "done", "session": { "state": "none" },
+            "log": [], "context": {}, "stack": [], "pending": null, "ready": null, "claimed": true,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn finished_runs_are_pruned_to_the_most_recent_and_live_runs_stay() {
+        let mut runs: Vec<runner::Run> = (0..(RUNS_FINISHED_KEPT + 50)).map(|n| finished_run(&format!("old-{n}"))).collect();
+        runs.push(held_run("c1", &Subject::SlackThread { channel: "C1".into(), thread: "live".into() }, "mac", &[]));
+        prune_finished_runs(&mut runs);
+        assert_eq!(runs.len(), RUNS_FINISHED_KEPT + 1, "live runs stay, only the newest finished do");
+        assert!(runs.iter().any(|run| run.id.0 == "run-mac"), "the waiting run stays");
+        assert!(!runs.iter().any(|run| run.id.0 == "old-0"), "the oldest finished run is dropped");
+        assert!(runs.iter().any(|run| run.id.0 == format!("old-{}", RUNS_FINISHED_KEPT + 49)), "the newest finished run stays");
     }
 
     /// The subjects each workflow holds a release mark for, without their times.

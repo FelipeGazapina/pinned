@@ -101,11 +101,12 @@ pub enum Screen {
     Trust,
     Bypass,
     McpApproval,
+    DocsServer,
 }
 
 /// Words only each screen shows, as `flat` spells them, in Claude Code 2.1. The keys `answer`
 /// types follow that version's menus, where "No, exit" comes first.
-const SCREENS: [(Screen, &[&str]); 6] = [
+const SCREENS: [(Screen, &[&str]); 7] = [
     (Screen::Theme, &["choosethetextstylethatlooksbestwithyourterminal"]),
     (Screen::Login, &["selectloginmethod"]),
     (Screen::Trust, &["yesitrustthisfolder"]),
@@ -113,6 +114,10 @@ const SCREENS: [(Screen, &[&str]); 6] = [
     // One new server, then several: the two titles.
     (Screen::McpApproval, &["mcpserverfoundinthisproject"]),
     (Screen::McpApproval, &["mcpserversfoundinthisproject"]),
+    // The docs-server approval dialog, which pinned never answers: failing fast
+    // beats waiting out the 10-minute starting limit on a prompt that needs
+    // the person. Both wordings contain this prefix.
+    (Screen::DocsServer, &["usethedocsserver"]),
 ];
 
 /// The banner of the session's own screen, "Claude Code v2.1.322", which follows every first-run
@@ -146,6 +151,7 @@ pub fn answer(screen: Screen, folder: &Path, made: bool, bypass: bool) -> Result
         Screen::Bypass => Err("Claude Code is waiting on its bypass-permissions warning; open the session to answer it".into()),
         Screen::Login => Err("Claude Code is not signed in for this account; sign in under Settings > Accounts, then start the session again".into()),
         Screen::McpApproval => Err(format!("Claude Code is waiting for approval of this project's MCP servers in {}; open the session to answer it", folder.display())),
+        Screen::DocsServer => Err(format!("Claude Code is waiting for approval of this folder's docs server in {}; open the session to answer it", folder.display())),
     }
 }
 
@@ -290,5 +296,17 @@ mod tests {
         let reason: Result<&[&str], String> = Err("Claude Code is waiting for approval of this project's MCP servers in /w/app; open the session to answer it".into());
         assert_eq!(answer(Screen::McpApproval, folder, true, true), reason, "approving a server is the person's decision, even with trust and bypass");
         assert_eq!(answer(Screen::McpApproval, folder, false, false), reason);
+    }
+
+    #[test]
+    fn the_docs_server_approval_dialog_fails_fast_instead_of_the_ten_minute_limit() {
+        let one = " Use the docs server this folder lists?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel";
+        let with_path = " Use the docs server at /w/app with sk-ant-oat01-KEY?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel";
+        assert_eq!(showing(one), Some(Screen::DocsServer));
+        assert_eq!(showing(with_path), Some(Screen::DocsServer));
+        let folder = Path::new("/w/app");
+        let reason: Result<&[&str], String> = Err("Claude Code is waiting for approval of this folder's docs server in /w/app; open the session to answer it".into());
+        assert_eq!(answer(Screen::DocsServer, folder, true, true), reason, "the docs choice is the person's, even with trust and bypass");
+        assert_eq!(answer(Screen::DocsServer, folder, false, false), reason);
     }
 }
