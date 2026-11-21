@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.18.9 (2026-11-20)
+
+### Added
+
+- A project's Captain can open a room with `room_open`: one shared thread several workers sit in. Speech, the brief and each seat's summary live in the room. Each seat keeps its own tools, diffs and worktree. A line you type in the room wakes every seat still working, and the Captain. When every seat finishes, the room closes.
+- The Workflows page now offers "A Linear issue changes status" and "A Linear issue is assigned". They use the Linear key already connected. The hub already fired these; the picker, the editor and the graph can now make them.
+- OpenCode Go's model list is fetched live from the gateway. A model the gateway adds shows up without a pinned release. Free models get a green Free badge in the picker.
+
+### Fixed
+
+- A Slack workflow that posts its acknowledgement and then cannot open the session stays on that session step. The next check retries the open. A later message in the thread that does not mention the bot does not start another run. A failed box boot still gets one retry on that same run. The thread stays claimed. A second boot failure within 30 days stops the run.
+- Filing a Linear issue from a Slack thread asks the decision model over every open issue's title in that team, and answers the one that already covers the report instead of filing a copy.
+- A session that stops on Claude Code's "Use the docs server this folder lists?" dialog now ends its start with that reason, instead of waiting out the 10-minute limit. pinned never answers that dialog for you.
+- Hub checks keep live workflow runs plus the newest 200 finished ones, instead of every run ever started, and name the offline-runner hold as held in the logs.
+
 ## 0.18.8 (2026-11-19)
 
 ### Added
