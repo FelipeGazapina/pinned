@@ -15454,9 +15454,12 @@ Have another model review a risky change before it goes ahead.";
         m.record_event(reported(&tab, AgentStatus::NeedsInput, "s-parked", Some("Claude needs your attention"), None));
         wait_for("the start to fail", || m.delegates.get(&task).is_some_and(|t| t.state.terminal()));
         let info = m.delegates.get(&task).unwrap();
-        let reason = "it did not start within 2 s; its screen shows: Use the docs server this folder lists?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel";
-        assert_eq!((info.state.as_str(), info.error.as_deref()), ("failed", Some(reason)));
-        assert_eq!((m.view(&tab).unwrap().status, m.view(&tab).unwrap().message.as_deref()), (Some(AgentStatus::Failed), Some(reason)));
+        let reason = format!(
+            "Claude Code is waiting for approval of this folder's docs server in {}; open the session to answer it",
+            app.display()
+        );
+        assert_eq!((info.state.as_str(), info.error.as_deref()), ("failed", Some(reason.as_str())));
+        assert_eq!((m.view(&tab).unwrap().status, m.view(&tab).unwrap().message.as_deref()), (Some(AgentStatus::Failed), Some(reason.as_str())));
         assert!(!keys.exists(), "nothing was typed into a dialog pinned does not know");
         let _ = std::fs::remove_dir_all(root);
     }
@@ -15476,7 +15479,13 @@ Have another model review a risky change before it goes ahead.";
         wait_for("the start to fail", || m.delegates.get(&task).is_some_and(|t| t.state.terminal()));
         let info = m.delegates.get(&task).unwrap();
         let reason = info.error.clone().unwrap();
-        assert_eq!(reason, "it did not start within 2 s; its screen shows: Use the docs server at [folder] with [hidden]?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel");
+        assert_eq!(
+            reason,
+            format!(
+                "Claude Code is waiting for approval of this folder's docs server in {}; open the session to answer it",
+                app.display()
+            )
+        );
         for secret in ["/home", "boxuser", "sk-ant-oat01", "ABCDEFGHIJKLMNOP"] {
             assert!(!reason.contains(secret), "{secret} leaked into {reason}");
         }
