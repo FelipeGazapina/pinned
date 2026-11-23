@@ -151,8 +151,9 @@ impl Delegates {
 
 impl Delegates {
     /// What the plans need of each task in `ids`, read now: how it stands, what its worker waits on, and what
-    /// its tree cost. An id no task holds is left out, so a plan reads its saved outcome for it.
-    pub fn plan_facts(&self, ids: &[String]) -> Vec<crate::plan::TaskFacts> {
+    /// its tree cost, and who runs it: its worker tab's title from `tab_titles`, else its model. An id no task
+    /// holds is left out, so a plan reads its saved outcome for it.
+    pub fn plan_facts(&self, ids: &[String], tab_titles: &HashMap<String, String>) -> Vec<crate::plan::TaskFacts> {
         let tasks = self.tasks.lock().unwrap();
         ids.iter()
             .filter_map(|id| {
@@ -179,6 +180,7 @@ impl Delegates {
                     // A worker whose cost is unknown leaves the total short, so the tree has no cost to show.
                     cost: (rolled.unknown == 0).then_some(rolled.total_usd),
                     ended_at: task.ended,
+                    by: task.thread.as_ref().and_then(|thread| tab_titles.get(&thread.tab)).cloned().or_else(|| task.model.clone()),
                 })
             })
             .collect()

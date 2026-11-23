@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
+use crate::pinned_lines;
+
 pub const MAX_PLANS_UNFINISHED: usize = 6;
 pub const MAX_PLANS_FINISHED: usize = 10;
 pub const MAX_LISTS: usize = 8;
@@ -21,6 +23,8 @@ pub const MAX_TITLE: usize = 80;
 pub const MAX_NOTE: usize = 200;
 pub const MAX_REASON: usize = 200;
 pub const GLANCE_TEXT: usize = 32;
+/// The most characters a step's `by` shows, the ellipsis included.
+pub const BY_TEXT: usize = 40;
 
 /// The reason a step shows when its list's task ended with a result and the Captain never reported it.
 const DONE_WITH_LIST: &str = "Done with the list's task";
@@ -217,6 +221,8 @@ pub struct TaskFacts {
     pub cost: Option<f64>,
     /// Unix milliseconds when the task ended. None while it has not ended.
     pub ended_at: Option<u64>,
+    /// The worker's thread title, else its model. Text from outside: clipped when a step shows it.
+    pub by: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -255,7 +261,7 @@ pub struct ListView {
     pub steps: Vec<StepView>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StepView {
     pub id: String,
     pub name: String,
@@ -265,10 +271,14 @@ pub struct StepView {
     pub why: Option<String>,
     pub cost: Option<f64>,
     pub task: Option<String>,
+    /// Who runs the step, as a short label: the worker's thread title, else its model. None for a step the
+    /// Captain reports itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
     pub fixes: Vec<FixView>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FixView {
     pub id: String,
     pub steps: Vec<StepView>,
@@ -472,11 +482,7 @@ pub fn glance(plan: &Plan, facts: &[TaskFacts]) -> PlanGlance {
         state: captain_state(plan, &view),
         done: mains.iter().filter(|s| s.state == State::Done).count(),
         total: mains.len(),
-        now: view
-            .lists
-            .iter()
-            .find_map(|l| first_active(&l.steps))
-            .map(|s| clip(&s.name)),
+        now: first_now(&view.lists).map(|s| clip(&s.name)),
         finished_at: plan.finished_at,
         strips: view
             .lists
@@ -1449,8 +1455,16 @@ fn step_view(step: &Step, shown: Shown, facts: &[TaskFacts]) -> StepView {
         why,
         cost: shown.cost,
         task: step.task.clone(),
+        by: by_of(step, facts),
         fixes,
     }
+}
+
+/// Who runs a step that a task is linked to, as its one-line label. None for a step with no task.
+fn by_of(step: &Step, facts: &[TaskFacts]) -> Option<String> {
+    let task = step.task.as_deref()?;
+    let by = facts.iter().find(|f| f.id == task)?.by.as_deref()?;
+    Some(pinned_lines::flat(by, BY_TEXT - 1)).filter(|s| !s.is_empty())
 }
 
 fn after_fixes(n: usize) -> String {
@@ -1505,14 +1519,23 @@ fn captain_state(plan: &Plan, view: &PlanView) -> CaptainState {
     }
 }
 
-/// The first step, in plan order, that is running or waiting. A fix comes right after the step it fixes.
-fn first_active(steps: &[StepView]) -> Option<&StepView> {
+/// The step the glance names as `now`: the first, in plan order, that waits for the user; else the first that
+/// runs. Both look at every list, fixes included.
+fn first_now(lists: &[ListView]) -> Option<&StepView> {
+    lists
+        .iter()
+        .find_map(|l| first_in(&l.steps, State::Waiting))
+        .or_else(|| lists.iter().find_map(|l| first_in(&l.steps, State::Running)))
+}
+
+/// The first step, in plan order, in state `want`. A fix comes right after the step it fixes.
+fn first_in(steps: &[StepView], want: State) -> Option<&StepView> {
     for s in steps {
-        if matches!(s.state, State::Running | State::Waiting) {
+        if s.state == want {
             return Some(s);
         }
         for f in &s.fixes {
-            if let Some(x) = first_active(&f.steps) {
+            if let Some(x) = first_in(&f.steps, want) {
                 return Some(x);
             }
         }
@@ -1953,6 +1976,7 @@ mod tests {
             failure: None,
             cost: None,
             ended_at: None,
+            by: None,
         }
     }
 
@@ -3388,7 +3412,7 @@ mod tests {
                 "state": "needs_you",
                 "done": 2,
                 "total": 6,
-                "now": "C",
+                "now": "D",
                 "strips": ["dxrwp", "f"]
             })
         );
@@ -3470,6 +3494,81 @@ mod tests {
         let g = glance(plan_of(&p, "p1"), &[]);
         assert_eq!(g.title, "T".repeat(32));
         assert_eq!(g.now.as_deref(), Some("N".repeat(32).as_str()));
+    }
+
+    #[test]
+    fn glance_now_names_the_step_that_waits_before_a_running_fix() {
+        let mut p = CaptainPlans::default();
+        set_json(
+            &mut p,
+            json!({"title": "Ship", "lists": [
+                {"name": "Build", "steps": [{"name": "Compile"}]},
+                {"name": "Ship", "steps": [{"name": "Publish"}]}
+            ]}),
+            1,
+        )
+        .unwrap();
+        report(&mut p, "s1", "failed", &[], 2).unwrap();
+        fix_on(&mut p, "s1", &["Patch"], &[], 3).unwrap();
+        report(&mut p, "s3", "running", &[], 4).unwrap();
+        report(&mut p, "s2", "waiting", &[], 5).unwrap();
+        let g = glance(plan_of(&p, "p1"), &[]);
+        assert_eq!(g.now.as_deref(), Some("Publish"));
+    }
+
+    #[test]
+    fn glance_now_is_the_first_running_step_when_nothing_waits() {
+        let mut p = CaptainPlans::default();
+        set_json(
+            &mut p,
+            json!({"title": "Ship", "lists": [
+                {"name": "Build", "steps": [{"name": "Compile"}, {"name": "Test"}]},
+                {"name": "Ship", "steps": [{"name": "Publish"}]}
+            ]}),
+            1,
+        )
+        .unwrap();
+        report(&mut p, "s1", "done", &[], 2).unwrap();
+        report(&mut p, "s2", "running", &[], 3).unwrap();
+        let g = glance(plan_of(&p, "p1"), &[]);
+        assert_eq!(g.now.as_deref(), Some("Test"));
+    }
+
+    #[test]
+    fn a_step_linked_to_a_worker_shows_the_worker_thread_title() {
+        let p = linked("t1");
+        let facts = [TaskFacts { by: Some("Copy review".into()), ..task("t1", Work::Working) }];
+        let by = s1_under(&p, &facts).by;
+        assert_eq!(by.as_deref(), Some("Copy review"));
+    }
+
+    #[test]
+    fn a_step_the_captain_reported_has_no_by_and_no_by_key() {
+        let mut p = CaptainPlans::default();
+        set_json(&mut p, json!({"lists": [{"name": "Build", "steps": [{"name": "Work"}]}]}), 1).unwrap();
+        report(&mut p, "s1", "running", &[], 2).unwrap();
+        let step = s1_under(&p, &[]);
+        assert_eq!(step.by, None);
+        assert!(serde_json::to_value(&step).unwrap().get("by").is_none());
+    }
+
+    #[test]
+    fn an_older_step_view_without_by_reads_back_as_none() {
+        let step: StepView = serde_json::from_value(json!({
+            "id": "s1", "name": "Work", "what": "", "state": "running",
+            "why": null, "cost": null, "task": "t1", "fixes": []
+        }))
+        .unwrap();
+        assert_eq!(step.by, None);
+    }
+
+    #[test]
+    fn by_is_clipped_to_forty_characters_and_flattened() {
+        let p = linked("t1");
+        let facts = [TaskFacts { by: Some(format!("Copy\nreview {}", "x".repeat(60))), ..task("t1", Work::Working) }];
+        let by = s1_under(&p, &facts).by.unwrap_or_default();
+        assert_eq!(by, format!("Copy review {}…", "x".repeat(27)));
+        assert_eq!(by.chars().count(), 40);
     }
 
     #[test]

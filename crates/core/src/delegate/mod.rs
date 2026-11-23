@@ -1446,6 +1446,20 @@ grok-4.7-high - Grok 4.7  High
     }
 
     #[test]
+    fn a_plan_step_reads_its_worker_tab_title_else_the_task_model() {
+        let delegates = Delegates::default();
+        let (worker, modeled) = (new_on(&delegates, Provider::Claude), new_on(&delegates, Provider::Claude));
+        {
+            let mut tasks = delegates.tasks.lock().unwrap();
+            tasks.iter_mut().find(|t| t.id == worker.id).unwrap().thread = Some(Thread { tab: "tab-w".into(), runs: true });
+            tasks.iter_mut().find(|t| t.id == modeled.id).unwrap().model = Some("claude-sonnet-5-5".into());
+        }
+        let titles = HashMap::from([("tab-w".to_owned(), "Copy review".to_owned())]);
+        let by: Vec<Option<String>> = delegates.plan_facts(&[worker.id.clone(), modeled.id.clone()], &titles).into_iter().map(|f| f.by).collect();
+        assert_eq!(by, vec![Some("Copy review".to_owned()), Some("claude-sonnet-5-5".to_owned())]);
+    }
+
+    #[test]
     fn two_callers_cannot_both_take_the_last_place_at_once() {
         let delegates = Arc::new(Delegates::default());
         let ask = |caller: usize, cwd: &str| NewTask {
