@@ -43,6 +43,9 @@ async function readGlobalOrchestratorSettings() {
   return { machines: list, view: mergeGlobalSettings(list) };
 }
 
+/** The profile's length against the cap, so a paste the textarea cuts short does not pass unnoticed. */
+const approvalCount = (text) => `${text.length} / ${GO_APPROVAL_PROFILE_MAX} characters`;
+
 /** The "Global orchestrator" section of the General page: one setting for the whole account, saved
  * to every machine at once. Machines that cannot take it yet say so under the fields. */
 async function globalOrchestratorSettingsHtml() {
@@ -56,6 +59,7 @@ async function globalOrchestratorSettingsHtml() {
   const busy = GO_BUSY_CHOICES.map(([v, label]) => `<option value="${v}"${v === view.busy ? " selected" : ""}>${label}</option>`).join("");
   const reports = GO_REPORT_CHOICES.map(([v, label]) => `<option value="${v}"${v === view.reports ? " selected" : ""}>${label}</option>`).join("");
   const notes = globalSettingsNotes(machines);
+  const profile = view.approval_profile || GO_DEFAULT_APPROVAL_PROFILE;
   const toggle = (id, on, title, about) => `<div class="side-setting" data-setting="${id}"><div><label for="go-${id}">${title}</label><p class="meta">${about}</p></div>
     <label class="switch"><input type="checkbox" id="go-${id}"${on ? " checked" : ""}><span></span></label></div>`;
   return `<section id="global-orchestrator-settings"><h2 class="looks-title">Global orchestrator</h2>
@@ -72,8 +76,8 @@ async function globalOrchestratorSettingsHtml() {
     ${toggle("auto-merge", view.auto_merge, "Auto-merge", "When on, the Captains and the orchestrator decide by the approval profile whether a finished pull request merges or waits for your review.")}
     <div class="side-setting" data-setting="approval-profile"><div><label for="go-approval-profile">Approval profile</label><p class="meta">What decides whether a pull request merges by itself. Used when Auto-merge is on.</p></div>
       <details class="go-approval"><summary>Show the profile</summary><div class="go-approval-body">
-        <textarea id="go-approval-profile" maxlength="4000" aria-label="Approval profile">${esc(view.approval_profile || GO_DEFAULT_APPROVAL_PROFILE)}</textarea>
-        <button type="button" class="secondary" id="go-approval-reset">Reset to default</button></div></details></div>
+        <textarea id="go-approval-profile" maxlength="${GO_APPROVAL_PROFILE_MAX}" aria-label="Approval profile" aria-describedby="go-approval-count">${esc(profile)}</textarea>
+        <div class="go-approval-foot"><span class="meta" id="go-approval-count">${approvalCount(profile)}</span><button type="button" class="secondary" id="go-approval-reset">Reset to default</button></div></div></details></div>
     <div class="side-setting" data-setting="memory"><div><label>Global memory</label><p class="meta">What ${esc(view.name)} remembers about the account, kept on the machine that hosts it.</p></div>
       <button type="button" class="secondary" id="go-memory">${esc(view.name)}'s memory</button></div>
     <div class="actions"><span class="meta" id="go-status" role="status"></span><button type="button" id="go-save">Save</button></div>
@@ -100,15 +104,22 @@ function bindGlobalOrchestratorSettings() {
     goHost = b.dataset.machine;
     paintHost();
   };
-  document.getElementById("go-approval-reset").onclick = () => (document.getElementById("go-approval-profile").value = GO_DEFAULT_APPROVAL_PROFILE);
+  const profile = document.getElementById("go-approval-profile");
+  const paintCount = () => (document.getElementById("go-approval-count").textContent = approvalCount(profile.value));
+  profile.oninput = paintCount;
+  document.getElementById("go-approval-reset").onclick = () => {
+    profile.value = GO_DEFAULT_APPROVAL_PROFILE;
+    paintCount();
+  };
   document.getElementById("go-save").onclick = () => saveGlobalOrchestratorSettings();
   document.getElementById("go-memory").onclick = () => openGlobalMemory();
 }
 
 /** Saves the account-wide setting: the shared fields to every online machine, `host` true only on
  * the chosen one. A machine that cannot take it says so below the fields; the save itself stands
- * when the chosen host took it. Then the page tells the rest of the UI through the
- * "global-orchestrator-settings" event, whose name is a contract. */
+ * when the chosen host took it, and any other machine whose write failed is named, as it keeps its
+ * old settings. Then the page tells the rest of the UI through the "global-orchestrator-settings"
+ * event, whose name is a contract. */
 async function saveGlobalOrchestratorSettings() {
   const error = document.getElementById("go-error");
   const save = document.getElementById("go-save");
@@ -152,8 +163,11 @@ async function saveGlobalOrchestratorSettings() {
   if (section) {
     section.outerHTML = await globalOrchestratorSettingsHtml();
     bindGlobalOrchestratorSettings();
+    const missed = outcomes.filter((o) => o.error).map((o) => `Not saved on ${live.find((m) => m.id === o.machine)?.name ?? o.machine}: ${o.error.replace(/\.$/, "")}. It keeps its old settings.`);
     const status = document.getElementById("go-status");
-    if (status) status.textContent = "Saved";
+    if (status) status.textContent = missed.length ? `Saved on ${host.name}` : "Saved";
+    const failed = document.getElementById("go-error");
+    if (failed) failed.textContent = missed.join(" ");
   }
 }
 

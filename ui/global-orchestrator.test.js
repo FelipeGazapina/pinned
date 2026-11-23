@@ -100,7 +100,7 @@ test("an older node's unknown command and an older hub's refusal both read as ne
 });
 
 // The page half: a small document whose elements the section binds to, and the calls it makes.
-function page({ settings = {}, older = false, offline = false } = {}) {
+function page({ settings = {}, older = false, offline = false, refuse = {} } = {}) {
   const elements = {};
   const element = (id, extra = {}) => (elements[id] ??= {
     id,
@@ -137,7 +137,10 @@ function page({ settings = {}, older = false, offline = false } = {}) {
         if (machine === "mb" && older) throw new Error("this machine runs pinned 0.8.0, which can't answer that: unknown variant GlobalOrchestratorSettings");
         return { name: "Orchestrator", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false, ...settings[machine] };
       }
-      if (call.cmd === "set_global_orchestrator_settings") return { ...call.settings };
+      if (call.cmd === "set_global_orchestrator_settings") {
+        if (refuse[machine]) throw new Error(refuse[machine]);
+        return { ...call.settings };
+      }
       if (call.cmd === "open_global_orchestrator") return "g-1";
       return null;
     },
@@ -230,7 +233,8 @@ test("the section shows the auto-merge switch and the approval profile behind a 
   const html = await context.globalOrchestratorSettingsHtml();
   assert.match(html, /id="go-auto-merge" checked/);
   assert.match(html, /data-setting="approval-profile"[\s\S]*<details[^>]*><summary>[^<]+<\/summary>/);
-  assert.ok(html.includes(`<textarea id="go-approval-profile" maxlength="4000" aria-label="Approval profile">${context.esc(profile)}</textarea>`), "the default profile fills an empty one");
+  assert.ok(html.includes(`<textarea id="go-approval-profile" maxlength="4000" aria-label="Approval profile" aria-describedby="go-approval-count">${context.esc(profile)}</textarea>`), "the default profile fills an empty one");
+  assert.ok(html.includes(`<span class="meta" id="go-approval-count">${profile.length} / 4000 characters</span>`), "the cap shows under the profile");
   assert.match(html, /<button type="button" class="secondary" id="go-approval-reset">Reset to default<\/button>/);
   assert.ok(html.indexOf('id="go-read-aloud"') < html.indexOf('id="go-auto-merge"') && html.indexOf('id="go-approval-profile"') < html.indexOf('data-setting="memory"'), "after Read aloud, before Global memory");
 
@@ -247,6 +251,33 @@ test("Reset to default puts the default profile back in the text", async () => {
   element("go-approval-profile").value = "Merge everything.";
   element("go-approval-reset").onclick();
   assert.equal(element("go-approval-profile").value, pure().GO_DEFAULT_APPROVAL_PROFILE);
+});
+
+test("the profile's count follows typing and Reset, against the 4000 cap", async () => {
+  const { context, element } = page({ settings: { mm: { host: true, approval_profile: "Merge docs only." } } });
+  const html = await context.globalOrchestratorSettingsHtml();
+  assert.match(html, /id="go-approval-count">16 \/ 4000 characters</);
+  context.bindGlobalOrchestratorSettings();
+  element("go-approval-profile").value = "x".repeat(4000);
+  element("go-approval-profile").oninput();
+  assert.equal(element("go-approval-count").textContent, "4000 / 4000 characters");
+  element("go-approval-reset").onclick();
+  assert.equal(element("go-approval-count").textContent, `${pure().GO_DEFAULT_APPROVAL_PROFILE.length} / 4000 characters`);
+});
+
+test("a save the host took but another machine refused says Saved on the host and names the machine left behind", async () => {
+  const { context, element, events } = page({ settings: { mm: { host: true } }, refuse: { mb: "the machine went away." } });
+  await context.globalOrchestratorSettingsHtml();
+  context.bindGlobalOrchestratorSettings();
+  element("go-name").value = "Orchestrator";
+  element("go-busy").value = "queue";
+  element("go-reports").value = "auto";
+  element("go-auto-merge").checked = true;
+  await element("go-save").onclick();
+  assert.equal(element("go-status").textContent, "Saved on Mac mini");
+  assert.equal(element("go-error").textContent, "Not saved on MacBook: the machine went away. It keeps its old settings.");
+  assert.equal(events.length, 1, "the host's save still tells the page");
+  assert.equal(events[0].detail.auto_merge, true);
 });
 
 test("the settings search finds the Global orchestrator by auto-merge, approval profile and merge", () => {

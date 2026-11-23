@@ -312,7 +312,8 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
 #settings-page #global-orchestrator-settings .go-approval summary { cursor: pointer; }
 /* The column is a div inside the details: a details is no flex container in every engine. */
 #settings-page #global-orchestrator-settings .go-approval-body { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; margin-top: 8px; }
-#settings-page #global-orchestrator-settings .go-approval textarea { box-sizing: border-box; width: 100%; min-height: 200px; resize: vertical; }
+#settings-page #global-orchestrator-settings .go-approval textarea { box-sizing: border-box; width: 100%; min-height: 400px; resize: vertical; }
+#settings-page #global-orchestrator-settings .go-approval-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; width: 100%; }
 #settings-page #global-orchestrator-settings .actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; max-width: 520px; margin: 16px 0 0; }
 @media (max-width: 639px) {
   #settings-page #global-orchestrator-settings .side-setting:is([data-setting="name"], [data-setting="host"], [data-setting="busy"], [data-setting="reports"], [data-setting="memory"]) { flex-wrap: wrap; }

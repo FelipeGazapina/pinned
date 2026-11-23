@@ -12,6 +12,9 @@ const GO_DEFAULT_SETTINGS = { name: "Orchestrator", host: false, busy: "queue", 
  * DEFAULT_APPROVAL_PROFILE, which a Rust test keeps equal to this line. */
 const GO_DEFAULT_APPROVAL_PROFILE = "Approval means deciding, for each pull request that you or your workers opened for the current request, whether it is merged automatically or left for a human review.\n\nMerge automatically only when that pull request's checks pass and nothing is unresolved: no failing or pending check, no open review thread, no conflict, and no question waiting on the user.\n\nPrefer GitHub's own auto-merge (`gh pr merge --auto`), so the repository's required checks and branch rules still decide. Never bypass branch protection.\n\nThese always need a human review: releases, deploys, database migrations, auth, secrets or credentials, payments or billing, wire-contract or API breaks, anything the repo's AGENTS.md or CLAUDE.md reserves for the owner, and any change you are unsure about.";
 
+/** global_orchestrator.rs's APPROVAL_PROFILE_MAX: the node keeps no more of a profile than this. */
+const GO_APPROVAL_PROFILE_MAX = 4000;
+
 /** The busy policy and the report policy, each value with the words the section shows. */
 const GO_BUSY_CHOICES = [
   ["queue", "Queue the message"],
