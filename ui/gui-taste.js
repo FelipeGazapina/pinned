@@ -27,6 +27,7 @@ const TASTE_FIELD_LABELS = {
   time_limit_min: "Time limit per worker",
   box_budget_cents: "Box budget",
   box_size: "Default box size",
+  boxes_at_once: "Boxes at once",
 };
 const TASTE_TIER_ABOUT = { low: "Haiku and flash models", mid: "Sonnet, GLM and the like", high: "Opus and pro models" };
 
@@ -193,6 +194,22 @@ function tasteParallelHtml(t) {
   return tasteStepperHtml("parallel", String(t.parallel), t.parallel > 1 ? t.parallel - 1 : null, t.parallel < TASTE_MAX_PARALLEL ? t.parallel + 1 : null, "workers at once");
 }
 
+/** Boxes at once: how many boxes the account's agents may have open at once, from 0 to the hub's
+ * cap. A value past the cap, which an older app could store, shows as the cap. A hub that predates
+ * it sends none, so there is nothing to show. */
+function tasteBoxesHtml() {
+  const { boxes_at_once: stored, box_cap: cap = 8 } = tasteUi.draft;
+  if (stored == null) return "";
+  return `<div class="taste-field taste-inline taste-boxes"><label class="taste-label"><span>${TASTE_FIELD_LABELS.boxes_at_once}</span><input type="number" data-boxes-at-once min="0" max="${cap}" step="1" value="${Math.min(stored, cap)}"></label><span class="taste-quiet">0 to ${cap}. How many boxes agents may have open at once: the Orchestrator, the Captains, their workers and workflows. A box you open yourself never counts and is never refused.</span></div>`;
+}
+
+/** A typed Boxes at once, held to 0 to the hub's cap. Not a whole number changes nothing. */
+function tasteEditBoxes(text) {
+  const n = Number(text);
+  if (text === "" || !Number.isInteger(n)) return tasteRender();
+  tasteEdit({ ...tasteUi.draft, boxes_at_once: Math.max(0, Math.min(n, tasteUi.draft.box_cap ?? 8)) });
+}
+
 /** A stepper over `TASTE_STEPS[field]`, labelled by `label`. */
 function tasteLadderHtml(t, field, label, noun) {
   const value = t[field];
@@ -227,6 +244,7 @@ function tasteLimitsHtml(t) {
   const efforts = (selected, none) => `${none ? `<option value=""${selected == null ? " selected" : ""}>${none}</option>` : ""}${TASTE_EFFORTS.map((e) => `<option value="${e}"${e === selected ? " selected" : ""}>${e}</option>`).join("")}`;
   return `<section class="taste-section taste-limits"><div class="taste-heading"><h2>Delegation limits</h2><p>pinned holds every worker to these. A call past them is refused, and a worker past its time or budget is stopped.</p></div>
     ${tasteParallelHtml(t)}
+    ${tasteBoxesHtml()}
     <div class="taste-field">${tasteLabelHtml("tier")}<div class="taste-seg" role="group" aria-label="Model tier">${tiers}</div>
       <span class="taste-quiet">The costliest tier a worker's own model may be. ${TASTE_TIER_ABOUT[t.tier]} and below. The models a worker picks for its own subagents are not held to it.</span></div>
     <div class="taste-limit-pair">
@@ -440,6 +458,7 @@ function tasteEditEffort(field, value) {
 pageView.addEventListener("change", (e) => {
   if (document.body.dataset.page !== "taste") return;
   if (e.target.matches("[data-effort]")) return tasteEditEffort(e.target.dataset.effort, e.target.value || null);
+  if (e.target.matches("[data-boxes-at-once]")) return tasteEditBoxes(e.target.value);
   if (!e.target.value) return;
   if (e.target.matches("[data-place-add]")) tasteEditPlacement(placementAdd(tasteUi.draft.placement, e.target.dataset.placeAdd, e.target.value));
   else if (e.target.matches("[data-add-model]")) tasteEditField("ladder", [...tasteShown().ladder, tasteRefOf(e.target.value)]);

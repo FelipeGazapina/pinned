@@ -26,6 +26,7 @@ const PHONE_SVG = {
   right: `<path d="m9 6 6 6-6 6"></path>`,
   close: `<path d="M6 6l12 12"></path><path d="M18 6 6 18"></path>`,
   shield: `<path d="M12 3 5 6v6c0 4.5 3 7.7 7 9 4-1.3 7-4.5 7-9V6z"></path>`,
+  check: `<path d="M20 6 9 17l-5-5"></path>`,
   mic: `<rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v3"></path>`,
 };
 const phoneSvg = (name, size, cls = "", width = 2) =>
@@ -390,10 +391,11 @@ function askSheetHtml(tab) {
   };
   const free = freeOption(menu);
   if (kind === "plan") {
+    const note = planApprove(menu) && typeof approveNoteOf(tab) !== "string" ? row(`data-approve-note`, "Approve with note", "check") : "";
     return `<div class="ask-head">${icon("list-checks", "lead")}<h2>Plan ready</h2>${count}</div>
       ${menu.question ? `<p class="ask-about">${esc(menu.question)}</p>` : ""}
-      <div class="ask-options">${menu.options.filter((o) => o !== free).map(options).join("")}</div>
-      <div class="ask-rows">${free ? row(`data-ask="type"`, "Refine it with a message", "mic") : ""}${row(`data-ask="new-thread"`, "Implement in a new thread")}${terminal}</div>`;
+      <div class="ask-options">${menu.options.filter((o) => o !== free).map(options).join("")}</div>${approveNoteField(tab)}
+      <div class="ask-rows">${free ? row(`data-ask="type"`, "Refine it with a message", "mic") : ""}${note}${row(`data-ask="new-thread"`, "Implement in a new thread")}${terminal}</div>`;
   }
   const tabs = questionTabs(tab);
   const review = tabs && tabs.at >= tabs.headers.length;
@@ -446,6 +448,7 @@ new MutationObserver(() => {
 
 function syncPhoneAsk() {
   const tab = active;
+  if (tab) approveNoteOf(tab);
   const key = guiOn() && onPhone() && askSheetMayShow() && tab && !terminalOnly(tab) ? askKeyOf(tab) : "";
   if (!key) {
     askCard.hidden = true;
@@ -469,8 +472,11 @@ function syncPhoneAsk() {
     } });
     askSheet = { key, sheet };
     sheet.el.addEventListener("click", onAskClick);
+    // The plan's note field, in the sheet: approveNoteEvent takes what is its own.
+    for (const type of ["click", "input", "keydown"]) sheet.el.addEventListener(type, (e) => active && approveNoteEvent(active, e));
   }
   setHtml(askSheet.sheet.el.querySelector(".ask-body"), html);
+  drawApproveNote(tab);
 }
 
 /** Answers from the ask sheet as the approval card does. */

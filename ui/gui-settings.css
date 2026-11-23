@@ -29,6 +29,7 @@ body[data-mode="gui"] #settings-page p { line-height: 1.55; }
 body[data-mode="gui"] #settings :is(.hint, .meta) { color: var(--g-muted); }
 body[data-mode="gui"] #settings code { padding: 1px 4px; border-radius: 4px; background: var(--g-hover); font: 12px var(--g-mono); color: var(--g-fg); }
 body[data-mode="gui"] #settings b { color: var(--g-fg); font-weight: 600; }
+body[data-mode="gui"] #settings #checked.stale { color: var(--g-warning-fg); }
 body[data-mode="gui"] #settings .error { color: var(--g-error); }
 
 body[data-mode="gui"] #settings :is(input:not([type="checkbox"]), select, textarea) { min-height: 32px; padding: 6px 10px; border: 1px solid var(--g-input);
@@ -338,3 +339,12 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
 #settings .mcp-found { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 #settings .mcp-found > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 600px) { #settings .mcp-fields { grid-template-columns: minmax(0, 1fr); } }
+#settings-page #memory .memory-row { margin: 8px 0 8px 20px; }
+#settings-page #memory .memory-size { flex: none; font-variant-numeric: tabular-nums; }
+#settings-page #memory button { display: inline-flex; align-items: center; gap: 6px; }
+#settings-page #memory .side-setting > div:first-child { min-width: 0; }
+#settings-page #memory .side-setting :is(label, .meta) { overflow-wrap: anywhere; }
+@media (max-width: 639px) {
+  #settings-page #memory .side-setting { flex-wrap: wrap; }
+  #settings-page #memory .memory-actions { flex: 1 1 100%; }
+}

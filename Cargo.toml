@@ -3,11 +3,11 @@ members = [".", "crates/core", "crates/server", "crates/dev"]
 
 # scripts/release.sh bumps every `version = ` line in this file, this one included.
 [workspace.package]
-version = "0.18.9"
+version = "0.18.10"
 
 [package]
 name = "pinned"
-version = "0.18.9"
+version = "0.18.10"
 edition = "2021"
 default-run = "pinned"
 
@@ -40,8 +40,10 @@ tauri-plugin-notification = "2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Power"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 tauri-plugin-single-instance = "2"
 # Already in the build through wry; the browser panel reads the page's back-forward list from it.
 webkit2gtk = { version = "2.0", features = ["v2_8"] }
-libc = "0.2"

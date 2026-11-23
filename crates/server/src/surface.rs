@@ -704,15 +704,19 @@ pub async fn deliver_notices(hub: Arc<Hub>, account: Arc<Account>, machine: Stri
 /// The confirmations that wait, to every client of the account.
 pub async fn push_confirmations(hub: &Hub, account: &Account) {
     match waiting(hub, account).await {
-        Ok(items) => account.broadcast(&ToClient::Confirmations { items }),
+        Ok(items) => {
+            eprintln!("pinned-server: account {} pushes {} waiting confirmation(s) to its clients", account.id, items.len());
+            account.broadcast(&ToClient::Confirmations { items })
+        }
         Err(e) => eprintln!("pinned-server: could not read account {}'s confirmations: {e}", account.id),
     }
 }
 
 /// The confirmations that wait, to one client that just signed in.
 pub async fn send_confirmations(hub: &Hub, account: &Account, client: u64) {
-    if let Ok(items) = waiting(hub, account).await {
-        account.to_client(client, &ToClient::Confirmations { items });
+    match waiting(hub, account).await {
+        Ok(items) => account.to_client(client, &ToClient::Confirmations { items }),
+        Err(e) => eprintln!("pinned-server: could not read account {}'s confirmations for client {client}: {e}", account.id),
     }
 }
 

@@ -47,6 +47,7 @@ function app(answers = {}, world = {}) {
     close() {}
   }
   const context = {
+    visibleInterval: () => 0,
     console,
     WebSocket,
     setTimeout: (run) => run(),

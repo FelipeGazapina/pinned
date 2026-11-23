@@ -126,6 +126,27 @@ repository.
 
 To search, add or delete memories, open the **Memory** tab in the side panel.
 
+### Memory report
+
+To see how much RAM pinned holds, open **Settings → Memory** in the desktop app. It shows four
+groups, each with its total and its number of processes:
+
+- **App**: pinned's own process.
+- **Webview helpers**: the processes that draw pinned's window, which macOS lists in Activity
+  Monitor as WebKit processes.
+- **Threads and terminals**: one row per thread, per delegated task without a thread of its own,
+  and per terminal. Each row counts its agent CLI or shell with everything it started, such as
+  MCP servers or a dev server, and says whether it is running or idle.
+- **Other**: anything else pinned started.
+
+macOS shows the memory footprint, the figure Activity Monitor's Memory column shows. Linux
+shows resident memory. A process whose figure can't be read is counted apart and says so.
+
+The page reads the figures when it opens and when you press **Refresh**, never in the
+background. **Copy** puts the report on the clipboard as plain text, ready to paste into a
+GitHub issue. It holds pinned's version, the OS, the sizes and the thread titles, and no paths.
+The report is not available on Windows yet.
+
 ## App view and terminal view
 
 pinned opens in the app view, laid out like T3 Code. Press ⌘E, or click the view button, to

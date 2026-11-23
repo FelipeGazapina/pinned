@@ -5,9 +5,10 @@
 //! still works when a caller passes it as `target.model`.
 
 use crate::agent::{LimitWindow, Usage};
+use crate::claude_models::CLAUDE_EFFORT;
 use crate::delegate::ModelChoice;
 use serde_json::Value;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Set on a Go session so the statusline can ask Go for usage. Never a login account.
 pub const KEY_ENV: &str = "PINNED_OPENCODE_GO_KEY";
@@ -42,12 +43,19 @@ pub const STRIP_ENV: [&str; 16] = [
     "CLAUDE_CODE_USE_VERTEX",
 ];
 
-/// `claude --effort` accepts these, so the delegate catalog offers only the gateway's values in
-/// this set. `none` and `minimal` stay off the CLI flag.
-pub(crate) const SUPPORTED_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-
 const USER_AGENT: &str = concat!("pinned/", env!("CARGO_PKG_VERSION"));
 const NO_EFFORT: &[&str] = &[];
+
+/// How long a fetched gateway list stays fresh.
+pub(crate) const REFRESH_EVERY: Duration = Duration::from_secs(3600);
+/// How soon a failed fetch is tried again: a down gateway must not cost one request per account read.
+pub(crate) const RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// Whether the gateway list is due for a fetch: hourly after a success, and a minute after a
+/// failure, instead of on every read.
+pub(crate) fn refresh_due(last: Option<Instant>, failed: bool, now: Instant) -> bool {
+    last.is_none_or(|at| now.saturating_duration_since(at) >= if failed { RETRY_AFTER } else { REFRESH_EVERY })
+}
 
 /// The file a machine keeps the last gateway model list in, so the picker lists new models
 /// without a pinned release. The gateway remains the source of truth on every refresh.
@@ -95,14 +103,16 @@ pub fn models() -> Vec<ModelChoice> {
         .map(|m| ModelChoice {
             id: m.slug.clone(),
             label: m.name.clone(),
-            efforts: m.efforts.iter().filter(|e| SUPPORTED_EFFORTS.contains(&e.as_str())).cloned().collect(),
+            efforts: m.efforts.iter().filter(|e| CLAUDE_EFFORT.contains(&e.as_str())).cloned().collect(),
             cost: m.cost,
             free: m.free,
         })
         .collect()
 }
 
-/// The fallback list as picker models, with context windows and free flags, in gateway order.
+/// The fallback list as picker models, with context windows and free flags, in gateway order. The
+/// shipped table lists the gateway's own values, `none` and `minimal` included, so it is filtered
+/// the same way the live list is.
 pub fn fallback_models() -> Vec<crate::claude_models::ClaudeModel> {
     MODELS
         .iter()
@@ -112,7 +122,7 @@ pub fn fallback_models() -> Vec<crate::claude_models::ClaudeModel> {
                 slug: (*id).into(),
                 name: (*label).into(),
                 menu: None,
-                efforts: efforts.iter().map(|e| (*e).to_string()).collect(),
+                efforts: efforts.iter().filter(|e| CLAUDE_EFFORT.contains(*e)).map(|e| (*e).to_string()).collect(),
                 context: *context,
                 cost: if free { crate::delegate::Cost::Low } else { crate::delegate::cost_of(id) },
                 legacy: false,
@@ -164,7 +174,7 @@ pub fn parse_models(body: &str) -> Vec<crate::claude_models::ClaudeModel> {
         let efforts: Vec<String> = item
             .pointer("/capabilities/reasoning/effort")
             .and_then(Value::as_array)
-            .map(|list| list.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+            .map(|list| list.iter().filter_map(Value::as_str).filter(|e| CLAUDE_EFFORT.contains(e)).map(str::to_owned).collect())
             .unwrap_or_default();
         let context = item.pointer("/limit/context").and_then(Value::as_u64).filter(|c| *c > 0).unwrap_or(1_000_000);
         let price = |path: &str| item.pointer(path).and_then(Value::as_f64).unwrap_or(-1.0);
@@ -199,10 +209,14 @@ pub fn fetch_models() -> Result<Vec<crate::claude_models::ClaudeModel>, String> 
     Ok(models)
 }
 
-/// Reads a cached gateway list, when it parses.
+/// Reads a cached gateway list, when it parses. A cache written before the efforts were filtered
+/// still lists `none` and `minimal`, so the read drops them too.
 pub fn load_cached(path: &std::path::Path) -> Option<Vec<crate::claude_models::ClaudeModel>> {
     let body = std::fs::read(path).ok()?;
-    let models: Vec<crate::claude_models::ClaudeModel> = serde_json::from_slice(&body).ok()?;
+    let mut models: Vec<crate::claude_models::ClaudeModel> = serde_json::from_slice(&body).ok()?;
+    for model in &mut models {
+        model.efforts.retain(|e| CLAUDE_EFFORT.contains(&e.as_str()));
+    }
     (!models.is_empty()).then_some(models)
 }
 
@@ -395,7 +409,7 @@ mod tests {
         let kimi = models.iter().find(|model| model.id == "kimi-k3").unwrap();
         assert_eq!((kimi.label.as_str(), kimi.efforts.as_slice()), ("Kimi K3", &["max".to_owned()][..]));
         assert!(models.iter().find(|model| model.id == "kimi-k2.7-code").unwrap().efforts.is_empty());
-        assert!(models.iter().flat_map(|model| &model.efforts).all(|effort| SUPPORTED_EFFORTS.contains(&effort.as_str())), "an effort the CLI rejects");
+        assert!(models.iter().flat_map(|model| &model.efforts).all(|effort| CLAUDE_EFFORT.contains(&effort.as_str())), "an effort the CLI rejects");
         assert!(models.iter().find(|model| model.id == "beam-free").unwrap().free, "beam-free costs nothing");
         assert!(models.iter().find(|model| model.id == "iceman-contributor-free").unwrap().free, "iceman costs nothing");
         assert!(models.iter().find(|model| model.id == "longcat-2.5-free").unwrap().free, "longcat-2.5-free costs nothing");
@@ -407,6 +421,8 @@ mod tests {
         assert_eq!(fallback.len(), models.len());
         assert_eq!(fallback.iter().find(|m| m.slug == "beam-free").unwrap().context, 1_048_576);
         assert!(fallback.iter().find(|m| m.slug == "beam-free").unwrap().free);
+        assert_eq!(fallback.iter().find(|m| m.slug == "hy4-flash-free").unwrap().efforts, ["high"], "the shipped table drops none too");
+        assert!(fallback.iter().flat_map(|m| &m.efforts).all(|e| CLAUDE_EFFORT.contains(&e.as_str())), "the shipped table drops minimal too");
         let env = env("  oc_sk_test  ");
         assert_eq!(
             env,
@@ -484,21 +500,40 @@ mod tests {
             {"id":"qwen4-max","name":"Qwen4 Max","capabilities":{"reasoning":{"effort":["low","high","xhigh"]}},"limit":{"context":1000000},"cost":{"text":{"input":{"price":1.5},"output":{"price":4.5}}}},
             {"id":"hy4-flash-free","name":"Hy4 flash Free","capabilities":{"reasoning":{"effort":["none","high"]}},"limit":{"context":1048576},"cost":{"text":{"input":{"price":0},"output":{"price":0}}}},
             {"id":"kimi-k2.7-code","name":"Kimi K2.7 Code","limit":{"context":262144},"cost":{"text":{"input":{"price":0.95},"output":{"price":4}}}},
+            {"id":"every-level","name":"Every Level","capabilities":{"reasoning":{"effort":["none","low","medium","high","xhigh","max"]}}},
+            {"id":"none-only","name":"None Only","capabilities":{"reasoning":{"effort":["none"]}}},
             {"id":"","name":"Nope"},
             {"name":"Missing"}
         ]}"#;
         let models = parse_models(body);
-        assert_eq!(models.iter().map(|m| m.slug.as_str()).collect::<Vec<_>>(), ["qwen4-max", "hy4-flash-free", "kimi-k2.7-code"]);
+        assert_eq!(models.iter().map(|m| m.slug.as_str()).collect::<Vec<_>>(), ["qwen4-max", "hy4-flash-free", "kimi-k2.7-code", "every-level", "none-only"]);
         assert_eq!(models[0].efforts, ["low", "high", "xhigh"]);
+        assert_eq!(models[1].efforts, ["high"], "the gateway's none is not offered");
         assert_eq!((models[0].context, models[0].free), (1_000_000, false));
         assert_eq!((models[1].context, models[1].free, models[1].cost), (1_048_576, true, crate::delegate::Cost::Low));
+        assert_eq!(models[3].efforts, ["low", "medium", "high", "xhigh", "max"]);
+        assert!(models[4].efforts.is_empty(), "a model whose only level is none offers none");
         assert!(models[2].efforts.is_empty() && !models[2].free);
         assert_eq!(parse_models("{}"), Vec::new());
         assert_eq!(parse_models("nope"), Vec::new());
         let cached = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(cached.path(), serde_json::to_vec(&models).unwrap()).unwrap();
-        assert_eq!(load_cached(cached.path()).unwrap().len(), 3);
+        assert_eq!(load_cached(cached.path()).unwrap().len(), 5);
+        std::fs::write(cached.path(), r#"[{"slug":"old-cache","name":"Old Cache","efforts":["none","minimal","high"],"context":1000000,"cost":"high"}]"#).unwrap();
+        assert_eq!(load_cached(cached.path()).unwrap()[0].efforts, ["high"], "a cache written before the filter drops none and minimal too");
         assert_eq!(load_cached(std::path::Path::new("/nonexistent-pinned-go-models.json")), None);
+    }
+
+    #[test]
+    fn a_refresh_is_due_hourly_after_a_success_and_a_minute_after_a_failure() {
+        let now = Instant::now();
+        let ago = |secs: u64| Some(now - Duration::from_secs(secs));
+        assert!(refresh_due(None, false, now), "no attempt yet is due");
+        assert!(refresh_due(None, true, now), "no attempt after a failure is due");
+        assert!(!refresh_due(ago(300), false, now), "a success 5 minutes ago is not due");
+        assert!(refresh_due(ago(3660), false, now), "a success 61 minutes ago is due");
+        assert!(!refresh_due(ago(10), true, now), "a failure 10 seconds ago is not due");
+        assert!(refresh_due(ago(61), true, now), "a failure 61 seconds ago is due");
     }
 
     #[test]

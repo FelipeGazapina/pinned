@@ -9,6 +9,7 @@ mod dictation;
 mod fn_key;
 mod fonts;
 mod navigation;
+mod ram;
 
 use background::{Background, Moment};
 use pinned_core::machine::{AppWindow, Launch, Machine, SelfUpdate};
@@ -282,6 +283,14 @@ fn get_tastes(machine: State<Arc<Machine>>) -> Tastes {
     machine.local_tastes()
 }
 
+/// What the app, its webview helpers, and each thread's and terminal's processes hold now, for the
+/// Memory settings page. Read only when the page asks.
+#[tauri::command]
+async fn memory_report(machine: State<'_, Arc<Machine>>) -> Result<ram::Report, String> {
+    let machine = machine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || ram::read(&machine)).await.map_err(|e| e.to_string())?
+}
+
 /// A signed-out app's delegation totals, from this machine's tasks, as `HubCall::DelegationStats`
 /// answers a signed-in one.
 #[tauri::command]
@@ -490,6 +499,7 @@ fn add_tray_or_go_without(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn main() {
+    ram::started();
     // GTK's native Wayland backend can't keep a window above others, on every workspace, or where
     // the app puts it, all of which the panel needs. XWayland can, so run there unless the user
     // chose a backend. This must happen before GTK starts. The programs pinned starts don't get it.
@@ -540,6 +550,7 @@ fn main() {
             get_usage,
             get_tastes,
             delegation_stats,
+            memory_report,
             set_taste,
             reset_taste_field,
             commands::local_call,

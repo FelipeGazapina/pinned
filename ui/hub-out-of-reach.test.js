@@ -167,6 +167,7 @@ test("the external agents card says the hub can't be reached, and does not ask i
     account: { email: "owner@example.test" },
     hub: { online: false, hub: (call) => (asked.push(call.cmd), Promise.reject("not connected to the hub")) },
     actions: {},
+    settingsGen: 0,
     agentApproval: () => null,
     invoke: () => Promise.reject("invoke should not run"),
     settingsOpen: () => true,
@@ -235,6 +236,7 @@ function settingsApp({ up, sent, copy = null, tauri = {} }) {
     loadConvexProjects() {},
     loadExternalAgents() {},
     icon: (name) => `<svg data-icon="${name}"></svg>`,
+    visibleInterval: () => {},
     document: { body: { dataset: {} }, getElementById: byId, querySelector: () => byId("nav"), querySelectorAll: () => [] },
   };
   context.globalThis = context;
@@ -427,6 +429,7 @@ test("signed out, a settings call goes to local_call", async () => {
   const context = {
     hub: null,
     TAURI: {},
+    settingsGen: 0,
     agentApproval: () => null,
     invoke: (cmd, args) => (asked.push([cmd, here(args)]), Promise.resolve({ connectors: [] })),
   };

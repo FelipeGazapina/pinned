@@ -23,8 +23,12 @@ struct Crew {
 
 impl Crew {
     fn new(name: &str) -> Crew {
+        Crew::with_policy(name, fast())
+    }
+
+    fn with_policy(name: &str, policy: Policy) -> Crew {
         let patient = TeamPolicy { escalate_after_secs: 3600, give_up_after_secs: 7200, ..TeamPolicy::default() };
-        let hub = TestHub::start_with_team_policy(name, fast(), patient);
+        let hub = TestHub::start_with_team_policy(name, policy, patient);
         let sign_up = |email: &str| {
             let (_, view) = account::signup(&hub.url, email, "correct horse").unwrap();
             hub.runtime.block_on(hub.hub().account(Uuid::parse_str(&view.id).unwrap())).unwrap()
@@ -305,4 +309,19 @@ fn a_bot_whose_workflow_reaches_its_session_twice_is_refused_and_a_one_session_b
     let on: Vec<String> = crew.call(&crew.bob, TeamOp::Bots).unwrap().as_array().unwrap().iter().filter(|b| b["on"] == json!(true)).map(|b| b["workflow"].as_str().unwrap().to_owned()).collect();
     assert_eq!(on.len(), 2);
     assert!(on.contains(&one) && on.contains(&migrated), "{on:?}");
+}
+
+#[test]
+fn a_teams_bot_is_held_to_the_hubs_cap_not_to_a_boxes_at_once_it_cannot_set() {
+    let crew = Crew::with_policy("tt_team_cap", Policy { max_open: 12, ..fast() });
+    let id = crew.on_bot("Footer");
+    for n in 0..11 {
+        admin_on(
+            &crew.hub.database,
+            &format!("insert into boxes (id, account, machine, connector, subject, spec, size, phase) values ('held-{n}', '{}', '{}', 'other', '{{\"issue\":\"held-{n}\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'small', 'running')", crew.team, Uuid::new_v4()),
+        );
+    }
+    let placed = crew.fired(crew.labeled(&id, "eng-7"));
+    assert!(placed.as_ref().is_ok_and(|p| p.is_some()), "the 12th box of a team with 11 open opens: {placed:?}");
+    assert_eq!(crew.hub.runtime.block_on(crew.hub.hub().db.boxes(crew.team)).unwrap().len(), 12);
 }

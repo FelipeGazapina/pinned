@@ -62,6 +62,7 @@ const SURFACES = {
   prs: { icon: "link-2", label: "Linked pull requests", key: "L" },
   device: { icon: "smartphone", label: "Device", key: "M" },
   memory: { icon: "book-open", label: "Memory", key: "Y" },
+  plan: { icon: "git-branch", label: "Plan", key: "N" },
 };
 
 /** Each thread's right panel: its open surfaces, the one shown, open or closed, maximized, width. */
@@ -176,6 +177,7 @@ const surfaceTitle = (tab, s) => {
   if (s.kind === "file") return s.path.split("/").pop();
   if (s.kind === "terminal") return terminalLabel(terminalsOf(s).active);
   if (s.kind === "prs") return "Pull requests";
+  if (s.kind === "plan") return isGlobalOrchestratorTab(tab) ? "Captains" : "Plan";
   if (s.kind === "device") return s.label ?? s.target?.name ?? "Device";
   if (s.kind === "memory") return isGlobalOrchestratorTab(tab) ? `${globalOrchestratorName()}'s memory` : "Memory";
   if (s.kind === "pr") return `PR #${s.url.match(/\/pull\/(\d+)/)?.[1] ?? "?"}`;
@@ -226,6 +228,8 @@ function addMenu() {
     { label: "Linked pull requests", icon: "link-2", kbd: "L", disabled: !tab, run: () => addSurface(tab, { id: "prs", kind: "prs" }) },
     { label: "Device", icon: "smartphone", kbd: "M", disabled: !tab, run: () => addSurface(tab, panelOf(tab).surfaces.find((x) => x.kind === "device") ?? { id: `device:${Date.now().toString(36)}`, kind: "device" }) },
     { label: isGlobalOrchestratorTab(tab) ? `${globalOrchestratorName()}'s memory` : "Memory", icon: "book-open", kbd: "Y", disabled: !hasProject(tab), hint: hasProject(tab) ? "" : "This thread is not in a project", run: () => addSurface(tab, { id: "memory", kind: "memory" }) },
+    ...(isPlanCaptain(tab) ? [{ label: "Plan", icon: "git-branch", kbd: "N", run: () => addSurface(tab, { id: "plan", kind: "plan", title: "Plan" }) }] : []),
+    ...(isGlobalOrchestratorTab(tab) ? [{ label: "Captains", icon: "git-branch", kbd: "N", run: () => addSurface(tab, { id: "plan", kind: "plan", title: "Captains" }) }] : []),
   ];
 }
 
@@ -428,6 +432,7 @@ function renderPanel() {
   else if (s.kind === "prs") renderPrsPanel(s);
   else if (s.kind === "device") renderDevicePanel(s);
   else if (s.kind === "memory") renderMemoryPanel();
+  else if (s.kind === "plan") renderPlanPanel(s);
   else renderPrPanel(s);
   placePages();
 }

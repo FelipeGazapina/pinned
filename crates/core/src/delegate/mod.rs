@@ -516,6 +516,9 @@ pub struct Task {
     pub limits: crate::taste::Limits,
     /// What it used so far, as its transcript reports it.
     pub usage: crate::usage::TaskUsage,
+    /// In a team box, a model it used has no price and `usage.cost_usd` prices it at the ceiling
+    /// rate (`usage::Meter::priced`): the limits count that cost, and its rollup counts it unknown.
+    pub at_ceiling: bool,
     pub delegator: Delegator,
     pub effort: Option<String>,
     /// The limit that stopped it, when one did.
@@ -1443,6 +1446,20 @@ grok-4.7-high - Grok 4.7  High
             client_request_id: None,
             role: None,
         })
+    }
+
+    #[test]
+    fn a_plan_step_reads_its_worker_tab_title_else_the_task_model() {
+        let delegates = Delegates::default();
+        let (worker, modeled) = (new_on(&delegates, Provider::Claude), new_on(&delegates, Provider::Claude));
+        {
+            let mut tasks = delegates.tasks.lock().unwrap();
+            tasks.iter_mut().find(|t| t.id == worker.id).unwrap().thread = Some(Thread { tab: "tab-w".into(), runs: true });
+            tasks.iter_mut().find(|t| t.id == modeled.id).unwrap().model = Some("claude-sonnet-5-5".into());
+        }
+        let titles = HashMap::from([("tab-w".to_owned(), "Copy review".to_owned())]);
+        let by: Vec<Option<String>> = delegates.plan_facts(&[worker.id.clone(), modeled.id.clone()], &titles).into_iter().map(|f| f.by).collect();
+        assert_eq!(by, vec![Some("Copy review".to_owned()), Some("claude-sonnet-5-5".to_owned())]);
     }
 
     #[test]
@@ -3180,7 +3197,7 @@ exec '{real}' "$@"
         let finished = thread_task(&delegates, Duration::from_secs(3600));
         delegates.hold_to(&finished.id, limits);
         delegates.turn_finished(&finished.id, Some("PR #12 is open and green.".into()), vec!["1 background shell".into()]);
-        delegates.meter(&[(finished.id.clone(), spent(5.10))], None);
+        delegates.meter(&[(finished.id.clone(), spent(5.10))], &[], None);
         assert_eq!(state_of(&delegates, &finished.id), ("result_available".to_owned(), Some("PR #12 is open and green.".to_owned()), None));
         let ended_by = delegates.status(&parent(), &finished.id).unwrap()["endedBy"].as_str().unwrap().to_owned();
         assert_eq!(ended_by, "pinned stopped it after it spent US$ 5.10, its budget of US$ 5.00, after its turn had finished; its last reply is the result");
@@ -3189,8 +3206,26 @@ exec '{real}' "$@"
         delegates.hold_to(&mid_turn.id, limits);
         delegates.turn_finished(&mid_turn.id, Some("Looking.".into()), vec![]);
         delegates.turn_started(&mid_turn.id);
-        delegates.meter(&[(mid_turn.id.clone(), spent(5.10))], None);
+        delegates.meter(&[(mid_turn.id.clone(), spent(5.10))], &[], None);
         assert_eq!(state_of(&delegates, &mid_turn.id).0, "cancelled", "a turn still running is stopped as before");
+    }
+
+    #[test]
+    fn a_budgeted_task_on_an_unpriced_model_stops_at_the_meter_instead_of_running_with_no_cap() {
+        let delegates = Delegates::default();
+        let limits = crate::taste::Limits { budget_cents: 500, ..crate::taste::Limits::default() };
+        let task = thread_task(&delegates, Duration::from_secs(3600));
+        delegates.hold_to(&task.id, limits);
+        delegates.set_model(&task.id, Some("mystery-9".into()));
+        delegates.meter(&[(task.id.clone(), crate::usage::TaskUsage::default())], &[], None);
+        assert_eq!(state_of(&delegates, &task.id).0, "cancelled");
+        assert_eq!(state_of(&delegates, &task.id).2.as_deref(), Some("budget"), "stopped through the limit path, like a budget that passed");
+        let status = delegates.status(&parent(), &task.id).unwrap();
+        assert_eq!(
+            status["error"].as_str(),
+            Some("mystery-9 has no price, so pinned can't hold it to its budget of US$ 5.00. Set one in Settings › Usage › Model prices, or set the budget to 0"),
+            "{status}"
+        );
     }
 
     #[test]

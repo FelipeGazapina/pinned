@@ -25,8 +25,9 @@ pub struct WorkerCost {
     pub tokens_out: u64,
 }
 
-/// The cost of a thread and everything it delegated. Only costs that are known are added up;
-/// `unknown` counts the ones that are not, so the total is a floor when it is above zero.
+/// The cost of a thread and everything it delegated. Only costs that are known are added up,
+/// and a team box's worker priced at the ceiling rate (`Task::at_ceiling`); `unknown` counts
+/// the ones that are not known, that worker included.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
 pub struct WorkCost {
     /// `own_usd` + `agents_usd` + `box_usd`.
@@ -38,7 +39,8 @@ pub struct WorkCost {
     pub agents_usd: f64,
     /// The workers' boxes.
     pub box_usd: f64,
-    /// Workers and thread sessions whose agent cost is not known (a Cursor worker is not metered).
+    /// Workers and thread sessions whose agent cost is not known (a Cursor worker is not metered,
+    /// a team box's worker on a model with no price is priced at the ceiling rate).
     pub unknown: u32,
     pub workers: u32,
     pub wall_ms: u64,
@@ -91,6 +93,9 @@ fn rollup_of(tasks: &[Task], roots: Vec<&Task>) -> WorkCost {
         match usage.cost_usd {
             Some(usd) => cost.agents_usd += usd,
             None => cost.unknown += 1,
+        }
+        if task.at_ceiling {
+            cost.unknown += 1;
         }
         cost.box_usd += usage.box_usd.unwrap_or(0.0);
         cost.wall_ms += wall_ms;
@@ -151,8 +156,9 @@ impl Delegates {
 
 impl Delegates {
     /// What the plans need of each task in `ids`, read now: how it stands, what its worker waits on, and what
-    /// its tree cost. An id no task holds is left out, so a plan reads its saved outcome for it.
-    pub fn plan_facts(&self, ids: &[String]) -> Vec<crate::plan::TaskFacts> {
+    /// its tree cost, and who runs it: its worker tab's title from `tab_titles`, else its model. An id no task
+    /// holds is left out, so a plan reads its saved outcome for it.
+    pub fn plan_facts(&self, ids: &[String], tab_titles: &HashMap<String, String>) -> Vec<crate::plan::TaskFacts> {
         let tasks = self.tasks.lock().unwrap();
         ids.iter()
             .filter_map(|id| {
@@ -179,6 +185,7 @@ impl Delegates {
                     // A worker whose cost is unknown leaves the total short, so the tree has no cost to show.
                     cost: (rolled.unknown == 0).then_some(rolled.total_usd),
                     ended_at: task.ended,
+                    by: task.thread.as_ref().and_then(|thread| tab_titles.get(&thread.tab)).cloned().or_else(|| task.model.clone()),
                 })
             })
             .collect()
