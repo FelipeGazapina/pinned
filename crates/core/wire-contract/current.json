@@ -7917,6 +7917,43 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "From the settings page, once it wrote `settings` to each machine: `global_orchestrator::AccountSave`.\nThe hub keeps it as the account's last save, pending on every machine but a box and those in\n`took`, and sends it to each pending machine when it connects, keeping that machine's `host`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "record_global_orchestrator_save"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/GlobalOrchestratorSettings"
+                  },
+                  "took": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings",
+                  "took"
+                ]
+              },
+              {
+                "description": "The account's last `global_orchestrator::AccountSave`, or `null` when it has none.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "global_orchestrator_save"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -21353,6 +21390,43 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "From the settings page, once it wrote `settings` to each machine: `global_orchestrator::AccountSave`.\nThe hub keeps it as the account's last save, pending on every machine but a box and those in\n`took`, and sends it to each pending machine when it connects, keeping that machine's `host`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "record_global_orchestrator_save"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/GlobalOrchestratorSettings"
+                  },
+                  "took": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings",
+                  "took"
+                ]
+              },
+              {
+                "description": "The account's last `global_orchestrator::AccountSave`, or `null` when it has none.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "global_orchestrator_save"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -30936,6 +31010,43 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "From the settings page, once it wrote `settings` to each machine: `global_orchestrator::AccountSave`.\nThe hub keeps it as the account's last save, pending on every machine but a box and those in\n`took`, and sends it to each pending machine when it connects, keeping that machine's `host`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "record_global_orchestrator_save"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/GlobalOrchestratorSettings"
+                  },
+                  "took": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings",
+                  "took"
+                ]
+              },
+              {
+                "description": "The account's last `global_orchestrator::AccountSave`, or `null` when it has none.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "global_orchestrator_save"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               }
             ]
           },
@@ -37249,6 +37360,75 @@
                 ]
               }
             ]
+          },
+          "GlobalOrchestratorSettings": {
+            "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
+                "type": "string",
+                "default": "Orchestrator"
+              },
+              "host": {
+                "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
+                "type": "boolean",
+                "default": false
+              },
+              "busy": {
+                "$ref": "#/$defs/BusyPolicy",
+                "default": "queue"
+              },
+              "reports": {
+                "$ref": "#/$defs/ReportPolicy",
+                "default": "auto"
+              },
+              "group_reports": {
+                "description": "The chat folds consecutive reports into one row.",
+                "type": "boolean",
+                "default": true
+              },
+              "read_aloud": {
+                "description": "The phone reads the orchestrator's summaries aloud.",
+                "type": "boolean",
+                "default": false
+              },
+              "auto_merge": {
+                "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+                "type": "boolean",
+                "default": false
+              },
+              "approval_profile": {
+                "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "name",
+              "host",
+              "busy",
+              "reports",
+              "group_reports",
+              "read_aloud",
+              "auto_merge",
+              "approval_profile"
+            ]
+          },
+          "ReportPolicy": {
+            "description": "When a Capitão reports to the global orchestrator.",
+            "oneOf": [
+              {
+                "description": "At the end of every turn that a message from the orchestrator started, and with `tell_orchestrator`.",
+                "type": "string",
+                "const": "auto"
+              },
+              {
+                "description": "Only with `tell_orchestrator`.",
+                "type": "string",
+                "const": "tool_only"
+              }
+            ]
           }
         }
       },
@@ -41215,6 +41395,43 @@
                   "cmd": {
                     "type": "string",
                     "const": "release_workflows"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "From the settings page, once it wrote `settings` to each machine: `global_orchestrator::AccountSave`.\nThe hub keeps it as the account's last save, pending on every machine but a box and those in\n`took`, and sends it to each pending machine when it connects, keeping that machine's `host`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "record_global_orchestrator_save"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/GlobalOrchestratorSettings"
+                  },
+                  "took": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings",
+                  "took"
+                ]
+              },
+              {
+                "description": "The account's last `global_orchestrator::AccountSave`, or `null` when it has none.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "global_orchestrator_save"
                   }
                 },
                 "required": [
@@ -47304,6 +47521,65 @@
                 ]
               }
             ]
+          },
+          "GlobalOrchestratorSettings": {
+            "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
+                "type": "string",
+                "default": "Orchestrator"
+              },
+              "host": {
+                "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
+                "type": "boolean",
+                "default": false
+              },
+              "busy": {
+                "$ref": "#/$defs/BusyPolicy",
+                "default": "queue"
+              },
+              "reports": {
+                "$ref": "#/$defs/ReportPolicy",
+                "default": "auto"
+              },
+              "group_reports": {
+                "description": "The chat folds consecutive reports into one row.",
+                "type": "boolean",
+                "default": true
+              },
+              "read_aloud": {
+                "description": "The phone reads the orchestrator's summaries aloud.",
+                "type": "boolean",
+                "default": false
+              },
+              "auto_merge": {
+                "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+                "type": "boolean",
+                "default": false
+              },
+              "approval_profile": {
+                "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+                "type": "string",
+                "default": ""
+              }
+            }
+          },
+          "ReportPolicy": {
+            "description": "When a Capitão reports to the global orchestrator.",
+            "oneOf": [
+              {
+                "description": "At the end of every turn that a message from the orchestrator started, and with `tell_orchestrator`.",
+                "type": "string",
+                "const": "auto"
+              },
+              {
+                "description": "Only with `tell_orchestrator`.",
+                "type": "string",
+                "const": "tool_only"
+              }
+            ]
           }
         }
       }
@@ -53143,6 +53419,224 @@
           "clone_url",
           "private"
         ]
+      }
+    },
+    "GlobalOrchestratorSave": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "GlobalOrchestratorSave",
+        "description": "The last save of the account's settings page, which the hub keeps and sends to each machine in\n`pending` once it connects, keeping that machine's own `host`.\n\n`{\"id\":\"6f1c…\",\"settings\":{\"name\":\"Orchestrator\",\"host\":false,…,\"auto_merge\":false},\"pending\":[\"9a2e…\"]}`",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "settings": {
+            "description": "The shared fields as the page saved them, cleaned, with `host` false.",
+            "$ref": "#/$defs/GlobalOrchestratorSettings"
+          },
+          "pending": {
+            "description": "The machines that have not taken it yet.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "settings",
+          "pending"
+        ],
+        "$defs": {
+          "GlobalOrchestratorSettings": {
+            "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
+                "type": "string",
+                "default": "Orchestrator"
+              },
+              "host": {
+                "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
+                "type": "boolean",
+                "default": false
+              },
+              "busy": {
+                "$ref": "#/$defs/BusyPolicy",
+                "default": "queue"
+              },
+              "reports": {
+                "$ref": "#/$defs/ReportPolicy",
+                "default": "auto"
+              },
+              "group_reports": {
+                "description": "The chat folds consecutive reports into one row.",
+                "type": "boolean",
+                "default": true
+              },
+              "read_aloud": {
+                "description": "The phone reads the orchestrator's summaries aloud.",
+                "type": "boolean",
+                "default": false
+              },
+              "auto_merge": {
+                "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+                "type": "boolean",
+                "default": false
+              },
+              "approval_profile": {
+                "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "name",
+              "host",
+              "busy",
+              "reports",
+              "group_reports",
+              "read_aloud",
+              "auto_merge",
+              "approval_profile"
+            ]
+          },
+          "BusyPolicy": {
+            "description": "What happens to a message for a Capitão that is busy.",
+            "oneOf": [
+              {
+                "description": "It waits in the Capitão's queue and is typed once the Capitão is idle.",
+                "type": "string",
+                "const": "queue"
+              },
+              {
+                "description": "It is refused with `ocupado`, and the orchestrator tries again later.",
+                "type": "string",
+                "const": "refuse"
+              }
+            ]
+          },
+          "ReportPolicy": {
+            "description": "When a Capitão reports to the global orchestrator.",
+            "oneOf": [
+              {
+                "description": "At the end of every turn that a message from the orchestrator started, and with `tell_orchestrator`.",
+                "type": "string",
+                "const": "auto"
+              },
+              {
+                "description": "Only with `tell_orchestrator`.",
+                "type": "string",
+                "const": "tool_only"
+              }
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "GlobalOrchestratorSave",
+        "description": "The last save of the account's settings page, which the hub keeps and sends to each machine in\n`pending` once it connects, keeping that machine's own `host`.\n\n`{\"id\":\"6f1c…\",\"settings\":{\"name\":\"Orchestrator\",\"host\":false,…,\"auto_merge\":false},\"pending\":[\"9a2e…\"]}`",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "settings": {
+            "description": "The shared fields as the page saved them, cleaned, with `host` false.",
+            "$ref": "#/$defs/GlobalOrchestratorSettings"
+          },
+          "pending": {
+            "description": "The machines that have not taken it yet.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "settings",
+          "pending"
+        ],
+        "$defs": {
+          "GlobalOrchestratorSettings": {
+            "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
+                "type": "string",
+                "default": "Orchestrator"
+              },
+              "host": {
+                "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
+                "type": "boolean",
+                "default": false
+              },
+              "busy": {
+                "$ref": "#/$defs/BusyPolicy",
+                "default": "queue"
+              },
+              "reports": {
+                "$ref": "#/$defs/ReportPolicy",
+                "default": "auto"
+              },
+              "group_reports": {
+                "description": "The chat folds consecutive reports into one row.",
+                "type": "boolean",
+                "default": true
+              },
+              "read_aloud": {
+                "description": "The phone reads the orchestrator's summaries aloud.",
+                "type": "boolean",
+                "default": false
+              },
+              "auto_merge": {
+                "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+                "type": "boolean",
+                "default": false
+              },
+              "approval_profile": {
+                "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+                "type": "string",
+                "default": ""
+              }
+            }
+          },
+          "BusyPolicy": {
+            "description": "What happens to a message for a Capitão that is busy.",
+            "oneOf": [
+              {
+                "description": "It waits in the Capitão's queue and is typed once the Capitão is idle.",
+                "type": "string",
+                "const": "queue"
+              },
+              {
+                "description": "It is refused with `ocupado`, and the orchestrator tries again later.",
+                "type": "string",
+                "const": "refuse"
+              }
+            ]
+          },
+          "ReportPolicy": {
+            "description": "When a Capitão reports to the global orchestrator.",
+            "oneOf": [
+              {
+                "description": "At the end of every turn that a message from the orchestrator started, and with `tell_orchestrator`.",
+                "type": "string",
+                "const": "auto"
+              },
+              {
+                "description": "Only with `tell_orchestrator`.",
+                "type": "string",
+                "const": "tool_only"
+              }
+            ]
+          }
+        }
       }
     },
     "GlobalOrchestratorSettings": {

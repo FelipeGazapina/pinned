@@ -376,6 +376,8 @@ pub const ACTIONS: &[Action] = &[
     h("handback", Excluded, "a signed-in desktop hands its copy's edits back with its login"),
     h("set_offline_runner", Excluded, "which machine runs the account's workflows while the hub is off, which only the owner says, in the app"),
     h("release_workflows", Excluded, "the owner's release, in the app, of a hold that waits for the offline runner to hand back"),
+    h("record_global_orchestrator_save", Excluded, "the settings page's record of a save it wrote to every machine: an agent sets one machine's with set_global_orchestrator_settings"),
+    h("global_orchestrator_save", Excluded, "the settings page's read of its last save: an agent reads a machine's with global_orchestrator_settings"),
 ];
 
 /// A signed-in client's answer to a call only the account's owner makes, until it unlocks.
@@ -383,12 +385,16 @@ pub const LOCKED: &str = "unlock with your password in the app to do this";
 
 /// Whether a signed-in client must have unlocked with the password to run `cmd` on `side`: a
 /// decision, the release-protection switch, the offline runner and the release of a hold always,
-/// and a `confirm` action on a `locked` login.
+/// and on a `locked` login a `confirm` action and the record of a settings page save, which the hub
+/// then writes to other machines as the `confirm` `set_global_orchestrator_settings` would.
 /// The app keeps its login on disk, where any process of the same user reads it; the unlock lives
 /// in the app's memory only.
 pub fn owner_only(side: Side, cmd: &str, locked: bool) -> bool {
     if side == Side::Hub && matches!(cmd, "decide_confirmation" | "set_release_protection" | "set_offline_runner" | "release_workflows") {
         return true;
+    }
+    if side == Side::Hub && cmd == "record_global_orchestrator_save" {
+        return locked;
     }
     locked && of_cmd(side, cmd).is_some_and(|action| action.class == Confirm)
 }
@@ -1073,6 +1079,8 @@ mod tests {
         assert!(needs(Side::Hub, "set_release_protection", false) && needs(Side::Hub, "set_release_protection", true), "pre-approving releases needs the password");
         assert!(needs(Side::Hub, "set_offline_runner", false) && needs(Side::Hub, "set_offline_runner", true), "naming the offline runner needs the password");
         assert!(needs(Side::Hub, "release_workflows", false) && needs(Side::Hub, "release_workflows", true), "releasing a hold needs the password");
+        assert!(needs(Side::Hub, "record_global_orchestrator_save", true) && !needs(Side::Hub, "record_global_orchestrator_save", false), "a save the hub sends to other machines needs the password on a locked login");
+        assert!(!needs(Side::Hub, "global_orchestrator_save", true), "reading the last save needs no unlock");
         assert!(!needs(Side::Hub, "mirror", true) && !needs(Side::Hub, "handback", true), "the desktop sends these with its login");
         assert!(needs(Side::Hub, "remove_machine", true) && !needs(Side::Hub, "remove_machine", false), "an older app's login keeps its calls");
         assert!(needs(Side::Node, "update_self", true) && needs(Side::Hub, "approve_agent", true) && needs(Side::Hub, "set_taste", true));
@@ -1086,7 +1094,7 @@ mod tests {
         }
         let confirm: Vec<&str> = ACTIONS.iter().filter(|a| needs(a.side, a.cmd, true)).map(|a| a.name).collect();
         assert!(confirm.contains(&"decide_confirmation") && confirm.contains(&"extend_box"), "the decision and the Extend need the unlock: {confirm:?}");
-        assert_eq!(confirm.len(), ACTIONS.iter().filter(|a| a.class == Confirm).count() + 4, "every confirm action, the decision, the release-protection switch, the offline runner and the release of a hold: {confirm:?}");
+        assert_eq!(confirm.len(), ACTIONS.iter().filter(|a| a.class == Confirm).count() + 5, "every confirm action, the decision, the release-protection switch, the offline runner, the release of a hold and the record of a settings save: {confirm:?}");
         assert!(include_str!("../../../ui/hub.js").contains(&format!("const LOCKED = \"{LOCKED}\";")), "the app asks for the password on this exact refusal");
     }
 
@@ -1167,7 +1175,7 @@ mod tests {
             assert_eq!(find(name).map(|a| (a.class, a.wired)), Some((Write, true)), "{name}: Write, and the server turns a save with approvals or a delete of the user's task into a confirmation");
         }
         assert_eq!(find("set_release_protection").map(|a| a.class), Some(Excluded), "no agent turns tag and main protection on");
-        for name in ["mirror", "handback", "set_offline_runner", "release_workflows"] {
+        for name in ["mirror", "handback", "set_offline_runner", "release_workflows", "record_global_orchestrator_save", "global_orchestrator_save"] {
             assert_eq!(find(name).map(|a| (a.side, a.class, a.wired)), Some((Side::Hub, Excluded, false)), "{name} stays off the agent surface");
         }
         assert!(find("enqueue").is_some_and(|a| a.starts_work), "a message that starts a Captain goes through the limits");

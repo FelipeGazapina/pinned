@@ -1278,6 +1278,10 @@ impl Hub {
                 self.push_settings(account).await;
                 return Ok(Value::Null);
             }
+            // Only an app reaches these (`http::forward` admits neither from a machine), unlocked on a
+            // locked login (`surface::owner_only`); no agent action runs them.
+            HubCall::RecordGlobalOrchestratorSave { settings, took } => return json(crate::global_settings::record(self, account, settings, took).await?),
+            HubCall::GlobalOrchestratorSave => return json(self.db.global_settings(account.id).await?),
             HubCall::Team { .. } => return Err(TEAM_CALL_ELSEWHERE.into()),
         };
         if changed {

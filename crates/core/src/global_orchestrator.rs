@@ -155,6 +155,20 @@ fn reads_as_pinned(name: &str) -> bool {
     name.chars().map(ascii).filter(|c| c.is_alphabetic()).flat_map(char::to_lowercase).eq("pinned".chars())
 }
 
+/// The last save of the account's settings page, which the hub keeps and sends to each machine in
+/// `pending` once it connects, keeping that machine's own `host`.
+///
+/// `{"id":"6f1c…","settings":{"name":"Orchestrator","host":false,…,"auto_merge":false},"pending":["9a2e…"]}`
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[schemars(rename = "GlobalOrchestratorSave")]
+pub struct AccountSave {
+    pub id: String,
+    /// The shared fields as the page saved them, cleaned, with `host` false.
+    pub settings: Settings,
+    /// The machines that have not taken it yet.
+    pub pending: Vec<MachineId>,
+}
+
 /// What became of a message handed to a Capitão, or of a report handed to the orchestrator.
 ///
 /// `{"outcome":"na_fila","tab":"tab-1a-3","position":2}`

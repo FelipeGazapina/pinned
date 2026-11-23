@@ -430,6 +430,8 @@ impl LocalHub<'_> {
             | HubCall::DeleteIdea { .. }
             | HubCall::Reports { .. }
             | HubCall::ReportIssue { .. }
+            | HubCall::RecordGlobalOrchestratorSave { .. }
+            | HubCall::GlobalOrchestratorSave
             | HubCall::Team { .. } => Answer::HubOnly,
         }
     }

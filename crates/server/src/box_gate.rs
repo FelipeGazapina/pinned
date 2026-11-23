@@ -150,7 +150,10 @@ pub fn box_may_send(call: &HubCall) -> Result<(), String> {
         | HubCall::SetBoxClaudeToken { .. }
         | HubCall::RemoveBoxClaudeToken { .. }
         | HubCall::MintBoxClaudeToken { .. }
-        | HubCall::CancelBoxClaudeToken { .. } => SETTINGS,
+        | HubCall::CancelBoxClaudeToken { .. }
+        // The global orchestrator settings page's save, which the hub sends to the other machines.
+        | HubCall::RecordGlobalOrchestratorSave { .. }
+        | HubCall::GlobalOrchestratorSave => SETTINGS,
         // Its machines and boxes. A box's session asks to extend its own box through `box_may_act`.
         HubCall::OpenBox { .. } | HubCall::ExtendBox { .. } | HubCall::RenameMachine { .. } | HubCall::RemoveMachine { .. } | HubCall::PairCode => MACHINES,
         // Its people and agents.
@@ -243,6 +246,9 @@ mod tests {
             box_may_send(&call(serde_json::json!({ "cmd": "release_workflows" }))),
             Err("a box may not change the account's workflows".to_owned())
         );
+        for save in [serde_json::json!({ "cmd": "record_global_orchestrator_save", "settings": { "auto_merge": true }, "took": [] }), serde_json::json!({ "cmd": "global_orchestrator_save" })] {
+            assert_eq!(box_may_send(&call(save)), Err("a box may not change the account's settings".to_owned()));
+        }
     }
 
     #[test]

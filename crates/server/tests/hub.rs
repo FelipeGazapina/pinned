@@ -13421,6 +13421,7 @@ mod teams_hardening;
 #[path = "hub/teams_one_live_run.rs"] mod teams_one_live_run;
 #[path = "hub/trigger_fires.rs"] mod trigger_fires;
 #[path = "hub/account_mirror.rs"] mod account_mirror;
+#[path = "hub/global_settings.rs"] mod global_settings;
 #[path = "hub/reports.rs"]
 mod reports;
 #[path = "hub/reports_poller.rs"]
