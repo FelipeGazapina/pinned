@@ -6,6 +6,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::delegate::Cost;
 
+/// The levels `claude --effort` takes; the composer's ultracode and ultrathink are not among them.
+/// A gateway may also list `none` and `minimal`, which the flag and the composer's menu have no
+/// name for, so the delegate catalog and the OpenCode Go gateway list both drop them.
+pub(crate) const CLAUDE_EFFORT: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
 /// A Claude model as the picker draws it and `delegate_task` runs it.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct ClaudeModel {
