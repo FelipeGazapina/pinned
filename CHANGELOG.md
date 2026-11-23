@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.18.10 (2026-11-23)
+
+### Added
+
+- Settings › Way of working has "Boxes at once": how many Upstash boxes the account's agents may have open at once. It covers boxes the Orchestrator, Captains, workers and workflows open. It defaults to 8 and runs from 0 up to the hub's cap. Boxes you open yourself never count. At 0, agents cannot start a box on the account.
+- A Captain's plans open in the right panel (key N). Each step says who runs it, and the glance names the step that waits for you first. On the Orchestrator, the panel is "Captains": one card per Captain with its plans, state word and progress. The rail uses the same word as the card.
+- The Plan ready card has "Approve with note": it approves the plan and sends your note as the next message in one step, on the desktop and the phone.
+- A session can name itself with `set_session_title`. Its own name shows in the sidebar over the generated title. A title you set yourself still wins.
+- The Model prices dialog lists the models that ran with no price yet, each with "Set price".
+- A team run's model cost now counts toward its bot's spend limit. The run page shows "Box US$ x · Model US$ y".
+
+### Changed
+
+- A worker under a budget does not start on a Claude model pinned has no price for. It says so and points to Settings › Usage › Model prices. Cursor and Codex workers are held by their time limit as before.
+- OpenCode Go offers only the efforts its CLI takes. A failed model-list refresh waits a minute before it asks again.
+- Settings › Workflows reads the settings again once a minute while it is open, and its "Last checked" line shows its age when the check is older than 3 minutes.
+
+### Fixed
+
+- The worker strip, the phone's worker count and the projects page no longer show a finished or sleeping worker as working with a running clock.
+- An approved plan whose text says "Interrupted" no longer reads as a refusal and no longer leaves an Approval on Needs you.
+- Every hub hello rebuilds the confirmations waiting on you, so one lost to a dropped socket shows again.
+- Rooms: a post to a seat that has no tab yet waits for it, a settled room owes nothing after a restart, closing a tab ends the room it owns or the seat it holds, and a repeated `room_post` id appends nothing.
+- A session stopped on the docs-server dialog names the folder as [folder] in its failure, never the raw path.
+
+### Known gaps
+
+- A titled request sent to a Captain on another machine or in a box arrives without its title.
+- Copying an account's setup does not copy Boxes at once yet.
+
 ## 0.18.9 (2026-11-20)
 
 ### Added
