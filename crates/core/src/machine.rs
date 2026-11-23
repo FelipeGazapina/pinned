@@ -1125,7 +1125,7 @@ pub struct Machine {
     /// The last time the machine slept, found from a jump between ticks, and saved beside the sessions.
     sleeps: Mutex<sleep::Watch>,
     sync_file: Option<PathBuf>,
-    sync_loop_holds_state: AtomicBool,
+    sync_loop_holds_state: Arc<AtomicBool>,
     /// The hub's latest refusal at a sync limit, while the sync loop's last push stays refused and no push has been taken since.
     sync_limited: Mutex<Option<String>>,
     projects: Mutex<Vec<projects::Project>>,
@@ -1369,7 +1369,7 @@ impl Machine {
             sessions_file: dir.as_ref().map(|d| d.join("sessions.json")),
             sleeps: Mutex::new(sleep::Watch::with_window(dir.as_ref().and_then(|d| sleep::load(&d.join("sleep.json"))))),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
-            sync_loop_holds_state: AtomicBool::new(false),
+            sync_loop_holds_state: Arc::new(AtomicBool::new(false)),
             sync_limited: Mutex::new(None),
             projects: Mutex::new(projects),
             projects_file,
@@ -4875,8 +4875,10 @@ impl Machine {
         self.sync_file.as_deref()
     }
 
-    pub(crate) fn hold_sync_state(&self, held: bool) {
-        self.sync_loop_holds_state.store(held, Ordering::SeqCst);
+    #[must_use]
+    pub(crate) fn hold_sync_state(&self) -> SyncHold {
+        self.sync_loop_holds_state.store(true, Ordering::SeqCst);
+        SyncHold(self.sync_loop_holds_state.clone())
     }
 
     /// Holds the hub's latest limit refusal while a push stays refused, `None` once none is.
@@ -7758,6 +7760,15 @@ const HOME_ENV: &str = "USERPROFILE";
 /// count by running from cargo's `deps` folder.
 fn test_binary() -> bool {
     cfg!(test) || std::env::current_exe().ok().is_some_and(|exe| exe.components().any(|part| part.as_os_str() == "deps"))
+}
+
+/// The sync loop's hold on the state file: it goes when the loop that took it drops it, on a panic too.
+pub(crate) struct SyncHold(Arc<AtomicBool>);
+
+impl Drop for SyncHold {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 pub(crate) fn home() -> PathBuf {
