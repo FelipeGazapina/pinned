@@ -22,6 +22,29 @@ jobs:
       - run: npm ci
       - run: cargo test -p pinned-server --lib
 
+  # The hub test of what an agent may change unasked; the rest of hub.rs runs in no CI job.
+  agent-permissions:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pinned
+          POSTGRES_DB: pinned
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5499:5432
+        options: >-
+          --health-cmd "pg_isready -U pinned"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - run: cargo test --locked -p pinned-server --test hub -- --exact an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_and_another_account_reaches_none_of_it
+
   # The desktop app, built and packaged as the Linux installers ship.
   desktop:
     name: desktop (${{ matrix.arch }})
