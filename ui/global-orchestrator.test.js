@@ -249,6 +249,22 @@ test("Reset to default puts the default profile back in the text", async () => {
   assert.equal(element("go-approval-profile").value, pure().GO_DEFAULT_APPROVAL_PROFILE);
 });
 
+test("the settings search finds the Global orchestrator by auto-merge, approval profile and merge", () => {
+  const settings = read("settings.js");
+  const general = settings.slice(settings.indexOf('settingsSection({ page: "general"'));
+  const shell = read("gui-shell.js");
+  const normalize = shell.slice(shell.indexOf("const normalize ="), shell.indexOf("\n", shell.indexOf("const normalize =")));
+  const gui = read("gui-settings.js");
+  const from = gui.indexOf("function searchSettingsItems(");
+  const search = gui.slice(from, gui.indexOf("\n}\n", from) + 3);
+  const context = { settingsSections: [] };
+  vm.createContext(context);
+  vm.runInContext(`function settingsSection(s) { settingsSections.push(s); }\n${general.slice(0, general.indexOf("] });") + 5)}\n${normalize}\n${search}\nthis.find = (q) => searchSettingsItems(q).map((item) => item.title);`, context);
+  for (const query of ["auto-merge", "auto merge", "Auto-merge", "approval profile", "approval", "merge"]) {
+    assert.equal(context.find(query)[0], "Global orchestrator", `"${query}" finds ${JSON.stringify(here(context.find(query)))}`);
+  }
+});
+
 test("saving sends auto-merge and a custom profile to every online machine, and the default as empty", async () => {
   const { context, element, calls } = page({ settings: { mm: { host: true } } });
   await context.globalOrchestratorSettingsHtml();
