@@ -140,7 +140,8 @@ pub fn owner_only(op: &Op, locked: bool) -> bool {
             | TeamOp::GiveBack { .. }
             | TeamOp::StopRun { .. }
             | TeamOp::RunLog { .. }
-            | TeamOp::AskPeople { .. } => false,
+            | TeamOp::AskPeople { .. }
+            | TeamOp::RunModelCost { .. } => false,
         },
     };
     locked && team
@@ -164,6 +165,7 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
         TeamOp::Create { name } => return json(membership::create(hub, person.id, &name).await?),
         TeamOp::Join { code } => return json(membership::join(hub, person.id, &code).await?),
         TeamOp::AskPeople { .. } => return Err("only a session in one of the team's boxes asks people".into()),
+        TeamOp::RunModelCost { .. } => return Err("only a team's box reports what its run's model cost".into()),
         _ => {}
     }
     let team = team.ok_or("name the team")?;
@@ -171,7 +173,7 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
     let scope = Scope { team, member: person.id, role };
     let s = &scope;
     match op {
-        TeamOp::List | TeamOp::Create { .. } | TeamOp::Join { .. } | TeamOp::AskPeople { .. } | TeamOp::Hub { .. } => unreachable!("answered above"),
+        TeamOp::List | TeamOp::Create { .. } | TeamOp::Join { .. } | TeamOp::AskPeople { .. } | TeamOp::RunModelCost { .. } | TeamOp::Hub { .. } => unreachable!("answered above"),
         TeamOp::Rename { name } => json(membership::rename(hub, s, &name).await?),
         TeamOp::Members => json(membership::members(hub, s).await?),
         TeamOp::Invite => json(membership::invite(hub, s).await?),
@@ -217,10 +219,12 @@ async fn run_hub_call(hub: &Arc<Hub>, s: &Scope, call: HubCall) -> Result<Value,
     Ok(answer)
 }
 
-/// Runs a machine's `HubCall::Team`: only `AskPeople`, from a machine of a team's own account.
+/// Runs a machine's `HubCall::Team`: only `AskPeople` and `RunModelCost`, each from a box of a
+/// team's own account; any other op is refused.
 pub async fn machine_call(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, op: TeamOp) -> Result<Value, String> {
     match op {
         TeamOp::AskPeople { situation, question, choices, step } => json(calls::ask_people(hub, account, machine, situation, &question, choices, step.as_deref()).await?),
+        TeamOp::RunModelCost { workflow, subject, usd } => json(calls::model_cost(hub, account, machine, &workflow, &subject, usd).await?),
         op => Err(format!("a machine may not send the team op {}", op.name())),
     }
 }

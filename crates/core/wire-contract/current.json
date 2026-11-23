@@ -980,7 +980,7 @@
                 ]
               },
               {
-                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.",
+                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.\nWith `title`, the machine also writes it as the Capitão's own thread name before the\nCapitão reads the message; without one, the message tells the Capitão to name itself.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -1009,6 +1009,13 @@
                       {
                         "type": "null"
                       }
+                    ]
+                  },
+                  "title": {
+                    "description": "A suggested name for the Capitão's thread, written as its own title on delivery.",
+                    "type": [
+                      "string",
+                      "null"
                     ]
                   }
                 },
@@ -1725,6 +1732,27 @@
                   "tab",
                   "previous",
                   "thread"
+                ]
+              },
+              {
+                "description": "The cleaned `title`, one line trimmed to 70 characters, as the session in `tab`'s own name\nfor itself. The user's own name for the thread, if they gave one, still shows over it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_session_title"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "title"
                 ]
               },
               {
@@ -11371,6 +11399,26 @@
                 "additionalProperties": false
               },
               {
+                "description": "`{\"self_title\":{\"text\":\"Libera o formulário\",\"author\":\"captain\",\"at\":<unix s>}}`, or\n`{\"self_title\":null}` to take the session's own name off.",
+                "type": "object",
+                "properties": {
+                  "self_title": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/SelfTitle"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "self_title"
+                ],
+                "additionalProperties": false
+              },
+              {
                 "type": "object",
                 "properties": {
                   "pin": {
@@ -11507,6 +11555,29 @@
                 "type": "string",
                 "const": "clear"
               }
+            ]
+          },
+          "SelfTitle": {
+            "description": "A title a session wrote for itself, which never overwrites the user's own `title` mark.",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "author": {
+                "description": "Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.",
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was written.",
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "text",
+              "author",
+              "at"
             ]
           },
           "Snooze": {
@@ -12718,6 +12789,32 @@
                   "question",
                   "choices"
                 ]
+              },
+              {
+                "description": "From a team box's node only: what its session of `workflow` on `subject` has spent on its\nmodel so far, in USD, a running total sent again at an interval. The hub keeps the most it\nwas told for the live run of that workflow and subject bound to this box, so a report lost\nor sent twice never counts twice, and refuses a box that does not run it.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_model_cost"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "subject": {
+                    "$ref": "#/$defs/Subject"
+                  },
+                  "usd": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "subject",
+                  "usd"
+                ]
               }
             ]
           },
@@ -13088,6 +13185,41 @@
               "in_doubt",
               "on_limit",
               "on_failure"
+            ]
+          },
+          "Subject": {
+            "description": "What a connector's session works on, which its callbacks into pinned report against.\nUntagged, so a stage message from a Linear session reads `\"issue\": \"<id>\"` as it always has.",
+            "anyOf": [
+              {
+                "title": "LinearIssue",
+                "description": "Linear's id for the issue, which `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "issue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issue"
+                ]
+              },
+              {
+                "title": "SlackThread",
+                "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "thread": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "channel",
+                  "thread"
+                ]
+              }
             ]
           },
           "Changes": {
@@ -14339,7 +14471,7 @@
                 ]
               },
               {
-                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.",
+                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.\nWith `title`, the machine also writes it as the Capitão's own thread name before the\nCapitão reads the message; without one, the message tells the Capitão to name itself.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -14368,6 +14500,13 @@
                       {
                         "type": "null"
                       }
+                    ]
+                  },
+                  "title": {
+                    "description": "A suggested name for the Capitão's thread, written as its own title on delivery.",
+                    "type": [
+                      "string",
+                      "null"
                     ]
                   }
                 },
@@ -15083,6 +15222,27 @@
                   "tab",
                   "previous",
                   "thread"
+                ]
+              },
+              {
+                "description": "The cleaned `title`, one line trimmed to 70 characters, as the session in `tab`'s own name\nfor itself. The user's own name for the thread, if they gave one, still shows over it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_session_title"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "title"
                 ]
               },
               {
@@ -24490,6 +24650,26 @@
                 "additionalProperties": false
               },
               {
+                "description": "`{\"self_title\":{\"text\":\"Libera o formulário\",\"author\":\"captain\",\"at\":<unix s>}}`, or\n`{\"self_title\":null}` to take the session's own name off.",
+                "type": "object",
+                "properties": {
+                  "self_title": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/SelfTitle"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "self_title"
+                ],
+                "additionalProperties": false
+              },
+              {
                 "type": "object",
                 "properties": {
                   "pin": {
@@ -24626,6 +24806,29 @@
                 "type": "string",
                 "const": "clear"
               }
+            ]
+          },
+          "SelfTitle": {
+            "description": "A title a session wrote for itself, which never overwrites the user's own `title` mark.",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "author": {
+                "description": "Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.",
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was written.",
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "text",
+              "author",
+              "at"
             ]
           },
           "Snooze": {
@@ -25809,6 +26012,32 @@
                   "situation",
                   "question"
                 ]
+              },
+              {
+                "description": "From a team box's node only: what its session of `workflow` on `subject` has spent on its\nmodel so far, in USD, a running total sent again at an interval. The hub keeps the most it\nwas told for the live run of that workflow and subject bound to this box, so a report lost\nor sent twice never counts twice, and refuses a box that does not run it.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_model_cost"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "subject": {
+                    "$ref": "#/$defs/Subject"
+                  },
+                  "usd": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "subject",
+                  "usd"
+                ]
               }
             ]
           },
@@ -26158,6 +26387,41 @@
               "in_doubt",
               "on_limit",
               "on_failure"
+            ]
+          },
+          "Subject": {
+            "description": "What a connector's session works on, which its callbacks into pinned report against.\nUntagged, so a stage message from a Linear session reads `\"issue\": \"<id>\"` as it always has.",
+            "anyOf": [
+              {
+                "title": "LinearIssue",
+                "description": "Linear's id for the issue, which `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "issue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issue"
+                ]
+              },
+              {
+                "title": "SlackThread",
+                "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "thread": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "channel",
+                  "thread"
+                ]
+              }
             ]
           },
           "Changes": {
@@ -34790,6 +35054,26 @@
                 "additionalProperties": false
               },
               {
+                "description": "`{\"self_title\":{\"text\":\"Libera o formulário\",\"author\":\"captain\",\"at\":<unix s>}}`, or\n`{\"self_title\":null}` to take the session's own name off.",
+                "type": "object",
+                "properties": {
+                  "self_title": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/SelfTitle"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "self_title"
+                ],
+                "additionalProperties": false
+              },
+              {
                 "type": "object",
                 "properties": {
                   "pin": {
@@ -34926,6 +35210,29 @@
                 "type": "string",
                 "const": "clear"
               }
+            ]
+          },
+          "SelfTitle": {
+            "description": "A title a session wrote for itself, which never overwrites the user's own `title` mark.",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "author": {
+                "description": "Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.",
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was written.",
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "text",
+              "author",
+              "at"
             ]
           },
           "Snooze": {
@@ -36136,6 +36443,32 @@
                   "situation",
                   "question",
                   "choices"
+                ]
+              },
+              {
+                "description": "From a team box's node only: what its session of `workflow` on `subject` has spent on its\nmodel so far, in USD, a running total sent again at an interval. The hub keeps the most it\nwas told for the live run of that workflow and subject bound to this box, so a report lost\nor sent twice never counts twice, and refuses a box that does not run it.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_model_cost"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "subject": {
+                    "$ref": "#/$defs/Subject"
+                  },
+                  "usd": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "subject",
+                  "usd"
                 ]
               }
             ]
@@ -44790,6 +45123,26 @@
                 "additionalProperties": false
               },
               {
+                "description": "`{\"self_title\":{\"text\":\"Libera o formulário\",\"author\":\"captain\",\"at\":<unix s>}}`, or\n`{\"self_title\":null}` to take the session's own name off.",
+                "type": "object",
+                "properties": {
+                  "self_title": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/SelfTitle"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "self_title"
+                ],
+                "additionalProperties": false
+              },
+              {
                 "type": "object",
                 "properties": {
                   "pin": {
@@ -44926,6 +45279,29 @@
                 "type": "string",
                 "const": "clear"
               }
+            ]
+          },
+          "SelfTitle": {
+            "description": "A title a session wrote for itself, which never overwrites the user's own `title` mark.",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "author": {
+                "description": "Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.",
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was written.",
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "text",
+              "author",
+              "at"
             ]
           },
           "Snooze": {
@@ -46108,6 +46484,32 @@
                   "op",
                   "situation",
                   "question"
+                ]
+              },
+              {
+                "description": "From a team box's node only: what its session of `workflow` on `subject` has spent on its\nmodel so far, in USD, a running total sent again at an interval. The hub keeps the most it\nwas told for the live run of that workflow and subject bound to this box, so a report lost\nor sent twice never counts twice, and refuses a box that does not run it.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_model_cost"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "subject": {
+                    "$ref": "#/$defs/Subject"
+                  },
+                  "usd": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "subject",
+                  "usd"
                 ]
               }
             ]
@@ -57504,6 +57906,17 @@
               "null"
             ]
           },
+          "self_title": {
+            "description": "The name a session gave itself, shown in place of the generated one. It never overwrites\n`title`, and the sidebar shows `title` over it.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SelfTitle"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "pin": {
             "description": "Its place among pinned threads, lowest first.",
             "type": [
@@ -57576,6 +57989,29 @@
           "session"
         ],
         "$defs": {
+          "SelfTitle": {
+            "description": "A title a session wrote for itself, which never overwrites the user's own `title` mark.",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "author": {
+                "description": "Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.",
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was written.",
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "text",
+              "author",
+              "at"
+            ]
+          },
           "Snooze": {
             "type": "object",
             "properties": {
@@ -57674,6 +58110,17 @@
               "null"
             ]
           },
+          "self_title": {
+            "description": "The name a session gave itself, shown in place of the generated one. It never overwrites\n`title`, and the sidebar shows `title` over it.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SelfTitle"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "pin": {
             "description": "Its place among pinned threads, lowest first.",
             "type": [
@@ -57746,6 +58193,29 @@
           "session"
         ],
         "$defs": {
+          "SelfTitle": {
+            "description": "A title a session wrote for itself, which never overwrites the user's own `title` mark.",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "author": {
+                "description": "Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.",
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was written.",
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "text",
+              "author",
+              "at"
+            ]
+          },
           "Snooze": {
             "type": "object",
             "properties": {
@@ -68162,9 +68632,18 @@
             "default": null
           },
           "cost_usd": {
+            "description": "Its box's cost only, as before a run had a model cost, so an older app that reads it as\nthe box's still shows the box's. Its `BotLimits::usd` caps this and `model_usd` together.",
             "type": "number",
             "format": "double",
             "default": 0.0
+          },
+          "model_usd": {
+            "description": "The model cost its box's node reported, apart from `cost_usd`. None until the node first\nreports one, and from an older hub, which sends none.",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           },
           "active_secs": {
             "description": "Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's\n`BotLimits::minutes` count these only.",
@@ -68274,9 +68753,18 @@
             "default": null
           },
           "cost_usd": {
+            "description": "Its box's cost only, as before a run had a model cost, so an older app that reads it as\nthe box's still shows the box's. Its `BotLimits::usd` caps this and `model_usd` together.",
             "type": "number",
             "format": "double",
             "default": 0.0
+          },
+          "model_usd": {
+            "description": "The model cost its box's node reported, apart from `cost_usd`. None until the node first\nreports one, and from an older hub, which sends none.",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           },
           "active_secs": {
             "description": "Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's\n`BotLimits::minutes` count these only.",
@@ -72617,6 +73105,17 @@
                   "null"
                 ]
               },
+              "self_title": {
+                "description": "The name a session gave itself, shown in place of the generated one. It never overwrites\n`title`, and the sidebar shows `title` over it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SelfTitle"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "pin": {
                 "description": "Its place among pinned threads, lowest first.",
                 "type": [
@@ -72687,6 +73186,29 @@
             },
             "required": [
               "session"
+            ]
+          },
+          "SelfTitle": {
+            "description": "A title a session wrote for itself, which never overwrites the user's own `title` mark.",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "author": {
+                "description": "Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.",
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was written.",
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "text",
+              "author",
+              "at"
             ]
           },
           "Snooze": {
@@ -73164,9 +73686,18 @@
                 "default": null
               },
               "cost_usd": {
+                "description": "Its box's cost only, as before a run had a model cost, so an older app that reads it as\nthe box's still shows the box's. Its `BotLimits::usd` caps this and `model_usd` together.",
                 "type": "number",
                 "format": "double",
                 "default": 0.0
+              },
+              "model_usd": {
+                "description": "The model cost its box's node reported, apart from `cost_usd`. None until the node first\nreports one, and from an older hub, which sends none.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
               },
               "active_secs": {
                 "description": "Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's\n`BotLimits::minutes` count these only.",
@@ -77297,6 +77828,17 @@
                   "null"
                 ]
               },
+              "self_title": {
+                "description": "The name a session gave itself, shown in place of the generated one. It never overwrites\n`title`, and the sidebar shows `title` over it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SelfTitle"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "pin": {
                 "description": "Its place among pinned threads, lowest first.",
                 "type": [
@@ -77367,6 +77909,29 @@
             },
             "required": [
               "session"
+            ]
+          },
+          "SelfTitle": {
+            "description": "A title a session wrote for itself, which never overwrites the user's own `title` mark.",
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "author": {
+                "description": "Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.",
+                "type": "string"
+              },
+              "at": {
+                "description": "Unix seconds it was written.",
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "text",
+              "author",
+              "at"
             ]
           },
           "Snooze": {
@@ -77833,9 +78398,18 @@
                 "default": null
               },
               "cost_usd": {
+                "description": "Its box's cost only, as before a run had a model cost, so an older app that reads it as\nthe box's still shows the box's. Its `BotLimits::usd` caps this and `model_usd` together.",
                 "type": "number",
                 "format": "double",
                 "default": 0.0
+              },
+              "model_usd": {
+                "description": "The model cost its box's node reported, apart from `cost_usd`. None until the node first\nreports one, and from an older hub, which sends none.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
               },
               "active_secs": {
                 "description": "Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's\n`BotLimits::minutes` count these only.",
@@ -79202,7 +79776,7 @@
                 ]
               },
               {
-                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.",
+                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.\nWith `title`, the machine also writes it as the Capitão's own thread name before the\nCapitão reads the message; without one, the message tells the Capitão to name itself.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -79231,6 +79805,13 @@
                       {
                         "type": "null"
                       }
+                    ]
+                  },
+                  "title": {
+                    "description": "A suggested name for the Capitão's thread, written as its own title on delivery.",
+                    "type": [
+                      "string",
+                      "null"
                     ]
                   }
                 },
@@ -79947,6 +80528,27 @@
                   "tab",
                   "previous",
                   "thread"
+                ]
+              },
+              {
+                "description": "The cleaned `title`, one line trimmed to 70 characters, as the session in `tab`'s own name\nfor itself. The user's own name for the thread, if they gave one, still shows over it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_session_title"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "title"
                 ]
               },
               {
@@ -84855,7 +85457,7 @@
                 ]
               },
               {
-                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.",
+                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.\nWith `title`, the machine also writes it as the Capitão's own thread name before the\nCapitão reads the message; without one, the message tells the Capitão to name itself.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -84884,6 +85486,13 @@
                       {
                         "type": "null"
                       }
+                    ]
+                  },
+                  "title": {
+                    "description": "A suggested name for the Capitão's thread, written as its own title on delivery.",
+                    "type": [
+                      "string",
+                      "null"
                     ]
                   }
                 },
@@ -85599,6 +86208,27 @@
                   "tab",
                   "previous",
                   "thread"
+                ]
+              },
+              {
+                "description": "The cleaned `title`, one line trimmed to 70 characters, as the session in `tab`'s own name\nfor itself. The user's own name for the thread, if they gave one, still shows over it.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_session_title"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "title"
                 ]
               },
               {

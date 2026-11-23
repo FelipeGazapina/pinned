@@ -558,6 +558,31 @@ fn life_limit(secs: u64) -> String {
     }
 }
 
+pub use pinned_core::teams::MAX_RUN_MODEL_USD;
+
+/// Keeps what a team box's node reports its workflow session on `subject` has spent on its model
+/// so far, a running total, on that run (`db::record_model_cost`). Only the box the hub bound the
+/// live run to reports for it: any other machine, of this team or another, is refused, and
+/// nothing is stored.
+pub async fn model_cost(hub: &Arc<Hub>, team: &Arc<Account>, machine: &str, workflow: &str, subject: &Subject, usd: f64) -> Result<(), String> {
+    const NOT_ITS_RUN: &str = "this box runs no live run of that workflow on that subject";
+    // The hub keeps the most it was told, so a total past any real run's would stand for good.
+    if !(0.0..=MAX_RUN_MODEL_USD).contains(&usd) {
+        return Err(format!("a model cost is a number of dollars, 0 to {MAX_RUN_MODEL_USD}"));
+    }
+    if !db::is_team(&hub.db, team.id).await? {
+        return Err(NOT_ITS_RUN.into());
+    }
+    let machine_id = Uuid::parse_str(machine).map_err(|_| NOT_ITS_RUN)?;
+    if hub.db.box_of(team.id, machine_id).await?.is_none() {
+        return Err(NOT_ITS_RUN.into());
+    }
+    if !db::record_model_cost(&hub.db, team.id, machine, workflow, subject, usd).await? {
+        return Err(NOT_ITS_RUN.into());
+    }
+    Ok(())
+}
+
 /// Dollars as a limit reads them: cents shown ($0.40, $5.00), or every digit a smaller limit has ($0.001).
 fn dollars(usd: f64) -> String {
     let cents = usd * 100.0;
@@ -565,12 +590,12 @@ fn dollars(usd: f64) -> String {
 }
 
 /// Opens the `OnLimit` call of a run that reached a limit and tells its session to stop. Its
-/// dollars are the box's time only: no model usage is counted.
+/// dollars are its box's time and its model's usage together.
 async fn limit_reached(hub: &Arc<Hub>, policy: &TeamPolicy, at: &db::AtLimit) -> Result<(), String> {
     let team = hub.account(at.team).await?;
     let Some(run) = db::run(&hub.db, at.team, at.run).await? else { return Ok(()) };
     let what = match (at.spent, at.limits.minutes) {
-        (true, _) => format!("{} of box time (model usage is not counted)", dollars(at.limits.usd)),
+        (true, _) => format!("{} spent on its box and model", dollars(at.limits.usd)),
         (false, 1) => "1 minute of work".to_owned(),
         (false, minutes) => format!("{minutes} minutes of work"),
     };

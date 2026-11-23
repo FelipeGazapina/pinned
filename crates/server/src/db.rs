@@ -236,6 +236,12 @@ alter table team_run_queue add column if not exists unread_passes integer not nu
 alter table teams add column if not exists line_held_at timestamptz;
 alter table teams add column if not exists line_held_why text;
 alter table team_runs add column if not exists reserved_at timestamptz;
+-- The model cost a run's box reported (`teams::db::record_model_cost`), the most it told: the
+-- run costs `cost_usd` (its box's time) plus this, which its bot's dollars limit caps. Null
+-- until the box first reports, so a run never measured is told apart from one that spent nothing.
+alter table team_runs add column if not exists model_usd double precision;
+alter table team_runs alter column model_usd drop not null;
+alter table team_runs alter column model_usd drop default;
 -- A run's limit call the limits tick opened (`teams::calls::tick`): the only call that counts as
 -- its limit call (`teams::db::runs_at_limit`). A session's own ask never sets it.
 alter table team_calls add column if not exists opened_by_hub boolean not null default false;
@@ -771,6 +777,8 @@ enum Needs<'a> {
     Index(&'a str),
     /// `alter table <table> alter column <column> drop not null`: the column's being nullable.
     Nullable(&'a str, &'a str),
+    /// `alter table <table> alter column <column> drop default`: the column's having no default.
+    NoDefault(&'a str, &'a str),
 }
 
 fn needs(statement: &str) -> Needs<'_> {
@@ -779,6 +787,7 @@ fn needs(statement: &str) -> Needs<'_> {
     match words[..] {
         ["create", "index", "if", "not", "exists", index, ..] => Needs::Index(index),
         ["alter", "table", table, "alter", "column", column, "drop", "not", "null"] => Needs::Nullable(table, column),
+        ["alter", "table", table, "alter", "column", column, "drop", "default"] => Needs::NoDefault(table, column),
         ["alter", "table", table, ..] if words[3..].starts_with(&ADD) => {
             Needs::Columns(table, words.windows(ADD.len() + 1).filter(|w| w[..ADD.len()] == ADD).map(|w| w[ADD.len()].trim_end_matches(',')).collect())
         }
@@ -797,6 +806,7 @@ async fn needed(client: &Client, needs: &Needs<'_>) -> Result<bool, tokio_postgr
         }
         Needs::Index(index) => client.query_one("select to_regclass($1::text) is null", &[index]).await?.get(0),
         Needs::Nullable(table, column) => client.query_one(&format!("select coalesce(bool_or(attnotnull), true) {COLUMN} and attname::text = $2::text"), &[table, column]).await?.get(0),
+        Needs::NoDefault(table, column) => client.query_one(&format!("select coalesce(bool_or(atthasdef), true) {COLUMN} and attname::text = $2::text"), &[table, column]).await?.get(0),
     })
 }
 
@@ -3114,7 +3124,34 @@ mod tests {
             Needs::Columns("team_calls", vec!["step_hash", "released_at"])
         );
         assert_eq!(needs("alter table invites alter column expires_at drop not null"), Needs::Nullable("invites", "expires_at"));
+        assert_eq!(needs("alter table team_runs alter column model_usd drop default"), Needs::NoDefault("team_runs", "model_usd"));
         assert_eq!(needs("create index if not exists tasks_due on tasks (next_at) where enabled and next_at is not null"), Needs::Index("tasks_due"));
+    }
+
+    /// Against the test Postgres (`PINNED_TEST_POSTGRES`, as the hub's tests use): a boot whose
+    /// column has no default skips `drop default`, so it takes no lock that waits on another
+    /// session's, and one whose column has a default runs it.
+    #[tokio::test]
+    #[ignore = "needs the test Postgres at PINNED_TEST_POSTGRES"]
+    async fn a_boot_drops_a_columns_default_only_when_it_has_one() {
+        let base = std::env::var("PINNED_TEST_POSTGRES").unwrap_or_else(|_| "postgres://pinned@127.0.0.1:5499".into());
+        let connect = || async {
+            let (client, connection) = tokio_postgres::connect(&format!("{base}/pinned"), NoTls).await.unwrap();
+            tokio::spawn(connection);
+            client
+        };
+        let (boot, other) = (connect().await, connect().await);
+        let schema = format!("no_default_{}", uuid::Uuid::new_v4().simple());
+        boot.batch_execute(&format!("create schema {schema}; set search_path to {schema}; set lock_timeout = 2000; create table team_runs (id int, model_usd double precision default 0)")).await.unwrap();
+        let drop = "alter table team_runs alter column model_usd drop default";
+        assert!(needed(&boot, &needs(drop)).await.unwrap(), "a default to drop");
+        create(&boot, drop).await.unwrap();
+        assert!(!needed(&boot, &needs(drop)).await.unwrap(), "no default left");
+        other.batch_execute(&format!("begin; lock table {schema}.team_runs in access share mode")).await.unwrap();
+        let skipped = create(&boot, drop).await;
+        other.batch_execute("rollback").await.unwrap();
+        boot.batch_execute(&format!("drop schema {schema} cascade")).await.unwrap();
+        assert!(skipped.is_ok(), "with no default the boot runs no statement that waits on the other session's lock: {skipped:?}");
     }
 
     #[test]

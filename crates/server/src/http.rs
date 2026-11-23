@@ -1347,7 +1347,7 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         let result = hub.auto_archive(&account, &machine, &tab).await.and_then(|marks| serde_json::to_value(marks).map_err(|e| e.to_string()));
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
-    // A team's box asks its people; no other team op comes from a machine.
+    // A team's box asks its people and reports its runs' model cost; no other team op comes from a machine.
     if let HubCall::Team { op, .. } = call {
         let result = crate::teams::machine_call(&hub, &account, &machine, op).await;
         if let Err(e) = &result {

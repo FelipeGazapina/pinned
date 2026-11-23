@@ -20,11 +20,13 @@ function tcDuration(secs) {
 /** The open call of a run that stopped at its limit (`situation: "on_limit"`), while the run goes on. */
 const tcLimitCall = (run) => (["working", "waiting", "taken_over"].includes(run.state) ? tcStore.calls.find((c) => c.run === run.id && tcOpen(c) && c.situation === "on_limit") ?? null : null);
 
-/** What the run has used, each on its own line: active time, waiting time (which no limit counts) and the box's cost. */
+/** What the run has used, each on its own line: active time, waiting time (which no limit counts) and its cost, the box's
+ * (`cost_usd`) and the model's (`model_usd`) apart. No `model_usd` comes for a run its box never reported, nor from an older hub: its line stays the box's alone. */
 function tcRunFactsHtml(run) {
   const fact = (key, value, note = "") => `<p class="tc-fact"><span class="tc-fact-key">${key}:</span> <span class="tc-fact-value">${esc(value)}</span>${note ? ` <span class="tc-fact-note">(${esc(note)})</span>` : ""}</p>`;
-  const cost = `US$ ${Number(run.cost_usd || 0).toFixed(2)}`;
-  return `<div class="tc-facts" aria-label="Time and cost of this run">${fact("Active time", tcDuration(run.active_secs))}${run.waiting_secs ? fact("Waiting for people", tcDuration(run.waiting_secs), "not counted toward the time limit") : ""}${fact("Box cost", cost, "model usage not included")}</div>`;
+  const usd = (n) => `US$ ${Number(n || 0).toFixed(2)}`;
+  const cost = run.model_usd == null ? fact("Box cost", usd(run.cost_usd), "model usage not included") : fact("Cost", `Box ${usd(run.cost_usd)} · Model ${usd(run.model_usd)}`);
+  return `<div class="tc-facts" aria-label="Time and cost of this run">${fact("Active time", tcDuration(run.active_secs))}${run.waiting_secs ? fact("Waiting for people", tcDuration(run.waiting_secs), "not counted toward the time limit") : ""}${cost}</div>`;
 }
 
 /** "Waiting for someone in @design", "Ana took over this run", "Stopped by you". `sub` is a second line when the run has one. */

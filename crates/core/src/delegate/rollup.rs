@@ -25,8 +25,9 @@ pub struct WorkerCost {
     pub tokens_out: u64,
 }
 
-/// The cost of a thread and everything it delegated. Only costs that are known are added up;
-/// `unknown` counts the ones that are not, so the total is a floor when it is above zero.
+/// The cost of a thread and everything it delegated. Only costs that are known are added up,
+/// and a team box's worker priced at the ceiling rate (`Task::at_ceiling`); `unknown` counts
+/// the ones that are not known, that worker included.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
 pub struct WorkCost {
     /// `own_usd` + `agents_usd` + `box_usd`.
@@ -38,7 +39,8 @@ pub struct WorkCost {
     pub agents_usd: f64,
     /// The workers' boxes.
     pub box_usd: f64,
-    /// Workers and thread sessions whose agent cost is not known (a Cursor worker is not metered).
+    /// Workers and thread sessions whose agent cost is not known (a Cursor worker is not metered,
+    /// a team box's worker on a model with no price is priced at the ceiling rate).
     pub unknown: u32,
     pub workers: u32,
     pub wall_ms: u64,
@@ -91,6 +93,9 @@ fn rollup_of(tasks: &[Task], roots: Vec<&Task>) -> WorkCost {
         match usage.cost_usd {
             Some(usd) => cost.agents_usd += usd,
             None => cost.unknown += 1,
+        }
+        if task.at_ceiling {
+            cost.unknown += 1;
         }
         cost.box_usd += usage.box_usd.unwrap_or(0.0);
         cost.wall_ms += wall_ms;
