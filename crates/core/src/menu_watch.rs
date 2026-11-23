@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 /// several parts draws its next menu right after the first is answered.
 pub const SETTLE: Duration = Duration::from_millis(700);
 
-/// Rows above the menu's top that a refusal's "Interrupted" line may land on.
+/// Rows above the menu's top that a refusal's "⎿  Interrupted" line may land on.
 const ABOVE: usize = 4;
 
 pub struct MenuWatch {
@@ -48,7 +48,7 @@ impl MenuWatch {
             return false;
         }
         let from = self.top.unwrap_or(0).saturating_sub(ABOVE);
-        !self.lines().iter().skip(from).any(|line| line.contains("Interrupted"))
+        !self.lines().iter().skip(from).any(|line| line.contains("⎿  Interrupted"))
     }
 
     fn lines(&self) -> Vec<String> {
@@ -220,6 +220,7 @@ mod tests {
     use super::*;
 
     const MENU: &str = "\x1b[2J\x1b[H Bash command\r\n\r\n   cargo build\r\n\r\n Do you want to proceed?\r\n ❯ 1. Yes\r\n   2. Yes, and don't ask again for cargo build commands\r\n   3. No, and tell Claude what to do differently (esc)\r\n";
+    const PLAN: &str = "\x1b[2J\x1b[H Here is Claude's plan:\r\n\r\n 1. Keep the turns.\r\n 2. Show the notice.\r\n\r\n Would you like to proceed?\r\n ❯ 1. Yes, and use auto mode\r\n   2. Yes, manually approve edits\r\n   3. Tell Claude what to change\r\n\r\n Esc to cancel\r\n";
 
     fn at(watch: &MenuWatch, after: Duration, from: Instant) -> bool {
         watch.answered(from + after)
@@ -299,6 +300,23 @@ mod tests {
         let mut watch = MenuWatch::new(24, 80, MENU.as_bytes(), now);
         watch.feed("\x1b[5;1H\x1b[J   \u{23bf}  Interrupted \u{b7} What should Claude do instead?\r\n\r\n> \r\n".as_bytes(), now);
         assert!(!at(&watch, Duration::from_secs(5), now));
+    }
+
+    #[test]
+    fn a_plan_that_mentions_interrupted_still_reads_as_answered() {
+        let now = Instant::now();
+        let mut watch = MenuWatch::new(24, 80, PLAN.as_bytes(), now);
+        assert!(!at(&watch, Duration::from_secs(5), now), "the plan menu is still up");
+        watch.feed("\x1b[2J\x1b[H \u{23fa} User approved Claude's plan:\r\n\r\n   1. Keep the turns.\r\n   2. Show the notice.\r\n   3. Retry turns that were Interrupted\r\n\r\n \u{23fa} Working\u{2026}\r\n".as_bytes(), now);
+        assert!(at(&watch, SETTLE + Duration::from_millis(1), now), "an approved plan that names Interrupted is an answer");
+    }
+
+    #[test]
+    fn a_declined_plan_still_reads_as_not_answered() {
+        let now = Instant::now();
+        let mut watch = MenuWatch::new(24, 80, PLAN.as_bytes(), now);
+        watch.feed("\x1b[2J\x1b[H \u{23fa} Here is Claude's plan:\r\n\r\n   \u{23bf}  Interrupted \u{b7} What should Claude do instead?\r\n\r\n> \r\n".as_bytes(), now);
+        assert!(!at(&watch, SETTLE + Duration::from_millis(1), now), "a refusal leaves the session waiting on the user");
     }
 
     #[test]
