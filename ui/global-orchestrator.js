@@ -6,7 +6,11 @@
 const GO_NAME_PRESETS = ["Orchestrator", "Admiral", "Commander"];
 
 /** CONTRACTS §2's defaults, for machines that never answered. */
-const GO_DEFAULT_SETTINGS = { name: "Orchestrator", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false };
+const GO_DEFAULT_SETTINGS = { name: "Orchestrator", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false, auto_merge: false, approval_profile: "" };
+
+/** The approval profile the node uses when none is saved: global_orchestrator.rs's
+ * DEFAULT_APPROVAL_PROFILE, which a Rust test keeps equal to this line. */
+const GO_DEFAULT_APPROVAL_PROFILE = "Approval means deciding, for each pull request that you or your workers opened for the current request, whether it is merged automatically or left for a human review.\n\nMerge automatically only when that pull request's checks pass and nothing is unresolved: no failing or pending check, no open review thread, no conflict, and no question waiting on the user.\n\nPrefer GitHub's own auto-merge (`gh pr merge --auto`), so the repository's required checks and branch rules still decide. Never bypass branch protection.\n\nThese always need a human review: releases, deploys, database migrations, auth, secrets or credentials, payments or billing, wire-contract or API breaks, anything the repo's AGENTS.md or CLAUDE.md reserves for the owner, and any change you are unsure about.";
 
 /** The busy policy and the report policy, each value with the words the section shows. */
 const GO_BUSY_CHOICES = [
@@ -38,6 +42,9 @@ function mergeGlobalSettings(machines) {
  * `host` true only on the chosen machine. Offline and too-old machines are skipped; the section
  * tells Felipe about them instead of failing the save. */
 function globalSettingsWrites(view, machines) {
+  // The default is sent as "", so the node keeps following the default when it changes.
+  const profile = view.approval_profile ?? "";
+  const approval_profile = profile.trim() === GO_DEFAULT_APPROVAL_PROFILE ? "" : profile;
   return machines
     .filter((m) => m.online && !m.update)
     .map((m) => ({
@@ -49,6 +56,8 @@ function globalSettingsWrites(view, machines) {
         reports: view.reports,
         group_reports: view.group_reports !== false,
         read_aloud: !!view.read_aloud,
+        auto_merge: !!view.auto_merge,
+        approval_profile,
       },
     }));
 }

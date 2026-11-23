@@ -13,7 +13,7 @@ const here = (value) => JSON.parse(JSON.stringify(value));
 const pure = () => {
   const context = {};
   vm.createContext(context);
-  vm.runInContext(`${read("global-orchestrator.js")}\nthis.api = { mergeGlobalSettings, globalSettingsWrites, globalSettingsNotes, isOlderPinned };`, context);
+  vm.runInContext(`${read("global-orchestrator.js")}\nthis.api = { mergeGlobalSettings, globalSettingsWrites, globalSettingsNotes, isOlderPinned, GO_DEFAULT_APPROVAL_PROFILE };`, context);
   return context.api;
 };
 
@@ -25,7 +25,15 @@ test("the account's view takes the host's fields and names the host machine", ()
     macMini({ settings: { name: "Admiral", host: true, busy: "refuse", reports: "tool_only", group_reports: false, read_aloud: true } }),
     { id: "mb", name: "MacBook", online: true, settings: { name: "Orchestrator", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false }, update: false, error: null },
   ]));
-  assert.deepEqual(view, { name: "Admiral", host: "mm", busy: "refuse", reports: "tool_only", group_reports: false, read_aloud: true });
+  assert.deepEqual(view, { name: "Admiral", host: "mm", busy: "refuse", reports: "tool_only", group_reports: false, read_aloud: true, auto_merge: false, approval_profile: "" });
+});
+
+test("the account's view carries the host's auto-merge and profile, and an older machine's answer reads as off", () => {
+  const { mergeGlobalSettings } = pure();
+  const on = here(mergeGlobalSettings([macMini({ settings: { name: "Admiral", host: true, auto_merge: true, approval_profile: "Merge docs only." } })]));
+  assert.deepEqual(on, { name: "Admiral", host: "mm", busy: "queue", reports: "auto", group_reports: true, read_aloud: false, auto_merge: true, approval_profile: "Merge docs only." });
+  const older = here(mergeGlobalSettings([macMini({ settings: { name: "Admiral", host: true, busy: "queue", reports: "auto", group_reports: true, read_aloud: false } })]));
+  assert.deepEqual([older.auto_merge, older.approval_profile], [false, ""]);
 });
 
 test("with no host the first machine that answered speaks for the account", () => {
@@ -34,13 +42,13 @@ test("with no host the first machine that answered speaks for the account", () =
     { id: "mb", name: "MacBook", online: true, settings: { name: "Comandante", host: false }, update: false, error: null },
     macMini({ settings: { name: "Admiral", host: false } }),
   ]));
-  assert.deepEqual(view, { name: "Comandante", host: null, busy: "queue", reports: "auto", group_reports: true, read_aloud: false });
+  assert.deepEqual(view, { name: "Comandante", host: null, busy: "queue", reports: "auto", group_reports: true, read_aloud: false, auto_merge: false, approval_profile: "" });
 });
 
 test("machines that never answered leave the defaults standing", () => {
   const { mergeGlobalSettings } = pure();
   const view = here(mergeGlobalSettings([macMini({ online: false }), { id: "mb", name: "MacBook", online: true, update: true }]));
-  assert.deepEqual(view, { name: "Orchestrator", host: null, busy: "queue", reports: "auto", group_reports: true, read_aloud: false });
+  assert.deepEqual(view, { name: "Orchestrator", host: null, busy: "queue", reports: "auto", group_reports: true, read_aloud: false, auto_merge: false, approval_profile: "" });
 });
 
 test("a save writes every online machine, the host flag only to the chosen one", () => {
@@ -55,9 +63,21 @@ test("a save writes every online machine, the host flag only to the chosen one",
     ],
   ));
   assert.deepEqual(writes, [
-    { machine: "mm", settings: { name: "Admiral", host: true, busy: "refuse", reports: "auto", group_reports: false, read_aloud: true } },
-    { machine: "mb", settings: { name: "Admiral", host: false, busy: "refuse", reports: "auto", group_reports: false, read_aloud: true } },
+    { machine: "mm", settings: { name: "Admiral", host: true, busy: "refuse", reports: "auto", group_reports: false, read_aloud: true, auto_merge: false, approval_profile: "" } },
+    { machine: "mb", settings: { name: "Admiral", host: false, busy: "refuse", reports: "auto", group_reports: false, read_aloud: true, auto_merge: false, approval_profile: "" } },
   ]);
+});
+
+test("a save sends auto-merge and the profile, and the default profile as empty", () => {
+  const { globalSettingsWrites, GO_DEFAULT_APPROVAL_PROFILE } = pure();
+  const view = { name: "Admiral", host: "mm", busy: "queue", reports: "auto", group_reports: true, read_aloud: false };
+  const sent = (over) => {
+    const { auto_merge, approval_profile } = here(globalSettingsWrites({ ...view, ...over }, [macMini()]))[0].settings;
+    return [auto_merge, approval_profile];
+  };
+  assert.deepEqual(sent({ auto_merge: true, approval_profile: "Merge docs only." }), [true, "Merge docs only."]);
+  assert.deepEqual(sent({ auto_merge: 1, approval_profile: `\n${GO_DEFAULT_APPROVAL_PROFILE}  ` }), [true, ""], "the default, whitespace around it");
+  assert.deepEqual(sent({}), [false, ""], "a view without the fields sends them off and empty");
 });
 
 test("the notes name every machine the save could not reach, each in its own words", () => {
@@ -193,14 +213,60 @@ test("saving writes the shared fields everywhere and tells the page through the 
   await element("go-save").onclick();
   const writes = here(calls.filter(([, call]) => call.cmd === "set_global_orchestrator_settings"));
   assert.deepEqual(writes, [
-    ["mm", { cmd: "set_global_orchestrator_settings", settings: { name: "Comandante", host: true, busy: "queue", reports: "tool_only", group_reports: false, read_aloud: true } }],
-    ["mb", { cmd: "set_global_orchestrator_settings", settings: { name: "Comandante", host: false, busy: "queue", reports: "tool_only", group_reports: false, read_aloud: true } }],
+    ["mm", { cmd: "set_global_orchestrator_settings", settings: { name: "Comandante", host: true, busy: "queue", reports: "tool_only", group_reports: false, read_aloud: true, auto_merge: false, approval_profile: "" } }],
+    ["mb", { cmd: "set_global_orchestrator_settings", settings: { name: "Comandante", host: false, busy: "queue", reports: "tool_only", group_reports: false, read_aloud: true, auto_merge: false, approval_profile: "" } }],
   ]);
   assert.equal(events.length, 1);
   assert.equal(events[0].type, "global-orchestrator-settings");
-  assert.deepEqual(here(events[0].detail), { name: "Comandante", host: true, busy: "queue", reports: "tool_only", group_reports: false, read_aloud: true });
+  assert.deepEqual(here(events[0].detail), { name: "Comandante", host: true, busy: "queue", reports: "tool_only", group_reports: false, read_aloud: true, auto_merge: false, approval_profile: "" });
   assert.equal(element("go-status").textContent, "Saved");
   assert.equal(element("go-error").textContent, "");
+});
+
+test("the section shows the auto-merge switch and the approval profile behind a click", async () => {
+  const { context } = page({ settings: { mm: { host: true, auto_merge: true } } });
+  const profile = pure().GO_DEFAULT_APPROVAL_PROFILE;
+  const html = await context.globalOrchestratorSettingsHtml();
+  assert.match(html, /id="go-auto-merge" checked/);
+  assert.match(html, /data-setting="approval-profile"[\s\S]*<details[^>]*><summary>[^<]+<\/summary>/);
+  assert.ok(html.includes(`<textarea id="go-approval-profile" maxlength="4000" aria-label="Approval profile">${context.esc(profile)}</textarea>`), "the default profile fills an empty one");
+  assert.match(html, /<button type="button" class="secondary" id="go-approval-reset">Reset to default<\/button>/);
+  assert.ok(html.indexOf('id="go-read-aloud"') < html.indexOf('id="go-auto-merge"') && html.indexOf('id="go-approval-profile"') < html.indexOf('data-setting="memory"'), "after Read aloud, before Global memory");
+
+  const off = page({ settings: { mm: { host: true, approval_profile: "Merge <docs> only." } } });
+  const custom = await off.context.globalOrchestratorSettingsHtml();
+  assert.doesNotMatch(custom, /id="go-auto-merge" checked/);
+  assert.ok(custom.includes(">Merge &#60;docs&#62; only.</textarea>"), "a saved profile shows escaped");
+});
+
+test("Reset to default puts the default profile back in the text", async () => {
+  const { context, element } = page({ settings: { mm: { host: true, approval_profile: "Merge docs only." } } });
+  await context.globalOrchestratorSettingsHtml();
+  context.bindGlobalOrchestratorSettings();
+  element("go-approval-profile").value = "Merge everything.";
+  element("go-approval-reset").onclick();
+  assert.equal(element("go-approval-profile").value, pure().GO_DEFAULT_APPROVAL_PROFILE);
+});
+
+test("saving sends auto-merge and a custom profile to every online machine, and the default as empty", async () => {
+  const { context, element, calls } = page({ settings: { mm: { host: true } } });
+  await context.globalOrchestratorSettingsHtml();
+  context.bindGlobalOrchestratorSettings();
+  element("go-name").value = "Orchestrator";
+  element("go-busy").value = "queue";
+  element("go-reports").value = "auto";
+  element("go-group-reports").checked = true;
+  element("go-auto-merge").checked = true;
+  element("go-approval-profile").value = "Merge docs only.\nEverything else waits.";
+  await element("go-save").onclick();
+  const writes = () => here(calls.filter(([, call]) => call.cmd === "set_global_orchestrator_settings").map(([machine, call]) => [machine, call.settings.auto_merge, call.settings.approval_profile]));
+  assert.deepEqual(writes(), [["mm", true, "Merge docs only.\nEverything else waits."], ["mb", true, "Merge docs only.\nEverything else waits."]]);
+
+  calls.length = 0;
+  element("go-auto-merge").checked = false;
+  element("go-approval-reset").onclick();
+  await element("go-save").onclick();
+  assert.deepEqual(writes(), [["mm", false, ""], ["mb", false, ""]]);
 });
 
 test("saving refuses a host that cannot take the write, without sending any", async () => {

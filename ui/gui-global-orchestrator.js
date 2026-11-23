@@ -69,6 +69,11 @@ async function globalOrchestratorSettingsHtml() {
       <select id="go-reports" aria-label="Reports">${reports}</select></div>
     ${toggle("group-reports", view.group_reports, "Group consecutive reports", "Reports that arrive one after another become a single row in the chat.")}
     ${toggle("read-aloud", view.read_aloud, "Read summaries aloud on the phone", "The phone reads out the summary of each report that arrives.")}
+    ${toggle("auto-merge", view.auto_merge, "Auto-merge", "When on, the Captains and the orchestrator decide by the approval profile whether a finished pull request merges or waits for your review.")}
+    <div class="side-setting" data-setting="approval-profile"><div><label for="go-approval-profile">Approval profile</label><p class="meta">What decides whether a pull request merges by itself.</p></div>
+      <details class="go-approval"><summary>Show the profile</summary>
+        <textarea id="go-approval-profile" maxlength="4000" aria-label="Approval profile">${esc(view.approval_profile || GO_DEFAULT_APPROVAL_PROFILE)}</textarea>
+        <button type="button" class="secondary" id="go-approval-reset">Reset to default</button></details></div>
     <div class="side-setting" data-setting="memory"><div><label>Global memory</label><p class="meta">What ${esc(view.name)} remembers about the account, kept on the machine that hosts it.</p></div>
       <button type="button" class="secondary" id="go-memory">${esc(view.name)}'s memory</button></div>
     <div class="actions"><span class="meta" id="go-status" role="status"></span><button type="button" id="go-save">Save</button></div>
@@ -95,6 +100,7 @@ function bindGlobalOrchestratorSettings() {
     goHost = b.dataset.machine;
     paintHost();
   };
+  document.getElementById("go-approval-reset").onclick = () => (document.getElementById("go-approval-profile").value = GO_DEFAULT_APPROVAL_PROFILE);
   document.getElementById("go-save").onclick = () => saveGlobalOrchestratorSettings();
   document.getElementById("go-memory").onclick = () => openGlobalMemory();
 }
@@ -113,6 +119,8 @@ async function saveGlobalOrchestratorSettings() {
     reports: document.getElementById("go-reports").value,
     group_reports: document.getElementById("go-group-reports").checked,
     read_aloud: document.getElementById("go-read-aloud").checked,
+    auto_merge: document.getElementById("go-auto-merge").checked,
+    approval_profile: document.getElementById("go-approval-profile").value,
   };
   // Machines can drop or answer between the read and the save, so the live map decides.
   const live = (goSettings?.machines ?? []).map((m) => ({ ...m, online: machines.get(m.id)?.view.online === true }));
