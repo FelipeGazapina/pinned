@@ -820,6 +820,11 @@ impl Delegates {
         self.agents.lock().unwrap().get(id).map(|agent| agent.pid)
     }
 
+    /// Every recorded child's pid, by task id.
+    pub fn pids(&self) -> Vec<(String, u32)> {
+        self.agents.lock().unwrap().iter().map(|(id, agent)| (id.clone(), agent.pid)).collect()
+    }
+
     fn forget_pid(&self, id: &str) {
         self.agents.lock().unwrap().remove(id);
     }
