@@ -13,7 +13,7 @@ const here = (value) => JSON.parse(JSON.stringify(value));
 const pure = () => {
   const context = {};
   vm.createContext(context);
-  vm.runInContext(`${read("global-orchestrator.js")}\nthis.api = { mergeGlobalSettings, globalSettingsWrites, globalSettingsNotes, isOlderPinned, GO_DEFAULT_APPROVAL_PROFILE };`, context);
+  vm.runInContext(`${read("global-orchestrator.js")}\nthis.api = { mergeGlobalSettings, globalSettingsWrites, globalSettingsNotes, globalSettingsDrift, isOlderPinned, GO_DEFAULT_APPROVAL_PROFILE };`, context);
   return context.api;
 };
 
@@ -88,7 +88,20 @@ test("the notes name every machine the save could not reach, each in its own wor
     { id: "vps", name: "Linux VPS", online: false, update: false, error: null },
     { id: "mb", name: "MacBook", online: true, update: false, error: "timed out" },
   ]));
-  assert.deepEqual(notes, ["Old Mac needs to update pinned", "Linux VPS is offline; it updates when it reconnects", "MacBook: timed out"]);
+  assert.deepEqual(notes, ["Old Mac needs to update pinned", "Linux VPS is offline; once it is back, this page shows whether it matches", "MacBook: timed out"]);
+});
+
+test("the drift names each machine whose own values differ from the host's, in the section's words", () => {
+  const { globalSettingsDrift } = pure();
+  const host = macMini({ settings: { name: "Admiral", host: true, busy: "queue", reports: "auto", group_reports: true, read_aloud: false, auto_merge: false, approval_profile: "" } });
+  const drift = here(globalSettingsDrift([
+    host,
+    { id: "mb", name: "MacBook", online: true, settings: { ...host.settings, host: false, auto_merge: true, reports: "tool_only", approval_profile: "Merge everything." }, update: false, error: null },
+    { id: "old", name: "Old Mac", online: true, settings: { name: "Admiral", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false }, update: false, error: null },
+    { id: "vps", name: "Linux VPS", online: false, settings: null, update: false, error: null },
+  ]));
+  assert.deepEqual(drift, [{ id: "mb", name: "MacBook", base: "Mac mini", values: ['reports "Only when the Captain calls"', "Auto-merge on", "a different approval profile"] }]);
+  assert.deepEqual(here(globalSettingsDrift([host, { ...host, id: "mb", name: "MacBook", settings: { ...host.settings, host: false } }])), [], "matching machines are no drift");
 });
 
 test("an older node's unknown command and an older hub's refusal both read as needing an update", () => {
@@ -139,6 +152,7 @@ function page({ settings = {}, older = false, offline = false, refuse = {} } = {
       }
       if (call.cmd === "set_global_orchestrator_settings") {
         if (refuse[machine]) throw new Error(refuse[machine]);
+        settings[machine] = { ...call.settings };
         return { ...call.settings };
       }
       if (call.cmd === "open_global_orchestrator") return "g-1";
@@ -198,7 +212,7 @@ test("the section renders one account-wide setting and the machines that cannot 
   assert.doesNotMatch(html, /id="go-group-reports" checked/);
   assert.match(html, /Admiral's memory/);
   assert.match(html, /MacBook needs to update pinned/);
-  assert.match(html, /Linux VPS is offline; it updates when it reconnects/);
+  assert.match(html, /Linux VPS is offline; once it is back, this page shows whether it matches/);
 });
 
 test("saving writes the shared fields everywhere and tells the page through the event", async () => {
@@ -278,6 +292,55 @@ test("a save the host took but another machine refused says Saved on the host an
   assert.equal(element("go-error").textContent, "Not saved on MacBook: the machine went away. It keeps its old settings.");
   assert.equal(events.length, 1, "the host's save still tells the page");
   assert.equal(events[0].detail.auto_merge, true);
+});
+
+test("a machine that missed turning auto-merge off is still named after a reload, until Apply reaches it", async () => {
+  const settings = { mm: { host: true, auto_merge: true }, mb: { auto_merge: true } };
+  const refuse = { mb: "connection refused" };
+  const { context, element, calls } = page({ settings, refuse });
+  assert.doesNotMatch(await context.globalOrchestratorSettingsHtml(), /go-drift/, "both machines match before the save");
+  context.bindGlobalOrchestratorSettings();
+  element("go-name").value = "Orchestrator";
+  element("go-busy").value = "queue";
+  element("go-reports").value = "auto";
+  element("go-group-reports").checked = true;
+  element("go-auto-merge").checked = false;
+  await element("go-save").onclick();
+  assert.equal(element("go-error").textContent, "Not saved on MacBook: connection refused. It keeps its old settings.");
+
+  // A reload reads every machine again: the host is off, MacBook still on, and the page says so.
+  const reloaded = await context.globalOrchestratorSettingsHtml();
+  assert.match(reloaded, /<div class="go-drift" id="go-drift" role="alert"><p>MacBook does not match Mac mini: it has Auto-merge on\.<\/p>/);
+  assert.match(reloaded, /<button type="button" class="secondary" id="go-reapply">Apply Mac mini's settings to every machine<\/button>/);
+  assert.match(reloaded, /id="go-auto-merge">/, "the switch shows the host's off");
+
+  // Once MacBook takes writes again, Apply sends the host's saved values everywhere and the warning goes.
+  delete refuse.mb;
+  calls.length = 0;
+  context.bindGlobalOrchestratorSettings();
+  element("go-auto-merge").checked = true;
+  await element("go-reapply").onclick();
+  const writes = here(calls.filter(([, call]) => call.cmd === "set_global_orchestrator_settings").map(([machine, call]) => [machine, call.settings.host, call.settings.auto_merge]));
+  assert.deepEqual(writes, [["mm", true, false], ["mb", false, false]], "the host's saved values, not the form's unsaved switch");
+  assert.doesNotMatch(element("global-orchestrator-settings").outerHTML, /go-drift/);
+  assert.equal(element("go-error").textContent, "");
+});
+
+test("a machine that was offline for the save is named once it is back with its old values", async () => {
+  const settings = { mm: { host: true, auto_merge: true }, mb: { auto_merge: true } };
+  const { context, element } = page({ settings });
+  await context.globalOrchestratorSettingsHtml();
+  context.bindGlobalOrchestratorSettings();
+  context.machines.get("mb").view.online = false;
+  element("go-name").value = "Orchestrator";
+  element("go-busy").value = "queue";
+  element("go-reports").value = "auto";
+  element("go-group-reports").checked = true;
+  element("go-auto-merge").checked = false;
+  await element("go-save").onclick();
+  assert.match(element("global-orchestrator-settings").outerHTML, /MacBook is offline; once it is back, this page shows whether it matches/);
+  context.machines.get("mb").view.online = true;
+  assert.match(await context.globalOrchestratorSettingsHtml(), /MacBook does not match Mac mini: it has Auto-merge on\./);
 });
 
 test("the settings search finds the Global orchestrator by auto-merge, approval profile and merge", () => {

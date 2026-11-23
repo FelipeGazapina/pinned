@@ -316,6 +316,9 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
 #settings-page #global-orchestrator-settings .go-approval-body { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; margin-top: 8px; }
 #settings-page #global-orchestrator-settings .go-approval textarea { box-sizing: border-box; width: 100%; min-height: 400px; resize: vertical; }
 #settings-page #global-orchestrator-settings .go-approval-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; width: 100%; }
+/* A machine whose own settings differ from the host's: a warning above the fields until they match. */
+#settings-page #global-orchestrator-settings .go-drift { max-width: 520px; margin: 0 0 16px; padding: 12px; border-radius: 8px; color: var(--g-warning-fg); background: rgb(var(--g-warning-rgb) / 0.12); }
+#settings-page #global-orchestrator-settings .go-drift p { margin: 0 0 8px; }
 #settings-page #global-orchestrator-settings .actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; max-width: 520px; margin: 16px 0 0; }
 @media (max-width: 639px) {
   #settings-page #global-orchestrator-settings .side-setting:is([data-setting="name"], [data-setting="host"], [data-setting="busy"], [data-setting="reports"], [data-setting="memory"]) { flex-wrap: wrap; }
@@ -324,6 +327,7 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
   #settings-page #global-orchestrator-settings .side-setting:is([data-setting="name"], [data-setting="host"]) .chips { justify-content: flex-start; }
   #settings-page #global-orchestrator-settings .go-name input { width: 100%; }
   #settings-page #global-orchestrator-settings .side-setting select { width: 100%; flex: 1 1 100%; }
+  #settings-page #global-orchestrator-settings .go-approval textarea { min-height: 240px; }
 }
 #settings-page #global-orchestrator-settings #go-notes:empty { display: none; }
 

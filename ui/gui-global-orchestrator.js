@@ -47,7 +47,8 @@ async function readGlobalOrchestratorSettings() {
 const approvalCount = (text) => `${text.length} / ${GO_APPROVAL_PROFILE_MAX} characters`;
 
 /** The "Global orchestrator" section of the General page: one setting for the whole account, saved
- * to every machine at once. Machines that cannot take it yet say so under the fields. */
+ * to every machine at once. Machines that cannot take it yet say so under the fields, and a machine
+ * whose own settings differ from the host's is named at the top, with a way to apply the host's. */
 async function globalOrchestratorSettingsHtml() {
   goSettings = await readGlobalOrchestratorSettings();
   const { view, machines } = goSettings;
@@ -60,9 +61,16 @@ async function globalOrchestratorSettingsHtml() {
   const reports = GO_REPORT_CHOICES.map(([v, label]) => `<option value="${v}"${v === view.reports ? " selected" : ""}>${label}</option>`).join("");
   const notes = globalSettingsNotes(machines);
   const profile = view.approval_profile || GO_DEFAULT_APPROVAL_PROFILE;
+  const drift = globalSettingsDrift(machines);
+  const many = drift.length > 1;
+  const driftHtml = drift.length
+    ? `<div class="go-drift" id="go-drift" role="alert"><p>${drift.map((d) => esc(`${d.name} does not match ${d.base}: it has ${d.values.join(", ")}.`)).join("<br>")}</p>
+      <p class="meta">An agent that starts on ${many ? "those machines" : "that machine"} follows ${many ? "their" : "its"} own settings.</p>
+      <button type="button" class="secondary" id="go-reapply">Apply ${esc(drift[0].base)}'s settings to every machine</button></div>`
+    : "";
   const toggle = (id, on, title, about) => `<div class="side-setting" data-setting="${id}"><div><label for="go-${id}">${title}</label><p class="meta">${about}</p></div>
     <label class="switch"><input type="checkbox" id="go-${id}"${on ? " checked" : ""}><span></span></label></div>`;
-  return `<section id="global-orchestrator-settings"><h2 class="looks-title">Global orchestrator</h2>
+  return `<section id="global-orchestrator-settings"><h2 class="looks-title">Global orchestrator</h2>${driftHtml}
     <div class="side-setting" data-setting="name"><div><label for="go-name">Name</label><p class="meta">How it signs requests to the Captains and reports to you.</p></div>
       <div class="go-name"><div class="chips">${presets}</div><input id="go-name" type="text" maxlength="40" value="${esc(view.name)}" aria-label="Name"></div></div>
     <div class="side-setting" data-setting="host"><div><label>Where it runs</label><p class="meta">One machine hosts the account's orchestrator; the others keep their own Captains.</p></div>
@@ -112,18 +120,14 @@ function bindGlobalOrchestratorSettings() {
     paintCount();
   };
   document.getElementById("go-save").onclick = () => saveGlobalOrchestratorSettings();
+  const reapply = document.getElementById("go-reapply");
+  if (reapply) reapply.onclick = () => saveGlobalOrchestratorSettings({ ...goSettings.view });
   document.getElementById("go-memory").onclick = () => openGlobalMemory();
 }
 
-/** Saves the account-wide setting: the shared fields to every online machine, `host` true only on
- * the chosen one. A machine that cannot take it says so below the fields; the save itself stands
- * when the chosen host took it, and any other machine whose write failed is named, as it keeps its
- * old settings. Then the page tells the rest of the UI through the "global-orchestrator-settings"
- * event, whose name is a contract. */
-async function saveGlobalOrchestratorSettings() {
-  const error = document.getElementById("go-error");
-  const save = document.getElementById("go-save");
-  const view = {
+/** What the section's fields hold now, as a settings view. */
+function globalOrchestratorForm() {
+  return {
     name: document.getElementById("go-name").value,
     host: goHost,
     busy: document.getElementById("go-busy").value,
@@ -133,6 +137,17 @@ async function saveGlobalOrchestratorSettings() {
     auto_merge: document.getElementById("go-auto-merge").checked,
     approval_profile: document.getElementById("go-approval-profile").value,
   };
+}
+
+/** Saves the account-wide setting: the shared fields to every online machine, `host` true only on
+ * the chosen one. A machine that cannot take it says so below the fields; the save itself stands
+ * when the chosen host took it, and any other machine whose write failed is named, as it keeps its
+ * old settings. Then the page tells the rest of the UI through the "global-orchestrator-settings"
+ * event, whose name is a contract. `view` is the form's by default; the drift note passes the
+ * host's saved one. */
+async function saveGlobalOrchestratorSettings(view = globalOrchestratorForm()) {
+  const error = document.getElementById("go-error");
+  const save = document.getElementById("go-save");
   // Machines can drop or answer between the read and the save, so the live map decides.
   const live = (goSettings?.machines ?? []).map((m) => ({ ...m, online: machines.get(m.id)?.view.online === true }));
   const host = live.find((m) => m.id === view.host);
