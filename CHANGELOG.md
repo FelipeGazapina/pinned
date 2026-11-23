@@ -10,6 +10,7 @@
 - A session can name itself with `set_session_title`. Its own name shows in the sidebar over the generated title. A title you set yourself still wins.
 - The Model prices dialog lists the models that ran with no price yet, each with "Set price".
 - A team run's model cost now counts toward its bot's spend limit. The run page shows "Box US$ x · Model US$ y".
+- Sidebar: a Workflows link under Usage opens the Workflows page.
 
 ### Changed
 
