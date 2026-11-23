@@ -331,3 +331,6 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
 #settings .mcp-found { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 #settings .mcp-found > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 600px) { #settings .mcp-fields { grid-template-columns: minmax(0, 1fr); } }
+#settings-page #memory .memory-row { margin: 8px 0 8px 20px; }
+#settings-page #memory .memory-size { flex: none; font-variant-numeric: tabular-nums; }
+#settings-page #memory button { display: inline-flex; align-items: center; gap: 6px; }
