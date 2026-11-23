@@ -389,7 +389,9 @@ pub fn hub_rule(call: &HubCall) -> Rule {
         | HubCall::Mirror { .. }
         | HubCall::Handback { .. }
         | HubCall::SetOfflineRunner { .. }
-        | HubCall::ReleaseWorkflows => (Gate::Never, false),
+        | HubCall::ReleaseWorkflows
+        | HubCall::RecordGlobalOrchestratorSave { .. }
+        | HubCall::GlobalOrchestratorSave => (Gate::Never, false),
     };
     Rule { gate, unlock }
 }
@@ -513,6 +515,8 @@ mod tests {
             json!({ "cmd": "handback", "changes": {}, "login": "user-token" }),
             json!({ "cmd": "set_offline_runner" }),
             json!({ "cmd": "release_workflows" }),
+            json!({ "cmd": "record_global_orchestrator_save", "settings": {}, "took": [] }),
+            json!({ "cmd": "global_orchestrator_save" }),
         ];
         for call in never {
             for role in [Role::Owner, Role::Member] {

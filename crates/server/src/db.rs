@@ -14,6 +14,7 @@ use pinned_core::account_copy::{Fire, Item, Recorded};
 use pinned_core::agent::Subject;
 use pinned_core::connectors::BoxSize;
 use pinned_core::delegate::TaskRecord;
+use pinned_core::global_orchestrator::{self as global, AccountSave};
 use pinned_core::ideas::{Idea, IdeaStatus};
 use pinned_core::marks::{self, MarkChange, SessionMarks};
 use pinned_core::schedule::{Actor, Task, TaskRun};
@@ -258,6 +259,10 @@ create table if not exists hub_beat (one boolean primary key default true check 
 -- The hash of a version a machine handed back, never the version (`Db::keep_offline_edits`).
 create table if not exists offline_edits (account uuid not null references accounts on delete cascade,
   item text not null, recorded jsonb not null, primary key (account, item));
+-- The global orchestrator settings page's last save (`global_settings`): the cleaned shared
+-- settings, and the machines that have not taken it, which get it when they connect.
+create table if not exists global_settings_saves (account uuid primary key references accounts on delete cascade,
+  id uuid not null, settings jsonb not null, pending uuid[] not null, saved_at timestamptz not null default now());
 ";
 /// How long the hub keeps a trigger's claimed fire, in days: `connectors::FIRES_KEPT`.
 const FIRES_FOR_DAYS: u64 = 7;
@@ -2623,6 +2628,32 @@ impl Db {
     pub async fn save_tastes(&self, account: Uuid, tastes: &Tastes) -> Result<(), String> {
         let tastes = serde_json::to_value(tastes).map_err(|e| e.to_string())?;
         self.client().await?.execute("update accounts set tastes = $2 where id = $1", &[&account, &tastes]).await.map_err(err).map(drop)
+    }
+
+    /// Makes `settings` the account's last global orchestrator save, `id`, pending on `pending`,
+    /// in place of any earlier one.
+    pub async fn save_global_settings(&self, account: Uuid, id: Uuid, settings: &global::Settings, pending: &[Uuid]) -> Result<(), String> {
+        let settings = serde_json::to_value(settings).map_err(|e| e.to_string())?;
+        let sql = "insert into global_settings_saves (account, id, settings, pending) values ($1, $2, $3, $4)
+                   on conflict (account) do update set id = excluded.id, settings = excluded.settings, pending = excluded.pending, saved_at = now()";
+        self.client().await?.execute(sql, &[&account, &id, &settings, &pending]).await.map_err(err).map(drop)
+    }
+
+    /// The account's last global orchestrator save, when it has one.
+    pub async fn global_settings(&self, account: Uuid) -> Result<Option<AccountSave>, String> {
+        let row = self.client().await?.query_opt("select id, settings, pending from global_settings_saves where account = $1", &[&account]).await.map_err(err)?;
+        let Some(row) = row else { return Ok(None) };
+        let settings = serde_json::from_value(row.get(1)).map_err(|e| format!("account {account} has an unreadable global orchestrator save: {e}"))?;
+        let pending: Vec<Uuid> = row.get(2);
+        Ok(Some(AccountSave { id: row.get::<_, Uuid>(0).to_string(), settings, pending: pending.iter().map(Uuid::to_string).collect() }))
+    }
+
+    /// Takes `machine` off the pending machines of the account's save `id`, and answers whether
+    /// `id` is still the account's save: a newer one leaves its own pending machines alone.
+    pub async fn took_global_settings(&self, account: Uuid, id: Uuid, machine: Uuid) -> Result<bool, String> {
+        let sql = "update global_settings_saves set pending = array_remove(pending, $3) where account = $1 and id = $2";
+        let n = self.client().await?.execute(sql, &[&account, &id, &machine]).await.map_err(err)?;
+        Ok(n == 1)
     }
 
     /// Stores `tastes` only when the account has none, and answers whether it did.

@@ -56,6 +56,8 @@ Paths are relative to the repo root. Line numbers are as of the foundation PR he
 
 Every field has a serde default, so a partial object reads. `Machine::global_settings()` reads and `Machine::set_global_settings(s)` cleans, saves, tells running sessions of an auto-merge or approval profile change (§1) and returns.
 
+The settings page writes every online machine, then records the save with the hub (`record_global_orchestrator_save`, §4). The hub replays that last page save to each machine that missed it, when the machine connects, and keeps the machine's own `host`.
+
 ## 3. Node calls (`Call`, `crates/core/src/wire.rs`)
 
 | Call | JSON | Reply |
@@ -81,6 +83,16 @@ Every field has a serde default, so a partial object reads. `Machine::global_set
 
 | `RecordTasks` | `{"cmd":"record_tasks","records":[TaskRecord]}`, at most 500 | `null`. Only from a machine: a client gets `only a machine records the tasks it ran`. The hub stamps `machine` and `machine_name` from the socket and upserts by (account, machine, task id). |
 | `DelegationStats` | `{"cmd":"delegation_stats","days":7}` (1, 7 or 30) | `delegate::DelegationStats` of the account's records that ended in that period, from a client or a machine |
+| `RecordGlobalOrchestratorSave` | `{"cmd":"record_global_orchestrator_save","settings":{Settings},"took":["<machine id>"]}`. `settings` holds the shared fields as the page wrote them; `took` lists the machines whose write succeeded. | `AccountSave` (schema `GlobalOrchestratorSave`): `{"id":"<save id>","settings":{Settings},"pending":["<machine id>"]}`. The hub stores `settings` cleaned with `host: false`, and `pending` is every machine of the account that is no box (`MachineView.upstash_box`), minus `took`. It replaces any earlier save of the account. Only from a signed-in client: a machine gets `a machine may only forward a workflow session's callbacks`, and a box `a box may not change the account's settings`. |
+| `GlobalOrchestratorSave` | `{"cmd":"global_orchestrator_save"}` | the account's `AccountSave`, or `null` when it has none. Only from a signed-in client, as above. |
+
+**The last page save, delivered on connect** (`crates/server/src/global_settings.rs`). The settings page (`ui/gui-global-orchestrator.js`) writes `SetGlobalOrchestratorSettings` to each online machine itself. Once the host took its write, a signed-in page sends `record_global_orchestrator_save` and ignores a failure, as an older hub refuses it. The page reads `global_orchestrator_save` too: a pending machine leaves the drift warning, and its note says the hub sends the save when it connects.
+
+- The hub keeps one save per account in Postgres (`global_settings_saves`: account, save id, settings, pending machine ids, `saved_at`), so a pending save survives a hub restart.
+- `serve_machine` spawns `global_settings::deliver` for every machine that connects, beside `deliver_notices` and `deliver_held`. Recording a save also spawns it for each pending machine that is online at that moment.
+- `deliver` does nothing when the account has no save or the machine is not pending. Otherwise it reads the machine's `GlobalOrchestratorSettings`, writes `SetGlobalOrchestratorSettings` with the save's shared fields (`name`, `busy`, `reports`, `group_reports`, `read_aloud`, `auto_merge`, `approval_profile`) and the `host` the machine answered, and only then takes the machine off `pending`. That last update matches the save id it delivered, so a delivery of an older save never clears a machine from a newer one. When a newer save landed meanwhile, `deliver` sends that one too, since its own write may have replaced what the machine took from the page.
+- A read or write that fails, times out (30 s), or that a machine too old for it refuses (`unknown variant`) leaves the machine pending, and the hub tries again on its next connect. The hub never moves `host`.
+- Log lines name the account, machine and save ids only, never a setting or the approval profile.
 
 `RelayTo` is tagged by `kind`:
 
@@ -566,6 +578,7 @@ The web app keeps its login in `localStorage`, and a desktop app older than 0.17
 - `surface::owner_only(side, cmd, locked)`. `decide_confirmation` always needs an unlocked connection, and so does every `confirm` action on a locked login. Without one the hub answers `surface::LOCKED`: `unlock with your password in the app to do this`. `answer_box` and `extend_box` are not `confirm` (13.8), so a box question and a box's budget need no password; `set_box_access`, `connect_upstash`, `disconnect_upstash`, `set_box_claude_token` and `remove_box_claude_token` still do.
 - `HubCall::Unlock { password }` comes from a signed-in client only. The manifest excludes it, and a machine is refused. The hub checks the password, at most 10 tries per login and 100 per account in 15 minutes, and answers `Unlocked { token, until }`. The connection counts as the owner until `until`, 12 hours later. The app keeps `token` in memory and sends it in `Auth.unlock` after a reconnect. The token works only with the login it was taken on. A hub restart forgets it, and the app asks for the password again.
 - `ui/hub.js` asks for the password when a call answers `LOCKED`, once for every call waiting on it, and then sends the call again.
+- `record_global_orchestrator_save` and `global_orchestrator_save` are `Excluded`: only the settings page records or reads the account's last save (§4). An agent changes one machine's settings with the `confirm` `set_global_orchestrator_settings`, and that records no save. On a locked login, `record_global_orchestrator_save` needs the unlock, as the hub then writes `auto_merge` to other machines unattended; `global_orchestrator_save` needs none.
 - `POST /api/machines` refuses a locked login. An app adds its machine before it locks the login.
 - A node keeps only its machine token. `pinned-server login` ends the login after it adds the machine. A node that finds a login an older pinned kept in `account.json` removes it from the file and ends it at the hub.
 - A hub that stopped between a decision and its outcome leaves the confirmation decided with no outcome. When a hub starts, and again 5 minutes later, it gives every such confirmation decided more than 5 minutes earlier an outcome: `denied`, or `failed: the hub restarted before it could tell whether this ran; check before asking again` with a `failed` audit row. A younger one may still be running on the hub that a deploy replaces, so the hub leaves it alone. The session gets its notice at once, or when its machine connects.

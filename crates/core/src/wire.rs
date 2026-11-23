@@ -1616,6 +1616,12 @@ pub enum HubCall {
     },
     /// The owner's release, in the app, of a hold that waits for the offline runner to hand back.
     ReleaseWorkflows,
+    /// From the settings page, once it wrote `settings` to each machine: `global_orchestrator::AccountSave`.
+    /// The hub keeps it as the account's last save, pending on every machine but a box and those in
+    /// `took`, and sends it to each pending machine when it connects, keeping that machine's `host`.
+    RecordGlobalOrchestratorSave { settings: global::Settings, took: Vec<MachineId> },
+    /// The account's last `global_orchestrator::AccountSave`, or `null` when it has none.
+    GlobalOrchestratorSave,
 }
 
 /// A project an external agent may work in: one folder on one machine.

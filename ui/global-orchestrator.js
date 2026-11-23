@@ -56,10 +56,11 @@ const GO_DRIFT_WORDS = {
  * from the host (else the first machine that answered). A save that missed a machine, or an agent's
  * change approved on one machine, leaves it so, and an agent that starts there follows its own
  * values. Each entry names the machine and the values it holds instead. A field missing from a
- * machine's answer, as from an older pinned, is not compared. */
+ * machine's answer, as from an older pinned, is not compared. A machine `pending` on the hub's last
+ * save is neither the base nor compared: the hub sends it that save, and its note says so. */
 function globalSettingsDrift(machines) {
-  const answered = machines.filter((m) => m.settings);
-  const host = machines.find((m) => m.settings?.host === true) ?? null;
+  const answered = machines.filter((m) => m.settings && !m.pending);
+  const host = machines.find((m) => !m.pending && m.settings?.host === true) ?? null;
   const base = host?.settings ? host : answered[0] ?? null;
   if (!base) return [];
   const want = { ...GO_DEFAULT_SETTINGS, ...base.settings };
@@ -129,13 +130,16 @@ function reportCaptainState({ state, working = 0, needs = [] }) {
 }
 
 /** One line per machine the save could not reach, in the machine's own words: too old, offline, or
- * failed. Machines that took the settings stay quiet. */
+ * failed, and one `pending` on the hub's last save, which the hub sends it when it connects.
+ * Machines that took the settings stay quiet. */
 function globalSettingsNotes(machines) {
   return machines
-    .filter((m) => m.update || !m.online || m.error)
+    .filter((m) => m.update || !m.online || m.error || m.pending)
     .map((m) =>
       m.update ? `${m.name} needs to update pinned`
+      : !m.online && m.pending ? `${m.name} is offline; it gets the saved settings when it reconnects`
       : !m.online ? `${m.name} is offline; once it is back, this page shows whether it matches`
-      : `${m.name}: ${m.error}`,
+      : m.error ? `${m.name}: ${m.error}`
+      : `${m.name} has not taken the last save yet; the hub sends it again each time ${m.name} connects`,
     );
 }
