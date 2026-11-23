@@ -69,7 +69,10 @@ function setMode(mode) {
   save("mode", mode);
   if (mode === "terminal") {
     if (active) refit(active);
-  } else renderGui();
+  } else {
+    renderGui();
+    readFollowedThreads();
+  }
   focusInput();
   if (TAURI) fitWindowTo(mode).catch(console.warn);
 }
@@ -427,10 +430,15 @@ function forgetThreadWatch() {
   watchGeneration++;
 }
 
+function readFollowedThreads() {
+  if (!guiOn() || document.hidden) return;
+  for (const tab of tabs) if (followed(tab)) fetchThread(tab);
+}
+
+// `visibleInterval` also runs this as the page becomes visible, so a nudge dropped while it was hidden is read then.
 visibleInterval(() => {
   publishThreadWatch();
-  if (!guiOn()) return;
-  for (const tab of tabs) if (followed(tab)) fetchThread(tab);
+  readFollowedThreads();
 }, POLL_MS);
 visibleInterval(() => guiOn() && renderSidebar(), 60 * 1000);
 visibleInterval(() => guiOn() && refreshBoxInfo(), 60 * 1000);
