@@ -3305,7 +3305,9 @@ impl Machine {
             self.plans.lock().unwrap().drop_session(&session);
         }
         let made = closed.as_ref().and_then(|t| t.made.clone());
+        let task = closed.as_ref().and_then(|t| t.task.clone());
         drop(closed);
+        self.room_tab_closed(tab, task.as_deref());
         self.delegates.drop_kept_worktrees(tab, &owned, path.as_deref());
         if let Some(made) = made {
             if !owned.iter().any(|dir| dir == &made) {

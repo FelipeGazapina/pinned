@@ -73,7 +73,7 @@ impl Machine {
             Some(name) => room::Speech::Seat { name: name.clone(), text: call.text, to: call.to },
             None => room::Speech::Card { text: call.text, to: call.to },
         };
-        let outcome = self.rooms.lock().unwrap().post(&place.id, speech, super::unix_millis())?;
+        let outcome = self.rooms.lock().unwrap().post_with(&place.id, speech, call.id.as_deref(), super::unix_millis())?;
         self.after_speech(&place.id, outcome, true)
     }
 
@@ -165,7 +165,10 @@ impl Machine {
 
     /// A restart gives every tab a new id. Recreate a room thread, retie the seats, then send what is still unread.
     pub(super) fn reopen_rooms(&self) {
-        let ids = self.rooms.lock().unwrap().published_ids();
+        let ids: Vec<String> = {
+            let rooms = self.rooms.lock().unwrap();
+            rooms.published_ids().into_iter().filter(|id| rooms.get(id).is_some_and(|saved| saved.status == room::Status::Open)).collect()
+        };
         for id in &ids {
             let Some(saved) = self.rooms.lock().unwrap().get(id).cloned() else { continue };
             if !Path::new(&saved.project).is_dir() {
@@ -192,6 +195,27 @@ impl Machine {
         }
     }
 
+    /// A closed tab ends what it held. A seat's tab ends that seat. The Captain's tab settles the
+    /// rooms it owns and stops their seats. Called once the tab is gone, so no notice goes to it.
+    pub(super) fn room_tab_closed(&self, tab: &str, task: Option<&str>) {
+        if let Some((id, name)) = task.and_then(|task| self.seat_of_task(task)) {
+            let outcome = self.rooms.lock().unwrap().seat_gone(&id, &name, super::unix_millis());
+            if let Ok(outcome) = outcome {
+                self.deliver_room(&id, outcome);
+            }
+        }
+        let owned: Vec<String> = {
+            let rooms = self.rooms.lock().unwrap();
+            rooms.published_ids().into_iter().filter(|id| rooms.get(id).is_some_and(|saved| saved.owner_tab == tab && saved.status == room::Status::Open)).collect()
+        };
+        for id in owned {
+            let outcome = self.rooms.lock().unwrap().close(&id, "its Captain's tab was closed", super::unix_millis());
+            if let Ok(outcome) = outcome {
+                let _ = self.after_speech(&id, outcome, true);
+            }
+        }
+    }
+
     /// A notice queued before a crash must not be sent again. Nothing is queued here: tab ids are still the old ones.
     pub(super) fn reconcile_rooms(&self) {
         let keys = self.rooms.lock().unwrap().unacked_keys();
@@ -213,7 +237,8 @@ impl Machine {
     fn deliver_room(&self, id: &str, outcome: room::Outcome) {
         let mut follow = vec![];
         for wake in outcome.wakes {
-            if wake.tab.is_empty() {
+            // No tab can carry it yet. It stays owed until `reopen_rooms` binds one.
+            if wake.tab.is_empty() || !self.tabs.lock().unwrap().contains_key(&wake.tab) {
                 continue;
             }
             if self.is_room_tab(&wake.tab) {
@@ -590,6 +615,190 @@ mod tests {
         let read: Value = serde_json::from_str(&m.team_tool(Some(&captain), None, crate::team_tools::request("room_read", &json!({})).unwrap()).unwrap()).unwrap();
         assert_eq!(read["status"], "settled");
         assert!(read["posts"].as_array().unwrap().iter().any(|post| post["text"].as_str().unwrap_or("").contains("Ship it")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    fn machine_on(dir: &Path) -> std::sync::Arc<Machine> {
+        let m = Machine::new(super::super::Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        // A restart is a second machine over the same config, which already holds the account.
+        if let Err(e) = m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }) {
+            assert_eq!(e, "an account work already exists");
+        }
+        m.set_local_taste(&TasteScope::Captains, TastePatch { tier: Some(Tier::High), parallel: Some(2), ..TastePatch::default() }).unwrap();
+        m
+    }
+
+    #[cfg(unix)]
+    fn captain_on(m: &Machine, dir: &Path, app: &str) -> (String, String) {
+        let path = m.open_project(dir.join(app)).display().to_string();
+        let captain = m.open_orchestrator(&path).unwrap();
+        (captain, path)
+    }
+
+    #[cfg(unix)]
+    fn open_room(m: &Machine, captain: &str, brief: &str) -> Value {
+        let tool = crate::team_tools::request("room_open", &json!({ "brief": brief, "seats": [{ "name": "Ana" }, { "name": "Beto" }] })).unwrap();
+        serde_json::from_str(&m.team_tool(Some(captain), None, tool).unwrap()).unwrap()
+    }
+
+    #[cfg(unix)]
+    fn seat_of(body: &Value, name: &str) -> (String, String) {
+        let row = body["seats"].as_array().unwrap().iter().find(|row| row["name"] == name).unwrap();
+        (row["task"].as_str().unwrap().to_owned(), row["tab"].as_str().unwrap().to_owned())
+    }
+
+    #[cfg(unix)]
+    fn posted(m: &Machine, tab: &str, task: &str, text: &str, to: Value) -> Result<String, String> {
+        let tool = crate::team_tools::request("room_post", &json!({ "text": text, "to": to })).unwrap();
+        m.team_tool(Some(tab), Some(task), tool)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn closing_a_tab_ends_the_room_it_owns_or_the_seat_it_holds() {
+        let dir = std::env::temp_dir().join(format!("pinned-room-close-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        let m = machine_on(&dir);
+        let (captain, _path) = captain_on(&m, &dir, "app");
+        let body = open_room(&m, &captain, "Fix the parser.");
+        let id = body["id"].as_str().unwrap().to_owned();
+        let (ana_task, ana_tab) = seat_of(&body, "Ana");
+        let (beto_task, beto_tab) = seat_of(&body, "Beto");
+
+        m.close_tab(&ana_tab);
+        let room = m.rooms.lock().unwrap().get(&id).cloned().unwrap();
+        assert!(room.seats.iter().find(|seat| seat.name == "Ana").unwrap().done, "closing a seat's tab ends that seat");
+        assert_eq!(room.status, room::Status::Open, "the room lives on");
+        assert!(!m.delegates.get(&beto_task).unwrap().state.terminal(), "the other seat keeps working");
+        let still = posted(&m, &beto_tab, &beto_task, "I will take the tests", json!([])).unwrap();
+        assert!(still.contains("\"closed\":false"), "{still}");
+        assert_eq!(posted(&m, &ana_tab, &ana_task, "still here", json!([])).unwrap_err(), "Ana already finished");
+
+        m.close_tab(&captain);
+        let room = m.rooms.lock().unwrap().get(&id).cloned().unwrap();
+        assert_eq!(room.status, room::Status::Settled, "closing the Captain's tab settles the room");
+        assert!(m.delegates.get(&beto_task).unwrap().state.terminal(), "the running seats are stopped");
+        assert_eq!(posted(&m, &beto_tab, &beto_task, "more", json!([])).unwrap_err(), "room-1 is closed");
+        let read = m.rooms.lock().unwrap().read(&id, 0).unwrap();
+        assert!(read["posts"].as_array().unwrap().iter().any(|post| post["text"].as_str().unwrap_or("").contains("take the tests")), "the messages stay readable");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_restart_reopens_only_open_rooms() {
+        let dir = std::env::temp_dir().join(format!("pinned-room-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("one")).unwrap();
+        std::fs::create_dir_all(dir.join("two")).unwrap();
+        let m = machine_on(&dir);
+        let (captain_one, _) = captain_on(&m, &dir, "one");
+        let (captain_two, _) = captain_on(&m, &dir, "two");
+        let kept = open_room(&m, &captain_one, "Fix the parser.");
+        let kept_id = kept["id"].as_str().unwrap().to_owned();
+        let gone = open_room(&m, &captain_two, "Write the docs.");
+        let gone_id = gone["id"].as_str().unwrap().to_owned();
+        m.close_tab(&captain_two);
+        let gone_seq = m.rooms.lock().unwrap().get(&gone_id).unwrap().seq;
+        assert_eq!(m.rooms.lock().unwrap().get(&gone_id).unwrap().status, room::Status::Settled, "the closed tab settles its room");
+
+        let again = machine_on(&dir);
+        again.restore_tabs();
+        let tabs_of = |id: &str| again.tabs.lock().unwrap().iter().filter(|(_, t)| room::id_in(&t.env).as_deref() == Some(id) && role_of(&t.env).is_none()).count();
+        assert_eq!(tabs_of(&kept_id), 1, "the open room's thread comes back");
+        assert_eq!(tabs_of(&gone_id), 0, "a settled room is not resurrected");
+        assert_eq!(again.rooms.lock().unwrap().get(&gone_id).unwrap().status, room::Status::Settled, "it loads back settled");
+        assert!(again.rooms.lock().unwrap().pending_wakes().iter().all(|(id, _)| id != &gone_id), "a settled room owes no wake");
+        assert!(!again.delegates.took_notice(&room::wake_key(&gone_id, room::CAPTAIN, gone_seq)), "its close line is not sent again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_wake_that_waited_for_a_seat_arrives_when_the_seat_is_bound() {
+        let dir = std::env::temp_dir().join(format!("pinned-room-bind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        let m = machine_on(&dir);
+        let (captain, _path) = captain_on(&m, &dir, "app");
+        let body = open_room(&m, &captain, "Fix the parser.");
+        let id = body["id"].as_str().unwrap().to_owned();
+        let (ana_task, ana_tab) = seat_of(&body, "Ana");
+        let (beto_task, beto_tab) = seat_of(&body, "Beto");
+
+        // the window `room_open` leaves while a later seat still has no tab
+        m.rooms.lock().unwrap().bind_seat(&id, "Beto", &beto_task, "").unwrap();
+        posted(&m, &ana_tab, &ana_task, "Beto, take the tests", json!(["Beto"])).unwrap();
+        assert_eq!(m.delegates.queued().get(&beto_tab).copied().unwrap_or(0), 0, "nothing can carry it yet");
+
+        // a restart's retie is what binds the seat back, and it sends what waited
+        m.rooms.lock().unwrap().bind_seat(&id, "Beto", &beto_task, &beto_tab).unwrap();
+        m.reopen_rooms();
+        assert_eq!(m.delegates.queued().get(&beto_tab).copied().unwrap_or(0), 1, "the waiting post arrives once the seat is bound");
+        assert!(!m.rooms.lock().unwrap().unacked_keys().contains(&room::wake_key(&id, "Beto", 1)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_wake_for_a_captain_tab_that_left_waits_for_the_captain_to_return() {
+        let dir = std::env::temp_dir().join(format!("pinned-room-owner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        let m = machine_on(&dir);
+        let (captain, path) = captain_on(&m, &dir, "app");
+        let body = open_room(&m, &captain, "Fix the parser.");
+        let id = body["id"].as_str().unwrap().to_owned();
+        let (ana_task, ana_tab) = seat_of(&body, "Ana");
+
+        // a restart clears the tab map without settling anything, as `quit` does
+        m.tabs.lock().unwrap().remove(&captain).unwrap();
+        posted(&m, &ana_tab, &ana_task, "Captain, the split is wrong", json!(["captain"])).unwrap();
+        let key = room::wake_key(&id, room::CAPTAIN, 1);
+        assert!(!m.delegates.took_notice(&key), "no tab can carry it, so nothing is queued in its name");
+        assert!(m.rooms.lock().unwrap().unacked_keys().contains(&key), "the wake stays owed");
+
+        // the Captain returns on a new tab and the rooms reopen onto it
+        let back = m.open_orchestrator(&path).unwrap();
+        m.reopen_rooms();
+        assert_eq!(m.rooms.lock().unwrap().get(&id).unwrap().owner_tab, back);
+        assert!(m.delegates.queued().get(&back).copied().unwrap_or(0) > 0, "the waiting post reaches the Captain's new tab");
+        assert!(!m.rooms.lock().unwrap().unacked_keys().contains(&key));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_repeated_room_post_id_answers_the_first_and_appends_nothing() {
+        let dir = std::env::temp_dir().join(format!("pinned-room-idem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        let m = machine_on(&dir);
+        let (captain, _path) = captain_on(&m, &dir, "app");
+        let body = open_room(&m, &captain, "Fix the parser.");
+        let (ana_task, ana_tab) = seat_of(&body, "Ana");
+        let say = |text: &str, id: Option<&str>| {
+            let mut args = json!({ "text": text });
+            if let Some(id) = id {
+                args["id"] = json!(id);
+            }
+            let tool = crate::team_tools::request("room_post", &args).unwrap();
+            m.team_tool(Some(&ana_tab), Some(&ana_task), tool)
+        };
+
+        let first: Value = serde_json::from_str(&say("the split is the colon", Some("say-1")).unwrap()).unwrap();
+        let again: Value = serde_json::from_str(&say("the split is the colon", Some("say-1")).unwrap()).unwrap();
+        assert_eq!(again, first, "the repeat answers the first outcome");
+        let late = say("a different text under the same id", Some("say-1")).unwrap();
+        assert_eq!(late, serde_json::to_string(&first).unwrap(), "even different text under the same id appends nothing");
+
+        let read: Value = serde_json::from_str(&m.team_tool(Some(&captain), None, crate::team_tools::request("room_read", &json!({})).unwrap()).unwrap()).unwrap();
+        let texts: Vec<&str> = read["posts"].as_array().unwrap().iter().map(|post| post["text"].as_str().unwrap()).collect();
+        assert_eq!(texts, vec!["the split is the colon"], "one message");
+        let next: Value = serde_json::from_str(&say("and the tests", Some("say-2")).unwrap()).unwrap();
+        assert_eq!(next["seq"], 2, "a fresh id posts");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
