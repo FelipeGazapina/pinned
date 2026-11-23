@@ -349,3 +349,19 @@ test("the PostHog card: not connected it asks for host, project and key; connect
   assert.match(connected, /data-action="disconnect-posthog"/);
   assert.doesNotMatch(connected, /posthog-key|phx_/, "no key field and no key");
 });
+
+test("Connect on the PostHog card names the first empty field and sends nothing", async () => {
+  const env = load({});
+  const byId = env.context.document.getElementById;
+  const focused = [];
+  for (const id of ["posthog-host", "posthog-project", "posthog-key"]) byId(id).focus = () => focused.push(id);
+  await env.context.__actions["connect-posthog"]();
+  assert.equal(byId("posthog-error").textContent, "Enter the project id.");
+  byId("posthog-project").value = "12345";
+  await env.context.__actions["connect-posthog"]();
+  assert.equal(byId("posthog-error").textContent, "Paste the key.");
+  assert.deepEqual(focused, ["posthog-project", "posthog-key"]);
+  assert.ok(!env.calls.some((call) => call.cmd === "connect_posthog"), "nothing reaches the hub");
+  const card = env.context.posthogCardHtml();
+  for (const label of ["PostHog host address", "PostHog project id", "PostHog personal API key"]) assert.match(card, new RegExp(`aria-label="${label}"`));
+});

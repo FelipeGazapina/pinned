@@ -577,16 +577,16 @@ function posthogCardHtml() {
     : `${agentAskingHtml("connect_posthog")}<ol class="steps">
          <li>Create a personal API key in PostHog's account settings that can read the project and run queries.</li>
          <li>Pick where your PostHog runs and the project id from the project's settings.
-           <div class="row"><select id="posthog-host-choice" aria-label="Where PostHog runs">${options(Object.keys(POSTHOG_HOSTS), (h) => POSTHOG_HOSTS[h], posthogHost)}</select>
-           <input id="posthog-host" type="url" placeholder="https://posthog.example.com" autocomplete="off" spellcheck="false"${posthogHost === "self" ? "" : " hidden"}>
-           <input id="posthog-project" type="text" inputmode="numeric" placeholder="Project id, as 12345" autocomplete="off" spellcheck="false"></div></li>
+           <div class="row posthog-host"><select id="posthog-host-choice" aria-label="Where PostHog runs">${options(Object.keys(POSTHOG_HOSTS), (h) => POSTHOG_HOSTS[h], posthogHost)}</select>
+           <input id="posthog-host" type="url" aria-label="PostHog host address" placeholder="https://posthog.example.com" autocomplete="off" spellcheck="false"${posthogHost === "self" ? "" : " hidden"}></div>
+           <div class="row"><input id="posthog-project" type="text" inputmode="numeric" aria-label="PostHog project id" placeholder="Project id, as 12345" autocomplete="off" spellcheck="false"></div></li>
          <li>Paste the key here.
-           <div class="row"><input id="posthog-key" type="password" placeholder="phx_…" autocomplete="off">
+           <div class="row"><input id="posthog-key" type="password" aria-label="PostHog personal API key" placeholder="phx_…" autocomplete="off">
            <button class="primary" data-action="connect-posthog">Connect</button></div></li>
        </ol>
        <p class="error" id="posthog-error"></p>`;
   return `<div class="card">
-      <div class="card-head"><span class="logo" data-tone="posthog">◆</span><div><b>PostHog</b><div class="hint">Errors that start an observability workflow</div></div>
+      <div class="card-head"><span class="logo posthog" data-tone="posthog">◆</span><div><b>PostHog</b><div class="hint">Errors that start an observability workflow</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
     </div>`;
@@ -2283,7 +2283,16 @@ const actions = {
     const key = document.getElementById("posthog-key").value;
     const project = document.getElementById("posthog-project").value.trim();
     const host = posthogHost === "self" ? document.getElementById("posthog-host").value.trim() : posthogHost;
-    if (!key.trim() || !project || !host) return;
+    // The first field left empty, in the form's order, is named and focused.
+    const missing = [
+      [!host, "posthog-host", "Enter the self-hosted address."],
+      [!project, "posthog-project", "Enter the project id."],
+      [!key.trim(), "posthog-key", "Paste the key."],
+    ].find(([empty]) => empty);
+    if (missing) {
+      document.getElementById("posthog-error").textContent = missing[2];
+      return document.getElementById(missing[1]).focus();
+    }
     try {
       settings.posthog = await connectorCall("connect_posthog", { key, project, host });
       if (pendingWorkflow && triggerReady(pendingWorkflow.kind)) return await resumeWorkflow();
