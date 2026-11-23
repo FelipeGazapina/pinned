@@ -588,6 +588,7 @@ impl link::Local for Standby {
         }
         match call {
             HubCall::Stage { connector, subject, .. } | HubCall::RunSet { connector, subject, .. } => self.connectors.has_run(connector, subject),
+            HubCall::LinearCreate { connector, subject: Some(issue), .. } => self.connectors.has_run(connector, &Subject::LinearIssue { issue: issue.clone() }),
             HubCall::SlackReply { connector, channel, thread, .. }
             | HubCall::LinearCreate { connector, channel, thread, .. }
             | HubCall::LinearTake { connector, channel, thread, .. } => {

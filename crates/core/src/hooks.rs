@@ -449,8 +449,13 @@ pub fn linear(args: &[String]) -> Reply {
             if title.trim().is_empty() || description.is_empty() {
                 return Err(usage());
             }
-            let (connector, channel, thread) = context()?;
-            ask(Message::LinearCreate { connector, channel, thread, title: title.clone(), description: description.join(" "), assignee })
+            // An observability run has no Slack thread: it files for the PostHog error its subject names.
+            let observed = env(ISSUE_ENV).ok().filter(|issue| env(SLACK_CHANNEL_ENV).is_err() && crate::connectors::is_observed(&Subject::LinearIssue { issue: issue.clone() }));
+            let (connector, channel, thread) = match observed {
+                Some(_) => (env(CONNECTOR_ENV)?, String::new(), String::new()),
+                None => context()?,
+            };
+            ask(Message::LinearCreate { connector, channel, thread, title: title.clone(), description: description.join(" "), assignee, subject: observed })
         }
         [verb, issue] if verb == "take" && !issue.trim().is_empty() => {
             let (connector, channel, thread) = context()?;
@@ -625,7 +630,10 @@ mod tests {
                 Ok(format!("{connector} moved the issue of {channel}:{thread} to {stage:?}"))
             }
             Message::SlackReply { connector, channel, thread, text } => Ok(format!("{connector} posted {text:?} in {channel}:{thread}")),
-            Message::LinearCreate { connector, channel, thread, title, description, assignee } => {
+            Message::LinearCreate { connector, subject: Some(subject), channel, thread, title, .. } => {
+                Ok(format!("{connector} filed {title:?} for {subject} with {channel:?}:{thread:?}"))
+            }
+            Message::LinearCreate { connector, channel, thread, title, description, assignee, subject: None } => {
                 Ok(format!("{connector} filed {title:?} / {description:?} for {channel}:{thread} to {assignee:?}"))
             }
             Message::LinearTake { connector, channel, thread, issue } => Ok(format!("{connector} took {issue} for {channel}:{thread}")),
@@ -651,6 +659,17 @@ mod tests {
         assert_eq!(
             slack(&args(&["reply", "hi"])),
             Err("PINNED_SLACK_CHANNEL is not set: run this inside a session a pinned workflow started".to_owned())
+        );
+        assert_eq!(
+            linear(&args(&["create", "Export 500s", "fails"])),
+            Err("PINNED_SLACK_CHANNEL is not set: run this inside a session a pinned workflow started".to_owned()),
+            "a Linear issue's session files nothing"
+        );
+        std::env::set_var(ISSUE_ENV, "posthog:12345:0193-ab");
+        assert_eq!(
+            linear(&args(&["create", "TypeError in checkout", "Reading id of undefined"])),
+            Ok("c1 filed \"TypeError in checkout\" for posthog:12345:0193-ab with \"\":\"\"".to_owned()),
+            "an observability run files for its PostHog error"
         );
         std::env::remove_var(ISSUE_ENV);
         std::env::set_var(SLACK_CHANNEL_ENV, "C0123ABCD");

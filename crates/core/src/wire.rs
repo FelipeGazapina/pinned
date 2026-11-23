@@ -1135,6 +1135,10 @@ pub enum HubCall {
     /// `vercel::Account`, once the gateway took the key.
     ConnectVercel { key: String },
     DisconnectVercel,
+    /// `posthog::Account`, once PostHog let the key read `project` on `host` (`us`, `eu` or an
+    /// `https://` site).
+    ConnectPosthog { key: String, project: String, host: String },
+    DisconnectPosthog,
     /// `Vec<vercel::Model>`: chat models tagged `structured-output`, and every decision model. The list needs no key.
     VercelModels,
     /// `upstash::Account`, once Upstash took the key. Only a signed-in app runs boxes, so this has no Tauri command.
@@ -1273,6 +1277,10 @@ pub enum HubCall {
         description: String,
         #[serde(default)]
         assignee: String,
+        /// An observability run's subject key, which files for its PostHog error instead of a
+        /// Slack thread; `channel` and `thread` are then empty. Older apps never send it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<String>,
     },
     LinearTake { connector: String, channel: String, thread: String, issue: String },
     /// From a workflow session's `pinned run set`: stores `value` as `{{vars.<name>}}` of its live graph run.
@@ -2393,6 +2401,31 @@ mod tests {
         round_trip(HubCall::ConnectVercel { key: "vck_1".into() }, json!({ "cmd": "connect_vercel", "key": "vck_1" }));
         round_trip(HubCall::DisconnectVercel, json!({ "cmd": "disconnect_vercel" }));
         round_trip(HubCall::VercelModels, json!({ "cmd": "vercel_models" }));
+        round_trip(
+            HubCall::ConnectPosthog { key: "phx_1".into(), project: "12345".into(), host: "eu".into() },
+            json!({ "cmd": "connect_posthog", "key": "phx_1", "project": "12345", "host": "eu" }),
+        );
+        round_trip(HubCall::DisconnectPosthog, json!({ "cmd": "disconnect_posthog" }));
+        let slack_filing = json!({ "cmd": "linear_create", "connector": "c2", "channel": "C1", "thread": "1.2", "title": "Export 500s", "description": "It fails", "assignee": "" });
+        round_trip(
+            HubCall::LinearCreate { connector: "c2".into(), channel: "C1".into(), thread: "1.2".into(), title: "Export 500s".into(), description: "It fails".into(), assignee: String::new(), subject: None },
+            slack_filing.clone(),
+        );
+        let mut older = slack_filing;
+        older.as_object_mut().unwrap().remove("assignee");
+        assert!(matches!(serde_json::from_value::<HubCall>(older).unwrap(), HubCall::LinearCreate { subject: None, .. }), "an older app's filing names no subject");
+        round_trip(
+            HubCall::LinearCreate {
+                connector: "c3".into(),
+                channel: String::new(),
+                thread: String::new(),
+                title: "TypeError".into(),
+                description: "Reading id".into(),
+                assignee: String::new(),
+                subject: Some("posthog:12345:0193".into()),
+            },
+            json!({ "cmd": "linear_create", "connector": "c3", "channel": "", "thread": "", "title": "TypeError", "description": "Reading id", "assignee": "", "subject": "posthog:12345:0193" }),
+        );
         let before_vercel = json!({ "cmd": "import", "store": { "connectors": [] }, "linear_key": null, "slack_key": "xoxb-1" });
         match serde_json::from_value::<HubCall>(before_vercel).unwrap() {
             HubCall::Import { slack_key, github_key, vercel_key, .. } => assert_eq!((slack_key.as_deref(), github_key, vercel_key), (Some("xoxb-1"), None, None)),
@@ -2482,7 +2515,7 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], ideas: vec![], repo_insight: Default::default(), schedules: vec![], offline_runner: None, workflows_held_for: None } },
+            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, posthog: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], ideas: vec![], repo_insight: Default::default(), schedules: vec![], offline_runner: None, workflows_held_for: None } },
             json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
         let old: ToClient = serde_json::from_value(json!({ "type": "machines", "machines": [] })).unwrap();

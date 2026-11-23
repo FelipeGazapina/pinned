@@ -1079,6 +1079,8 @@ impl Hub {
             HubCall::GithubRepos => (json(c().await?.github_repos().await?), false),
             HubCall::ConnectVercel { key } => (json(c().await?.connect_vercel(&key).await?), true),
             HubCall::DisconnectVercel => (json(c().await?.disconnect_vercel()?), true),
+            HubCall::ConnectPosthog { key, project, host } => (json(c().await?.connect_posthog(&key, &project, &host).await?), true),
+            HubCall::DisconnectPosthog => (json(c().await?.disconnect_posthog()?), true),
             HubCall::VercelModels => (json(c().await?.vercel_models().await?), false),
             HubCall::ConnectUpstash { key, claude_token } => {
                 let keys = upstash::Keys::parse(&key, &claude_token)?;
@@ -1126,8 +1128,8 @@ impl Hub {
             HubCall::SlackReply { connector, channel, thread, text } => {
                 (json(c().await?.slack_reply(&connector, &channel, &thread, &text).await?), false)
             }
-            HubCall::LinearCreate { connector, channel, thread, title, description, assignee } => {
-                (json(c().await?.linear_create(&connector, &channel, &thread, &title, &description, &assignee).await?), true)
+            HubCall::LinearCreate { connector, channel, thread, title, description, assignee, subject } => {
+                (json(c().await?.linear_create(&connector, &channel, &thread, subject.as_deref(), &title, &description, &assignee).await?), true)
             }
             HubCall::LinearTake { connector, channel, thread, issue } => {
                 (json(c().await?.linear_take(&connector, &channel, &thread, &issue).await?), true)

@@ -10,6 +10,9 @@ pub const SLACK_THREAD: &str = "a Slack thread";
 /// The source of a Slack thread's later reply, which reaches the thread's run.
 pub const SLACK_REPLY: &str = "a Slack reply in this thread";
 
+/// The source of a PostHog error's text, which an observability run is triggered by.
+pub const POSTHOG_ERROR: &str = "a PostHog error";
+
 /// What a reader may take for a line break though `str::lines` keeps it inside a line: a lone
 /// carriage return, the Unicode line and paragraph separators, next line, vertical tab, form feed.
 const BREAKS: [char; 6] = ['\r', '\u{2028}', '\u{2029}', '\u{85}', '\u{0B}', '\u{0C}'];
