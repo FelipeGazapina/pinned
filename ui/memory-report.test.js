@@ -35,6 +35,7 @@ const REPORT = {
 function load({ tauri = {}, invoke = async () => REPORT } = {}) {
   const sections = [];
   const memory = { onclick: null };
+  const clipboard = [];
   const context = {
     TAURI: tauri,
     invoke,
@@ -45,13 +46,13 @@ function load({ tauri = {}, invoke = async () => REPORT } = {}) {
     document: { getElementById: (id) => (id === "memory" ? memory : null) },
     icon: (name) => `<svg data-icon="${name}"></svg>`,
     esc: (text) => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"),
-    navigator: {},
+    navigator: { clipboard: { writeText: async (text) => clipboard.push(text) } },
     console,
     Date,
   };
   vm.createContext(context);
   vm.runInContext(memorySrc, context);
-  return { context, sections };
+  return { context, sections, memory, clipboard };
 }
 
 test("the copied report lists the groups, each thread and terminal largest first, and no path", () => {
@@ -102,4 +103,22 @@ test("the page reads the report when it opens, and a failure shows its text and 
   assert.ok(page.includes(error));
   assert.ok(!page.includes("data-memory=\"copy\""), "no Copy button");
   assert.ok(!page.includes("Copy"));
+});
+
+test("Copy writes the report text and keeps its icon, and Refresh is held while it reads again", async () => {
+  let calls = 0;
+  const shown = load({ invoke: async () => (calls++, REPORT) });
+  await shown.sections[0].show();
+  const label = { textContent: "Copy" };
+  const copy = { dataset: { memory: "copy" }, querySelector: (sel) => (sel === "span" ? label : null) };
+  await shown.memory.onclick({ target: { closest: () => copy } });
+  assert.deepEqual(shown.clipboard, [shown.context.memoryReportText(REPORT)]);
+  assert.equal(label.textContent, "Copied");
+  assert.ok(shown.context.settingsPage.innerHTML.includes('data-icon="copy"></svg><span>Copy</span>'), "the icon sits beside a text span");
+
+  const refresh = { dataset: { memory: "refresh" }, disabled: false };
+  const reading = shown.memory.onclick({ target: { closest: () => refresh } });
+  assert.equal(refresh.disabled, true);
+  await reading;
+  assert.equal(calls, 2);
 });

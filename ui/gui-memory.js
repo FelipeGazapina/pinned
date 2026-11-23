@@ -44,7 +44,7 @@ function memoryLine(label, meta, sum, cls = "") {
 function memoryHtml(report, at) {
   const groups = report.groups.map((group) => memoryLine(group.name, memoryCount(group), group) + memoryRows(group).map((row) => memoryLine(row.label, [memoryRowWhat(row), memoryCount(row)].join(" · "), row, " memory-row")).join(""));
   return `<div class="side-setting"><div><label>Read at ${esc(at.toLocaleTimeString())}</label><p class="meta">Up ${esc(memoryUptime(report.uptime_secs))} · ${esc(report.measure)}</p></div>
-    <span><button type="button" class="outline" data-memory="refresh">${icon("rotate-cw")}Refresh</button> <button type="button" class="outline" data-memory="copy">${icon("copy")}Copy</button></span></div>
+    <span class="memory-actions"><button type="button" class="outline" data-memory="refresh">${icon("rotate-cw")}Refresh</button> <button type="button" class="outline" data-memory="copy">${icon("copy")}<span>Copy</span></button></span></div>
     ${memoryLine("Total", memoryCount(report), report)}${groups.join("")}`;
 }
 
@@ -61,11 +61,14 @@ async function readMemory() {
   settingsPage.innerHTML = `<h2>Memory</h2><section id="memory">${html}</section>`;
   document.getElementById("memory").onclick = async (e) => {
     const button = e.target.closest("[data-memory]");
-    if (button?.dataset.memory === "refresh") return readMemory();
+    if (button?.dataset.memory === "refresh") {
+      button.disabled = true;
+      return readMemory();
+    }
     if (button?.dataset.memory !== "copy" || !memoryShown) return;
     try {
       await navigator.clipboard.writeText(memoryReportText(memoryShown));
-      button.textContent = "Copied";
+      button.querySelector("span").textContent = "Copied";
     } catch (error) {
       console.warn("copy memory report", error);
     }

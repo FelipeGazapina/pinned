@@ -334,3 +334,9 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
 #settings-page #memory .memory-row { margin: 8px 0 8px 20px; }
 #settings-page #memory .memory-size { flex: none; font-variant-numeric: tabular-nums; }
 #settings-page #memory button { display: inline-flex; align-items: center; gap: 6px; }
+#settings-page #memory .side-setting > div:first-child { min-width: 0; }
+#settings-page #memory .side-setting :is(label, .meta) { overflow-wrap: anywhere; }
+@media (max-width: 639px) {
+  #settings-page #memory .side-setting { flex-wrap: wrap; }
+  #settings-page #memory .memory-actions { flex: 1 1 100%; }
+}
