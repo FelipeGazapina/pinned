@@ -25,6 +25,7 @@
 - Every hub hello rebuilds the confirmations waiting on you, so one lost to a dropped socket shows again.
 - Rooms: a post to a seat that has no tab yet waits for it, a settled room owes nothing after a restart, closing a tab ends the room it owns or the seat it holds, and a repeated `room_post` id appends nothing.
 - A session stopped on the docs-server dialog names the folder as [folder] in its failure, never the raw path.
+- A box that ends with a question still open no longer loses it silently. The task's error now says how many questions were unanswered and quotes the first (for example `1 question unanswered: "Which database?"`), and on the machine that ran the worker, a questionnaire still open when its task ends closes as ended and stops pausing that task's time limit.
 
 ### Known gaps
 
