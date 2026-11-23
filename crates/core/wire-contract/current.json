@@ -10427,6 +10427,15 @@
                     "type": "null"
                   }
                 ]
+              },
+              "boxes_at_once": {
+                "description": "The account's Boxes at once. Only the Captains' and the orchestrator's scope take it, and\nonly the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -10559,7 +10568,8 @@
               "time_limit_min",
               "box_budget_cents",
               "placement",
-              "box_size"
+              "box_size",
+              "boxes_at_once"
             ]
           },
           "ReviewerPatch": {
@@ -10836,6 +10846,20 @@
                   "projects": {},
                   "proposed": []
                 }
+              },
+              "boxes_at_once": {
+                "description": "Boxes at once: how many boxes the account's agents (the orchestrator, the Captains, their\nworkers and the workflows) may have open at once. A box the user opens never counts. Only the\nuser's own app sets it. Read through `boxes_limit`, which holds it to `box_cap`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 8
+              },
+              "box_cap": {
+                "description": "The hub's fixed cap on the account's open boxes, the most Boxes at once can be. The hub\nwrites it into every answer; tastes from before it read the cap of then, 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 8
               }
             },
             "required": [
@@ -10844,7 +10868,9 @@
               "projects",
               "placement",
               "reviewer",
-              "worker_profiles"
+              "worker_profiles",
+              "boxes_at_once",
+              "box_cap"
             ]
           },
           "Taste": {
@@ -23577,6 +23603,15 @@
                     "type": "null"
                   }
                 ]
+              },
+              "boxes_at_once": {
+                "description": "The account's Boxes at once. Only the Captains' and the orchestrator's scope take it, and\nonly the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -23704,7 +23739,8 @@
               "time_limit_min",
               "box_budget_cents",
               "placement",
-              "box_size"
+              "box_size",
+              "boxes_at_once"
             ]
           },
           "ReviewerPatch": {
@@ -23976,6 +24012,20 @@
                   "projects": {},
                   "proposed": []
                 }
+              },
+              "boxes_at_once": {
+                "description": "Boxes at once: how many boxes the account's agents (the orchestrator, the Captains, their\nworkers and the workflows) may have open at once. A box the user opens never counts. Only the\nuser's own app sets it. Read through `boxes_limit`, which holds it to `box_cap`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 8
+              },
+              "box_cap": {
+                "description": "The hub's fixed cap on the account's open boxes, the most Boxes at once can be. The hub\nwrites it into every answer; tastes from before it read the cap of then, 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 8
               }
             }
           },
@@ -33188,6 +33238,15 @@
                     "type": "null"
                   }
                 ]
+              },
+              "boxes_at_once": {
+                "description": "The account's Boxes at once. Only the Captains' and the orchestrator's scope take it, and\nonly the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -33351,7 +33410,8 @@
               "time_limit_min",
               "box_budget_cents",
               "placement",
-              "box_size"
+              "box_size",
+              "boxes_at_once"
             ]
           },
           "ReviewerPatch": {
@@ -33628,6 +33688,20 @@
                   "projects": {},
                   "proposed": []
                 }
+              },
+              "boxes_at_once": {
+                "description": "Boxes at once: how many boxes the account's agents (the orchestrator, the Captains, their\nworkers and the workflows) may have open at once. A box the user opens never counts. Only the\nuser's own app sets it. Read through `boxes_limit`, which holds it to `box_cap`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 8
+              },
+              "box_cap": {
+                "description": "The hub's fixed cap on the account's open boxes, the most Boxes at once can be. The hub\nwrites it into every answer; tastes from before it read the cap of then, 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 8
               }
             },
             "required": [
@@ -33636,7 +33710,9 @@
               "projects",
               "placement",
               "reviewer",
-              "worker_profiles"
+              "worker_profiles",
+              "boxes_at_once",
+              "box_cap"
             ]
           },
           "Taste": {
@@ -43229,6 +43305,15 @@
                     "type": "null"
                   }
                 ]
+              },
+              "boxes_at_once": {
+                "description": "The account's Boxes at once. Only the Captains' and the orchestrator's scope take it, and\nonly the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -43387,7 +43472,8 @@
               "time_limit_min",
               "box_budget_cents",
               "placement",
-              "box_size"
+              "box_size",
+              "boxes_at_once"
             ]
           },
           "ReviewerPatch": {
@@ -43659,6 +43745,20 @@
                   "projects": {},
                   "proposed": []
                 }
+              },
+              "boxes_at_once": {
+                "description": "Boxes at once: how many boxes the account's agents (the orchestrator, the Captains, their\nworkers and the workflows) may have open at once. A box the user opens never counts. Only the\nuser's own app sets it. Read through `boxes_limit`, which holds it to `box_cap`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 8
+              },
+              "box_cap": {
+                "description": "The hub's fixed cap on the account's open boxes, the most Boxes at once can be. The hub\nwrites it into every answer; tastes from before it read the cap of then, 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 8
               }
             }
           },
@@ -65133,6 +65233,20 @@
               "projects": {},
               "proposed": []
             }
+          },
+          "boxes_at_once": {
+            "description": "Boxes at once: how many boxes the account's agents (the orchestrator, the Captains, their\nworkers and the workflows) may have open at once. A box the user opens never counts. Only the\nuser's own app sets it. Read through `boxes_limit`, which holds it to `box_cap`.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 8
+          },
+          "box_cap": {
+            "description": "The hub's fixed cap on the account's open boxes, the most Boxes at once can be. The hub\nwrites it into every answer; tastes from before it read the cap of then, 8.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 8
           }
         },
         "required": [
@@ -65141,7 +65255,9 @@
           "projects",
           "placement",
           "reviewer",
-          "worker_profiles"
+          "worker_profiles",
+          "boxes_at_once",
+          "box_cap"
         ],
         "$defs": {
           "Taste": {
@@ -65550,6 +65666,15 @@
                     "type": "null"
                   }
                 ]
+              },
+              "boxes_at_once": {
+                "description": "The account's Boxes at once. Only the Captains' and the orchestrator's scope take it, and\nonly the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -65934,6 +66059,20 @@
               "projects": {},
               "proposed": []
             }
+          },
+          "boxes_at_once": {
+            "description": "Boxes at once: how many boxes the account's agents (the orchestrator, the Captains, their\nworkers and the workflows) may have open at once. A box the user opens never counts. Only the\nuser's own app sets it. Read through `boxes_limit`, which holds it to `box_cap`.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 8
+          },
+          "box_cap": {
+            "description": "The hub's fixed cap on the account's open boxes, the most Boxes at once can be. The hub\nwrites it into every answer; tastes from before it read the cap of then, 8.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 8
           }
         },
         "$defs": {
@@ -66325,6 +66464,15 @@
                     "type": "null"
                   }
                 ]
+              },
+              "boxes_at_once": {
+                "description": "The account's Boxes at once. Only the Captains' and the orchestrator's scope take it, and\nonly the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },

@@ -211,6 +211,19 @@ impl Default for Policy {
     }
 }
 
+/// An agent's box refused because the account's Boxes at once is 0.
+pub const BOXES_AT_ONCE_ZERO: &str = "Boxes at once is 0, so agents cannot start a box on this account. Run it on a connected machine, or raise Boxes at once in Settings › Way of working.";
+/// The rest of an agent's box refused because the account's agents already have Boxes at once open.
+const BOXES_AT_ONCE_FULL: &str = "the most it allows at once. Wait for one to end, or raise Boxes at once in Settings › Way of working.";
+
+/// Which limit holds an account's agents' boxes.
+#[derive(Clone, Copy)]
+enum AgentsLimit {
+    /// The account's Boxes at once, lower than the hub's cap.
+    BoxesAtOnce(u32),
+    HubCap,
+}
+
 /// The hub's record that one run lives in one box. It exists before its box does and goes only
 /// after the box and its machine are gone.
 #[derive(Clone, Debug)]
@@ -1242,6 +1255,12 @@ impl Boxes {
         if permission == BoxPermission::Off {
             return Err("Upstash Box is off for workflows: choose a box permission in Connectors settings".into());
         }
+        // Before any ask. A Run now is the user's act, a reused box is no new one, and a subject's
+        // own box is answered as it is.
+        let run_now = pinned_core::connectors::is_run_now(&run.subject);
+        if !run_now && !matches!(permission, BoxPermission::Fixed { .. }) && hub.db.box_for(account.id, &run.connector, &run.subject).await?.is_none() {
+            self.agents_have_room(hub, account).await?;
+        }
         let folder = run.cwd.to_str().filter(|f| !f.is_empty());
         let signs_in = match run.account.as_deref().filter(|a| !a.is_empty()) {
             Some(named) => named.to_owned(),
@@ -1276,27 +1295,31 @@ impl Boxes {
     pub async fn open_session(&self, hub: &Arc<Hub>, account: &Arc<Account>, repo: String, size: Option<BoxSize>, budget_usd: Option<f64>, opener: Option<Opener>) -> Result<BoxStatus, String> {
         let connectors = hub.connectors(account).await?;
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
-        match (connectors.box_access().session, &opener) {
-            (BoxPermission::Off, _) => return Err("Upstash Box is off for sessions: choose a box permission in Connectors settings".into()),
-            (BoxPermission::Ask, Some(opener)) => {
+        let permission = connectors.box_access().session;
+        if permission == BoxPermission::Off {
+            return Err("Upstash Box is off for sessions: choose a box permission in Connectors settings".into());
+        }
+        let repo = normalize_repo(&repo).ok_or("name a GitHub repository as owner/repo or paste its clone URL")?;
+        let size = box_size(hub, account, Some(&repo), size).await?.size();
+        let budget_usd = box_budget(hub, account, Some(&repo), budget_usd).await?;
+        if let Some(budget) = budget_usd {
+            minimum_budget(size, budget)?;
+        }
+        // After the budget, which speaks first as it did before Boxes at once, and before any ask.
+        if let Some(opener) = &opener {
+            self.agents_have_room(hub, account).await?;
+            if permission == BoxPermission::Ask {
                 let name = account.name_of(&opener.machine.to_string()).unwrap_or_else(|| opener.machine.to_string());
                 let asked = Subject::LinearIssue { issue: format!("sessions of {name} {}", opener.tab) };
                 allowed(&connectors, BoxPermission::Ask, "Sessions", INTERACTIVE_CONNECTOR, &asked).await?;
             }
-            _ => {}
         }
-        let repo = normalize_repo(&repo).ok_or("name a GitHub repository as owner/repo or paste its clone URL")?;
         // An agent's box signs in as the account its own session runs under; the user's, as the project's.
         let signs_in = match opener.as_ref().and_then(|o| account.tab(&o.machine.to_string(), &o.tab)) {
             Some(tab) => tab.account,
             None => project_account(hub, account, None, Some(&repo)).await?,
         };
         token_kept(&connectors, &signs_in, Some(&project_name(None, Some(&repo))))?;
-        let size = box_size(hub, account, Some(&repo), size).await?.size();
-        let budget_usd = box_budget(hub, account, Some(&repo), budget_usd).await?;
-        if let Some(budget) = budget_usd {
-            minimum_budget(size, budget)?;
-        }
         self.within_cap(&hub.db.boxes(account.id).await?)?;
         let name = machine::repo_name(&repo).unwrap_or("repo").to_owned();
         let id = new_row_id();
@@ -1319,15 +1342,10 @@ impl Boxes {
         if self.drive_guard(account.id, &fresh.id).is_none() {
             return Err("Upstash Box: its box is still booting; try again".into());
         }
-        // Kept before the row, so the box can't end before its opener is known.
-        if let Some(opener) = &opener {
-            hub.db.hold_agent_box(&fresh.id, account.id, opener, unix_millis()).await?;
-        }
-        if let Err(e) = hub.db.reserve_box(&fresh).await {
-            if opener.is_some() {
-                let _ = hub.db.forget_agent_box(account.id, &fresh.id).await;
-            }
-            return Err(e);
+        // An agent's opener is kept with its row, so the box can't end before its opener is known.
+        match &opener {
+            Some(opener) => drop(self.reserve_agent(hub, account, &fresh, Some(opener)).await?),
+            None => drop(hub.db.reserve_box(&fresh).await?),
         }
         let (hub, account, keys) = (hub.clone(), account.clone(), keys.clone());
         let row = fresh.clone();
@@ -1354,6 +1372,7 @@ impl Boxes {
         if let Some(row) = hub.db.box_row_for(account.id, DELEGATE_CONNECTOR, &subject).await? {
             return Ok(started_box(&row));
         }
+        self.agents_have_room(hub, account).await?;
         let asked = Subject::LinearIssue { issue: format!("workers of {} {}", origin.machine_name, origin.tab) };
         allowed(&connectors, connectors.box_access().worker, "Workers", DELEGATE_CONNECTOR, &asked).await?;
         if request.target.driver_kind.as_deref().is_some_and(|kind| kind != "claude") {
@@ -1392,9 +1411,13 @@ impl Boxes {
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
         let repo = origin_repo(repo).ok_or("a box clones a GitHub repository, and this project's origin is none")?;
         let subject = Subject::LinearIssue { issue: format!("the Captain of {repo}") };
+        let existing = hub.db.box_for(account.id, CAPTAIN_CONNECTOR, &subject).await?;
+        if existing.is_none() {
+            self.agents_have_room(hub, account).await?;
+        }
         allowed(&connectors, connectors.box_access().orchestrator, "Captains", CAPTAIN_CONNECTOR, &subject).await?;
         let work = BoxWork::Captain { request_id, text, sender, busy };
-        if let Some(id) = hub.db.box_for(account.id, CAPTAIN_CONNECTOR, &subject).await? {
+        if let Some(id) = existing {
             let row = hub.db.box_by_id(account.id, &id).await?.ok_or("its box just went; send it again")?.map_err(|r| format!("box {} {}", r.id, r.why))?;
             return match row.phase {
                 Phase::Running => {
@@ -1425,7 +1448,7 @@ impl Boxes {
         if self.drive_guard(account.id, &fresh.id).is_none() {
             return Err("Upstash Box: its box is still booting; try again".into());
         }
-        let (row, written) = hub.db.reserve_box(&fresh).await?;
+        let (row, written) = self.reserve_agent(hub, account, &fresh, None).await?;
         if !written {
             return Ok(row);
         }
@@ -1590,7 +1613,15 @@ impl Boxes {
             self.give_back(hub, account, claimed.as_deref()).await;
             return Err("Upstash Box: its box is still booting; the next check tries again".into());
         }
-        let (row, _) = hub.db.reserve_box(&fresh).await?;
+        // The user's own Run now is no agent's box: neither held to Boxes at once nor counted.
+        let reserved = if pinned_core::connectors::is_run_now(&run.subject) { hub.db.reserve_box(&fresh).await } else { self.reserve_agent(hub, account, &fresh, None).await };
+        let row = match reserved {
+            Ok((row, _)) => row,
+            Err(e) => {
+                self.give_back(hub, account, claimed.as_deref()).await;
+                return Err(e);
+            }
+        };
         if row.id != fresh.id {
             self.give_back(hub, account, claimed.as_deref()).await;
         }
@@ -1614,6 +1645,60 @@ impl Boxes {
         }
     }
 
+    /// Reserves `row` for a box an agent opens: the workflows', the workers', the Captains', and an
+    /// agent's `open_box` with its `opener`. Every agent path writes its row here and nowhere else, so
+    /// each is held to the account's Boxes at once, at most the hub's cap, counted and written at once.
+    /// A box the user opens is not held to it and does not count.
+    async fn reserve_agent(&self, hub: &Hub, account: &Account, row: &BoxRow, opener: Option<&Opener>) -> Result<(BoxRow, bool), String> {
+        let limit = self.agents_limit(hub, account).await?;
+        match hub.db.reserve_agent_box(row, self.most(limit), opener, unix_millis()).await? {
+            Ok(reserved) => Ok(reserved),
+            Err(open) => Err(self.past_limit(limit, open)),
+        }
+    }
+
+    /// Refuses an agent's new box when the account's agents already have its limit open, before
+    /// anything is asked or written. The reserve counts again under the account's lock.
+    async fn agents_have_room(&self, hub: &Hub, account: &Account) -> Result<(), String> {
+        let limit = self.agents_limit(hub, account).await?;
+        let most = self.most(limit);
+        let open = if most == 0 { 0 } else { hub.db.agent_boxes_open(account.id).await? };
+        if most > open {
+            return Ok(());
+        }
+        Err(self.past_limit(limit, open))
+    }
+
+    /// What holds the account's agents' boxes: the lower of its Boxes at once and the hub's cap,
+    /// the cap when they are equal, as raising the setting would change nothing. A team has no
+    /// Boxes at once to set, so its limit is the hub's cap.
+    async fn agents_limit(&self, hub: &Hub, account: &Account) -> Result<AgentsLimit, String> {
+        if account.team {
+            return Ok(AgentsLimit::HubCap);
+        }
+        let tastes = hub.db.tastes(account.id).await?.unwrap_or_default();
+        Ok(if tastes.boxes_at_once < self.policy.max_open { AgentsLimit::BoxesAtOnce(tastes.boxes_at_once) } else { AgentsLimit::HubCap })
+    }
+
+    fn most(&self, limit: AgentsLimit) -> u32 {
+        match limit {
+            AgentsLimit::BoxesAtOnce(n) => n,
+            AgentsLimit::HubCap => self.policy.max_open,
+        }
+    }
+
+    /// Why an agent's box is refused when `open` are open. It names Settings only when Boxes at
+    /// once stopped it, the one limit there the user can raise; the hub's cap speaks as it always did.
+    fn past_limit(&self, limit: AgentsLimit, open: u32) -> String {
+        match (limit, open) {
+            (AgentsLimit::HubCap, _) => self.cap_refusal(),
+            (AgentsLimit::BoxesAtOnce(0), _) => BOXES_AT_ONCE_ZERO.into(),
+            (AgentsLimit::BoxesAtOnce(n), open) if open > n => format!("{open} boxes already run on this account, more than Boxes at once allows ({n}). Wait for them to end, or raise Boxes at once in Settings › Way of working."),
+            (AgentsLimit::BoxesAtOnce(_), 1) => format!("1 box already runs on this account, {BOXES_AT_ONCE_FULL}"),
+            (AgentsLimit::BoxesAtOnce(_), open) => format!("{open} boxes already run on this account, {BOXES_AT_ONCE_FULL}"),
+        }
+    }
+
     fn within_cap(&self, rows: &[Result<BoxRow, Remains>]) -> Result<(), String> {
         let open = rows.iter().filter(|row| match row {
             Ok(row) => !matches!(row.phase, Phase::Ending(_)),
@@ -1622,9 +1707,13 @@ impl Boxes {
         if open < self.policy.max_open {
             return Ok(());
         }
+        Err(self.cap_refusal())
+    }
+
+    fn cap_refusal(&self) -> String {
         let n = self.policy.max_open;
         let (noun, verb) = if n == 1 { ("box", "is") } else { ("boxes", "are") };
-        Err(format!("Upstash Box: {n} {noun} {verb} already open, and this account's limit is {n}"))
+        format!("Upstash Box: {n} {noun} {verb} already open, and this account's limit is {n}")
     }
 
     /// Brings the row to running: its box's node online within `boot_wait`, then `spec` answered

@@ -80,10 +80,9 @@ async fn place(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, repo: Option<
     let key = repo.as_deref().and_then(pinned_core::machine::repo_key);
     let lists = |machine: &str| key.as_deref().is_some_and(|key| account.last_listed(machine).iter().any(|project| project.repo.as_deref().is_some_and(|repo| repo.eq_ignore_ascii_case(key))));
     let mut machines = hub.machines(account).await?;
-    machines.retain(|machine| machine.upstash_box.is_none());
     // What a machine reported up to 20 s ago can miss an account it just signed in to, so a
     // machine is asked again before it is skipped for that.
-    for machine in machines.iter_mut().filter(|machine| machine.online) {
+    for machine in machines.iter_mut().filter(|machine| machine.online && machine.upstash_box.is_none()) {
         if machine.state.as_ref().is_some_and(|state| pinned_core::placement::lacks_account(&machine.name, need, state).is_some()) {
             if let Ok(fresh) = hub.call_machine(account, &machine.id, Call::State, LOOK_WAIT).await {
                 if let Ok(state) = serde_json::from_value::<pinned_core::load::MachineState>(fresh) {
@@ -95,7 +94,7 @@ async fn place(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, repo: Option<
     }
     let seen: Vec<Seen> = machines
         .into_iter()
-        .map(|machine| Seen { has_repo: machine.id == from || cloneable || lists(&machine.id), id: machine.id, name: machine.name, online: machine.online, state: machine.state })
+        .map(|machine| Seen { has_repo: machine.id == from || cloneable || lists(&machine.id), upstash_box: machine.upstash_box.is_some(), id: machine.id, name: machine.name, online: machine.online, state: machine.state })
         .collect();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
     serde_json::to_value(pinned_core::placement::place(&policy, from, need, &seen, exclude, now)).map_err(|e| e.to_string())

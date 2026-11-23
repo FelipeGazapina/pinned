@@ -293,6 +293,13 @@ pub struct OpenedBox {
     pub role: Option<String>,
     pub machine: Option<String>,
 }
+/// The account `$1`'s boxes its agents have open: its rows not ending that a workflow, a worker or a
+/// Captain holds, and the session boxes (connector `$2`) an agent opened, kept in `agent_boxes`. A
+/// session box the user opened is none, and neither is a workflow's Run now, the user's own act.
+const AGENT_BOXES_OPEN: &str = "select count(*) from boxes b where b.account = $1 and b.phase in ('creating', 'booting', 'running') \
+     and not coalesce(b.subject->>'issue' like 'run-now:%', false) \
+     and (b.connector <> $2 or exists (select 1 from agent_boxes a where a.box = b.id and a.account = b.account))";
+
 const BOX_COLUMNS: &str = "id, account, machine, upstash, connector, subject, spec, size, phase, reason, extract(epoch from now() - created_at)::float8";
 /// How often a push reads again what synced projects take and the database's size.
 const SYNC_READ_EVERY: Duration = Duration::from_secs(60);
@@ -1779,6 +1786,58 @@ impl Db {
         Ok((readable(box_row(&stored))?, inserted == 1))
     }
 
+    /// `reserve_box` for a box an agent opens, held to `most` of the agents' boxes: how many are
+    /// open when that many already are. The agents' boxes are those `AGENT_BOXES_OPEN` counts. The
+    /// count and the writes run in one transaction that locks the account's row, so two opens at
+    /// once never both pass. A row the subject already has, or gets from an open that wins the
+    /// insert, is answered as it is, uncounted.
+    pub async fn reserve_agent_box(&self, row: &BoxRow, most: u32, opener: Option<&Opener>, started: u64) -> Result<Result<(BoxRow, bool), u32>, String> {
+        let (subject, mut spec) = (serde_json::to_value(&row.subject).unwrap(), serde_json::to_value(&row.spec).unwrap());
+        if row.work != BoxWork::Run {
+            spec["work"] = serde_json::to_value(&row.work).unwrap();
+        }
+        let (phase, reason) = row.phase.stored();
+        let size = serde_json::to_value(row.size).unwrap().as_str().unwrap().to_owned();
+        let started = i64::try_from(started).map_err(|_| format!("box {} started at an impossible time", row.id))?;
+        let stored = format!("select {BOX_COLUMNS} from boxes where account = $1 and connector = $2 and subject = $3");
+        let mut held = self.transaction_client().await?;
+        let tx = held.as_mut().expect("opened above").transaction().await.map_err(err)?;
+        // `no key update` serializes the reserves and leaves inserts that reference the account free.
+        tx.execute("select 1 from accounts where id = $1 for no key update", &[&row.account]).await.map_err(err)?;
+        if let Some(existing) = tx.query_opt(&stored, &[&row.account, &row.connector, &subject]).await.map_err(err)? {
+            return Ok(Ok((readable(box_row(&existing))?, false)));
+        }
+        let open: i64 = tx.query_one(AGENT_BOXES_OPEN, &[&row.account, &pinned_core::agent::INTERACTIVE_CONNECTOR]).await.map_err(err)?.get(0);
+        if open >= i64::from(most) {
+            return Ok(Err(u32::try_from(open).unwrap_or(u32::MAX)));
+        }
+        let inserted = tx
+            .execute(
+                "insert into boxes (id, account, machine, connector, subject, spec, size, phase, reason) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 on conflict (account, connector, subject) do nothing",
+                &[&row.id, &row.account, &row.machine, &row.connector, &subject, &spec, &size, &phase, &reason],
+            )
+            .await
+            .map_err(err)?;
+        if let Some(opener) = opener.filter(|_| inserted == 1) {
+            tx.execute(
+                "insert into agent_boxes (box, account, machine, tab, role, started) values ($1, $2, $3, $4, $5, $6) on conflict (box) do nothing",
+                &[&row.id, &row.account, &opener.machine, &opener.tab, &opener.role.name(), &started],
+            )
+            .await
+            .map_err(err)?;
+        }
+        let written = tx.query_one(&stored, &[&row.account, &row.connector, &subject]).await.map_err(err)?;
+        tx.commit().await.map_err(err)?;
+        Ok(Ok((readable(box_row(&written))?, inserted == 1)))
+    }
+
+    /// How many boxes the account's agents have open now, as `reserve_agent_box` counts them.
+    pub async fn agent_boxes_open(&self, account: Uuid) -> Result<u32, String> {
+        let open: i64 = self.client().await?.query_one(AGENT_BOXES_OPEN, &[&account, &pinned_core::agent::INTERACTIVE_CONNECTOR]).await.map_err(err)?.get(0);
+        Ok(u32::try_from(open).unwrap_or(u32::MAX))
+    }
+
     pub async fn boxes(&self, account: Uuid) -> Result<Vec<Result<BoxRow, Remains>>, String> {
         let rows = self.client().await?.query(&format!("select {BOX_COLUMNS} from boxes where account = $1 order by created_at"), &[&account]).await.map_err(err)?;
         Ok(rows.iter().map(box_row).collect())
@@ -1873,20 +1932,6 @@ impl Db {
     pub async fn box_exists(&self, id: &str) -> Result<bool, String> {
         let row = self.client().await?.query_one("select exists (select 1 from boxes where id = $1)", &[&id]).await.map_err(err)?;
         Ok(row.get(0))
-    }
-
-    /// Keeps that the agent session `opener` opened box row `id` at unix ms `started`.
-    pub async fn hold_agent_box(&self, id: &str, account: Uuid, opener: &Opener, started: u64) -> Result<(), String> {
-        let started = i64::try_from(started).map_err(|_| format!("box {id} started at an impossible time"))?;
-        self.client()
-            .await?
-            .execute(
-                "insert into agent_boxes (box, account, machine, tab, role, started) values ($1, $2, $3, $4, $5, $6) on conflict (box) do nothing",
-                &[&id, &account, &opener.machine, &opener.tab, &opener.role.name(), &started],
-            )
-            .await
-            .map_err(err)
-            .map(drop)
     }
 
     /// The agent session that opened the account's box row `id`, and when, while it is not recorded yet.
