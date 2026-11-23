@@ -208,6 +208,7 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .logo.posthog { background: #f54e00; }
 .posthog-host { flex-wrap: wrap; }
 .posthog-host input { flex: 1 1 200px; }
+.key-hint { white-space: nowrap; }
 .logo.agents { background: #7c5cff; }
 .agent-consent { border-color: rgb(124 92 255 / 0.6); }
 .agent-consent h4 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }

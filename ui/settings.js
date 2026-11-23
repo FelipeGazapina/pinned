@@ -581,7 +581,7 @@ let posthogHost = "us";
 function posthogCardHtml() {
   const account = settings.posthog;
   const body = account && !agentAsking("connect_posthog")
-    ? `<p class="connected">Project <b>${esc(account.project_name || account.project)}</b> (${esc(account.project)}) on ${esc(posthogHostName(account.host))}, key <b>${esc(account.key_hint)}</b></p>
+    ? `<p class="connected">Project <b>${esc(account.project_name || account.project)}</b> (${esc(account.project)}) on ${esc(posthogHostName(account.host))}, <span class="key-hint">key <b>${esc(account.key_hint)}</b></span></p>
        <div class="actions"><button class="secondary" data-action="disconnect-posthog">Disconnect</button></div>`
     : `${agentAskingHtml("connect_posthog")}<ol class="steps">
          <li>Create a personal API key in PostHog's account settings that can read the project and run queries.</li>
@@ -594,7 +594,7 @@ function posthogCardHtml() {
            <button class="primary" data-action="connect-posthog">Connect</button></div></li>
        </ol>
        <p class="error" id="posthog-error"></p>`;
-  return `<div class="card">
+  return `<div class="card" id="posthog-card">
       <div class="card-head"><span class="logo posthog" data-tone="posthog">◆</span><div><b>PostHog</b><div class="hint">Errors that start an observability workflow</div></div>
         <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
       ${body}
@@ -1216,8 +1216,8 @@ function connectorsHtml() {
   const intro = `<h2>Workflows</h2>
     <p class="hint">A workflow watches a connector and opens a Claude Code tab on its own when something happens, so the agent starts before you ask.</p>
     ${workflowNotice()}`;
-  if (!settings.linear && !hasSlack()) {
-    return `${intro}<div class="card"><p>Connect Linear or Slack first.</p>
+  if (!settings.linear && !hasSlack() && !settings.posthog) {
+    return `${intro}<div class="card"><p>Connect Linear, Slack or PostHog first.</p>
       <div class="actions"><button class="primary" data-action="go-integrations">Go to Connectors</button></div></div>`;
   }
   return `${intro}
@@ -2376,6 +2376,8 @@ const actions = {
   "connect-for-trigger"(button) {
     pendingWorkflow = { kind: button.dataset.kind };
     showPage("integrations");
+    // The PostHog card sits below the fold, under the note that sent the user here.
+    if (TRIGGERS[pendingWorkflow.kind].needs === "posthog") document.getElementById("posthog-card")?.scrollIntoView({ block: "center" });
   },
   "resume-workflow": () => resumeWorkflow(),
   "forget-pending-workflow"() {
@@ -2832,7 +2834,7 @@ settingsSection({ page: "connectors", label: "Workflows", icon: "workflow", show
   refreshCopy().then(() => {
     if (page === "connectors") redraw();
   });
-}, search: [{ title: "Workflows", terms: ["linear label status assigned column slack mention automation trigger"] }] });
+}, search: [{ title: "Workflows", terms: ["linear label status assigned column slack mention automation trigger posthog error errors observability"] }] });
 settingsSection({ page: "account", label: "Account", icon: "circle-user", show: () => showAccount(), search: [{ title: "Password", terms: ["account change sign in out email"] }] });
 settingsSection({ page: "machines", label: "Machines", icon: "server", show: () => showMachinesAndRecheckSync(), search: [{ title: "Machines", terms: ["pair rename remove server node computer run in the background window"] }] });
 settingsSection({ page: "archive", label: "Archive", icon: "archive", show: () => showArchive(), search: [{ title: "Archive", terms: ["archived threads unarchive delete restore"] }] });

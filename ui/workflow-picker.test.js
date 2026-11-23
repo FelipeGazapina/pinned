@@ -5,6 +5,8 @@ import vm from "node:vm";
 import * as PinnedGraph from "./graph.js";
 
 const settingsSrc = readFileSync(new URL("./settings.js", import.meta.url), "utf8");
+const styleCss = readFileSync(new URL("./style.css", import.meta.url), "utf8");
+const guiSettingsCss = readFileSync(new URL("./gui-settings.css", import.meta.url), "utf8");
 
 const element = (id) => ({
   id,
@@ -78,7 +80,7 @@ function load({ linear = null, bots = [], reply = () => ({}) } = {}) {
   };
   context.globalThis = context;
   vm.runInNewContext(
-    `${settingsSrc}\nglobalThis.__actions = actions; globalThis.__steps = STEPS; globalThis.__tidy = tidy; globalThis.__state = () => ({ page, view }); globalThis.__setSettings = (next) => { settings = next; }; globalThis.__settings = () => settings;`,
+    `${settingsSrc}\nglobalThis.__actions = actions; globalThis.__steps = STEPS; globalThis.__tidy = tidy; globalThis.__state = () => ({ page, view }); globalThis.__setSettings = (next) => { settings = next; }; globalThis.__settings = () => settings; globalThis.__sections = settingsSections;`,
     context,
   );
   context.__setSettings({ linear, slack: bots[0] ?? null, slack_bots: bots, connectors: [], checked: null });
@@ -365,4 +367,55 @@ test("Connect on the PostHog card names the first empty field and sends nothing"
   assert.ok(!env.calls.some((call) => call.cmd === "connect_posthog"), "nothing reaches the hub");
   const card = env.context.posthogCardHtml();
   for (const label of ["PostHog host address", "PostHog project id", "PostHog personal API key"]) assert.match(card, new RegExp(`aria-label="${label}"`));
+});
+
+test("with PostHog as the only connector, Workflows offers a new workflow, and with none connected it names PostHog", () => {
+  const env = load({});
+  assert.match(env.context.connectorsHtml(), /Connect Linear, Slack or PostHog first\./);
+  assert.doesNotMatch(env.context.connectorsHtml(), /data-action="new-connector"/);
+  env.context.__setSettings({ ...env.context.__settings(), posthog: POSTHOG });
+  const list = env.context.connectorsHtml();
+  assert.match(list, /data-action="new-connector">＋ New workflow/);
+  assert.doesNotMatch(list, /Connect Linear, Slack or PostHog first/);
+});
+
+test("the detour to connect PostHog brings its card into view; a Linear detour leaves the page at the top", async () => {
+  const env = load({ linear: LINEAR });
+  const scrolled = [];
+  env.context.document.getElementById("posthog-card").scrollIntoView = (how) => scrolled.push({ ...how });
+  await openPicker(env);
+  await env.click("observability");
+  assert.equal(env.state().page, "integrations");
+  assert.match(env.html(), /<div class="card" id="posthog-card">/);
+  assert.deepEqual(scrolled, [{ block: "center" }]);
+
+  const bare = load({});
+  const none = [];
+  bare.context.document.getElementById("posthog-card").scrollIntoView = (how) => none.push(how);
+  await openPicker(bare);
+  await bare.click("linear-label");
+  assert.equal(bare.state().page, "integrations");
+  assert.deepEqual(none, []);
+});
+
+test("the connected PostHog card keeps the key hint on one line", () => {
+  const env = load({});
+  env.context.__setSettings({ ...env.context.__settings(), posthog: POSTHOG });
+  assert.match(env.context.posthogCardHtml(), /<span class="key-hint">key <b>…k3y9<\/b><\/span>/);
+  assert.match(styleCss, /\n\.key-hint \{ white-space: nowrap; \}/);
+});
+
+test("the PostHog host choice keeps room for its arrow, past the field rule that pads every settings input", () => {
+  // The field rule's `:is(input:not([type="checkbox"]), ...)` outweighs `#settings select`, so the select's own 32px is lost.
+  assert.match(guiSettingsCss, /body\[data-mode="gui"\] #settings :is\(input:not\(\[type="checkbox"\]\), select, textarea\) \{ min-height: 32px; padding: 6px 10px;/);
+  const rule = /body\[data-mode="gui"\] #settings #posthog-host-choice \{([^}]*)\}/.exec(guiSettingsCss);
+  assert.ok(rule, "a rule with an id outweighs the field rule");
+  assert.match(rule[1], /padding-right: 32px/);
+  assert.ok(guiSettingsCss.indexOf(rule[0]) > guiSettingsCss.indexOf("background-position: right 10px center"), "it follows the select rule it restores");
+});
+
+test("Settings search finds Workflows by posthog, error and observability", () => {
+  const env = load({});
+  const workflows = env.context.__sections.find((s) => s.page === "connectors").search.find((item) => item.title === "Workflows");
+  for (const word of ["posthog", "error", "observability"]) assert.ok(workflows.terms.join(" ").split(" ").includes(word), word);
 });
