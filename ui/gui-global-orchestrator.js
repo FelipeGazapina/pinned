@@ -22,10 +22,29 @@ const globalOrchestratorName = () => {
   return goSettings?.view?.name ?? "Orchestrator";
 };
 
+/** The hub while the app is signed in, else null; it keeps the account's last save of this section. */
+const goHub = () => (typeof hub === "undefined" ? null : hub);
+
+/** A machine's id on the hub: this computer is LOCAL on the page and its own id on the hub. */
+const goHubId = (id) => (id === LOCAL ? machines.get(LOCAL)?.hubView?.id ?? null : id);
+
+/** The hub's last save of this section (`global_orchestrator_save`), or null with no hub, no save,
+ * or a hub too old to keep one. */
+async function readGlobalOrchestratorSave() {
+  const linked = goHub();
+  if (!linked) return null;
+  try {
+    return (await linked.hub({ cmd: "global_orchestrator_save" })) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Reads the account's setting: `global_orchestrator_settings` from every online machine, one
- * entry per machine with what that machine answered or why it could not. */
+ * entry per machine with what that machine answered or why it could not, marked `pending` when the
+ * hub's last save has not reached it yet. */
 async function readGlobalOrchestratorSettings() {
-  const list = await Promise.all(
+  const read = Promise.all(
     [...machines.entries()]
       .filter(([, m]) => !m.view.upstash_box)
       .map(async ([id, m]) => {
@@ -40,7 +59,10 @@ async function readGlobalOrchestratorSettings() {
         return machine;
       }),
   );
-  return { machines: list, view: mergeGlobalSettings(list) };
+  const [list, save] = await Promise.all([read, readGlobalOrchestratorSave()]);
+  const pending = new Set(save?.pending ?? []);
+  for (const machine of list) if (pending.has(goHubId(machine.id))) machine.pending = true;
+  return { machines: list, view: mergeGlobalSettings(list), save };
 }
 
 /** The profile's length against the cap, so a paste the textarea cuts short does not pass unnoticed. */
@@ -142,7 +164,9 @@ function globalOrchestratorForm() {
 /** Saves the account-wide setting: the shared fields to every online machine, `host` true only on
  * the chosen one. A machine that cannot take it says so below the fields; the save itself stands
  * when the chosen host took it, and any other machine whose write failed is named, as it keeps its
- * old settings. Then the page tells the rest of the UI through the "global-orchestrator-settings"
+ * old settings. A signed-in app then records the save with the hub, which sends it to each machine
+ * that did not take it once that machine connects; a hub that cannot record it leaves the save as
+ * it is. Then the page tells the rest of the UI through the "global-orchestrator-settings"
  * event, whose name is a contract. `view` is the form's by default; the drift note passes the
  * host's saved one. */
 async function saveGlobalOrchestratorSettings(view = globalOrchestratorForm()) {
@@ -157,8 +181,9 @@ async function saveGlobalOrchestratorSettings(view = globalOrchestratorForm()) {
   }
   error.textContent = "";
   save.disabled = true;
+  const writes = globalSettingsWrites(view, live);
   const outcomes = await Promise.all(
-    globalSettingsWrites(view, live).map(async (w) => {
+    writes.map(async (w) => {
       try {
         return { machine: w.machine, settings: await callOn(w.machine, { cmd: "set_global_orchestrator_settings", settings: w.settings }) };
       } catch (e) {
@@ -172,6 +197,12 @@ async function saveGlobalOrchestratorSettings(view = globalOrchestratorForm()) {
     const failed = outcomes.find((o) => o.machine === view.host);
     error.textContent = `Could not save on ${host.name}: ${failed?.error ?? "no answer"}`;
     return;
+  }
+  const linked = goHub();
+  if (linked) {
+    const { host: _host, ...settings } = writes.find((w) => w.machine === view.host).settings;
+    const took = outcomes.filter((o) => !o.error).map((o) => goHubId(o.machine)).filter(Boolean);
+    await linked.hub({ cmd: "record_global_orchestrator_save", settings, took }).catch(() => {});
   }
   document.dispatchEvent(new CustomEvent("global-orchestrator-settings", { detail: saved.settings }));
   const section = document.getElementById("global-orchestrator-settings");
