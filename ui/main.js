@@ -1618,6 +1618,11 @@ function connectHub(signedIn) {
   });
 }
 
+// Coming back to the window, or the network coming back, tries the hub at once instead of after the wait.
+addEventListener("online", () => hub?.retryNow());
+addEventListener("focus", () => hub?.retryNow());
+document.addEventListener("visibilitychange", () => document.hidden || hub?.retryNow());
+
 function showMachines(list, tabsByMachine) {
   for (const view of list) {
     if (view.id === account.machine_id) {

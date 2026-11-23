@@ -257,37 +257,63 @@ test("the live states held still and dimmed with the hub link down are those of 
 });
 
 /** hub.js on sockets the test closes itself. `draws` are the jitter draws in order; waits are what the
- * socket asked setTimeout for. */
-function app({ draws = [], start = 0 } = {}) {
+ * socket asked setTimeout for between tries, and `retries` their timers. The timer set as a socket is
+ * made is that try's deadline, `socket.deadline`. A timer runs only when the test fires it, and not
+ * once cleared. `hello` is the app's handler for the hub's hello. */
+function app({ draws = [], start = 0, hello } = {}) {
   const sockets = [];
   const waits = [];
+  const retries = [];
+  const timers = [];
   const reports = [];
   const time = { now: start };
   class WebSocket {
     static OPEN = 1;
     constructor() {
       this.readyState = 1;
+      this.sent = [];
+      this.closed = false;
+      this.deadline = null;
       sockets.push(this);
     }
-    send() {}
-    close() {}
+    send(text) {
+      this.sent.push(JSON.parse(text));
+    }
+    close() {
+      this.closed = true;
+    }
   }
   const context = {
     WebSocket,
-    setTimeout: (run, ms) => (waits.push(ms), (pending.run = run)),
+    setTimeout: (run, ms) => {
+      const timer = { run, ms, cleared: false, fired: false };
+      timers.push(timer);
+      const socket = sockets.at(-1);
+      if (!socket.deadline) socket.deadline = timer;
+      else waits.push(ms), retries.push(timer);
+      return timer;
+    },
+    clearTimeout: (timer) => timer && (timer.cleared = true),
     draw: () => (draws.length ? draws.shift() : 0.5),
     now: () => time.now,
-    reports,
+    on: { online: (on) => reports.push(on), ...(hello ? { hello } : {}) },
   };
-  const pending = {};
   vm.createContext(context);
-  vm.runInContext(`${hubSrc}\nthis.hub = new Hub("https://hub.example", "login", { online: (on) => reports.push(on) }, { draw, now });`, context);
-  const open = () => sockets.at(-1).onmessage({ data: JSON.stringify({ type: "hello", tabs: {} }) });
+  vm.runInContext(`${hubSrc}\nthis.hub = new Hub("https://hub.example", "login", on, { draw, now });`, context);
+  const fire = (timer) => {
+    if (!timer || timer.cleared || timer.fired) return;
+    timer.fired = true;
+    timer.run();
+  };
+  /** Timers set and neither fired nor cleared. */
+  const live = () => timers.filter((t) => !t.cleared && !t.fired);
+  const helloFrame = { data: JSON.stringify({ type: "hello", tabs: {} }) };
+  const open = () => sockets.at(-1).onmessage(helloFrame);
   const drop = (code) => {
     sockets.at(-1).onclose({ code });
-    pending.run?.();
+    fire(retries.at(-1));
   };
-  return { hub: context.hub, sockets, waits, reports, time, open, drop };
+  return { hub: context.hub, sockets, waits, retries, reports, time, open, drop, fire, live, helloFrame };
 }
 
 test("a hub that stays away is retried after 1, 2, 4 … 30 s, and no wait passes 30 s", () => {
@@ -362,6 +388,126 @@ test("a refused sign-in is not retried or reported as an outage", () => {
   sockets.at(-1).onclose({ code: 1008 });
   assert.deepEqual(reports, []);
   assert.deepEqual(waits, []);
+});
+
+test("a try whose socket never opens is given up at 20 s, retried after the next wait, and its socket stays quiet", () => {
+  const { hub, sockets, waits, retries, reports, fire, live, helloFrame } = app();
+  const first = sockets[0];
+  assert.equal(first.deadline.ms, 20000);
+  fire(first.deadline);
+  assert.equal(first.closed, true, "the socket given up on is closed");
+  assert.deepEqual(reports, [false], "down once, without waiting for the socket's own close");
+  assert.deepEqual(waits, [1000], "a try the hub never accepted backs off from 1 s");
+  assert.equal(sockets.length, 1);
+  first.onclose({ code: 1006 });
+  first.onopen();
+  first.onmessage(helloFrame);
+  assert.deepEqual(reports, [false], "a late close, open or hello from it changes nothing");
+  assert.deepEqual(first.sent, []);
+  assert.equal(hub.online, false);
+  assert.deepEqual(waits, [1000], "and schedules nothing");
+  assert.equal(live().length, 1, "only the wait before the next try");
+  fire(retries[0]);
+  assert.equal(sockets.length, 2, "the next try runs after the wait");
+  first.onclose({ code: 1006 });
+  assert.equal(sockets.length, 2);
+  assert.deepEqual(reports, [false]);
+  assert.deepEqual(live(), [sockets[1].deadline], "only the new try's deadline is left");
+  fire(sockets[1].deadline);
+  assert.deepEqual(reports, [false], "a second miss in the same outage is not reported again");
+  assert.deepEqual(waits, [1000, 2000]);
+});
+
+test("a try that sent its login but heard no hello in 20 s is given up the same way", () => {
+  const { sockets, waits, reports, fire } = app();
+  const first = sockets[0];
+  first.onopen();
+  assert.deepEqual(first.sent, [{ type: "auth", token: "login", lock: true }]);
+  fire(first.deadline);
+  assert.equal(first.closed, true);
+  assert.deepEqual(reports, [false]);
+  assert.deepEqual(waits, [1000]);
+  first.onclose({ code: 1006 });
+  assert.deepEqual(reports, [false]);
+  assert.deepEqual(waits, [1000]);
+});
+
+test("a try the hub accepts in time is not given up when 20 s pass, and one that closes first ends its deadline", () => {
+  const { hub, sockets, reports, fire, open, drop } = app();
+  sockets[0].onopen();
+  open();
+  assert.equal(sockets[0].deadline.cleared, true);
+  fire(sockets[0].deadline);
+  assert.equal(sockets[0].closed, false);
+  assert.equal(hub.online, true);
+  assert.deepEqual(reports, [true]);
+  drop(1006);
+  assert.equal(sockets.length, 2);
+  sockets[1].onclose({ code: 1006 });
+  assert.equal(sockets[1].deadline.cleared, true, "the close ends the try, not the deadline");
+});
+
+test("retry now cuts the wait short and keeps the backoff where it was", () => {
+  const { hub, sockets, waits, retries, fire } = app();
+  sockets[0].onclose({ code: 1006 });
+  assert.deepEqual(waits, [1000]);
+  hub.retryNow();
+  assert.equal(sockets.length, 2, "a new try at once");
+  assert.equal(retries[0].cleared, true);
+  fire(retries[0]);
+  assert.equal(sockets.length, 2, "the wait it cut short starts no second try");
+  sockets[1].onclose({ code: 1006 });
+  assert.deepEqual(waits, [1000, 2000], "the try after a cut-short 1 s wait waits 2 s");
+});
+
+test("retry now does nothing while the link is up, while a try runs, after sign-out or after a refused login", () => {
+  const up = app();
+  up.open();
+  up.hub.retryNow();
+  assert.equal(up.sockets.length, 1, "link up");
+  assert.deepEqual(up.live(), []);
+
+  const trying = app();
+  trying.hub.retryNow();
+  assert.equal(trying.sockets.length, 1, "first try running");
+  trying.drop(1006);
+  trying.hub.retryNow();
+  assert.equal(trying.sockets.length, 2, "a retried try running");
+  assert.deepEqual(trying.live(), [trying.sockets[1].deadline]);
+
+  const signedOut = app();
+  signedOut.sockets[0].onclose({ code: 1006 });
+  signedOut.hub.close();
+  signedOut.hub.retryNow();
+  assert.equal(signedOut.sockets.length, 1, "after sign-out");
+  assert.deepEqual(signedOut.live(), []);
+
+  const refused = app();
+  refused.sockets[0].onclose({ code: 1008 });
+  refused.hub.retryNow();
+  assert.equal(refused.sockets.length, 1, "after a refused login");
+  assert.deepEqual(refused.waits, []);
+  assert.deepEqual(refused.live(), []);
+});
+
+test("the UI hears the link is up even when handling the hello throws", () => {
+  const { hub, reports, open } = app({
+    hello() {
+      throw new Error("hello handler broke");
+    },
+  });
+  assert.throws(open, /hello handler broke/);
+  assert.equal(hub.online, true);
+  assert.deepEqual(reports, [true]);
+});
+
+test("the window coming back or the network returning tries the hub at once, set up once at load", () => {
+  const main = read("main.js");
+  const connect = fn(main, "connectHub");
+  assert.ok(!connect.includes("retryNow"), "not once per sign-in");
+  assert.ok(main.includes('addEventListener("online", () => hub?.retryNow());'));
+  assert.ok(main.includes('addEventListener("focus", () => hub?.retryNow());'));
+  assert.ok(main.includes('document.addEventListener("visibilitychange", () => document.hidden || hub?.retryNow());'));
 });
 
 test("sign-in says plainly when the hub can't be reached, in each browser's words and the app's", () => {

@@ -396,7 +396,7 @@ test("Agent activity comes right after Machines in the settings nav", () => {
 
 test("the hub's confirmations push reaches the app with its items", () => {
   const got = [];
-  const context = { WebSocket: class { send() {} } };
+  const context = { WebSocket: class { send() {} }, setTimeout: () => 0 };
   vm.createContext(context);
   vm.runInContext(`${read("hub.js")}\nthis.hub = new Hub("https://hub.example", "token", { confirmations: (items) => got.push(items) });`, Object.assign(context, { got }));
   context.hub.receive({ type: "confirmations", items: [removeImac] });
