@@ -31,7 +31,7 @@ const AGENT_FORMS = {
   connect_slack: { page: "integrations", focus: "slack-token", entered: ["token"], noun: "token" },
   connect_github: { page: "integrations", focus: "github-token", entered: ["token"], noun: "token" },
   connect_vercel: { page: "integrations", focus: "vercel-key", entered: ["key"], noun: "key" },
-  connect_posthog: { page: "integrations", focus: "posthog-key", entered: ["key"], noun: "key" },
+  connect_posthog: { page: "integrations", focus: "posthog-key", entered: ["key"], noun: "key", same: ["project", "host"] },
   connect_upstash: { page: "integrations", focus: "upstash-key", entered: ["key", "claude_token"], noun: "key and token" },
   set_box_claude_token: { page: "integrations", focus: "box-token", entered: ["token"], noun: "token" },
   connect_convex: { page: "integrations", focus: "convex-key", entered: ["key"], noun: "deploy key" },
