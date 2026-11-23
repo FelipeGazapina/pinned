@@ -50,7 +50,9 @@ function app(answers = {}, world = {}) {
     visibleInterval: () => 0,
     console,
     WebSocket,
-    setTimeout: (run) => run(),
+    // A reconnect runs at once; the 20 s deadline on each try never comes.
+    setTimeout: (run, ms) => (ms === 20000 ? 0 : run()),
+    clearTimeout() {},
     addEventListener() {},
     account: { email: "ana@acme.dev" },
     load() { return null; },
