@@ -110,6 +110,8 @@ button.reports-head:hover { background: var(--g-accent); }
 #captains-rail .captain-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 #captains-rail .captain-row :is(.state, .start) { flex: none; font-size: 12px; color: var(--g-side-muted); }
 #captains-rail .captain-row[data-state="working"] .state { color: var(--g-blue); }
+#captains-rail .captain-row[data-state="needs_you"] .state { color: var(--g-warning-fg); }
+#captains-rail .captain-row[data-state="fixing"] .state { color: var(--g-error); }
 #captains-rail .captain-row .start { display: none; color: color-mix(in srgb, var(--g-link) 75%, white); }
 #captains-rail .captain-row:is(:hover, :focus-visible) .start { display: inline; }
 #captains-rail .captain-row:is(:hover, :focus-visible):has(.start) .state { display: none; }

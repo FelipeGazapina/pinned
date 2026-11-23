@@ -1,6 +1,7 @@
-// #349 unit 5: the Plan surface, a Captain thread's plans in the right panel (plan.rs). gui-panel.js owns the
-// panel frame, the add menu entry and the render dispatch; this file draws the surface, keeps its data current
-// and owns its clicks. Loaded after gui-surfaces.js.
+// #349 units 5-6: the Plan surface, a Captain thread's plans in the right panel (plan.rs), and the Captains surface
+// on the Orchestrator thread, one card per Captain. gui-panel.js owns the panel frame, the add menu entry and the
+// render dispatch; this file draws the surfaces, keeps their data current and owns their clicks. Loaded after
+// gui-surfaces.js.
 
 /** The zoom levels: the cell width and row height of one main step, in px. */
 const PLAN_ZOOMS = [
@@ -13,6 +14,10 @@ const PLAN_ZOOMS = [
 const PLAN_STEP_WORD = { done: "Done", running: "Running now", failed: "Failed", waiting: "Waiting for your go", pending: "Not started" };
 const PLAN_CARD_WORD = { needs_you: "Needs you", fixing: "Fixing", working: "Working", idle: "Idle", finished: "Finished", closed: "Closed" };
 const PLAN_ORDER = { needs_you: 0, fixing: 1, working: 2, idle: 3, finished: 4, closed: 5 };
+/** The states the Captains header counts, in its order. */
+const CAPTAIN_COUNTED = ["needs_you", "fixing", "working", "idle"];
+/** What each letter of a glance's strips means: `x` is a done step that took a fix. */
+const PLAN_DOT_STATE = { d: "done", x: "done", r: "running", f: "failed", w: "waiting", p: "pending" };
 
 const planAfterFix = (step) => step.state === "done" && /^after /.test(step.why ?? "");
 const planStepWord = (step) => (planAfterFix(step) ? "Done, after one fix" : PLAN_STEP_WORD[step.state]);
@@ -87,6 +92,8 @@ const planCache = new Map(); // tab key -> { sig, plans, loading, dirty, failed 
 /** The part of the glance the surface draws: a push that leaves it alone sends no call. */
 const planSig = (t) => JSON.stringify([t.view.session ?? null, (t.view.plans ?? []).map((g) => [g.id, g.state, g.done, g.total, g.strips, g.finished_at ?? null])]);
 const isPlanCaptain = (tab) => !!tab && tab.view.role === "orchestrator" && !tab.view.orchestrator_global;
+/** The Orchestrator's own thread, where the Captains surface shows. */
+const isGlobalThread = (tab) => tab?.view?.orchestrator_global === true;
 const planGlances = (t) => [...(t.view.plans ?? [])].sort((a, b) => PLAN_ORDER[a.state] - PLAN_ORDER[b.state]);
 
 /** The Captain's full plans for the glance it has now. The call for a new glance starts its fetch; one in flight
@@ -134,6 +141,25 @@ function planRerender() {
   if (shownSurface(active)?.kind === "plan") renderPanel();
 }
 
+/** The fold, the picked plan and the picked step belong to one Captain session: a session change (a /resume) or a
+ * different Captain starts them over, so an old pick never lands on the new session's plan with the same id. */
+function planKeep(s, t) {
+  const session = t.view.session ?? null;
+  if (s.keep?.key === t.key && s.keep?.session === session) return;
+  s.keep = { key: t.key, session };
+  delete s.folded;
+  delete s.fixOpen;
+  delete s.plan;
+  delete s.step;
+}
+
+/** The Captain whose plan the surface draws now: the thread's own, or on the Orchestrator's Captains surface the one
+ * in full view. */
+function planSubject(s, t) {
+  if (!isGlobalThread(t)) return t;
+  return (s.focus && tabByKey(s.focus.key)) ?? null;
+}
+
 /** A resume (`carry_plans`) drops a tab's old plans without a word on the wire. The surface keeps the last glance it
  * drew per thread, so a session change that takes an unfinished plan away shows one line until it is dismissed.
  * A resumed session numbers its plans from p1 again, so a plan counts as the same only with its id and title. */
@@ -159,12 +185,15 @@ function planDetectDropped(t) {
 }
 
 /** A new plan id opens the surface once, on the viewed Captain, with its panel closed. The opened ids belong to one
- * session: a resume restarts plan ids at p1, so a session change starts the list over and only that session's ids stay. */
+ * session: a resume restarts plan ids at p1, so a session change starts the list over and only that session's ids stay.
+ * A plan the resume carried over keeps its id and title, and counts as opened already: it does not reopen the surface. */
 function planAutoOpen(t) {
   const p = panelOf(t);
   const session = t.view.session ?? null;
-  const opened = p.autoOpened?.session === session ? p.autoOpened.ids : [];
-  const fresh = (t.view.plans ?? []).filter((g) => !g.finished_at && !opened.includes(g.id));
+  const plans = t.view.plans ?? [];
+  const carried = p.seen && p.seen.session !== session ? plans.filter((g) => p.seen.plans.some((u) => u.id === g.id && u.title === g.title)).map((g) => g.id) : [];
+  const opened = p.autoOpened?.session === session ? p.autoOpened.ids : carried;
+  const fresh = plans.filter((g) => !g.finished_at && !opened.includes(g.id));
   const next = { session, ids: [...opened, ...fresh.map((g) => g.id)] };
   if (JSON.stringify(next) !== JSON.stringify(p.autoOpened)) {
     p.autoOpened = next;
@@ -174,12 +203,109 @@ function planAutoOpen(t) {
   addSurface(t, p.surfaces.find((x) => x.kind === "plan") ?? { id: "plan", kind: "plan", title: "Plan" });
 }
 
-/** Every tabs push: auto-open for a new plan, and a fetch when the shown Captain's glance moved. */
+/** Every tabs push. On a Captain: auto-open for a new plan, the dropped line, and a fetch when the shown glance moved.
+ * On the Orchestrator: the Captains surface redraws from the glances, and fetches only the cards that are unfolded. */
 function onPlanPush() {
   const t = active;
-  if (!t || !guiOn() || !isPlanCaptain(t)) return;
+  if (!t || !guiOn()) return;
+  if (isGlobalThread(t)) return planRerender();
+  if (!isPlanCaptain(t)) return;
   planAutoOpen(t);
+  planDetectDropped(t);
   if (shownSurface(t)?.kind === "plan") planRefresh(t);
+}
+
+// ---- the Orchestrator's Captains: one card per Captain, the words and order from its plans and its own wait ----
+
+/** A Captain's card: its state, the word for it, and the plan the card leads with. The most urgent of its own wait for
+ * the user, its own work and its plans decides the state. The rail's word is this word too. */
+function captainCard(t) {
+  const plans = planGlances(t);
+  const own = threadState(t) === "needs" ? "needs_you" : threadState(t) === "working" ? "working" : null;
+  const state = [own, plans[0]?.state].filter(Boolean).sort((a, b) => PLAN_ORDER[a] - PLAN_ORDER[b])[0] ?? "idle";
+  const lead = plans.find((g) => g.state === state) ?? plans[0] ?? null;
+  const ends = plans.map((g) => g.finished_at).filter((at) => at != null);
+  const word = state === "finished" && ends.length ? `Finished at ${planClock(Math.max(...ends))}` : PLAN_CARD_WORD[state];
+  return { state, word, plans, now: lead?.now ?? "", done: lead?.done ?? 0, total: lead?.total ?? 0 };
+}
+
+/** Every Captain tab with its card, and the project and machine its card names. */
+function captainRows() {
+  const facts = captainFacts();
+  return tabs.filter(isPlanCaptain).map((t) => ({
+    tab: t,
+    card: captainCard(t),
+    name: facts.find((f) => f.captain === t.key)?.name ?? projectName(t),
+    machine: machineName(t.machine),
+  }));
+}
+
+/** One plan's dots: a group per list, a dot per step, as the glance's strips spell them. */
+const planStripHtml = (g) => `<span class="pl-dots">${g.strips.map((x) => `<span class="pl-grp">${[...x].map((ch) => `<i class="pl-sd" data-state="${PLAN_DOT_STATE[ch] ?? "pending"}"></i>`).join("")}</span>`).join("")}</span>`;
+
+/** The rail row's dots: one strip per unfinished plan of its Captain. */
+function planRailStripHtml(t) {
+  const live = planGlances(t).filter((g) => !g.finished_at);
+  return live.length ? `<span class="pl-railstrip">${live.map(planStripHtml).join("")}</span>` : "";
+}
+
+/** The Captains surface as a whole: the header counts, the cards by urgency, the plain Captains, or the full plan. */
+function captainsView(s) {
+  const rows = captainRows();
+  const focus = s.focus ? rows.find((r) => r.tab.key === s.focus.key) : null;
+  if (focus) return `<div class="pl" data-view="full">${captainFullHtml(focus, s)}</div>`;
+  if (!rows.length) return `<div class="pl" data-view="captains"><div class="pl-empty"><p class="t">No Captain yet</p><p>A project's Captain keeps its plan here.</p></div></div>`;
+  const withPlan = rows.filter((r) => r.card.plans.length).sort((a, b) => PLAN_ORDER[a.card.state] - PLAN_ORDER[b.card.state]);
+  const plain = rows.filter((r) => !r.card.plans.length);
+  const count = CAPTAIN_COUNTED.map((k) => [k, rows.filter((r) => r.card.state === k).length])
+    .filter(([, n]) => n)
+    .map(([k, n]) => `${n} ${PLAN_CARD_WORD[k].toLowerCase()}`)
+    .join(" · ");
+  const cards = withPlan.map((r) => captainCardHtml(r, s)).join("");
+  const rest = plain.length ? `<p class="pl-sec">No plan running</p>${plain.map(captainPlainHtml).join("")}` : "";
+  return `<div class="pl" data-view="captains"><div class="pl-head"><span class="pl-count">${count}</span></div><div class="pl-scroll pl-cards">${cards}${rest}</div></div>`;
+}
+
+/** A card: the Captain's tile, name, machine, the now line, the word, done of total, a strip per unfinished plan, and
+ * the tree in place when unfolded. Unfolded for this session only: a resume folds it again. */
+function captainCardHtml(r, s) {
+  const { tab, card } = r;
+  const open = s.unfolded?.[tab.key] === (tab.view.session ?? "");
+  const strips = card.plans
+    .filter((g) => !g.finished_at)
+    .map((g) => `<div class="pl-strip"><span class="t" title="${esc(g.title)}">${esc(g.title)}</span>${planStripHtml(g)}</div>`)
+    .join("");
+  const body = open ? planInPlaceHtml(r) : "";
+  return `<section class="pl-card" data-cstate="${card.state}" data-open="${open}"><button type="button" class="pl-card-head" data-card="${esc(tab.key)}" aria-expanded="${open}">${captainMonoHtml(r.name)}<span class="text"><span class="top"><span class="name">${esc(r.name)}</span><span class="machine">${esc(r.machine)}</span></span><span class="sub">${esc(card.now)}</span></span><span class="end"><span class="pl-word" data-tone="${card.state}">${card.word}</span><span class="n">${card.done}/${card.total}</span></span>${icon(open ? "chevron-up" : "chevron-down", "chev")}</button>${strips}${body}</section>`;
+}
+
+/** A Captain with no plan: a short row under No plan running. Its thread opens from its own button. */
+const captainPlainHtml = (r) => `<div class="pl-idle">${captainMonoHtml(r.name)}<span class="name">${esc(r.name)}</span><span class="machine">${esc(r.machine)}</span><span class="pl-word" data-tone="${r.card.state}">${r.card.word}</span><button type="button" class="ghost" data-open-thread="${esc(r.tab.key)}">${icon("arrow-up-right")}Open thread</button></div>`;
+
+/** The tree in place of an unfolded card: its unfinished plans stacked at the Dots zoom, without step names. Fetches
+ * that Captain's plans once per glance change. Its controls are the full plan and the thread. */
+function planInPlaceHtml(r) {
+  const c = planRefresh(r.tab);
+  const actions = `<div class="pl-card-actions"><button type="button" class="outline" data-full="${esc(r.tab.key)}">${icon("maximize-2")}Open the full plan</button><button type="button" class="ghost" data-open-thread="${esc(r.tab.key)}">${icon("arrow-up-right")}Open thread</button></div>`;
+  if (!c.plans) return `<div class="pl-card-body"><p class="pl-loading">${c.failed ? "Could not load the plan." : "Loading the plan…"}</p>${actions}</div>`;
+  const live = r.card.plans
+    .filter((g) => !g.finished_at)
+    .map((g) => c.plans.find((p) => p.id === g.id))
+    .filter(Boolean);
+  const trees = live.map((p) => `<div class="pl-mini"><p class="pl-mini-title">${esc(p.title)}</p><div class="pl-lists">${p.lists.map(planDotsListHtml).join("")}</div></div>`).join("");
+  return `<div class="pl-card-body">${trees || `<p class="pl-loading">Every plan is finished.</p>`}${actions}</div>`;
+}
+
+/** A list in the tree in place: its name, its word and its track at the Dots zoom. It has no controls. */
+function planDotsListHtml(list) {
+  const [tone, word] = planListWord(list);
+  return `<section class="pl-list"><div class="pl-list-head"><span class="pl-list-name">${esc(list.name)}</span><span class="pl-word" data-tone="${tone}">${word}</span></div>${planTrackHtml(list, {}, 0)}</section>`;
+}
+
+/** The whole plan of one Captain on the Orchestrator's surface, with All Captains back and Open thread. */
+function captainFullHtml(r, s) {
+  const lead = `<div class="pl-fullhead"><button type="button" class="ghost pl-back" data-back>${icon("chevron-left")}All Captains</button>${captainMonoHtml(r.name)}<span class="name">${esc(r.name)}</span><span class="machine">${esc(r.machine)}</span><button type="button" class="ghost" data-open-thread="${esc(r.tab.key)}">${icon("arrow-up-right")}Open thread</button></div>`;
+  return planBodyHtml(r.tab, s, { captains: true, lead });
 }
 
 // ---- render ----
@@ -203,19 +329,9 @@ function planStepHtml(step, x, y, Z, zoom, s) {
   return `<button type="button" class="pl-step${picked}" data-step="${esc(step.id)}" data-state="${step.state}"${planAfterFix(step) ? ' data-fixed=""' : ""} style="left:${x - Z.cell / 2}px;top:${y - 8}px;width:${Z.cell}px" title="${esc(step.name)} · ${esc(planStepWord(step))}"><span class="pl-dot"></span>${name}${meta}</button>`;
 }
 
-function planListHtml(list, s, zoom) {
+/** A list's track: the dots on the base line, the open fix branches and the steps, at one zoom level. */
+function planTrackHtml(list, s, zoom) {
   const Z = PLAN_ZOOMS[zoom];
-  const folded = (s.folded ?? []).includes(list.id);
-  const [tone, word] = planListWord(list);
-  const fixSteps = list.steps.filter((x) => x.fixes.length);
-  const fixOn = fixSteps.some((x) => planFixOpen(s, x));
-  const fixCount = fixSteps.reduce((n, x) => n + x.fixes.length, 0);
-  const chip = fixSteps.length
-    ? `<button type="button" class="pl-fixchip" data-fixchip="${esc(list.id)}" aria-pressed="${fixOn}" title="${fixOn ? "Hide" : "Show"} the fix branch">${icon("git-branch")}${fixCount} ${fixCount === 1 ? "fix" : "fixes"}</button>`
-    : "";
-  const bar = `<span class="pl-bar">${list.steps.map((x) => `<i data-state="${x.state}"></i>`).join("")}</span>`;
-  const head = `<div class="pl-list-head"><button type="button" class="pl-fold" data-fold="${esc(list.id)}" aria-expanded="${!folded}">${icon(folded ? "chevron-right" : "chevron-down")}<span class="pl-list-name">${esc(list.name)}</span></button>${bar}<span class="pl-word" data-tone="${tone}">${word}</span>${chip}</div>`;
-  if (folded) return `<section class="pl-list folded">${head}</section>`;
   const { xs, fixes, last, width } = planLayout(list, s, Z);
   const dotY = zoom === 0 ? Z.row / 2 : 12;
   const height = Z.row + (fixes.length ? Z.row : 0);
@@ -233,11 +349,27 @@ function planListHtml(list, s, zoom) {
     f.steps.forEach((st, k) => (steps += planStepHtml(st, f.xs[k], fy, Z, zoom, s)));
   }
   list.steps.forEach((st, i) => (steps += planStepHtml(st, xs[i], dotY, Z, zoom, s)));
-  const track = `<div class="pl-track" data-z="${zoom}" style="height:${height}px"><div class="pl-canvas" style="width:${width}px;height:${height}px"><svg width="${width}" height="${height}" aria-hidden="true">${svg}</svg>${steps}</div></div>`;
-  return `<section class="pl-list${fixes.length ? " has-fix" : ""}">${head}${track}</section>`;
+  return `<div class="pl-track" data-z="${zoom}" style="height:${height}px"><div class="pl-canvas" style="width:${width}px;height:${height}px"><svg width="${width}" height="${height}" aria-hidden="true">${svg}</svg>${steps}</div></div>`;
 }
 
-function planFootHtml(plan, s) {
+function planListHtml(list, s, zoom) {
+  const Z = PLAN_ZOOMS[zoom];
+  const folded = (s.folded ?? []).includes(list.id);
+  const [tone, word] = planListWord(list);
+  const fixSteps = list.steps.filter((x) => x.fixes.length);
+  const fixOn = fixSteps.some((x) => planFixOpen(s, x));
+  const fixCount = fixSteps.reduce((n, x) => n + x.fixes.length, 0);
+  const chip = fixSteps.length
+    ? `<button type="button" class="pl-fixchip" data-fixchip="${esc(list.id)}" aria-pressed="${fixOn}" title="${fixOn ? "Hide" : "Show"} the fix branch">${icon("git-branch")}${fixCount} ${fixCount === 1 ? "fix" : "fixes"}</button>`
+    : "";
+  const bar = `<span class="pl-bar">${list.steps.map((x) => `<i data-state="${x.state}"></i>`).join("")}</span>`;
+  const head = `<div class="pl-list-head"><button type="button" class="pl-fold" data-fold="${esc(list.id)}" aria-expanded="${!folded}">${icon(folded ? "chevron-right" : "chevron-down")}<span class="pl-list-name">${esc(list.name)}</span></button>${bar}<span class="pl-word" data-tone="${tone}">${word}</span>${chip}</div>`;
+  if (folded) return `<section class="pl-list folded">${head}</section>`;
+  const { fixes } = planLayout(list, s, Z);
+  return `<section class="pl-list${fixes.length ? " has-fix" : ""}">${head}${planTrackHtml(list, s, zoom)}</section>`;
+}
+
+function planFootHtml(plan, s, what = true) {
   const live = planLiveStep(plan);
   const hit = (s.step && planFindStep(plan, s.step)) || (live && planFindStep(plan, live.id));
   if (!hit) return "";
@@ -245,21 +377,23 @@ function planFootHtml(plan, s) {
   const why = step.why && !planAfterFix(step) ? `<p class="pl-why">${esc(step.why)}</p>` : "";
   const branch = under ? `Fix ${esc(fix.id)}, under “${esc(under.name)}”` : "Main line";
   return `<div class="pl-foot" data-state="${step.state}"><p class="pl-foot-state"><span class="pl-dot"></span>${s.step ? planStepWord(step) : `Live now · ${planStepWord(step)}`}</p>
-      <p class="pl-foot-name">${esc(step.name)}</p>${step.what ? `<p class="pl-foot-what">${esc(step.what)}</p>` : ""}${why}
+      <p class="pl-foot-name">${esc(step.name)}</p>${what && step.what ? `<p class="pl-foot-what">${esc(step.what)}</p>` : ""}${why}
       <dl class="pl-facts"><dt>List</dt><dd>${esc(list.name)}</dd><dt>Run by</dt><dd>${esc(planRunBy(step))}</dd><dt>Branch</dt><dd>${branch}</dd><dt>Cost</dt><dd>${esc(planCost(step.cost)) || "None yet"}</dd></dl>
       ${step.task ? `<button type="button" class="outline pl-open" data-open-task="${esc(step.task)}">${icon("arrow-up-right")}Open thread</button>` : ""}</div>`;
 }
 
-/** The body of the surface for the active Captain: dropped line, switcher, header, the plan's lists, footer. */
-function planBodyHtml(t, s) {
-  const p = panelOf(t);
-  const dropped = planDroppedHtml(p);
+/** The body of the surface for one Captain: dropped line, switcher, header, the plan's lists, footer. On the
+ * Captains surface's full view `captains` drops the dropped line and the footer's "what", and `lead` goes first. */
+function planBodyHtml(t, s, { captains = false, lead = "" } = {}) {
+  planKeep(s, t);
+  const dropped = captains ? "" : planDroppedHtml(panelOf(t));
+  const empty = `<div class="pl-empty"><p class="t">The Captain is writing its plan</p><p>Each part of the work shows up here as a list of steps.</p></div>`;
   const glances = planGlances(t);
-  if (!glances.length) return `${dropped}<div class="pl-empty"><p class="t">The Captain is writing its plan</p><p>Each part of the work shows up here as a list of steps.</p></div>`;
+  if (!glances.length) return `${lead}${dropped}${empty}`;
   const c = planRefresh(t);
-  if (!c.plans) return `${dropped}<p class="pl-loading">${c.failed ? "Could not load the plan." : "Loading the plan…"}</p>`;
+  if (!c.plans) return `${lead}${dropped}<p class="pl-loading">${c.failed ? "Could not load the plan." : "Loading the plan…"}</p>`;
   const plan = planPicked(t, s);
-  if (!plan) return `${dropped}<div class="pl-empty"><p class="t">The Captain is writing its plan</p><p>Each part of the work shows up here as a list of steps.</p></div>`;
+  if (!plan) return `${lead}${dropped}${empty}`;
   const zoom = s.zoom ?? 1;
   const chips = glances.length > 1 ? planChipsHtml(glances, plan) : "";
   const ms = planMains(plan);
@@ -269,11 +403,12 @@ function planBodyHtml(t, s) {
   const at = plan.closed ? `Closed: ${esc(plan.closed)}` : plan.finished_at ? `Finished at ${planClock(plan.finished_at)}` : `Plan, from your message at ${planClock(plan.asked_at)}`;
   const root = `<p class="pl-root">${icon("message-circle")}<span><b>${esc(plan.title)}</b><span class="pl-root-at">${at}</span></span></p>`;
   const lists = plan.lists.map((l) => planListHtml(l, s, zoom)).join("");
-  return `${dropped}${chips}${head}<div class="pl-scroll">${root}<div class="pl-lists">${lists}</div></div>${planFootHtml(plan, s)}`;
+  return `${lead}${dropped}${chips}${head}<div class="pl-scroll">${root}<div class="pl-lists">${lists}</div></div>${planFootHtml(plan, s, !captains)}`;
 }
 
 function renderPlanPanel(s) {
   const t = active;
+  if (isGlobalThread(t)) return showPanel(captainsView(s));
   if (!isPlanCaptain(t)) return showPanel(`<div class="pl"><div class="pl-empty"><p class="t">No plan here</p><p>Only a project's Captain keeps a plan.</p></div></div>`);
   planDetectDropped(t);
   showPanel(`<div class="pl" data-view="plan">${planBodyHtml(t, s)}</div>`);
@@ -282,29 +417,45 @@ function renderPlanPanel(s) {
 // ---- clicks ----
 
 function onPlanClick(e) {
-  const t = active;
-  const s = t && shownSurface(t);
+  const thread = active;
+  const s = thread && shownSurface(thread);
   if (!s || s.kind !== "plan" || !e.target.closest(".pl")) return;
   const q = (sel) => e.target.closest(sel);
   let el;
-  if ((el = q("[data-zoom]"))) s.zoom = Math.max(0, Math.min(2, (s.zoom ?? 1) + Number(el.dataset.zoom)));
-  else if ((el = q("[data-fold]"))) {
-    const id = el.dataset.fold;
-    s.folded = (s.folded ?? []).includes(id) ? s.folded.filter((x) => x !== id) : [...(s.folded ?? []), id];
-  } else if ((el = q("[data-fixchip]"))) {
-    const list = planPicked(t, s)?.lists.find((l) => l.id === el.dataset.fixchip);
-    const steps = (list?.steps ?? []).filter((x) => x.fixes.length);
-    const on = !steps.some((x) => planFixOpen(s, x));
-    s.fixOpen = { ...(s.fixOpen ?? {}) };
-    for (const step of steps) s.fixOpen[step.id] = on;
-  } else if ((el = q("[data-step]"))) s.step = s.step === el.dataset.step ? null : el.dataset.step;
-  else if ((el = q("[data-plan]"))) {
-    s.plan = el.dataset.plan;
-    s.step = null;
-  } else if (q("[data-dismiss-dropped]")) panelOf(t).dropped = null;
-  else if ((el = q("[data-open-task]"))) return openDelegated(el.dataset.openTask);
-  else return;
-  savePanel(t);
+  if ((el = q("[data-card]"))) {
+    const key = el.dataset.card;
+    const session = tabByKey(key)?.view.session ?? "";
+    s.unfolded = { ...(s.unfolded ?? {}) };
+    if (s.unfolded[key] === session) delete s.unfolded[key];
+    else s.unfolded[key] = session;
+  } else if ((el = q("[data-full]"))) s.focus = { key: el.dataset.full };
+  else if (q("[data-back]")) s.focus = null;
+  else if ((el = q("[data-open-thread]"))) return activate(tabByKey(el.dataset.openThread));
+  else if (q(".pl-card-body")) return;
+  else {
+    const t = planSubject(s, thread);
+    if (!t) return;
+    planKeep(s, t);
+    if ((el = q("[data-zoom]"))) s.zoom = Math.max(0, Math.min(2, (s.zoom ?? 1) + Number(el.dataset.zoom)));
+    else if ((el = q("[data-fold]"))) {
+      const id = el.dataset.fold;
+      s.folded = (s.folded ?? []).includes(id) ? s.folded.filter((x) => x !== id) : [...(s.folded ?? []), id];
+    } else if ((el = q("[data-fixchip]"))) {
+      const list = planPicked(t, s)?.lists.find((l) => l.id === el.dataset.fixchip);
+      const steps = (list?.steps ?? []).filter((x) => x.fixes.length);
+      const on = !steps.some((x) => planFixOpen(s, x));
+      s.fixOpen = { ...(s.fixOpen ?? {}) };
+      for (const step of steps) s.fixOpen[step.id] = on;
+    } else if ((el = q("[data-step]"))) s.step = s.step === el.dataset.step ? null : el.dataset.step;
+    else if ((el = q("[data-plan]"))) {
+      s.plan = el.dataset.plan;
+      s.step = null;
+    } else if (q("[data-dismiss-dropped]")) panelOf(t).dropped = null;
+    else if ((el = q("[data-open-task]"))) return openDelegated(el.dataset.openTask, t);
+    else return;
+    if (t !== thread) savePanel(t);
+  }
+  savePanel(thread);
   planRerender();
 }
 
