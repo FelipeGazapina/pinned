@@ -1052,6 +1052,28 @@ impl Tab {
     }
 }
 
+/// What a process pinned started runs for, as the desktop memory report groups it. Ordered as
+/// the report claims processes: a thread's before a task's before a terminal's.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum RootKind {
+    Thread,
+    /// A `delegate_task` child that runs without a terminal of its own.
+    Delegated,
+    Terminal,
+}
+
+/// A process pinned started, whose tree of processes belongs to one thread, task or terminal.
+#[derive(Clone, PartialEq, Debug)]
+pub struct ProcessRoot {
+    pub kind: RootKind,
+    pub label: String,
+    /// The agent CLI a thread runs, such as `claude`.
+    pub agent: Option<&'static str>,
+    pub pid: u32,
+    /// A thread runs a turn, a delegated task works, or a terminal runs a command.
+    pub running: bool,
+}
+
 /// How much a summary of the accounts asks for.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Look {
@@ -5067,6 +5089,33 @@ impl Machine {
     /// Each account's usage, as its sessions last reported it.
     pub fn usage(&self) -> BTreeMap<accounts::AccountId, Usage> {
         self.usage.lock().unwrap().clone()
+    }
+
+    /// The processes this machine started for its threads, headless delegated tasks and terminals,
+    /// threads first. `table` is `ps -A -o pid=,ppid=,comm=`, which tells whether a terminal runs
+    /// a command. A tab asleep or without a session has none.
+    pub fn process_roots(&self, table: &str) -> Vec<ProcessRoot> {
+        let mut roots = vec![];
+        let mut shown = HashMap::new();
+        for tab in self.tabs.lock().unwrap().values() {
+            let title = tab.title.clone().filter(|t| !t.is_empty());
+            if let (Some(task), Some(title)) = (&tab.task, &title) {
+                shown.insert(task.clone(), title.clone());
+            }
+            let Some(pid) = tab.session.as_ref().and_then(|s| s.pid()) else { continue };
+            let agent = if tab.account.auth == Auth::OpenCodeGo { "opencode" } else { tab.account.provider.spec().bin };
+            let running = tab.status == Some(AgentStatus::Working);
+            roots.push(ProcessRoot { kind: RootKind::Thread, label: title.unwrap_or_else(|| "Untitled thread".into()), agent: Some(agent), pid, running });
+        }
+        for (task, pid) in self.delegates.pids() {
+            let label = shown.get(&task).cloned().unwrap_or_else(|| "Delegated task".into());
+            roots.push(ProcessRoot { kind: RootKind::Delegated, label, agent: None, pid, running: true });
+        }
+        for (id, pid, running) in self.shells.pids(table) {
+            let label = format!("Terminal {}", id.trim_start_matches("shell-"));
+            roots.push(ProcessRoot { kind: RootKind::Terminal, label, agent: None, pid, running });
+        }
+        roots
     }
 
 

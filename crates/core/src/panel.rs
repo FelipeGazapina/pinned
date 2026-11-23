@@ -1405,6 +1405,13 @@ impl Shells {
         let table = crate::workspace::run(Path::new("/"), path, "ps", &["-A", "-o", "pid=,ppid=,comm="]).unwrap_or_default();
         pids.into_iter().filter(|(_, pid)| runs_command(&table, *pid)).map(|(id, _)| id).collect()
     }
+
+    /// Each open shell's id and pid, and whether `table` (`ps -A -o pid=,ppid=,comm=`) lists a
+    /// command running under it.
+    pub fn pids(&self, table: &str) -> Vec<(String, u32, bool)> {
+        let open = self.open.lock().unwrap();
+        open.iter().filter_map(|(id, shell)| shell.session.pid().map(|pid| (id.clone(), pid, runs_command(table, pid)))).collect()
+    }
 }
 
 /// Whether `ps -o pid=,ppid=,comm=` lists a command under the shell `shell`. As T3 Code's terminal
