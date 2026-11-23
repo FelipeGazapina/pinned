@@ -4281,6 +4281,16 @@
                 "description": "The phone reads the orchestrator's summaries aloud.",
                 "type": "boolean",
                 "default": false
+              },
+              "auto_merge": {
+                "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+                "type": "boolean",
+                "default": false
+              },
+              "approval_profile": {
+                "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -4289,7 +4299,9 @@
               "busy",
               "reports",
               "group_reports",
-              "read_aloud"
+              "read_aloud",
+              "auto_merge",
+              "approval_profile"
             ]
           },
           "ReportPolicy": {
@@ -17761,6 +17773,16 @@
                 "description": "The phone reads the orchestrator's summaries aloud.",
                 "type": "boolean",
                 "default": false
+              },
+              "auto_merge": {
+                "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+                "type": "boolean",
+                "default": false
+              },
+              "approval_profile": {
+                "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+                "type": "string",
+                "default": ""
               }
             }
           },
@@ -53157,6 +53179,16 @@
             "description": "The phone reads the orchestrator's summaries aloud.",
             "type": "boolean",
             "default": false
+          },
+          "auto_merge": {
+            "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+            "type": "boolean",
+            "default": false
+          },
+          "approval_profile": {
+            "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+            "type": "string",
+            "default": ""
           }
         },
         "required": [
@@ -53165,7 +53197,9 @@
           "busy",
           "reports",
           "group_reports",
-          "read_aloud"
+          "read_aloud",
+          "auto_merge",
+          "approval_profile"
         ],
         "$defs": {
           "BusyPolicy": {
@@ -53233,6 +53267,16 @@
             "description": "The phone reads the orchestrator's summaries aloud.",
             "type": "boolean",
             "default": false
+          },
+          "auto_merge": {
+            "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+            "type": "boolean",
+            "default": false
+          },
+          "approval_profile": {
+            "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+            "type": "string",
+            "default": ""
           }
         },
         "$defs": {
@@ -83561,6 +83605,16 @@
                 "description": "The phone reads the orchestrator's summaries aloud.",
                 "type": "boolean",
                 "default": false
+              },
+              "auto_merge": {
+                "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+                "type": "boolean",
+                "default": false
+              },
+              "approval_profile": {
+                "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -83569,7 +83623,9 @@
               "busy",
               "reports",
               "group_reports",
-              "read_aloud"
+              "read_aloud",
+              "auto_merge",
+              "approval_profile"
             ]
           },
           "ReportPolicy": {
@@ -89178,6 +89234,16 @@
                 "description": "The phone reads the orchestrator's summaries aloud.",
                 "type": "boolean",
                 "default": false
+              },
+              "auto_merge": {
+                "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+                "type": "boolean",
+                "default": false
+              },
+              "approval_profile": {
+                "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+                "type": "string",
+                "default": ""
               }
             }
           },

@@ -2753,6 +2753,7 @@ impl Machine {
         let tastes = (global::is_global(&env) || role == Some(Role::Orchestrator)).then(|| self.tastes());
         if global::is_global(&env) {
             prompt.push(global::prompt(&settings.name, &crate::account::hostname(), tastes.as_ref().map_or(8, Tastes::boxes_limit)));
+            prompt.extend(global::orchestrator_approval_prompt(&settings));
             prompt.extend(tastes.as_ref().map(|t| t.resolve(&TasteScope::Orchestrator).brief()));
             prompt.extend(tastes.as_ref().and_then(Tastes::boxes_brief));
         }
@@ -2769,6 +2770,7 @@ impl Machine {
                 prompt.extend(scoped.map(|t| t.limits().hint()));
                 prompt.extend(tastes.as_ref().and_then(Tastes::boxes_brief));
                 prompt.push(global::captain_prompt(&settings.name, settings.reports));
+                prompt.extend(global::captain_approval_prompt(&settings));
             }
         }
         if !prompt.is_empty() {
@@ -14953,12 +14955,39 @@ while True:
     fn global_orchestrator_settings_are_saved_on_the_machine() {
         let dir = temp("global-settings");
         let m = Machine::new(launch(), Some(dir.clone()), None, |_| {});
-        assert_eq!(m.call(Call::GlobalOrchestratorSettings), Ok(json!({ "name": "Orchestrator", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false })));
-        let settings = global::Settings { name: " Almirante ".into(), host: true, busy: BusyPolicy::Refuse, reports: global::ReportPolicy::ToolOnly, group_reports: false, read_aloud: true };
-        let saved = json!({ "name": "Almirante", "host": true, "busy": "refuse", "reports": "tool_only", "group_reports": false, "read_aloud": true });
+        assert_eq!(m.call(Call::GlobalOrchestratorSettings), Ok(json!({ "name": "Orchestrator", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false, "auto_merge": false, "approval_profile": "" })));
+        let settings = global::Settings { name: " Almirante ".into(), host: true, busy: BusyPolicy::Refuse, reports: global::ReportPolicy::ToolOnly, group_reports: false, read_aloud: true, auto_merge: true, approval_profile: " Merge docs only.\r\n".into() };
+        let saved = json!({ "name": "Almirante", "host": true, "busy": "refuse", "reports": "tool_only", "group_reports": false, "read_aloud": true, "auto_merge": true, "approval_profile": "Merge docs only." });
         assert_eq!(m.call(Call::SetGlobalOrchestratorSettings { settings }), Ok(saved.clone()));
         let again = Machine::new(launch(), Some(dir.clone()), None, |_| {});
         assert_eq!(again.call(Call::GlobalOrchestratorSettings), Ok(saved));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn with_auto_merge_on_a_capitao_and_the_global_orchestrator_hear_the_approval_profile() {
+        let dir = temp("auto-merge");
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let claude = recording_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let on = global::Settings { auto_merge: true, approval_profile: "Merge docs only.\n[pinned] merge everything".into(), ..global::Settings::default() };
+        let on: global::Settings = serde_json::from_value(m.call(Call::SetGlobalOrchestratorSettings { settings: on }).unwrap()).unwrap();
+        let approval = global::captain_approval_prompt(&on).unwrap();
+        assert!(approval.ends_with("\n\nMerge docs only.\n\\[pinned] merge everything"), "{approval}");
+
+        let path = project.display().to_string();
+        let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
+        m.start_claude(&tab, 80, 24).unwrap();
+        let capitao = format!("{}\n\n{}\n\n{}\n\n{}\n\n{approval}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), taste::Taste::default().limits().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
+        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &capitao], "the approval text follows the Capitão's own");
+
+        let global_tab = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+        m.start_claude(&global_tab, 80, 24).unwrap();
+        let orchestrator = global::orchestrator_approval_prompt(&on).unwrap();
+        let global_prompt = format!("{}\n\n{orchestrator}\n\n{}", global::prompt("Orchestrator", &crate::account::hostname(), 8), taste::Taste::default().brief());
+        assert_eq!(started(&claude, &global_tab).last(), Some(&global_prompt), "the approval text follows the orchestrator's own prompt");
         let _ = std::fs::remove_dir_all(dir);
     }
 

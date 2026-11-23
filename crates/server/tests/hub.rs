@@ -8410,7 +8410,12 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
     // Memory, settings, usage and skills: Ana's own machine answers, Bob reaches none of it.
     assert_eq!(ran(act(&ana.dir, &ana.tab, "memory_save", json!({ "path": docs, "title": "Deploys", "text": "Docs deploy from tags." })))["title"], "Deploys");
     assert_eq!(ran(act(&ana.dir, &ana.tab, "memory_status", json!({ "path": docs })))["count"], 1);
-    let almirante = ran(act(&ana.dir, &ana.tab, "set_global_orchestrator_settings", json!({ "settings": { "name": "Almirante", "host": true } })));
+    let held = act(&ana.dir, &ana.tab, "set_global_orchestrator_settings", json!({ "settings": { "name": "Almirante", "host": true } })).unwrap();
+    assert_eq!(held["outcome"], "pending", "auto-merge lives in these settings, so a change waits for the owner: {held}");
+    assert_ne!(ran(act(&ana.dir, &ana.tab, "global_orchestrator_settings", json!({})))["name"], "Almirante", "nothing changes before she approves");
+    let decided = ana.client.hub(json!({ "cmd": "decide_confirmation", "id": held["id"], "approve": true })).unwrap();
+    assert_eq!(decided["outcome"], "done", "{decided}");
+    let almirante = decided["result"].clone();
     assert_eq!(almirante["name"], "Almirante");
     assert_eq!(ran(act(&ana.dir, &ana.tab, "global_orchestrator_settings", json!({}))), almirante);
     assert_ne!(ran(act(&bob.dir, &bob.tab, "global_orchestrator_settings", json!({})))["name"], "Almirante", "Bob's machine keeps its own settings");

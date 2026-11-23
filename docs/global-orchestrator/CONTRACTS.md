@@ -32,13 +32,14 @@ Paths are relative to the repo root. Line numbers are as of the foundation PR he
 - The global folder's memory store is the global memory. `project_of_tab(global tab)` answers the folder, so `memory_*` tools and automatic recall use it. `known_project(folder)` accepts it, so `Call::MemorySearch/Save/Forget/Status { path: <folder> }` work. `Call::ListProjects` never lists it.
 - In tests the folder is `<config dir>/home/.pinned/orquestrador` (`test_binary()`), so tests never touch the real home.
 - `launch_tab` appends `global::prompt(<name>, <hostname>)` to the global tab's `--append-system-prompt`, after the device agent prompt. `role_of` is `None` for it, so it gets no role prompt and no disallowed tools.
+- With `auto_merge` on (§2), `launch_tab` appends `global::orchestrator_approval_prompt(settings)` right after `global::prompt`, and a Capitão's `global::captain_approval_prompt(settings)` right after `global::captain_prompt`. Each is one instruction line, decide "merge automatically" or "needs human review" for every finished pull request, act on it and say which one, then the approval profile through `pinned_lines::guard`. With it off both are `None`, and the prompts are what they were before the setting existed.
 
 ## 2. Settings
 
 `global_orchestrator::Settings`, schema name `GlobalOrchestratorSettings`. One file per machine, `<config dir>/global-orchestrator.json`, like `orchestration.json`.
 
 ```json
-{ "name": "Orchestrator", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false }
+{ "name": "Orchestrator", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false, "auto_merge": false, "approval_profile": "" }
 ```
 
 | Field | Type | Default | Meaning |
@@ -49,6 +50,8 @@ Paths are relative to the repo root. Line numbers are as of the foundation PR he
 | `reports` | `"auto"` \| `"tool_only"` | `"auto"` | `ReportPolicy`. Auto reports at the end of every turn that an orchestrator message started, plus `tell_orchestrator`. |
 | `group_reports` | bool | `true` | The chat folds consecutive reports into one row. UI only. |
 | `read_aloud` | bool | `false` | The phone reads summaries aloud. UI only. |
+| `auto_merge` | bool | `false` | Captains and the global orchestrator decide by the approval profile whether a finished pull request merges by itself or waits for a human review. It only changes the two prompts (§1); pinned merges nothing itself, and the never list and team guard are unchanged. |
+| `approval_profile` | string | `""` | The approval profile. `""` means `DEFAULT_APPROVAL_PROFILE`, which lives in code (`ui/global-orchestrator.js` keeps a copy as `GO_DEFAULT_APPROVAL_PROFILE`, held equal by a Rust test), so a later default reaches every user who never edited it. `cleaned()` turns `\r\n` and `\r` into `\n`, drops control characters but `\n` and `\t`, trims it, caps it at 4000 characters (`APPROVAL_PROFILE_MAX`), and stores `""` when the result is blank or equals the default. `effective_approval_profile()` answers the text in effect. |
 
 Every field has a serde default, so a partial object reads. `Machine::global_settings()` reads and `Machine::set_global_settings(s)` cleans, saves and returns.
 
@@ -527,7 +530,7 @@ Since 0.17.23 a box follows only its access setting and the Box budget, never th
 | Workflows | `save_connector` (write; a new workflow with no `id`, an edit with one), `delete_connector` (confirm). `get_settings` (read, P1) lists the account's workflows. |
 | Projects | `create_project`, `make_folder`, `publish_project`, `set_project_account`, `save_project_scripts` (write, on a machine); `clone` (write, the hub's: it adds the account's own GitHub token, the node's `node_clone` stays excluded), `share_project` (write). The reads `list_projects`, `project_history`, `shared_projects`, `project_scripts` were already wired. |
 | Sessions | `open_scratch`, `open_orchestrator`, `open_global_orchestrator` (the global orchestrator's own session only), `prompt`, `enqueue` (`starts_work`, 13.6). `search_threads` (read) was already wired. |
-| Settings | `set_global_orchestrator_settings`, `set_usage_prices`, `save_skill` (write). `set_taste` and `reset_taste_field` stay confirm, since they carry the delegation limits. |
+| Settings | `set_usage_prices`, `save_skill` (write). `set_taste` and `reset_taste_field` stay confirm, since they carry the delegation limits. `set_global_orchestrator_settings` is confirm since `auto_merge`: an agent could otherwise turn auto-merge on or rewrite its own approval profile with no approval. Renaming the orchestrator through `act` waits for the owner too, and a locked web login unlocks to save the section, as with `set_taste`. |
 | Memory, usage | Already wired by P1: `memory_status`, `memory_search`, `memory_save`, `memory_forget`, `token_usage`, `usage_limits`, `delegation_stats`. |
 
 The `Run` and `Deliver` calls are how the hub opens a workflow's session and types into it, and stay excluded. 0.17.23 adds a manual run, for the app and for agents (13.12).

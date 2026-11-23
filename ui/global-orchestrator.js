@@ -6,7 +6,14 @@
 const GO_NAME_PRESETS = ["Orchestrator", "Admiral", "Commander"];
 
 /** CONTRACTS §2's defaults, for machines that never answered. */
-const GO_DEFAULT_SETTINGS = { name: "Orchestrator", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false };
+const GO_DEFAULT_SETTINGS = { name: "Orchestrator", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false, auto_merge: false, approval_profile: "" };
+
+/** The approval profile the node uses when none is saved: global_orchestrator.rs's
+ * DEFAULT_APPROVAL_PROFILE, which a Rust test keeps equal to this line. */
+const GO_DEFAULT_APPROVAL_PROFILE = "Approval means deciding, for each pull request that you or your workers opened for the current request, whether it is merged automatically or left for a human review.\n\nMerge automatically only when that pull request's checks pass and nothing is unresolved: no failing or pending check, no open review thread, no conflict, and no question waiting on the user.\n\nPrefer GitHub's own auto-merge (`gh pr merge --auto`), so the repository's required checks and branch rules still decide. Never bypass branch protection.\n\nThese always need a human review: releases, deploys, database migrations, auth, secrets or credentials, payments or billing, wire-contract or API breaks, anything the repo's AGENTS.md or CLAUDE.md reserves for the owner, and any change you are unsure about.";
+
+/** global_orchestrator.rs's APPROVAL_PROFILE_MAX: the node keeps no more of a profile than this. */
+const GO_APPROVAL_PROFILE_MAX = 4000;
 
 /** The busy policy and the report policy, each value with the words the section shows. */
 const GO_BUSY_CHOICES = [
@@ -34,10 +41,41 @@ function mergeGlobalSettings(machines) {
   return { ...GO_DEFAULT_SETTINGS, ...(base?.settings ?? {}), host: host?.id ?? null };
 }
 
+/** How the drift note words a machine's own value of each shared field. */
+const GO_DRIFT_WORDS = {
+  name: (v) => `the name ${v}`,
+  busy: (v) => `"${GO_BUSY_CHOICES.find(([c]) => c === v)?.[1] ?? v}" when a Captain is busy`,
+  reports: (v) => `reports "${GO_REPORT_CHOICES.find(([c]) => c === v)?.[1] ?? v}"`,
+  group_reports: (v) => `Group consecutive reports ${v ? "on" : "off"}`,
+  read_aloud: (v) => `Read summaries aloud ${v ? "on" : "off"}`,
+  auto_merge: (v) => `Auto-merge ${v ? "on" : "off"}`,
+  approval_profile: () => "a different approval profile",
+};
+
+/** The machines whose own settings differ from the account's view, which mergeGlobalSettings takes
+ * from the host (else the first machine that answered). A save that missed a machine, or an agent's
+ * change approved on one machine, leaves it so, and an agent that starts there follows its own
+ * values. Each entry names the machine and the values it holds instead. A field missing from a
+ * machine's answer, as from an older pinned, is not compared. */
+function globalSettingsDrift(machines) {
+  const answered = machines.filter((m) => m.settings);
+  const host = machines.find((m) => m.settings?.host === true) ?? null;
+  const base = host?.settings ? host : answered[0] ?? null;
+  if (!base) return [];
+  const want = { ...GO_DEFAULT_SETTINGS, ...base.settings };
+  return answered
+    .filter((m) => m !== base)
+    .map((m) => ({ id: m.id, name: m.name, base: base.name, values: Object.keys(GO_DRIFT_WORDS).filter((k) => k in m.settings && m.settings[k] !== want[k]).map((k) => GO_DRIFT_WORDS[k](m.settings[k])) }))
+    .filter((d) => d.values.length);
+}
+
 /** The writes a save sends: the shared fields to every online machine that can take them, with
  * `host` true only on the chosen machine. Offline and too-old machines are skipped; the section
  * tells Felipe about them instead of failing the save. */
 function globalSettingsWrites(view, machines) {
+  // The default is sent as "", so the node keeps following the default when it changes.
+  const profile = view.approval_profile ?? "";
+  const approval_profile = profile.trim() === GO_DEFAULT_APPROVAL_PROFILE ? "" : profile;
   return machines
     .filter((m) => m.online && !m.update)
     .map((m) => ({
@@ -49,6 +87,8 @@ function globalSettingsWrites(view, machines) {
         reports: view.reports,
         group_reports: view.group_reports !== false,
         read_aloud: !!view.read_aloud,
+        auto_merge: !!view.auto_merge,
+        approval_profile,
       },
     }));
 }
@@ -86,7 +126,7 @@ function globalSettingsNotes(machines) {
     .filter((m) => m.update || !m.online || m.error)
     .map((m) =>
       m.update ? `${m.name} needs to update pinned`
-      : !m.online ? `${m.name} is offline; it updates when it reconnects`
+      : !m.online ? `${m.name} is offline; once it is back, this page shows whether it matches`
       : `${m.name}: ${m.error}`,
     );
 }
