@@ -408,6 +408,10 @@ pub enum Message {
         /// Who the issue is assigned to, by name or email; empty assigns the Linear account's owner.
         #[serde(default)]
         assignee: String,
+        /// The run's subject key, for a session with no Slack thread: an observability run's
+        /// (`connectors::is_observed`), which sends `channel` and `thread` empty.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<String>,
     },
     LinearTake {
         connector: String,

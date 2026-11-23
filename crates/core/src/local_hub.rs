@@ -84,6 +84,7 @@ pub enum SignedOut {
         title: String,
         description: String,
         assignee: String,
+        subject: Option<String>,
     },
     LinearTake {
         connector: String,
@@ -123,6 +124,7 @@ pub fn signed_out(connectors: &Connectors, message: Message) -> SignedOut {
             title,
             description,
             assignee,
+            subject,
         } => SignedOut::LinearCreate {
             connector,
             channel,
@@ -130,6 +132,7 @@ pub fn signed_out(connectors: &Connectors, message: Message) -> SignedOut {
             title,
             description,
             assignee,
+            subject,
         },
         Message::LinearTake {
             connector,
@@ -205,6 +208,8 @@ impl LocalHub<'_> {
             HubCall::GithubRepos => done(self.connectors.github_repos().await),
             HubCall::ConnectVercel { key } => done(self.connectors.connect_vercel(&key).await),
             HubCall::DisconnectVercel => done(self.connectors.disconnect_vercel()),
+            HubCall::ConnectPosthog { key, project, host } => done(self.connectors.connect_posthog(&key, &project, &host).await),
+            HubCall::DisconnectPosthog => done(self.connectors.disconnect_posthog()),
             HubCall::VercelModels => done(self.connectors.vercel_models().await),
             HubCall::SaveConnector { connector } => done(self.connectors.save_connector(connector)),
             HubCall::DeleteConnector { id } => done(self.connectors.delete_connector(&id)),
@@ -241,8 +246,8 @@ impl LocalHub<'_> {
             }
             HubCall::Stage { connector, subject, stage } => done(self.connectors.stage(&connector, &subject, stage).await),
             HubCall::SlackReply { connector, channel, thread, text } => done(self.connectors.slack_reply(&connector, &channel, &thread, &text).await),
-            HubCall::LinearCreate { connector, channel, thread, title, description, assignee } => {
-                done(self.connectors.linear_create(&connector, &channel, &thread, &title, &description, &assignee).await)
+            HubCall::LinearCreate { connector, channel, thread, title, description, assignee, subject } => {
+                done(self.connectors.linear_create(&connector, &channel, &thread, subject.as_deref(), &title, &description, &assignee).await)
             }
             HubCall::LinearTake { connector, channel, thread, issue } => done(self.connectors.linear_take(&connector, &channel, &thread, &issue).await),
             HubCall::RunSet { connector, subject, name, value } => match self.account {

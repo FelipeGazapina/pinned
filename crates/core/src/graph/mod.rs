@@ -5,7 +5,7 @@
 //! `migrate` builds the graph a fixed-pipeline connector already is. `project` writes the legacy
 //! fields back for apps that predate graphs. `runner` walks a graph without doing any I/O.
 
-use crate::connectors::{Assignee, By, LinearScope};
+use crate::connectors::{Assignee, By, LinearScope, ObservabilitySource};
 use crate::vercel::Chosen;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -215,6 +215,8 @@ pub enum Watch {
     },
     /// `Trigger::Schedule`: a cron in `tz`, an IANA zone.
     Schedule { schedule: crate::schedule::Schedule, tz: String },
+    /// `Trigger::Observability`: each new error `source` reports.
+    Observability { source: ObservabilitySource },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -353,6 +355,16 @@ impl NodeKind {
     }
 }
 
+impl NodeKind {
+    /// Whether the step acts on the run's Slack thread or Linear issue, which an observability run has neither of.
+    fn needs_thread_or_issue(&self) -> bool {
+        matches!(
+            self,
+            NodeKind::Reply { .. } | NodeKind::Page { .. } | NodeKind::FileIssue { .. } | NodeKind::TakeIssue { .. } | NodeKind::MoveColumn { .. } | NodeKind::StagePicked
+        )
+    }
+}
+
 impl Graph {
     /// Checks the invariants on `Graph`. `called` says whether a connector id holds a graph whose
     /// trigger is `Watch::Called`, for `call` targets. Errors name the node, for the editor.
@@ -382,6 +394,11 @@ impl Graph {
         let Some(trigger) = trigger else {
             return Err("a workflow needs a trigger".into());
         };
+        if matches!(trigger.kind, NodeKind::Trigger { watch: Watch::Observability { .. } }) {
+            if let Some(node) = self.nodes.iter().find(|node| node.kind.needs_thread_or_issue()) {
+                return Err(format!("\"{}\" needs a Slack thread or a Linear issue, which an observability trigger does not give it", node.name));
+            }
+        }
         for edge in &self.edges {
             if edge.to == trigger.id {
                 return Err(format!("an edge enters the trigger \"{}\"", trigger.name));
@@ -603,6 +620,32 @@ mod tests {
             Graph { nodes: vec![trigger, call], edges: vec![edge("trigger", "out", "route")] }.validate(&|id| id == "kept"),
             Err("\"Route\" calls \"gone\", which is not a called workflow".into())
         );
+    }
+
+    #[test]
+    fn an_observability_trigger_refuses_steps_that_need_a_thread_or_an_issue() {
+        let trigger = node("trigger", "Start", NodeKind::Trigger { watch: Watch::Observability { source: ObservabilitySource::Posthog } });
+        let talk = node("talk", "Talk", NodeKind::Talk { prompt: String::new() });
+        let ok = Graph { nodes: vec![trigger.clone(), talk], edges: vec![edge("trigger", "out", "talk")] };
+        assert_eq!(ok.validate(&|_| false), Ok(()));
+        let steps = [
+            ("Reply", NodeKind::Reply { text: String::new() }),
+            ("Page", NodeKind::Page { group: "@oncall".into() }),
+            ("File", NodeKind::FileIssue { team: String::new(), label: String::new(), assignee: String::new(), title: String::new(), description: String::new() }),
+            ("Take", NodeKind::TakeIssue { issue: String::new() }),
+            ("Move", NodeKind::MoveColumn { column: "Done".into() }),
+            ("Picked", NodeKind::StagePicked),
+        ];
+        for (name, kind) in steps {
+            let graph = Graph { nodes: vec![trigger.clone(), node("step", name, kind.clone())], edges: vec![edge("trigger", "out", "step")] };
+            assert_eq!(
+                graph.validate(&|_| false),
+                Err(format!("\"{name}\" needs a Slack thread or a Linear issue, which an observability trigger does not give it"))
+            );
+            let manual = node("trigger", "Start", NodeKind::Trigger { watch: Watch::Manual });
+            let elsewhere = Graph { nodes: vec![manual, node("step", name, kind)], edges: vec![edge("trigger", "out", "step")] };
+            assert_eq!(elsewhere.validate(&|_| false), Ok(()), "{name} is fine under another trigger");
+        }
     }
 
     fn switch_kind(classify_id: &str, question: &str, cases: &[(&str, &str)]) -> NodeKind {

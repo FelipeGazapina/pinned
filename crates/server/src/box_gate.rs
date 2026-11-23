@@ -135,6 +135,8 @@ pub fn box_may_send(call: &HubCall) -> Result<(), String> {
         | HubCall::DisconnectGithub
         | HubCall::ConnectVercel { .. }
         | HubCall::DisconnectVercel
+        | HubCall::ConnectPosthog { .. }
+        | HubCall::DisconnectPosthog
         | HubCall::ConnectUpstash { .. }
         | HubCall::DisconnectUpstash
         | HubCall::ConnectConvex { .. }

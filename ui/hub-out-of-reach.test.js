@@ -268,7 +268,7 @@ test("on the web, Connectors and Workflows stay read-only while the hub has not 
 test("signed in on this Mac before the hub ever answered, Connectors and Workflows stay editable", async () => {
   const { show } = settingsApp({ up: false, sent: null });
   assert.ok((await show("integrations")).startsWith(`<h2>Connectors</h2>\n    <p class="hint">Services the harness can read from and act on.</p>`));
-  assert.match(await show("connectors"), /Connect Linear or Slack first/);
+  assert.match(await show("connectors"), /Connect Linear, Slack or PostHog first/);
   assert.doesNotMatch(await show("connectors"), /hub-out/);
 });
 

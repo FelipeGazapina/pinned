@@ -40,6 +40,8 @@ body[data-mode="gui"] #settings :is(input, select, textarea):focus { border-colo
 body[data-mode="gui"] #settings select { appearance: none; -webkit-appearance: none; padding-right: 32px; cursor: pointer;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23818181' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 15 5 5 5-5'/%3E%3Cpath d='m7 9 5-5 5 5'/%3E%3C/svg%3E");
   background-repeat: no-repeat; background-position: right 10px center; background-size: 14px; }
+/* The input rule above sets the padding of every field, so a select sized to its text needs its arrow room back. */
+body[data-mode="gui"] #settings #posthog-host-choice { padding-right: 32px; }
 body[data-mode="gui"] #settings select option { background: var(--g-raised); color: var(--g-fg); }
 body[data-mode="gui"] #settings textarea { font: 12px/1.55 var(--g-mono); }
 body[data-mode="gui"] #settings input[type="checkbox"] { accent-color: var(--g-primary); }

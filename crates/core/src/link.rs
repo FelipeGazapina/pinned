@@ -381,8 +381,8 @@ impl Link {
         let call = match message {
             Message::Stage { connector, subject, stage } => HubCall::Stage { connector, subject, stage },
             Message::SlackReply { connector, channel, thread, text } => HubCall::SlackReply { connector, channel, thread, text },
-            Message::LinearCreate { connector, channel, thread, title, description, assignee } => {
-                HubCall::LinearCreate { connector, channel, thread, title, description, assignee }
+            Message::LinearCreate { connector, channel, thread, title, description, assignee, subject } => {
+                HubCall::LinearCreate { connector, channel, thread, title, description, assignee, subject }
             }
             Message::LinearTake { connector, channel, thread, issue } => HubCall::LinearTake { connector, channel, thread, issue },
             Message::RunSet { connector, subject, name, value } => HubCall::RunSet { connector, subject, name, value },

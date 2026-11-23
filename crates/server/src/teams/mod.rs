@@ -287,6 +287,8 @@ pub fn hub_rule(call: &HubCall) -> Rule {
         | HubCall::GithubRepos { .. }
         | HubCall::ConnectVercel { .. }
         | HubCall::DisconnectVercel { .. }
+        | HubCall::ConnectPosthog { .. }
+        | HubCall::DisconnectPosthog { .. }
         | HubCall::VercelModels { .. }
         | HubCall::ConnectConvex { .. }
         | HubCall::SetConvexRepos { .. }
