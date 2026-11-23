@@ -46,8 +46,8 @@ const GO_DRIFT_WORDS = {
   name: (v) => `the name ${v}`,
   busy: (v) => `"${GO_BUSY_CHOICES.find(([c]) => c === v)?.[1] ?? v}" when a Captain is busy`,
   reports: (v) => `reports "${GO_REPORT_CHOICES.find(([c]) => c === v)?.[1] ?? v}"`,
-  group_reports: (v) => `Group reports ${v ? "on" : "off"}`,
-  read_aloud: (v) => `Read aloud ${v ? "on" : "off"}`,
+  group_reports: (v) => `Group consecutive reports ${v ? "on" : "off"}`,
+  read_aloud: (v) => `Read summaries aloud ${v ? "on" : "off"}`,
   auto_merge: (v) => `Auto-merge ${v ? "on" : "off"}`,
   approval_profile: () => "a different approval profile",
 };

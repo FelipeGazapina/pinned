@@ -319,6 +319,8 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
 /* A machine whose own settings differ from the host's: a warning above the fields until they match. */
 #settings-page #global-orchestrator-settings .go-drift { max-width: 520px; margin: 0 0 16px; padding: 12px; border-radius: 8px; color: var(--g-warning-fg); background: rgb(var(--g-warning-rgb) / 0.12); }
 #settings-page #global-orchestrator-settings .go-drift p { margin: 0 0 8px; }
+/* Its button names the host, so its label wraps, even inside a long name, rather than run past a narrow screen. */
+#settings-page #global-orchestrator-settings .go-drift button { height: auto; min-height: 32px; max-width: 100%; padding-block: 6px; white-space: normal; overflow-wrap: anywhere; }
 #settings-page #global-orchestrator-settings .actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; max-width: 520px; margin: 16px 0 0; }
 @media (max-width: 639px) {
   #settings-page #global-orchestrator-settings .side-setting:is([data-setting="name"], [data-setting="host"], [data-setting="busy"], [data-setting="reports"], [data-setting="memory"]) { flex-wrap: wrap; }

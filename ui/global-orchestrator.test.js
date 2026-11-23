@@ -102,6 +102,8 @@ test("the drift names each machine whose own values differ from the host's, in t
   ]));
   assert.deepEqual(drift, [{ id: "mb", name: "MacBook", base: "Mac mini", values: ['reports "Only when the Captain calls"', "Auto-merge on", "a different approval profile"] }]);
   assert.deepEqual(here(globalSettingsDrift([host, { ...host, id: "mb", name: "MacBook", settings: { ...host.settings, host: false } }])), [], "matching machines are no drift");
+  const switches = here(globalSettingsDrift([host, { ...host, id: "mb", name: "MacBook", settings: { ...host.settings, host: false, group_reports: false, read_aloud: true } }]));
+  assert.deepEqual(switches[0].values, ["Group consecutive reports off", "Read summaries aloud on"], "the switches by the names their rows show");
 });
 
 test("an older node's unknown command and an older hub's refusal both read as needing an update", () => {
@@ -324,6 +326,12 @@ test("a machine that missed turning auto-merge off is still named after a reload
   assert.deepEqual(writes, [["mm", true, false], ["mb", false, false]], "the host's saved values, not the form's unsaved switch");
   assert.doesNotMatch(element("global-orchestrator-settings").outerHTML, /go-drift/);
   assert.equal(element("go-error").textContent, "");
+});
+
+test("the drift's Apply button, which names the host, wraps instead of running past a phone's width", () => {
+  const rule = read("gui-settings.css").split("\n").find((line) => line.startsWith("#settings-page #global-orchestrator-settings .go-drift button {"));
+  assert.ok(rule, "a rule for the drift's button");
+  for (const part of ["height: auto", "max-width: 100%", "white-space: normal", "overflow-wrap: anywhere"]) assert.ok(rule.includes(part), `${part} in ${rule}`);
 });
 
 test("a machine that was offline for the save is named once it is back with its old values", async () => {
