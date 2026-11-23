@@ -423,7 +423,7 @@ test("a signed-in save records the shared values with the hub after the writes, 
   const recorded = at(([, call]) => call.cmd === "record_global_orchestrator_save");
   assert.ok(at(([, call]) => call.cmd === "set_global_orchestrator_settings") < recorded, "after the writes");
   assert.ok(recorded < at(([on, call]) => on === "mm" && call.cmd === "global_orchestrator_settings"), "before the section reads again");
-  assert.equal(element("go-status").textContent, "Saved on Mac mini");
+  assert.equal(element("go-status").textContent, "Saved on Mac mini. Running Captains and the orchestrator were told.");
   const section = element("global-orchestrator-settings").outerHTML;
   assert.match(section, /Linux VPS is offline; it gets the saved settings when it reconnects/);
   assert.match(section, /MacBook has not taken the last save yet; the hub sends it again each time MacBook connects/);
@@ -439,7 +439,7 @@ test("a failed record leaves the save and its status as they were", async () => 
   context.bindGlobalOrchestratorSettings();
   fillForm(element, true);
   await element("go-save").onclick();
-  assert.equal(element("go-status").textContent, "Saved");
+  assert.equal(element("go-status").textContent, "Saved. Running Captains and the orchestrator were told.");
   assert.equal(element("go-error").textContent, "");
   assert.equal(events.length, 1);
 });
