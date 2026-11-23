@@ -404,6 +404,9 @@ impl DelegationStats {
                 row["accepted"] = json!(g.accepted);
                 row["redone"] = json!(g.redone);
             }
+            if g.runs > g.priced {
+                row["unpriced"] = json!(g.runs - g.priced);
+            }
             row
         };
         let models: serde_json::Map<String, Value> = self.by_model.iter().map(|g| (g.label.clone(), row(g))).collect();
@@ -411,10 +414,16 @@ impl DelegationStats {
         let mut brief = json!({
             "days": self.days,
             "all": row(&self.totals),
-            "costUsd": round(self.totals.cost_usd + self.totals.box_usd, 2),
             "byModel": models,
             "outcomes": outcomes,
         });
+        // No costUsd when nothing it ran has a price: a 0 the reader could take for zero spend.
+        if !(self.totals.runs > 0 && self.totals.priced == 0) {
+            brief["costUsd"] = json!(round(self.totals.cost_usd + self.totals.box_usd, 2));
+        }
+        if self.totals.runs > self.totals.priced {
+            brief["unpriced"] = json!(self.totals.runs - self.totals.priced);
+        }
         if self.totals.box_usd > 0.0 {
             brief["boxUsd"] = json!(round(self.totals.box_usd, 2));
         }
@@ -511,9 +520,11 @@ mod tests {
 
         let brief = stats.brief();
         assert_eq!(brief["byModel"]["claude-opus-5-5"], json!({ "runs": 3, "doneRate": 0.33, "medianMinutes": 120.0, "medianUsd": 4.0, "stoppedByLimit": { "time": 2 }, "accepted": 1, "redone": 0 }));
-        assert_eq!(brief["byModel"]["glm-5.3"], json!({ "runs": 2, "doneRate": 0.0, "medianMinutes": 4.0, "medianUsd": 0.5, "accepted": 0, "redone": 1 }));
+        assert_eq!(brief["byModel"]["glm-5.3"], json!({ "runs": 2, "doneRate": 0.0, "medianMinutes": 4.0, "medianUsd": 0.5, "accepted": 0, "redone": 1, "unpriced": 1 }));
+        assert_eq!(brief["all"]["unpriced"], json!(1), "one of the five ran without a price");
         assert_eq!(brief["outcomes"], json!({ "done": 1, "failed": 1, "limit": 2, "cancelled": 1 }));
         assert_eq!(brief["costUsd"], json!(10.5));
+        assert_eq!(brief["unpriced"], json!(1), "the total says which part of it is not priced");
     }
 
     #[test]
@@ -527,5 +538,20 @@ mod tests {
         assert_eq!(stats_days(None), Ok(7));
         assert_eq!(stats_days(Some(30)), Ok(30));
         assert_eq!(stats_days(Some(3)), Err("days must be 1, 7 or 30, not 3".into()));
+    }
+
+    #[test]
+    fn a_brief_with_nothing_priced_prints_no_cost_and_says_how_many_runs_are_unpriced() {
+        let records = vec![
+            record("a", "mystery-9", "site", DelegatorKind::Captain, TaskOutcome::Done, 10, None),
+            record("b", "mystery-9", "site", DelegatorKind::Captain, TaskOutcome::Failed, 5, None),
+        ];
+        let stats = aggregate(&records, BASE + 200 * 60_000, 7);
+        let brief = stats.brief();
+        assert_eq!(brief["costUsd"], Value::Null, "a 0.0 here read as zero spend on 2026-11-20: {brief}");
+        assert_eq!(brief["unpriced"], json!(2));
+        assert_eq!(brief["all"]["unpriced"], json!(2));
+        assert_eq!(brief["byModel"]["mystery-9"]["unpriced"], json!(2));
+        assert_eq!(brief["byModel"]["mystery-9"]["medianUsd"], Value::Null, "already omitted when unknown");
     }
 }

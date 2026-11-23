@@ -2460,6 +2460,10 @@ impl Machine {
                 return Err(refused);
             }
         };
+        if let Err(refused) = self.require_priced(&limits, model.as_deref()) {
+            self.close_tab(&id);
+            return Err(refused);
+        }
         let parent = caller.unwrap_or(&id).to_owned();
         let caller_ref = Caller { tab: Some(parent.clone()), task: None };
         let new = NewTask {
@@ -4294,6 +4298,7 @@ impl Machine {
         }
         let limits = self.caller_limits(caller)?;
         let effort = limits.admit(&account, model.as_deref(), None, &self.claude_models())?;
+        self.require_priced(&limits, model.as_deref())?;
         let caller_ref = Caller { tab: Some(caller.to_owned()), task: None };
         let title = title.unwrap_or_else(|| format!("Session in {}", cwd.file_name().map_or_else(|| cwd.display().to_string(), |name| name.to_string_lossy().into_owned())));
         let new = NewTask {
@@ -4480,6 +4485,29 @@ impl Machine {
                 *held = Some((Instant::now(), rates.clone()));
                 rates
             }
+        }
+    }
+
+    /// Why a metered start on `model` can't be held to a budget: none of its prices is known here,
+    /// by the same rule `usage::price` prices with. `None` when it is priced.
+    fn unpriced(&self, model: &str) -> Option<String> {
+        let (rates, book) = (self.meter_rates(), usage::PriceBook::load(self.prices_file().as_deref()));
+        if usage::priced(model, &book, &rates) {
+            return None;
+        }
+        let table = if rates.is_empty() { " The price list could not be loaded, so no model has a price." } else { "" };
+        Some(format!("{model} has no price, so a worker on it can't be held to this project's budget. Set one in Settings › Usage › Model prices, or set the budget to 0.{table}"))
+    }
+
+    /// A budget this project means to enforce needs the model's price; one with no model named
+    /// runs on the account's default and is stopped by the meter when its spend turns out unknown.
+    fn require_priced(&self, limits: &taste::Limits, model: Option<&str>) -> Result<(), String> {
+        if limits.budget_cents == 0 {
+            return Ok(());
+        }
+        match model.filter(|m| !m.is_empty()) {
+            Some(model) => self.unpriced(model).map_or(Ok(()), Err),
+            None => Ok(()),
         }
     }
 
@@ -5445,6 +5473,7 @@ impl Machine {
         } else {
             limits.admit(&account, request.target.model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?
         };
+        self.require_priced(&limits, request.target.model.as_deref())?;
         let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
         (request.target.effort, request.budget_ms, request.limit_ms) = (effort.clone(), Some(budget_ms), Some(limit_ms));
         let held = taste::Limits { time_limit_min: limit_ms.div_ceil(60_000).try_into().unwrap_or(u32::MAX), ..limits };
@@ -6062,7 +6091,7 @@ impl Machine {
         let from = model.as_deref().and_then(|asked| ladder.iter().position(|rung| rung.model == asked)).map_or(0, |at| at + 1);
         let claude = self.claude_models();
         for rung in &ladder[from..] {
-            let runs = self.accounts.list().into_iter().filter(|next| next.id != account.id && self.rung_runs_on(rung, next) && limits.admit(next, Some(&rung.model), effort, &claude).is_ok());
+            let runs = self.accounts.list().into_iter().filter(|next| next.id != account.id && self.rung_runs_on(rung, next) && limits.admit(next, Some(&rung.model), effort, &claude).is_ok() && (limits.budget_cents == 0 || self.unpriced(&rung.model).is_none()));
             let Some(next) = runs.into_iter().find(|next| !matches!(self.admit_account(next), Admit::Blocked(_))) else { continue };
             let moved = Moved { account: account.id.clone(), model: model.clone(), reason: blocked.note() };
             return Ok((next, Some(rung.model.clone()), Some(moved)));
@@ -6125,6 +6154,7 @@ impl Machine {
         let model = crate::delegate::child_model(parent_provider, account.provider, inherited_model, request.target.model.clone());
         let (account, mut model, moved) = self.route_around_limits(account, model, &limits, &cwd, request.target.effort.as_deref())?;
         let mut effort = limits.admit(&account, model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
+        self.require_priced(&limits, model.as_deref())?;
         let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
         self.ensure_parent(parent_tab.as_deref(), None)?;
         let isolated = request.isolation == Isolation::Worktree;
@@ -16412,6 +16442,99 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn a_worker_on_an_unpriced_model_is_refused_under_a_budget_and_runs_without_one() {
+        let (m, dir, captain) = limited_captain("limits-unpriced", TastePatch { budget_cents: Some(50), ..TastePatch::default() });
+        let config = dir.join("config");
+        std::fs::write(config.join("usage-model-rates.json"), r#"{"glm-5.3": {"input_cost_per_token": 0.2e-6, "output_cost_per_token": 0.8e-6}}"#).unwrap();
+        assert_eq!(
+            refused(&m, &captain, work(Some("mystery-9"), None)),
+            "mystery-9 has no price, so a worker on it can't be held to this project's budget. Set one in Settings › Usage › Model prices, or set the budget to 0."
+        );
+        std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-sonnet-5-5":{"input":3,"output":15}}}"#).unwrap();
+        let priced_table = delegate_task(&m, &captain, work(Some("glm-5.3"), None));
+        assert_eq!(priced_table["workState"], "working", "a model priced only in the table is admitted: {priced_table}");
+        let priced_book = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        assert_eq!(priced_book["workState"], "working", "a model priced only in the book is admitted: {priced_book}");
+        m.set_local_taste(&TasteScope::Captains, TastePatch { budget_cents: Some(0), ..TastePatch::default() }).unwrap();
+        let free = delegate_task(&m, &captain, work(Some("mystery-9"), None));
+        assert_eq!(free["workState"], "working", "a project that sets no budget says it wants unpriced models: {free}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn with_no_price_list_at_all_a_budgeted_dispatch_says_the_prices_could_not_be_loaded() {
+        let (m, dir, captain) = limited_captain("limits-no-table", TastePatch { budget_cents: Some(50), ..TastePatch::default() });
+        let config = dir.join("config");
+        std::fs::write(config.join("usage-model-rates.json"), "{}").unwrap();
+        assert_eq!(
+            refused(&m, &captain, work(Some("claude-sonnet-5-5"), None)),
+            "claude-sonnet-5-5 has no price, so a worker on it can't be held to this project's budget. Set one in Settings › Usage › Model prices, or set the budget to 0. The price list could not be loaded, so no model has a price."
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_budgeted_run_now_and_start_claude_refuse_an_unpriced_model_and_start_a_priced_one() {
+        let (m, dir, captain) = limited_captain("limits-unpriced-starts", TastePatch { budget_cents: Some(50), ..TastePatch::default() });
+        let config = dir.join("config");
+        std::fs::write(config.join("usage-model-rates.json"), r#"{"claude-sonnet-5-5": {"input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6}}"#).unwrap();
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let refusal = "mystery-9 has no price, so a worker on it can't be held to this project's budget. Set one in Settings › Usage › Model prices, or set the budget to 0.";
+        let run_now = |spec: RunSpec| m.call(Call::RunNow { run: spec, title: "Nightly · Run now".into() });
+        assert_eq!(run_now(run_now_spec(&path, "mystery-9", "auto")), Err(refusal.into()));
+        let tab: String = serde_json::from_value(run_now(run_now_spec(&path, "claude-sonnet-5-5", "auto")).unwrap()).unwrap();
+        assert!(m.view(&tab).unwrap().running, "a priced model's run starts");
+
+        let worker = m.open_tab(Some(path.clone()), false).unwrap();
+        let act = |tab: &str, model: &str| {
+            m.tab(tab, |t| t.model = Some(model.into())).unwrap();
+            m.call(Call::ActFor { caller: captain.clone(), call: json!({ "cmd": "start_claude", "tab": tab, "cols": 80, "rows": 24 }) })
+        };
+        assert_eq!(act(&worker, "mystery-9"), Err(refusal.into()));
+        assert!(act(&worker, "claude-sonnet-5-5").is_ok(), "a priced model's session starts");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_budgeted_task_for_another_machine_on_an_unpriced_model_is_refused_before_it_reaches_it() {
+        let (m, dir, captain) = placing_captain("place-unpriced");
+        m.set_local_taste(&TasteScope::Captains, TastePatch { budget_cents: Some(50), ..TastePatch::default() }).unwrap();
+        std::fs::write(dir.join("config/usage-model-rates.json"), r#"{"glm-5.3": {"input_cost_per_token": 0.2e-6, "output_cost_per_token": 0.8e-6}}"#).unwrap();
+        let calls = placing_hub(&m, vec![], &[]);
+        let on = |model: &str| json!({ "task": "Fix the parser.", "title": "Parser", "target": { "machine": "m-mini", "model": model } });
+        let error = refused(&m, &captain, on("mystery-9"));
+        assert!(error.starts_with("mystery-9 has no price") && error.contains("Settings › Usage › Model prices"), "{error}");
+        assert_eq!(placing_calls(&calls), Vec::<String>::new(), "the refused call reached no machine");
+        let started = delegate_task(&m, &captain, on("glm-5.3"));
+        assert_eq!(started["placement"]["machine"], "m-mini", "a priced model is still sent: {started}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_budget_on_the_project_keeps_a_limited_task_off_an_unpriced_rung() {
+        let (m, dir, captain) = captain_with_spare("limits-unpriced-rung");
+        let config = dir.join("config");
+        std::fs::write(config.join("usage-model-rates.json"), r#"{"claude-sonnet-5-5": {"input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6}}"#).unwrap();
+        let sonnet = taste::ModelRef { provider: None, model: "claude-sonnet-5-5".into() };
+        let opus = taste::ModelRef { provider: None, model: "claude-opus-5-5".into() };
+        m.set_local_taste(&TasteScope::Captains, TastePatch { ladder: Some(vec![sonnet, opus]), budget_cents: Some(50), ..TastePatch::default() }).unwrap();
+        m.delegates.limits().mark("work", GO_429, None);
+        let request = crate::delegate::parse_request(&work_on("work", Some("claude-sonnet-5-5"))).unwrap();
+        let error = m.start_delegate(Some(captain.clone()), None, None, request).unwrap_err();
+        assert!(error.starts_with("work is limited and none of the rungs above it can run it (claude-opus-5-5)."), "{error}: the unpriced rung is skipped, not run");
+        std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-opus-5-5":{"input":1,"output":5}}}"#).unwrap();
+        let request = crate::delegate::parse_request(&work_on("work", Some("claude-sonnet-5-5"))).unwrap();
+        let moved = serde_json::from_str::<Value>(&m.start_delegate(Some(captain), None, None, request).unwrap()).unwrap();
+        assert_eq!((moved["providerInstanceId"].as_str(), moved["model"].as_str()), (Some("spare"), Some("claude-opus-5-5")), "with the rung priced the task moves to it: {moved}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_retried_call_gets_its_task_back_at_the_workers_at_once_limit_and_the_users_threads_do_not_count() {
         let (m, dir, captain) = limited_captain("limits-retry", TastePatch { parallel: Some(1), ..TastePatch::default() });
         for _ in 0..2 {
@@ -18886,6 +19009,7 @@ Have another model review a risky change before it goes ahead.";
     #[cfg(unix)]
     fn captain_with_spare(name: &str) -> (Arc<Machine>, PathBuf, String) {
         let (m, dir, captain) = limited_captain(name, TastePatch::default());
+        std::fs::write(dir.join("config/usage-model-rates.json"), r#"{"claude-sonnet-5-5": {"input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6}}"#).unwrap();
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Spare".into(), auth: None, key: None }).unwrap();
         m.delegates.limits().mark("claude", "You've hit your monthly spend limit", Some(unix_now() + 7 * 86_400));
         (m, dir, captain)

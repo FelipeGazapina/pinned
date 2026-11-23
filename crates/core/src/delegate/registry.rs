@@ -366,7 +366,7 @@ impl Delegates {
                 .filter_map(|(id, usage)| {
                     let task = tasks.iter_mut().find(|task| &task.id == id && task.state == WorkState::Working)?;
                     task.usage = *usage;
-                    task.limits.over_budget(usage.cost_usd).map(|reason| (id.clone(), reason))
+                                        task.limits.over_budget(usage.cost_usd, task.model.as_deref()).map(|reason| (id.clone(), reason))
                 })
                 .collect()
         };

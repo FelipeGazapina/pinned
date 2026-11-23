@@ -3194,6 +3194,24 @@ exec '{real}' "$@"
     }
 
     #[test]
+    fn a_budgeted_task_on_an_unpriced_model_stops_at_the_meter_instead_of_running_with_no_cap() {
+        let delegates = Delegates::default();
+        let limits = crate::taste::Limits { budget_cents: 500, ..crate::taste::Limits::default() };
+        let task = thread_task(&delegates, Duration::from_secs(3600));
+        delegates.hold_to(&task.id, limits);
+        delegates.set_model(&task.id, Some("mystery-9".into()));
+        delegates.meter(&[(task.id.clone(), crate::usage::TaskUsage::default())], None);
+        assert_eq!(state_of(&delegates, &task.id).0, "cancelled");
+        assert_eq!(state_of(&delegates, &task.id).2.as_deref(), Some("budget"), "stopped through the limit path, like a budget that passed");
+        let status = delegates.status(&parent(), &task.id).unwrap();
+        assert_eq!(
+            status["error"].as_str(),
+            Some("mystery-9 has no price, so pinned can't hold it to its budget of US$ 5.00. Set one in Settings › Usage › Model prices, or set the budget to 0"),
+            "{status}"
+        );
+    }
+
+    #[test]
     fn task_status_says_which_tasks_and_shells_a_finished_turn_still_waits_on() {
         let delegates = Delegates::default();
         let task = thread_task(&delegates, Duration::from_secs(3600));
