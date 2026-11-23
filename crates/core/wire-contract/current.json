@@ -980,7 +980,7 @@
                 ]
               },
               {
-                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.\nWith `title`, the machine also writes it as the Capitão's own thread name before the\nCapitão reads the message; without one, the message tells the Capitão to name itself.",
+                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -1009,13 +1009,6 @@
                       {
                         "type": "null"
                       }
-                    ]
-                  },
-                  "title": {
-                    "description": "A suggested name for the Capitão's thread, written as its own title on delivery.",
-                    "type": [
-                      "string",
-                      "null"
                     ]
                   }
                 },
@@ -1732,27 +1725,6 @@
                   "tab",
                   "previous",
                   "thread"
-                ]
-              },
-              {
-                "description": "The cleaned `title`, one line trimmed to 70 characters, as the session in `tab`'s own name\nfor itself. The user's own name for the thread, if they gave one, still shows over it.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "set_session_title"
-                  },
-                  "tab": {
-                    "type": "string"
-                  },
-                  "title": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "tab",
-                  "title"
                 ]
               },
               {
@@ -11399,26 +11371,6 @@
                 "additionalProperties": false
               },
               {
-                "description": "`{\"self_title\":{\"text\":\"Libera o formulário\",\"author\":\"captain\",\"at\":<unix s>}}`, or\n`{\"self_title\":null}` to take the session's own name off.",
-                "type": "object",
-                "properties": {
-                  "self_title": {
-                    "anyOf": [
-                      {
-                        "$ref": "#/$defs/SelfTitle"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                "required": [
-                  "self_title"
-                ],
-                "additionalProperties": false
-              },
-              {
                 "type": "object",
                 "properties": {
                   "pin": {
@@ -11555,29 +11507,6 @@
                 "type": "string",
                 "const": "clear"
               }
-            ]
-          },
-          "SelfTitle": {
-            "description": "A title a session wrote for itself, which never overwrites the user's own `title` mark.",
-            "type": "object",
-            "properties": {
-              "text": {
-                "type": "string"
-              },
-              "author": {
-                "description": "Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.",
-                "type": "string"
-              },
-              "at": {
-                "description": "Unix seconds it was written.",
-                "type": "number",
-                "format": "double"
-              }
-            },
-            "required": [
-              "text",
-              "author",
-              "at"
             ]
           },
           "Snooze": {
@@ -14471,7 +14400,7 @@
                 ]
               },
               {
-                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.\nWith `title`, the machine also writes it as the Capitão's own thread name before the\nCapitão reads the message; without one, the message tells the Capitão to name itself.",
+                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -14500,13 +14429,6 @@
                       {
                         "type": "null"
                       }
-                    ]
-                  },
-                  "title": {
-                    "description": "A suggested name for the Capitão's thread, written as its own title on delivery.",
-                    "type": [
-                      "string",
-                      "null"
                     ]
                   }
                 },
@@ -15222,27 +15144,6 @@
                   "tab",
                   "previous",
                   "thread"
-                ]
-              },
-              {
-                "description": "The cleaned `title`, one line trimmed to 70 characters, as the session in `tab`'s own name\nfor itself. The user's own name for the thread, if they gave one, still shows over it.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "set_session_title"
-                  },
-                  "tab": {
-                    "type": "string"
-                  },
-                  "title": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "tab",
-                  "title"
                 ]
               },
               {
@@ -24650,26 +24551,6 @@
                 "additionalProperties": false
               },
               {
-                "description": "`{\"self_title\":{\"text\":\"Libera o formulário\",\"author\":\"captain\",\"at\":<unix s>}}`, or\n`{\"self_title\":null}` to take the session's own name off.",
-                "type": "object",
-                "properties": {
-                  "self_title": {
-                    "anyOf": [
-                      {
-                        "$ref": "#/$defs/SelfTitle"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                "required": [
-                  "self_title"
-                ],
-                "additionalProperties": false
-              },
-              {
                 "type": "object",
                 "properties": {
                   "pin": {
@@ -24806,29 +24687,6 @@
                 "type": "string",
                 "const": "clear"
               }
-            ]
-          },
-          "SelfTitle": {
-            "description": "A title a session wrote for itself, which never overwrites the user's own `title` mark.",
-            "type": "object",
-            "properties": {
-              "text": {
-                "type": "string"
-              },
-              "author": {
-                "description": "Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.",
-                "type": "string"
-              },
-              "at": {
-                "description": "Unix seconds it was written.",
-                "type": "number",
-                "format": "double"
-              }
-            },
-            "required": [
-              "text",
-              "author",
-              "at"
             ]
           },
           "Snooze": {
@@ -35054,26 +34912,6 @@
                 "additionalProperties": false
               },
               {
-                "description": "`{\"self_title\":{\"text\":\"Libera o formulário\",\"author\":\"captain\",\"at\":<unix s>}}`, or\n`{\"self_title\":null}` to take the session's own name off.",
-                "type": "object",
-                "properties": {
-                  "self_title": {
-                    "anyOf": [
-                      {
-                        "$ref": "#/$defs/SelfTitle"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                "required": [
-                  "self_title"
-                ],
-                "additionalProperties": false
-              },
-              {
                 "type": "object",
                 "properties": {
                   "pin": {
@@ -35210,29 +35048,6 @@
                 "type": "string",
                 "const": "clear"
               }
-            ]
-          },
-          "SelfTitle": {
-            "description": "A title a session wrote for itself, which never overwrites the user's own `title` mark.",
-            "type": "object",
-            "properties": {
-              "text": {
-                "type": "string"
-              },
-              "author": {
-                "description": "Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.",
-                "type": "string"
-              },
-              "at": {
-                "description": "Unix seconds it was written.",
-                "type": "number",
-                "format": "double"
-              }
-            },
-            "required": [
-              "text",
-              "author",
-              "at"
             ]
           },
           "Snooze": {
@@ -45123,26 +44938,6 @@
                 "additionalProperties": false
               },
               {
-                "description": "`{\"self_title\":{\"text\":\"Libera o formulário\",\"author\":\"captain\",\"at\":<unix s>}}`, or\n`{\"self_title\":null}` to take the session's own name off.",
-                "type": "object",
-                "properties": {
-                  "self_title": {
-                    "anyOf": [
-                      {
-                        "$ref": "#/$defs/SelfTitle"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ]
-                  }
-                },
-                "required": [
-                  "self_title"
-                ],
-                "additionalProperties": false
-              },
-              {
                 "type": "object",
                 "properties": {
                   "pin": {
@@ -45279,29 +45074,6 @@
                 "type": "string",
                 "const": "clear"
               }
-            ]
-          },
-          "SelfTitle": {
-            "description": "A title a session wrote for itself, which never overwrites the user's own `title` mark.",
-            "type": "object",
-            "properties": {
-              "text": {
-                "type": "string"
-              },
-              "author": {
-                "description": "Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.",
-                "type": "string"
-              },
-              "at": {
-                "description": "Unix seconds it was written.",
-                "type": "number",
-                "format": "double"
-              }
-            },
-            "required": [
-              "text",
-              "author",
-              "at"
             ]
           },
           "Snooze": {
@@ -57906,17 +57678,6 @@
               "null"
             ]
           },
-          "self_title": {
-            "description": "The name a session gave itself, shown in place of the generated one. It never overwrites\n`title`, and the sidebar shows `title` over it.",
-            "anyOf": [
-              {
-                "$ref": "#/$defs/SelfTitle"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "pin": {
             "description": "Its place among pinned threads, lowest first.",
             "type": [
@@ -57989,29 +57750,6 @@
           "session"
         ],
         "$defs": {
-          "SelfTitle": {
-            "description": "A title a session wrote for itself, which never overwrites the user's own `title` mark.",
-            "type": "object",
-            "properties": {
-              "text": {
-                "type": "string"
-              },
-              "author": {
-                "description": "Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.",
-                "type": "string"
-              },
-              "at": {
-                "description": "Unix seconds it was written.",
-                "type": "number",
-                "format": "double"
-              }
-            },
-            "required": [
-              "text",
-              "author",
-              "at"
-            ]
-          },
           "Snooze": {
             "type": "object",
             "properties": {
@@ -58110,17 +57848,6 @@
               "null"
             ]
           },
-          "self_title": {
-            "description": "The name a session gave itself, shown in place of the generated one. It never overwrites\n`title`, and the sidebar shows `title` over it.",
-            "anyOf": [
-              {
-                "$ref": "#/$defs/SelfTitle"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "pin": {
             "description": "Its place among pinned threads, lowest first.",
             "type": [
@@ -58193,29 +57920,6 @@
           "session"
         ],
         "$defs": {
-          "SelfTitle": {
-            "description": "A title a session wrote for itself, which never overwrites the user's own `title` mark.",
-            "type": "object",
-            "properties": {
-              "text": {
-                "type": "string"
-              },
-              "author": {
-                "description": "Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.",
-                "type": "string"
-              },
-              "at": {
-                "description": "Unix seconds it was written.",
-                "type": "number",
-                "format": "double"
-              }
-            },
-            "required": [
-              "text",
-              "author",
-              "at"
-            ]
-          },
           "Snooze": {
             "type": "object",
             "properties": {
@@ -73105,17 +72809,6 @@
                   "null"
                 ]
               },
-              "self_title": {
-                "description": "The name a session gave itself, shown in place of the generated one. It never overwrites\n`title`, and the sidebar shows `title` over it.",
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/SelfTitle"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
               "pin": {
                 "description": "Its place among pinned threads, lowest first.",
                 "type": [
@@ -73186,29 +72879,6 @@
             },
             "required": [
               "session"
-            ]
-          },
-          "SelfTitle": {
-            "description": "A title a session wrote for itself, which never overwrites the user's own `title` mark.",
-            "type": "object",
-            "properties": {
-              "text": {
-                "type": "string"
-              },
-              "author": {
-                "description": "Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.",
-                "type": "string"
-              },
-              "at": {
-                "description": "Unix seconds it was written.",
-                "type": "number",
-                "format": "double"
-              }
-            },
-            "required": [
-              "text",
-              "author",
-              "at"
             ]
           },
           "Snooze": {
@@ -77828,17 +77498,6 @@
                   "null"
                 ]
               },
-              "self_title": {
-                "description": "The name a session gave itself, shown in place of the generated one. It never overwrites\n`title`, and the sidebar shows `title` over it.",
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/SelfTitle"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
               "pin": {
                 "description": "Its place among pinned threads, lowest first.",
                 "type": [
@@ -77909,29 +77568,6 @@
             },
             "required": [
               "session"
-            ]
-          },
-          "SelfTitle": {
-            "description": "A title a session wrote for itself, which never overwrites the user's own `title` mark.",
-            "type": "object",
-            "properties": {
-              "text": {
-                "type": "string"
-              },
-              "author": {
-                "description": "Who wrote it: `captain` or `session` naming itself, `auto` a delivered request's suggestion.",
-                "type": "string"
-              },
-              "at": {
-                "description": "Unix seconds it was written.",
-                "type": "number",
-                "format": "double"
-              }
-            },
-            "required": [
-              "text",
-              "author",
-              "at"
             ]
           },
           "Snooze": {
@@ -79776,7 +79412,7 @@
                 ]
               },
               {
-                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.\nWith `title`, the machine also writes it as the Capitão's own thread name before the\nCapitão reads the message; without one, the message tells the Capitão to name itself.",
+                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -79805,13 +79441,6 @@
                       {
                         "type": "null"
                       }
-                    ]
-                  },
-                  "title": {
-                    "description": "A suggested name for the Capitão's thread, written as its own title on delivery.",
-                    "type": [
-                      "string",
-                      "null"
                     ]
                   }
                 },
@@ -80528,27 +80157,6 @@
                   "tab",
                   "previous",
                   "thread"
-                ]
-              },
-              {
-                "description": "The cleaned `title`, one line trimmed to 70 characters, as the session in `tab`'s own name\nfor itself. The user's own name for the thread, if they gave one, still shows over it.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "set_session_title"
-                  },
-                  "tab": {
-                    "type": "string"
-                  },
-                  "title": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "tab",
-                  "title"
                 ]
               },
               {
@@ -85457,7 +85065,7 @@
                 ]
               },
               {
-                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.\nWith `title`, the machine also writes it as the Capitão's own thread name before the\nCapitão reads the message; without one, the message tells the Capitão to name itself.",
+                "description": "`global_orchestrator::Handoff`. Hands `text` to the Capitão of the project at `path`,\nopening it when missing, as `[<sender>] <text>`: typed now when it is idle, its first prompt\nwhen it is stopped, else queued until it is idle, or refused as busy when `busy` (else this\nmachine's setting) says so. A repeat of `request_id` answers the first outcome and types nothing.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -85486,13 +85094,6 @@
                       {
                         "type": "null"
                       }
-                    ]
-                  },
-                  "title": {
-                    "description": "A suggested name for the Capitão's thread, written as its own title on delivery.",
-                    "type": [
-                      "string",
-                      "null"
                     ]
                   }
                 },
@@ -86208,27 +85809,6 @@
                   "tab",
                   "previous",
                   "thread"
-                ]
-              },
-              {
-                "description": "The cleaned `title`, one line trimmed to 70 characters, as the session in `tab`'s own name\nfor itself. The user's own name for the thread, if they gave one, still shows over it.",
-                "type": "object",
-                "properties": {
-                  "cmd": {
-                    "type": "string",
-                    "const": "set_session_title"
-                  },
-                  "tab": {
-                    "type": "string"
-                  },
-                  "title": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "cmd",
-                  "tab",
-                  "title"
                 ]
               },
               {
