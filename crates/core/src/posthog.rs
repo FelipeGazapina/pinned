@@ -14,6 +14,11 @@ pub const EU: &str = "https://eu.posthog.com";
 /// The most error issues one check reads: the newest page only.
 const PER_CHECK: usize = 100;
 const CALL_WAIT: Duration = Duration::from_secs(30);
+/// How much of an answer pinned reads. A self-hosted site is any host the user names, and the hub
+/// asks it every minute, so a bigger answer is refused, never buffered. 100 issues fit many times over.
+const BODY_MAX: usize = 2 * 1024 * 1024;
+/// The longest issue id kept. PostHog's are UUIDs.
+const ID_MAX: usize = 64;
 
 /// What the Connectors card shows of the PostHog project pinned reads. The key is kept apart.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -96,11 +101,23 @@ async fn call(method: reqwest::Method, host: &str, path: &str, key: &str, body: 
     if let Some(body) = body {
         request = request.json(body);
     }
-    let response = request.send().await.map_err(|e| format!("PostHog at {host} is unreachable: {}", e.without_url()))?;
+    let mut response = request.send().await.map_err(|e| format!("PostHog at {host} is unreachable: {}", e.without_url()))?;
     let status = response.status();
-    let text = response.text().await.map_err(|e| format!("PostHog sent a bad response: {}", e.without_url()))?;
-    let body = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let mut bytes: Vec<u8> = vec![];
+    while let Some(chunk) = response.chunk().await.map_err(|e| format!("PostHog sent a bad response: {}", e.without_url()))? {
+        if bytes.len() + chunk.len() > BODY_MAX {
+            return Err(format!("PostHog at {host} sent more than {} MB, which pinned does not read", BODY_MAX / (1024 * 1024)));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     Ok((status, body))
+}
+
+/// Whether `id` is an issue id pinned keeps: letters, digits and `-`, as a UUID is, at most
+/// `ID_MAX` long. It goes into the run's subject and the link a Linear ticket carries.
+fn plain_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= ID_MAX && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 fn refused(status: reqwest::StatusCode, host: &str, project: &str) -> String {
@@ -124,6 +141,10 @@ pub async fn account(key: &str, project_id: &str, host_choice: &str) -> Result<A
     let (status, body) = call(reqwest::Method::GET, &host, &format!("/api/projects/{project}/"), key, None).await?;
     if !status.is_success() {
         return Err(refused(status, &host, &project));
+    }
+    // A site that answers anything with a 200 is not PostHog: its project has an id.
+    if body["id"].is_null() {
+        return Err(format!("{host} did not answer as PostHog does for project {project}: check the host"));
     }
     let project_name = body["name"].as_str().unwrap_or_default().to_owned();
     Ok(Account { host, project, project_name, key_hint: crate::account_copy::secret_tail(key) })
@@ -160,7 +181,7 @@ pub fn issues_from(body: &Value, since: DateTime<Utc>) -> Result<Vec<Issue>, Str
     let issues = results
         .iter()
         .filter_map(|item| {
-            let id = text(&item["id"])?;
+            let id = text(&item["id"]).filter(|id| plain_id(id))?;
             let first_seen = text(&item["first_seen"])?;
             let after = DateTime::parse_from_rfc3339(&first_seen).ok()? > since;
             let status = text(&item["status"]).unwrap_or_default();
@@ -216,6 +237,15 @@ mod tests {
     }
 
     #[test]
+    fn an_issue_id_is_letters_digits_and_dashes() {
+        assert!(plain_id("0193abcd-ef01-7000-8000-0123456789ab"));
+        let long = "a".repeat(65);
+        for refused in ["", "a b", "x)\n[click](https://evil.example)", "../x", long.as_str()] {
+            assert!(!plain_id(refused), "{refused:?}");
+        }
+    }
+
+    #[test]
     fn an_issue_url_names_the_host_project_and_issue() {
         assert_eq!(issue_url("https://us.posthog.com", "12345", "0193-ab"), "https://us.posthog.com/project/12345/error_tracking/0193-ab");
     }
@@ -251,6 +281,13 @@ mod tests {
                 "first_seen": "2026-11-23T10:03:00Z",
                 "last_seen": "2026-11-23T10:04:00Z",
                 "aggregations": { "occurrences": 900, "sessions": 80, "users": 70, "volume_buckets": [] }
+            },
+            {
+                "id": "evil)\n[click](https://evil.example)",
+                "status": "active",
+                "name": "Injected",
+                "first_seen": "2026-11-23T10:06:00Z",
+                "last_seen": "2026-11-23T10:06:00Z"
             },
             {
                 "id": "01933a7e-old",
@@ -290,7 +327,7 @@ mod tests {
                     status: "active".into(),
                 },
             ],
-            "the suppressed issue and the one first seen before since are left out"
+            "the suppressed issue, the one first seen before since and the one whose id is not plain are left out"
         );
         assert!(issues_from(&json!({ "error": "nope" }), since).is_err());
     }
