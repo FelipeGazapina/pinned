@@ -5,6 +5,9 @@ const RECONNECT_MAX_MS = 30000;
 const RECONNECT_STABLE_MS = 30000;
 /** Every wait varies by this share either way, so apps the hub dropped together don't return together. */
 const RECONNECT_JITTER = 0.25;
+/** A try the hub has not accepted (`hello`) this long after its socket was made is given up, so a socket
+ * that never opens or never hears back can't hold the outage. Longer than the hub's 15 s wait for auth. */
+const RECONNECT_ATTEMPT_MS = 20000;
 /** The hub closes every socket with this code when it is restarting. */
 const CLOSE_GOING_AWAY = 1001;
 
@@ -63,6 +66,9 @@ class Hub {
     this.acceptedAt = 0;
     this.down = false;
     this.closed = false;
+    /** The running try's deadline, and the wait before the next try while the link is down. */
+    this.deadline = null;
+    this.retry = null;
     /** What the hub answered the password. It stays in memory, so a login read off this machine's
      * disk unlocks nothing. */
     this.unlock = null;
@@ -71,41 +77,68 @@ class Hub {
   }
 
   connect() {
+    this.retry = null;
     const ws = (this.ws = new WebSocket(this.url));
+    // A socket given up on stays quiet: only the try's own socket moves the app.
     // The lock makes the login alone, which the app keeps on disk, run no call only the owner makes.
-    ws.onopen = () => ws.send(JSON.stringify({ type: "auth", token: this.token, lock: true, ...(this.unlock ? { unlock: this.unlock } : {}) }));
-    ws.onmessage = (e) => this.receive(JSON.parse(e.data));
-    ws.onclose = (e) => {
-      const wasOnline = this.online;
-      this.online = false;
-      for (const { reject } of this.pending.values()) reject("lost the connection to the hub");
-      this.pending.clear();
-      if (this.closed) return;
-      if (!wasOnline && REFUSED.includes(e.code)) return this.on.refused?.();
-      // Once per outage, however many tries it takes: the UI shows it is reconnecting until the hub answers.
-      if (!this.down) {
-        this.down = true;
-        this.on.online?.(false);
-      }
-      const wait = this.backoff.closed({ accepted: wasOnline, upMs: this.now() - this.acceptedAt, code: e.code });
-      setTimeout(() => this.closed || this.connect(), wait);
-    };
+    ws.onopen = () => ws === this.ws && ws.send(JSON.stringify({ type: "auth", token: this.token, lock: true, ...(this.unlock ? { unlock: this.unlock } : {}) }));
+    ws.onmessage = (e) => ws === this.ws && this.receive(JSON.parse(e.data));
+    ws.onclose = (e) => ws === this.ws && this.lost(e.code);
+    this.deadline = setTimeout(() => {
+      this.ws = null;
+      ws.close();
+      this.lost();
+    }, RECONNECT_ATTEMPT_MS);
+  }
+
+  /** The running try ended: its socket closed with `code`, or it ran out of time with none. */
+  lost(code) {
+    clearTimeout(this.deadline);
+    this.deadline = null;
+    const wasOnline = this.online;
+    this.online = false;
+    for (const { reject } of this.pending.values()) reject("lost the connection to the hub");
+    this.pending.clear();
+    if (this.closed) return;
+    if (!wasOnline && REFUSED.includes(code)) return this.on.refused?.();
+    // Once per outage, however many tries it takes: the UI shows it is reconnecting until the hub answers.
+    if (!this.down) {
+      this.down = true;
+      this.on.online?.(false);
+    }
+    const wait = this.backoff.closed({ accepted: wasOnline, upMs: this.now() - this.acceptedAt, code });
+    this.retry = setTimeout(() => this.closed || this.connect(), wait);
+  }
+
+  /** Tries now instead of waiting out the backoff, when the window comes back or the network does. Only
+   * while the link is down between tries: not while it is up or a try runs, after sign-out, or after the
+   * hub refused the login. A try that fails takes the next wait as if it had come on time. */
+  retryNow() {
+    if (this.closed || this.retry === null) return;
+    clearTimeout(this.retry);
+    this.connect();
   }
 
   receive(frame) {
     switch (frame.type) {
       case "hello":
+        clearTimeout(this.deadline);
+        this.deadline = null;
         this.online = true;
         this.down = false;
         this.acceptedAt = this.now();
-        // The hub forgot our subscriptions with the old socket; each replays its screen, so the terminal starts over.
-        for (const [key, { machine, tab, sinks }] of this.attached) {
-          if (!frame.tabs[machine]?.some((t) => t.id === tab)) continue;
-          for (const sink of sinks) sink.reset();
-          this.send({ type: "attach", machine, tab });
+        // The link is up whatever the app does with the hello, so the reconnect bar always clears.
+        try {
+          // The hub forgot our subscriptions with the old socket; each replays its screen, so the terminal starts over.
+          for (const [key, { machine, tab, sinks }] of this.attached) {
+            if (!frame.tabs[machine]?.some((t) => t.id === tab)) continue;
+            for (const sink of sinks) sink.reset();
+            this.send({ type: "attach", machine, tab });
+          }
+          this.on.hello?.(frame);
+        } finally {
+          this.on.online?.(true);
         }
-        this.on.hello?.(frame);
-        this.on.online?.(true);
         break;
       case "reply": {
         const waiting = this.pending.get(frame.id);
@@ -142,7 +175,7 @@ class Hub {
   }
 
   send(frame) {
-    if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(frame));
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(frame));
   }
 
   request(frame) {
@@ -216,6 +249,8 @@ class Hub {
 
   close() {
     this.closed = true;
-    this.ws.close();
+    clearTimeout(this.deadline);
+    clearTimeout(this.retry);
+    this.ws?.close();
   }
 }

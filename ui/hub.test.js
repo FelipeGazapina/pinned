@@ -27,7 +27,8 @@ function app(passwords) {
     close() {}
   }
   const locked = passwords && (async (error) => (asked.push(error), passwords.shift()));
-  const context = { WebSocket, setTimeout: (run) => run(), locked, atob };
+  // A reconnect runs at once; the 20 s deadline on each try never comes.
+  const context = { WebSocket, setTimeout: (run, ms) => (ms === 20000 ? 0 : run()), clearTimeout() {}, locked, atob };
   vm.createContext(context);
   vm.runInContext(`${hubSrc}\nthis.hub = new Hub("https://hub.example", "login", locked ? { locked } : {});`, context);
   const open = () => {
