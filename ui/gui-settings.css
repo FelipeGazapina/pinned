@@ -308,6 +308,19 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
 #settings-page #global-orchestrator-settings .chip { white-space: nowrap; }
 @media (min-width: 640px) { #settings-page #global-orchestrator-settings .go-name .chips { flex-wrap: nowrap; } }
 #settings-page #global-orchestrator-settings .side-setting select { width: 232px; }
+/* The approval profile opens under its label, its text the row's full width. */
+#settings-page #global-orchestrator-settings .side-setting[data-setting="approval-profile"] { flex-wrap: wrap; }
+#settings-page #global-orchestrator-settings .go-approval { flex: 1 1 100%; }
+#settings-page #global-orchestrator-settings .go-approval summary { cursor: pointer; }
+/* The column is a div inside the details: a details is no flex container in every engine. */
+#settings-page #global-orchestrator-settings .go-approval-body { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; margin-top: 8px; }
+#settings-page #global-orchestrator-settings .go-approval textarea { box-sizing: border-box; width: 100%; min-height: 400px; resize: vertical; }
+#settings-page #global-orchestrator-settings .go-approval-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; width: 100%; }
+/* A machine whose own settings differ from the host's: a warning above the fields until they match. */
+#settings-page #global-orchestrator-settings .go-drift { max-width: 520px; margin: 0 0 16px; padding: 12px; border-radius: 8px; color: var(--g-warning-fg); background: rgb(var(--g-warning-rgb) / 0.12); }
+#settings-page #global-orchestrator-settings .go-drift p { margin: 0 0 8px; }
+/* Its button names the host, so its label wraps, even inside a long name, rather than run past a narrow screen. */
+#settings-page #global-orchestrator-settings .go-drift button { height: auto; min-height: 32px; max-width: 100%; padding-block: 6px; white-space: normal; overflow-wrap: anywhere; }
 #settings-page #global-orchestrator-settings .actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; max-width: 520px; margin: 16px 0 0; }
 @media (max-width: 639px) {
   #settings-page #global-orchestrator-settings .side-setting:is([data-setting="name"], [data-setting="host"], [data-setting="busy"], [data-setting="reports"], [data-setting="memory"]) { flex-wrap: wrap; }
@@ -316,6 +329,7 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
   #settings-page #global-orchestrator-settings .side-setting:is([data-setting="name"], [data-setting="host"]) .chips { justify-content: flex-start; }
   #settings-page #global-orchestrator-settings .go-name input { width: 100%; }
   #settings-page #global-orchestrator-settings .side-setting select { width: 100%; flex: 1 1 100%; }
+  #settings-page #global-orchestrator-settings .go-approval textarea { min-height: 240px; }
 }
 #settings-page #global-orchestrator-settings #go-notes:empty { display: none; }
 
