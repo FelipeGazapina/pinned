@@ -5506,6 +5506,43 @@
                 ]
               },
               {
+                "description": "`posthog::Account`, once PostHog let the key read `project` on `host` (`us`, `eu` or an\n`https://` site).",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "connect_posthog"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "host": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "key",
+                  "project",
+                  "host"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "disconnect_posthog"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`Vec<vercel::Model>`: chat models tagged `structured-output`, and every decision model. The list needs no key.",
                 "type": "object",
                 "properties": {
@@ -6349,6 +6386,13 @@
                   "assignee": {
                     "type": "string",
                     "default": ""
+                  },
+                  "subject": {
+                    "description": "An observability run's subject key, which files for its PostHog error instead of a\nSlack thread; `channel` and `thread` are then empty. Older apps never send it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -8413,6 +8457,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -8615,6 +8676,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -9334,6 +9413,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -18768,6 +18864,43 @@
                 ]
               },
               {
+                "description": "`posthog::Account`, once PostHog let the key read `project` on `host` (`us`, `eu` or an\n`https://` site).",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "connect_posthog"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "host": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "key",
+                  "project",
+                  "host"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "disconnect_posthog"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`Vec<vercel::Model>`: chat models tagged `structured-output`, and every decision model. The list needs no key.",
                 "type": "object",
                 "properties": {
@@ -19602,6 +19735,13 @@
                   "assignee": {
                     "type": "string",
                     "default": ""
+                  },
+                  "subject": {
+                    "description": "An observability run's subject key, which files for its PostHog error instead of a\nSlack thread; `channel` and `thread` are then empty. Older apps never send it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -21624,6 +21764,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -21819,6 +21976,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -22518,6 +22693,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -28151,6 +28343,43 @@
                 ]
               },
               {
+                "description": "`posthog::Account`, once PostHog let the key read `project` on `host` (`us`, `eu` or an\n`https://` site).",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "connect_posthog"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "host": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "key",
+                  "project",
+                  "host"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "disconnect_posthog"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`Vec<vercel::Model>`: chat models tagged `structured-output`, and every decision model. The list needs no key.",
                 "type": "object",
                 "properties": {
@@ -28994,6 +29223,13 @@
                   "assignee": {
                     "type": "string",
                     "default": ""
+                  },
+                  "subject": {
+                    "description": "An observability run's subject key, which files for its PostHog error instead of a\nSlack thread; `channel` and `thread` are then empty. Older apps never send it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -31058,6 +31294,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -31260,6 +31513,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -31988,6 +32259,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -38306,6 +38594,43 @@
                 ]
               },
               {
+                "description": "`posthog::Account`, once PostHog let the key read `project` on `host` (`us`, `eu` or an\n`https://` site).",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "connect_posthog"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "host": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "key",
+                  "project",
+                  "host"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "disconnect_posthog"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`Vec<vercel::Model>`: chat models tagged `structured-output`, and every decision model. The list needs no key.",
                 "type": "object",
                 "properties": {
@@ -39140,6 +39465,13 @@
                   "assignee": {
                     "type": "string",
                     "default": ""
+                  },
+                  "subject": {
+                    "description": "An observability run's subject key, which files for its PostHog error instead of a\nSlack thread; `channel` and `thread` are then empty. Older apps never send it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -41162,6 +41494,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -41357,6 +41706,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -42065,6 +42432,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -48498,6 +48882,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -48700,6 +49101,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -49429,6 +49848,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -50059,6 +50495,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -50254,6 +50707,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -50962,6 +51433,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -57770,10 +58258,21 @@
             ],
             "default": null
           },
-          "upstash": {
+          "posthog": {
+            "description": "The connected PostHog project, with its key's last characters only.",
             "anyOf": [
               {
                 "$ref": "#/$defs/Account5"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "upstash": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Account6"
               },
               {
                 "type": "null"
@@ -57974,6 +58473,33 @@
             ]
           },
           "Account5": {
+            "description": "What the Connectors card shows of the PostHog project pinned reads. The key is kept apart.",
+            "type": "object",
+            "properties": {
+              "host": {
+                "description": "The site requests go to, as `https://us.posthog.com`.",
+                "type": "string"
+              },
+              "project": {
+                "description": "The project id, as PostHog's project settings show it.",
+                "type": "string"
+              },
+              "project_name": {
+                "type": "string"
+              },
+              "key_hint": {
+                "description": "The key's last characters, as `…a1b2`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "host",
+              "project",
+              "project_name",
+              "key_hint"
+            ]
+          },
+          "Account6": {
             "description": "What the Connectors card shows of the keys pinned keeps.",
             "type": "object",
             "properties": {
@@ -58332,6 +58858,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -58534,6 +59077,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -59262,6 +59823,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -60385,10 +60963,21 @@
             ],
             "default": null
           },
-          "upstash": {
+          "posthog": {
+            "description": "The connected PostHog project, with its key's last characters only.",
             "anyOf": [
               {
                 "$ref": "#/$defs/Account5"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "upstash": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Account6"
               },
               {
                 "type": "null"
@@ -60580,6 +61169,33 @@
             ]
           },
           "Account5": {
+            "description": "What the Connectors card shows of the PostHog project pinned reads. The key is kept apart.",
+            "type": "object",
+            "properties": {
+              "host": {
+                "description": "The site requests go to, as `https://us.posthog.com`.",
+                "type": "string"
+              },
+              "project": {
+                "description": "The project id, as PostHog's project settings show it.",
+                "type": "string"
+              },
+              "project_name": {
+                "type": "string"
+              },
+              "key_hint": {
+                "description": "The key's last characters, as `…a1b2`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "host",
+              "project",
+              "project_name",
+              "key_hint"
+            ]
+          },
+          "Account6": {
             "description": "What the Connectors card shows of the keys pinned keeps.",
             "type": "object",
             "properties": {
@@ -60916,6 +61532,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -61111,6 +61744,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -61819,6 +62470,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -69917,10 +70585,21 @@
                 ],
                 "default": null
               },
-              "upstash": {
+              "posthog": {
+                "description": "The connected PostHog project, with its key's last characters only.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Account5"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "upstash": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Account6"
                   },
                   {
                     "type": "null"
@@ -70121,6 +70800,33 @@
             ]
           },
           "Account5": {
+            "description": "What the Connectors card shows of the PostHog project pinned reads. The key is kept apart.",
+            "type": "object",
+            "properties": {
+              "host": {
+                "description": "The site requests go to, as `https://us.posthog.com`.",
+                "type": "string"
+              },
+              "project": {
+                "description": "The project id, as PostHog's project settings show it.",
+                "type": "string"
+              },
+              "project_name": {
+                "type": "string"
+              },
+              "key_hint": {
+                "description": "The key's last characters, as `…a1b2`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "host",
+              "project",
+              "project_name",
+              "key_hint"
+            ]
+          },
+          "Account6": {
             "description": "What the Connectors card shows of the keys pinned keeps.",
             "type": "object",
             "properties": {
@@ -70479,6 +71185,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -70681,6 +71404,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -71409,6 +72150,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -74703,10 +75461,21 @@
                 ],
                 "default": null
               },
-              "upstash": {
+              "posthog": {
+                "description": "The connected PostHog project, with its key's last characters only.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Account5"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "upstash": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Account6"
                   },
                   {
                     "type": "null"
@@ -74898,6 +75667,33 @@
             ]
           },
           "Account5": {
+            "description": "What the Connectors card shows of the PostHog project pinned reads. The key is kept apart.",
+            "type": "object",
+            "properties": {
+              "host": {
+                "description": "The site requests go to, as `https://us.posthog.com`.",
+                "type": "string"
+              },
+              "project": {
+                "description": "The project id, as PostHog's project settings show it.",
+                "type": "string"
+              },
+              "project_name": {
+                "type": "string"
+              },
+              "key_hint": {
+                "description": "The key's last characters, as `…a1b2`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "host",
+              "project",
+              "project_name",
+              "key_hint"
+            ]
+          },
+          "Account6": {
             "description": "What the Connectors card shows of the keys pinned keeps.",
             "type": "object",
             "properties": {
@@ -75234,6 +76030,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -75429,6 +76242,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -76137,6 +76968,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
