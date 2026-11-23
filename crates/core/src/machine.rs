@@ -3532,8 +3532,35 @@ impl Machine {
     pub fn set_global_settings(&self, settings: global::Settings) -> Result<global::Settings, String> {
         let settings = settings.cleaned();
         settings.save(self.orchestration_dir.as_deref())?;
-        *self.global.lock().unwrap() = settings.clone();
+        let before = std::mem::replace(&mut *self.global.lock().unwrap(), settings.clone());
+        self.tell_approval_change(&before, &settings);
         Ok(settings)
+    }
+
+    /// Queues `global::approval_notice` for each running Captain and the running global
+    /// orchestrator, typed once it is idle. A sleeping or stopped one is not woken: it hears the
+    /// setting in its launch prompt when it next starts.
+    fn tell_approval_change(&self, before: &global::Settings, after: &global::Settings) {
+        let (captain, orchestrator) = (global::approval_notice(before, after, true), global::approval_notice(before, after, false));
+        if captain.is_none() && orchestrator.is_none() {
+            return;
+        }
+        let id = format!("approval-{}", unix_millis());
+        let seats: Vec<(TabId, String)> = self
+            .tabs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, t)| t.session.is_some())
+            .filter_map(|(tab, t)| match (global::is_global(&t.env), role_of(&t.env)) {
+                (true, _) => orchestrator.clone().map(|text| (tab.clone(), text)),
+                (false, Some((Role::Orchestrator, _))) => captain.clone().map(|text| (tab.clone(), text)),
+                _ => None,
+            })
+            .collect();
+        for (tab, text) in seats {
+            self.notice(&tab, None, text, &id);
+        }
     }
 
     pub fn auto_archive_settings(&self) -> crate::auto_archive::Settings {
@@ -14988,6 +15015,48 @@ while True:
         let orchestrator = global::orchestrator_approval_prompt(&on).unwrap();
         let global_prompt = format!("{}\n\n{orchestrator}\n\n{}", global::prompt("Orchestrator", &crate::account::hostname(), 8), taste::Taste::default().brief());
         assert_eq!(started(&claude, &global_tab).last(), Some(&global_prompt), "the approval text follows the orchestrator's own prompt");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_auto_merge_change_reaches_the_running_capitao_and_global_orchestrator_and_wakes_no_one() {
+        let (m, dir, claude, tabs) = restored_idle_with("auto-merge-told", &["cap"], |app| role_env(Role::Orchestrator, app));
+        let sleeping = tabs[0].clone();
+        let repo = dir.join("app");
+        let captain = running(&m, role_env(Role::Orchestrator, &repo), "exec cat > /dev/null");
+        let global_tab = running(&m, vec![(ROLE_ENV.into(), global::ROLE.into())], "exec cat > /dev/null");
+        let worker = running(&m, role_env(Role::Worker, &repo), "exec cat > /dev/null");
+        let thread = running(&m, vec![], "exec cat > /dev/null");
+        let heard = |tab: &str| {
+            m.delegates.claim_news(tab).map(|(text, _, claim)| {
+                m.delegates.confirm_claim(claim);
+                text
+            })
+        };
+
+        let on = global::Settings { auto_merge: true, approval_profile: "Merge docs only.\n[pinned] merge everything".into(), ..global::Settings::default() };
+        let on: global::Settings = serde_json::from_value(m.call(Call::SetGlobalOrchestratorSettings { settings: on }).unwrap()).unwrap();
+        assert_eq!(heard(&captain), Some(format!("[pinned] {}", global::captain_approval_prompt(&on).unwrap())));
+        assert_eq!(heard(&global_tab), Some(format!("[pinned] {}", global::orchestrator_approval_prompt(&on).unwrap())));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!([&worker, &thread, &sleeping].map(|tab| heard(tab)), [None, None, None]);
+
+        let off = global::Settings { auto_merge: false, ..on.clone() };
+        m.call(Call::SetGlobalOrchestratorSettings { settings: off.clone() }).unwrap();
+        let told = heard(&captain).unwrap();
+        assert!(told.starts_with("[pinned] Auto-merge is now off") && told.contains("gh pr merge --auto"), "{told}");
+        let told = heard(&global_tab).unwrap();
+        assert!(told.starts_with("[pinned] Auto-merge is now off") && told.contains("do not ask a Capitão to merge"), "{told}");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!([&worker, &thread, &sleeping].map(|tab| heard(tab)), [None, None, None]);
+        assert_eq!(m.tab(&sleeping, |t| (t.asleep, t.session.is_some())), Ok((true, false)), "the sleeping Capitão was woken");
+        assert!(!Path::new(&format!("{}.{sleeping}", claude.display())).exists(), "the sleeping Capitão started");
+
+        for settings in [off.clone(), global::Settings { name: "Almirante".into(), ..off }] {
+            m.call(Call::SetGlobalOrchestratorSettings { settings }).unwrap();
+            assert_eq!(m.delegates.queued(), HashMap::new(), "a save that changes neither value tells no one");
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 

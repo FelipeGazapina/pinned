@@ -94,6 +94,15 @@ function globalSettingsWrites(view, machines) {
     }));
 }
 
+/** Whether a save from `before` to `after` tells the running Captains and the orchestrator, as
+ * global_orchestrator.rs's approval_notice decides: auto-merge changed, or the profile in effect
+ * changed while it stayed on. An empty profile is the default. */
+function approvalChangeTold(before, after) {
+  const profile = (s) => s.approval_profile || GO_DEFAULT_APPROVAL_PROFILE;
+  if (!!before.auto_merge !== !!after.auto_merge) return true;
+  return !!after.auto_merge && profile(before) !== profile(after);
+}
+
 const workersLabel = (n) => `${n} worker${n === 1 ? "" : "s"}`;
 
 /** How the projects page and the Captains rail name a `captainState`, and the rail a machine that is away. */

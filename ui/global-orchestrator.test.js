@@ -13,7 +13,7 @@ const here = (value) => JSON.parse(JSON.stringify(value));
 const pure = () => {
   const context = {};
   vm.createContext(context);
-  vm.runInContext(`${read("global-orchestrator.js")}\nthis.api = { mergeGlobalSettings, globalSettingsWrites, globalSettingsNotes, globalSettingsDrift, isOlderPinned, GO_DEFAULT_APPROVAL_PROFILE };`, context);
+  vm.runInContext(`${read("global-orchestrator.js")}\nthis.api = { mergeGlobalSettings, globalSettingsWrites, globalSettingsNotes, globalSettingsDrift, isOlderPinned, approvalChangeTold, GO_DEFAULT_APPROVAL_PROFILE };`, context);
   return context.api;
 };
 
@@ -301,10 +301,45 @@ test("the section shows the auto-merge switch and the approval profile behind a 
   assert.match(html, /<button type="button" class="secondary" id="go-approval-reset">Reset to default<\/button>/);
   assert.ok(html.indexOf('id="go-read-aloud"') < html.indexOf('id="go-auto-merge"') && html.indexOf('id="go-approval-profile"') < html.indexOf('data-setting="memory"'), "after Read aloud, before Global memory");
 
+  const reaches = "A change reaches running Captains and the orchestrator at their next turn; a turn already in progress can still merge.";
+  assert.ok(html.includes(`decide by the approval profile whether a finished pull request merges or waits for your review. ${reaches}</p>`), "the switch says when a change lands");
+  assert.ok(html.includes("Used when Auto-merge is on. With Auto-merge on, an edit reaches running Captains and the orchestrator at their next turn; a turn already in progress can still merge.</p>"), "the profile says when an edit lands");
+  assert.doesNotMatch(html, /immediate/i);
+
   const off = page({ settings: { mm: { host: true, approval_profile: "Merge <docs> only." } } });
   const custom = await off.context.globalOrchestratorSettingsHtml();
   assert.doesNotMatch(custom, /id="go-auto-merge" checked/);
   assert.ok(custom.includes(">Merge &#60;docs&#62; only.</textarea>"), "a saved profile shows escaped");
+});
+
+test("a save tells the running sessions when auto-merge changes, or the profile in effect while it is on", () => {
+  const { approvalChangeTold, GO_DEFAULT_APPROVAL_PROFILE } = pure();
+  const on = { name: "Orchestrator", auto_merge: true, approval_profile: "" };
+  const off = { ...on, auto_merge: false };
+  assert.equal(approvalChangeTold(on, off), true, "turned off");
+  assert.equal(approvalChangeTold(off, on), true, "turned on");
+  assert.equal(approvalChangeTold(on, { ...on, approval_profile: "Merge docs only." }), true, "profile edited while on");
+  assert.equal(approvalChangeTold(off, { ...off, approval_profile: "Merge docs only." }), false, "profile edited while off");
+  assert.equal(approvalChangeTold(on, { ...on, approval_profile: GO_DEFAULT_APPROVAL_PROFILE }), false, "the default spelled out is the empty one");
+  assert.equal(approvalChangeTold(on, { ...on, name: "Admiral" }), false, "another field");
+  assert.equal(approvalChangeTold({ name: "Orchestrator" }, off), false, "an older node's answer reads as off");
+});
+
+test("a save that turns auto-merge off says the running sessions were told", async () => {
+  const { context, element } = page({ settings: { mm: { host: true, auto_merge: true }, mb: { auto_merge: true } } });
+  await context.globalOrchestratorSettingsHtml();
+  context.bindGlobalOrchestratorSettings();
+  element("go-name").value = "Orchestrator";
+  element("go-busy").value = "queue";
+  element("go-reports").value = "auto";
+  element("go-group-reports").checked = true;
+  element("go-auto-merge").checked = false;
+  await element("go-save").onclick();
+  assert.equal(element("go-status").textContent, "Saved. Running Captains and the orchestrator were told.");
+  assert.equal(element("go-error").textContent, "");
+
+  await element("go-save").onclick();
+  assert.equal(element("go-status").textContent, "Saved", "saving the same values again tells no one");
 });
 
 test("Reset to default puts the default profile back in the text", async () => {
@@ -337,7 +372,7 @@ test("a save the host took but another machine refused says Saved on the host an
   element("go-reports").value = "auto";
   element("go-auto-merge").checked = true;
   await element("go-save").onclick();
-  assert.equal(element("go-status").textContent, "Saved on Mac mini");
+  assert.equal(element("go-status").textContent, "Saved on Mac mini. Running Captains and the orchestrator were told.");
   assert.equal(element("go-error").textContent, "Not saved on MacBook: the machine went away. It keeps its old settings.");
   assert.equal(events.length, 1, "the host's save still tells the page");
   assert.equal(events[0].detail.auto_merge, true);

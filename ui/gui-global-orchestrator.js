@@ -103,8 +103,8 @@ async function globalOrchestratorSettingsHtml() {
       <select id="go-reports" aria-label="Reports">${reports}</select></div>
     ${toggle("group-reports", view.group_reports, "Group consecutive reports", "Reports that arrive one after another become a single row in the chat.")}
     ${toggle("read-aloud", view.read_aloud, "Read summaries aloud on the phone", "The phone reads out the summary of each report that arrives.")}
-    ${toggle("auto-merge", view.auto_merge, "Auto-merge", "When on, the Captains and the orchestrator decide by the approval profile whether a finished pull request merges or waits for your review.")}
-    <div class="side-setting" data-setting="approval-profile"><div><label for="go-approval-profile">Approval profile</label><p class="meta">What decides whether a pull request merges by itself. Used when Auto-merge is on.</p></div>
+    ${toggle("auto-merge", view.auto_merge, "Auto-merge", "When on, the Captains and the orchestrator decide by the approval profile whether a finished pull request merges or waits for your review. A change reaches running Captains and the orchestrator at their next turn; a turn already in progress can still merge.")}
+    <div class="side-setting" data-setting="approval-profile"><div><label for="go-approval-profile">Approval profile</label><p class="meta">What decides whether a pull request merges by itself. Used when Auto-merge is on. With Auto-merge on, an edit reaches running Captains and the orchestrator at their next turn; a turn already in progress can still merge.</p></div>
       <details class="go-approval"><summary>Show the profile</summary><div class="go-approval-body">
         <textarea id="go-approval-profile" maxlength="${GO_APPROVAL_PROFILE_MAX}" aria-label="Approval profile" aria-describedby="go-approval-count">${esc(profile)}</textarea>
         <div class="go-approval-foot"><span class="meta" id="go-approval-count">${approvalCount(profile)}</span><button type="button" class="secondary" id="go-approval-reset">Reset to default</button></div></div></details></div>
@@ -205,13 +205,16 @@ async function saveGlobalOrchestratorSettings(view = globalOrchestratorForm()) {
     await linked.hub({ cmd: "record_global_orchestrator_save", settings, took }).catch(() => {});
   }
   document.dispatchEvent(new CustomEvent("global-orchestrator-settings", { detail: saved.settings }));
+  // What the section read before the save, which the re-render replaces.
+  const told = goSettings?.view && approvalChangeTold(goSettings.view, saved.settings);
   const section = document.getElementById("global-orchestrator-settings");
   if (section) {
     section.outerHTML = await globalOrchestratorSettingsHtml();
     bindGlobalOrchestratorSettings();
     const missed = outcomes.filter((o) => o.error).map((o) => `Not saved on ${live.find((m) => m.id === o.machine)?.name ?? o.machine}: ${o.error.replace(/\.$/, "")}. It keeps its old settings.`);
     const status = document.getElementById("go-status");
-    if (status) status.textContent = missed.length ? `Saved on ${host.name}` : "Saved";
+    const savedText = missed.length ? `Saved on ${host.name}` : "Saved";
+    if (status) status.textContent = told ? `${savedText}. Running Captains and the orchestrator were told.` : savedText;
     const failed = document.getElementById("go-error");
     if (failed) failed.textContent = missed.join(" ");
   }

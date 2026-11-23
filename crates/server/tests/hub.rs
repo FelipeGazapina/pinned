@@ -8410,15 +8410,28 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
     // Memory, settings, usage and skills: Ana's own machine answers, Bob reaches none of it.
     assert_eq!(ran(act(&ana.dir, &ana.tab, "memory_save", json!({ "path": docs, "title": "Deploys", "text": "Docs deploy from tags." })))["title"], "Deploys");
     assert_eq!(ran(act(&ana.dir, &ana.tab, "memory_status", json!({ "path": docs })))["count"], 1);
+    // Auto-merge lives in the global orchestrator's settings, so every change waits for the owner, a rename too.
+    let orchestrator = |agent: &Agent| ran(act(&agent.dir, &agent.tab, "global_orchestrator_settings", json!({})));
+    let before = orchestrator(&ana);
+    let renamed = act(&ana.dir, &ana.tab, "set_global_orchestrator_settings", json!({ "settings": { "name": "Comodoro" } })).unwrap();
+    assert_eq!(renamed["outcome"], "pending", "a change to the name alone waits for the owner: {renamed}");
+    let renamed_id = renamed["id"].as_str().unwrap().to_owned();
+    assert!(!renamed_id.is_empty() && renamed.get("result").is_none(), "a held change answers no settings: {renamed}");
+    assert_eq!(orchestrator(&ana), before, "nothing changes while it waits");
+    assert_eq!(bob.client.hub(json!({ "cmd": "decide_confirmation", "id": renamed_id, "approve": true })), Err(format!("no confirmation {renamed_id} waits")));
+    assert_eq!(orchestrator(&ana), before, "Bob's approval reached nothing");
+    let denied = ana.client.hub(json!({ "cmd": "decide_confirmation", "id": renamed_id, "approve": false })).unwrap();
+    assert_eq!(denied["outcome"], "denied", "{denied}");
+    assert_eq!(orchestrator(&ana), before, "a denied change leaves the settings as they were");
     let held = act(&ana.dir, &ana.tab, "set_global_orchestrator_settings", json!({ "settings": { "name": "Almirante", "host": true } })).unwrap();
-    assert_eq!(held["outcome"], "pending", "auto-merge lives in these settings, so a change waits for the owner: {held}");
-    assert_ne!(ran(act(&ana.dir, &ana.tab, "global_orchestrator_settings", json!({})))["name"], "Almirante", "nothing changes before she approves");
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert_eq!(orchestrator(&ana), before, "nothing changes before she approves");
     let decided = ana.client.hub(json!({ "cmd": "decide_confirmation", "id": held["id"], "approve": true })).unwrap();
     assert_eq!(decided["outcome"], "done", "{decided}");
     let almirante = decided["result"].clone();
-    assert_eq!(almirante["name"], "Almirante");
-    assert_eq!(ran(act(&ana.dir, &ana.tab, "global_orchestrator_settings", json!({}))), almirante);
-    assert_ne!(ran(act(&bob.dir, &bob.tab, "global_orchestrator_settings", json!({})))["name"], "Almirante", "Bob's machine keeps its own settings");
+    assert_eq!((&almirante["name"], &almirante["host"]), (&json!("Almirante"), &json!(true)), "{almirante}");
+    assert_eq!(orchestrator(&ana), almirante);
+    assert_ne!(orchestrator(&bob)["name"], "Almirante", "Bob's machine keeps its own settings");
     let prices = ran(act(&ana.dir, &ana.tab, "set_usage_prices", json!({ "prices": { "glm-5.3": { "input": 1.0, "output": 2.0 } }, "aliases": {} })));
     assert_eq!(prices["prices"]["glm-5.3"]["output"], 2.0);
     assert_eq!(ran(act(&bob.dir, &bob.tab, "usage_prices", json!({}))), json!({ "prices": {}, "aliases": {} }));
