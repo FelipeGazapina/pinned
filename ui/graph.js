@@ -450,6 +450,9 @@ function assigneeOf(to) {
   return { kind: "me" };
 }
 
+/** An observability trigger's source. PostHog is the only one today. */
+const sourceOf = (source) => ({ kind: source?.kind ?? "posthog" });
+
 /** The graph watch for a workflow trigger. Unknown kinds stay Called, as a graph with no watch does. */
 export function watchOf(trigger) {
   const kind = trigger?.kind ?? "called";
@@ -458,6 +461,7 @@ export function watchOf(trigger) {
   if (kind === "linear-assigned") return { kind, to: assigneeOf(trigger.to), scope: scopeOf(trigger.scope), by: trigger.by || "anyone" };
   if (kind === "slack-message") return { kind, channel: trigger.channel ?? "", ...(trigger.apps ? { apps: true } : {}) };
   if (kind === "slack-mention") return { kind, channel: trigger.channel ?? "" };
+  if (kind === "observability") return { kind, source: sourceOf(trigger.source) };
   return { kind: "called" };
 }
 
@@ -469,6 +473,7 @@ export function triggerFromWatch(watch) {
   if (kind === "linear-assigned") return { kind, to: assigneeOf(watch.to), scope: scopeOf(watch.scope), by: watch.by || "anyone" };
   if (kind === "slack-message") return { kind, channel: watch.channel ?? "", ...(watch.apps ? { apps: true } : {}) };
   if (kind === "slack-mention") return { kind, channel: watch.channel ?? "" };
+  if (kind === "observability") return { kind, source: sourceOf(watch.source) };
   return { kind: "called" };
 }
 

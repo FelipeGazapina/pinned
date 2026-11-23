@@ -502,7 +502,7 @@ wheel, a trackpad pinch, or the buttons in its bottom-left corner, where ⛶ fit
 A **＋** at the end of the flow lists the optional steps that are off, and a **＋** after a
 category that stops opens what that category does next. **＋ New workflow** asks what starts the agent and opens a flow
 filled with defaults: a Linear label, a Slack mention, any message in a Slack channel sorted by
-a decision model, or another workflow.
+a decision model, another workflow, or a new error in PostHog.
 
 Each workflow has its own column flow. Each **Move the issue** step names the column for a
 stage, and a stage without the step leaves the issue where it is:
@@ -640,6 +640,47 @@ mentions the bot in a channel that a Slack mention workflow watches starts one s
 two. If the gateway or Slack fails, the check reports the error and sorts the message at the
 next minute. A route to a workflow that is deleted, turned off or of the wrong kind stops the
 message and reports the error once.
+
+### PostHog errors
+
+A workflow that starts when **An error shows up in PostHog** (the `observability` trigger)
+starts one run for each new error that PostHog error tracking reports, so a session can judge
+it and file a Linear ticket for the ones worth fixing.
+
+To connect PostHog, open the **PostHog** card under **Connectors**. Pick where PostHog runs:
+**US cloud** (`https://us.posthog.com`), **EU cloud** (`https://eu.posthog.com`) or
+**Self-hosted**, which takes the site's `https://` address. Self-hosted must be a public
+hostname: pinned refuses `http`, `localhost`, an IP address, a user name or password, a path, a
+query and a fragment before it sends anything, and never follows a redirect, so the key only
+goes to the host you named. Enter the project id from the project's settings, and paste a
+personal API key that can read the project and run queries. pinned checks that the key reads
+the project, shows the project's name, and keeps the key in `posthog-key` next to
+`vercel-key`. The card then shows the host, the project and the key's last characters, never
+the key. A workflow with this trigger saves only while PostHog is connected.
+
+pinned checks PostHog every minute for active errors first seen after the workflow was saved or
+turned on, at most 100 per check. Errors that already existed start nothing, and resolved or
+suppressed errors are skipped. Each error starts one run, once: pinned records it under
+`posthog:<project>:<error id>` with the workflow, so a later check or a restart never starts it
+again.
+
+The run gets the error's title, description, how many times it was seen, when it was first and
+last seen, and its PostHog link. That text always reaches a model or the session framed as data
+from a PostHog error, outside pinned, and the session's name holds none of it, only
+`PostHog error <first characters of its id>`. An **Ask a model** step can classify the error
+before the session opens. The default instructions ask the session to judge whether the error
+is a real, actionable bug, and to file nothing for noise.
+
+The **File a Linear ticket** step names the Linear **Team** and an optional **Label**. When the
+error deserves a ticket, the session runs `pinned linear create "<title>" "<description>"` once.
+pinned files it in that team with that label and adds a link back to the PostHog error, which
+it builds from the connected project, to the description. A second call answers the ticket
+already filed. With no team, the session is told the workflow files no ticket.
+
+A run on a PostHog error has no Slack thread and no Linear issue, so `pinned stage` and
+`pinned slack reply` have nothing to act on, and a save refuses its **Reply in thread**, **Page
+a group**, **File an issue**, **Work an issue**, **Move issue** and **Stage picked** steps. Team
+bots can't use this trigger yet.
 
 ### One session per issue
 

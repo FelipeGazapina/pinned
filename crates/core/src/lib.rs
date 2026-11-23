@@ -53,6 +53,7 @@ pub mod pinned_lines;
 pub mod placement;
 pub mod plan;
 pub mod plan_store;
+pub mod posthog;
 pub mod pty;
 pub mod pulls;
 pub mod questions;

@@ -72,7 +72,8 @@ pub fn migrate(connector: &Connector) -> Graph {
         lay_decide(&mut built, column, &tails, decide);
         return built.finish();
     }
-    if !tails.is_empty() && !connector.columns.picked.trim().is_empty() {
+    let observes = matches!(connector.trigger, Trigger::Observability { .. });
+    if !tails.is_empty() && !observes && !connector.columns.picked.trim().is_empty() {
         let stage = built.add("stage", "Picked", column, 0, NodeKind::StagePicked);
         built.link(&tails, &stage);
         tails = vec![Tail { from: stage, port: PortId::OUT.into() }];
@@ -95,6 +96,7 @@ fn watch_of(trigger: &Trigger) -> Watch {
         Trigger::LinearStatus { from, to, scope, by } => Watch::LinearStatus { from: from.clone(), to: to.clone(), scope: scope.clone(), by: by.clone() },
         Trigger::LinearAssigned { to, scope, by } => Watch::LinearAssigned { to: to.clone(), scope: scope.clone(), by: by.clone() },
         Trigger::Schedule { schedule, tz } => Watch::Schedule { schedule: schedule.clone(), tz: tz.clone() },
+        Trigger::Observability { source } => Watch::Observability { source: source.clone() },
     }
 }
 

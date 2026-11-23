@@ -640,9 +640,9 @@ fn main() {
                         pinned_core::local_hub::SignedOut::SlackReply { connector, channel, thread, text } => tauri::async_runtime::block_on(
                             handle.state::<connectors::Connectors>().slack_reply(&connector, &channel, &thread, &text),
                         ),
-                        pinned_core::local_hub::SignedOut::LinearCreate { connector, channel, thread, title, description, assignee } => {
+                        pinned_core::local_hub::SignedOut::LinearCreate { connector, channel, thread, title, description, assignee, subject } => {
                             tauri::async_runtime::block_on(handle.state::<connectors::Connectors>().linear_create(
-                                &connector, &channel, &thread, &title, &description, &assignee,
+                                &connector, &channel, &thread, subject.as_deref(), &title, &description, &assignee,
                             ))
                         }
                         pinned_core::local_hub::SignedOut::LinearTake { connector, channel, thread, issue } => tauri::async_runtime::block_on(

@@ -205,6 +205,10 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 .logo[data-logo] { background: rgb(var(--s-ink-rgb, 255 255 255) / 0.05); box-shadow: inset 0 0 0 1px rgb(var(--s-ink-rgb, 255 255 255) / 0.08); }
 .logo[data-logo] svg { width: 60%; height: 60%; }
 .logo.upstash { background: #00c98d; }
+.logo.posthog { background: #f54e00; }
+.posthog-host { flex-wrap: wrap; }
+.posthog-host input { flex: 1 1 200px; }
+.key-hint { white-space: nowrap; }
 .logo.agents { background: #7c5cff; }
 .agent-consent { border-color: rgb(124 92 255 / 0.6); }
 .agent-consent h4 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
@@ -256,6 +260,7 @@ body[data-page="settings"] #workspace, body:not([data-page="settings"]) #setting
 [data-tone="switch"] { --tone: #3d6bf5; }
 [data-tone="vercel"] { --tone: #000; }
 [data-tone="convex"] { --tone: #0891b2; }
+[data-tone="posthog"] { --tone: #f54e00; }
 #settings .icon { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; flex: none;
   background: var(--tone, rgb(var(--s-ink-rgb, 255 255 255) / 0.078)); color: #fff; font-size: 14px; }
 #settings .icon[data-logo] { background: none; }

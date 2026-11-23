@@ -268,6 +268,8 @@ pub const ACTIONS: &[Action] = &[
     h("github_repos", Read, "The GitHub repositories the account's token reaches, most recently pushed first.").wired(),
     h("connect_vercel", Confirm, "Connects Vercel's AI gateway. The user enters the key in the app; an agent never sends one.").wired().asks(&["key"]),
     h("disconnect_vercel", Confirm, "Disconnects Vercel.").wired(),
+    h("connect_posthog", Confirm, "Connects PostHog error tracking for observability workflows: `project` is the project id, `host` is us, eu or a self-hosted https:// address. The user enters the key in the app; an agent never sends one.").wired().asks(&["key"]),
+    h("disconnect_posthog", Confirm, "Disconnects PostHog.").wired(),
     h("vercel_models", Read, "The chat and decision models a workflow may use.").wired(),
     h("connect_upstash", Confirm, "Connects Upstash for boxes. The user enters the keys in the app; an agent never sends one.").wired().asks(&["key", "claude_token"]),
     h("disconnect_upstash", Confirm, "Deletes the account's boxes and disconnects Upstash.").wired(),
@@ -1145,7 +1147,7 @@ mod tests {
                 "enqueue", "open_global_orchestrator", "set_global_orchestrator_settings", "memory_save", "memory_forget", "sign_in",
                 "switch_account", "prompt", "regenerate_title", "save_skill", "set_usage_prices", "save_project_scripts", "set_workspace",
                 "device_hub", "device_agents", "device", "rewind", "fork", "update_self", "connect_linear", "disconnect_linear", "connect_slack",
-                "disconnect_slack", "connect_github", "disconnect_github", "connect_vercel", "disconnect_vercel", "connect_upstash",
+                "disconnect_slack", "connect_github", "disconnect_github", "connect_vercel", "disconnect_vercel", "connect_posthog", "disconnect_posthog", "connect_upstash",
                 "disconnect_upstash", "save_schedule", "pause_schedule", "delete_schedule", "set_box_access", "set_repo_insight", "clone", "share_project", "save_connector", "delete_connector",
                 "run_workflow", "open_box", "extend_box", "rename_machine", "remove_machine", "pair_code", "create_invite", "revoke_invite",
                 "stage", "slack_reply", "linear_create", "linear_take", "approve_agent", "deny_agent", "revoke_agent", "set_taste",
@@ -1185,6 +1187,7 @@ mod tests {
                 "connect_slack: token",
                 "connect_github: token",
                 "connect_vercel: key",
+                "connect_posthog: key",
                 "connect_upstash: key claude_token",
                 "set_box_claude_token: token",
                 "save_mcp_server: secrets",
@@ -1276,6 +1279,8 @@ mod tests {
             disconnect_github: Confirm on "hub" => {};
             connect_vercel: Confirm on "hub" => {};
             disconnect_vercel: Confirm on "hub" => {};
+            connect_posthog: Confirm on "hub" => { "project": "12345", "host": "us" };
+            disconnect_posthog: Confirm on "hub" => {};
             connect_upstash: Confirm on "hub" => {};
             disconnect_upstash: Confirm on "hub" => {};
             set_box_access: Confirm on "hub" => { "access": { "session": { "mode": "fresh" } } };
