@@ -151,7 +151,7 @@ pub fn answer(screen: Screen, folder: &Path, made: bool, bypass: bool) -> Result
         Screen::Bypass => Err("Claude Code is waiting on its bypass-permissions warning; open the session to answer it".into()),
         Screen::Login => Err("Claude Code is not signed in for this account; sign in under Settings > Accounts, then start the session again".into()),
         Screen::McpApproval => Err(format!("Claude Code is waiting for approval of this project's MCP servers in {}; open the session to answer it", folder.display())),
-        Screen::DocsServer => Err(format!("Claude Code is waiting for approval of this folder's docs server in {}; open the session to answer it", folder.display())),
+        Screen::DocsServer => Err("Claude Code is waiting for approval of this folder's docs server in [folder]; open the session to answer it".into()),
     }
 }
 
@@ -305,7 +305,7 @@ mod tests {
         assert_eq!(showing(one), Some(Screen::DocsServer));
         assert_eq!(showing(with_path), Some(Screen::DocsServer));
         let folder = Path::new("/w/app");
-        let reason: Result<&[&str], String> = Err("Claude Code is waiting for approval of this folder's docs server in /w/app; open the session to answer it".into());
+        let reason: Result<&[&str], String> = Err("Claude Code is waiting for approval of this folder's docs server in [folder]; open the session to answer it".into());
         assert_eq!(answer(Screen::DocsServer, folder, true, true), reason, "the docs choice is the person's, even with trust and bypass");
         assert_eq!(answer(Screen::DocsServer, folder, false, false), reason);
     }

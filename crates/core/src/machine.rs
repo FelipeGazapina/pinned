@@ -8911,6 +8911,15 @@ pub(crate) mod tests {
         dunce::canonicalize(dir).unwrap()
     }
 
+    /// A folder under `/tmp` whose path is short enough that a scrubbed message names it `[folder]`, as a
+    /// person's own folder is, and not `[secret]` as a long temp path is.
+    fn short_folder(name: &str) -> PathBuf {
+        let dir = PathBuf::from("/tmp").join(format!("pinned-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[cfg(unix)]
     fn sh(script: &str) -> CommandBuilder {
         let mut cmd = CommandBuilder::new("/bin/sh");
@@ -15819,12 +15828,13 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
-    fn a_worker_parked_before_its_first_prompt_fails_at_the_starting_limit_though_a_notice_named_its_session() {
+    fn a_worker_parked_before_its_first_prompt_fails_fast_though_a_notice_named_its_session() {
         let root = temp("starting-limit-notice");
         let (claude, keys) = claude_on_screens(&root, &[PARKED_SCREEN]);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), starting_limit: Duration::from_secs(2), ..launch() }, Some(root.join("config")), None, |_| {});
-        let app = root.join("app");
-        std::fs::create_dir_all(&app).unwrap();
+        // The wait is longer than the notice needs, so the notice lands before the screen is read, and
+        // the limit is far past it, so only the dialog can end the start.
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), first_run_wait: Duration::from_secs(2), starting_limit: Duration::from_secs(30), ..launch() }, Some(root.join("config")), None, |_| {});
+        let app = short_folder("docs-server-parked");
         let task = delegate_from(&m, &app, "shared");
         let tab = m.delegates.get(&task).unwrap().thread.unwrap().tab;
         wait_for("the dialog on its screen", || m.screen_text(&tab).contains("Enter to confirm"));
@@ -15832,43 +15842,36 @@ Have another model review a risky change before it goes ahead.";
         m.record_event(reported(&tab, AgentStatus::NeedsInput, "s-parked", Some("Claude needs your attention"), None));
         wait_for("the start to fail", || m.delegates.get(&task).is_some_and(|t| t.state.terminal()));
         let info = m.delegates.get(&task).unwrap();
-        let reason = format!(
-            "Claude Code is waiting for approval of this folder's docs server in {}; open the session to answer it",
-            app.display()
-        );
-        assert_eq!((info.state.as_str(), info.error.as_deref()), ("failed", Some(reason.as_str())));
-        assert_eq!((m.view(&tab).unwrap().status, m.view(&tab).unwrap().message.as_deref()), (Some(AgentStatus::Failed), Some(reason.as_str())));
+        let reason = "Claude Code is waiting for approval of this folder's docs server in [folder]; open the session to answer it";
+        assert_eq!((info.state.as_str(), info.error.as_deref()), ("failed", Some(reason)));
+        assert_eq!((m.view(&tab).unwrap().status, m.view(&tab).unwrap().message.as_deref()), (Some(AgentStatus::Failed), Some(reason)));
         assert!(!keys.exists(), "nothing was typed into a dialog pinned does not know");
+        let _ = std::fs::remove_dir_all(app);
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     #[cfg(unix)]
-    fn a_parked_first_start_quotes_its_screen_line_scrubbed_of_paths_and_tokens() {
+    fn a_parked_first_start_fails_fast_on_the_docs_server_dialog_scrubbed_of_paths_and_tokens() {
         let root = temp("starting-limit-scrub");
         let line = " Use the docs server at /home/boxuser/pinned/app with sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWX?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel";
         let (claude, keys) = claude_on_screens(&root, &[line]);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), starting_limit: Duration::from_secs(2), ..launch() }, Some(root.join("config")), None, |_| {});
-        let app = root.join("app");
-        std::fs::create_dir_all(&app).unwrap();
+        // The limit is far past the first read, so only the dialog can end the start.
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), starting_limit: Duration::from_secs(30), ..launch() }, Some(root.join("config")), None, |_| {});
+        let app = short_folder("docs-server-scrub");
         let task = delegate_from(&m, &app, "shared");
         let tab = m.delegates.get(&task).unwrap().thread.unwrap().tab;
         wait_for("the dialog on its screen", || m.screen_text(&tab).contains("Enter to confirm"));
         wait_for("the start to fail", || m.delegates.get(&task).is_some_and(|t| t.state.terminal()));
         let info = m.delegates.get(&task).unwrap();
-        let reason = info.error.clone().unwrap();
-        assert_eq!(
-            reason,
-            format!(
-                "Claude Code is waiting for approval of this folder's docs server in {}; open the session to answer it",
-                app.display()
-            )
-        );
-        for secret in ["/home", "boxuser", "sk-ant-oat01", "ABCDEFGHIJKLMNOP"] {
-            assert!(!reason.contains(secret), "{secret} leaked into {reason}");
+        let reason = "Claude Code is waiting for approval of this folder's docs server in [folder]; open the session to answer it";
+        assert_eq!((info.state.as_str(), info.error.as_deref()), ("failed", Some(reason)));
+        for secret in ["/home", "boxuser", "sk-ant-oat01", "ABCDEFGHIJKLMNOP", app.to_str().unwrap()] {
+            assert!(!info.error.as_deref().unwrap_or_default().contains(secret), "{secret} leaked into {reason}");
         }
-        assert_eq!(m.view(&tab).unwrap().message.as_deref(), Some(reason.as_str()), "the tab quotes the same reason");
+        assert_eq!(m.view(&tab).unwrap().message.as_deref(), Some(reason), "the tab quotes the same reason");
         assert!(!keys.exists(), "nothing was typed into a dialog pinned does not know");
+        let _ = std::fs::remove_dir_all(app);
         let _ = std::fs::remove_dir_all(root);
     }
 
