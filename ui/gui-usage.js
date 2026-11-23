@@ -141,6 +141,7 @@ async function fetchUsage() {
     if (seq !== usageState.seq) return;
     usageState.envs.set(m, { ...env, loaded: true, loading: false });
     if (shellPage() === "usage") renderUsagePage();
+    if (shellDialog.dataset.kind === "prices") drawPrices();
   }));
 }
 
@@ -1026,6 +1027,66 @@ function priceChanges(target, drafts) {
   return { patch, errors, empty: !Object.keys(patch.prices).length && !Object.keys(patch.aliases).length };
 }
 
+/** The models that ran in the last 30 days with no price in a machine's book: what the dialog asks to fill.
+ * The usage page already reads 90 days of rows, so the window is cut here and a scan still running is said out loud. */
+const UNPRICED_DAYS = 30;
+/** A book's price for a model, following its "Map to" until the chain ends. */
+function bookPrice(book, model) {
+  const seen = new Set();
+  let at = model;
+  while (at && !seen.has(at)) {
+    seen.add(at);
+    if (book.prices && Object.hasOwn(book.prices, at) && book.prices[at]) return book.prices[at];
+    at = book.aliases && Object.hasOwn(book.aliases, at) ? book.aliases[at] : "";
+  }
+  return null;
+}
+/** One line per model and machine that ran in the window with no price anywhere in its book, busiest first. */
+function unpricedModels(targets, now = usageState.now || Date.now() / 1000) {
+  const since = usageBuckets(UNPRICED_DAYS, now)[0];
+  const out = [];
+  for (const t of targets) {
+    if (!t.prices) continue;
+    const models = new Map();
+    for (const r of usageState.envs.get(t.machine)?.rows ?? []) {
+      if (r.at < since) continue;
+      const one = models.get(r.model) ?? { model: r.model, machine: t.machine, tokens: 0, unpriced: 0 };
+      one.tokens += rowTokens(r);
+      one.unpriced += r.cost ? 0 : 1;
+      models.set(r.model, one);
+    }
+    for (const one of models.values()) if (one.unpriced && !bookPrice(t, one.model)) out.push(one);
+  }
+  return out.sort((a, b) => b.tokens - a.tokens || a.model.localeCompare(b.model) || a.machine.localeCompare(b.machine));
+}
+/** Why the list can't be stated as complete, or "" when every machine's scan and price book is in. */
+function unpricedShortfall(targets) {
+  const scanning = targets.filter((t) => t.prices && envOnline(t.machine) && (!usageState.envs.get(t.machine)?.loaded || usageState.envs.get(t.machine)?.loading));
+  const unread = targets.filter((t) => !t.prices);
+  return [
+    scanning.length ? `${scanning.map((t) => t.label).join(", ")} still scanning` : "",
+    unread.length ? `no prices from ${unread.map((t) => t.label).join(", ")}` : "",
+  ].filter(Boolean).join(" and ");
+}
+/** The dialog's "no price yet" list: each line names its machine and tokens, and its button adds the row. */
+function unpricedHtml(targets, now) {
+  const models = unpricedModels(targets, now);
+  if (!models.length) return "";
+  const books = targets.filter((t) => t.prices).map((t) => t.label);
+  const shortfall = unpricedShortfall(targets);
+  return `<section class="unpriced" aria-label="Models without a price"><h3>No price yet · last ${UNPRICED_DAYS} days</h3>
+      <p class="muted">Ran in the last ${UNPRICED_DAYS} days on ${esc(books.join(", "))} with no price in the book.${shortfall ? ` <b>Partial:</b> ${esc(shortfall)}.` : ""}</p>
+      <ul>${models.map((m) => `<li><span class="model-id">${esc(m.model)}</span><span class="muted">${esc(machineName(m.machine))} · ${tokensText(m.tokens)} tokens</span><button type="button" class="outline" data-price-unpriced="${esc(m.model)}" data-machine="${esc(m.machine)}">Set price</button></li>`).join("")}</ul>
+    </section>`;
+}
+/** The row an unpriced line adds: that model on that machine's book, waiting for its input and output. */
+function addUnpricedRow(machine, model) {
+  const id = `new:${priceDialog.next++}`;
+  if (!priceDialog.drafts.some((d) => !emptyDraft(d))) priceDialog.selected = new Set([machine]);
+  updateDraft({ id, model, isNew: true, values: {} });
+  priceDialog.focus = { id, field: "input" };
+}
+
 /** The open prices dialog: its machines, what's been typed, and the last save's results. */
 const priceDialog = { targets: [], selected: null, drafts: [], pending: false, attempt: null, next: 0, focus: null };
 async function loadPriceTargets() {
@@ -1123,7 +1184,7 @@ function drawPrices() {
   const keep = priceDialog.focus ?? (focused?.dataset.field ? { id: focused.closest("[data-row]").dataset.row, field: focused.dataset.field, start: focused.selectionStart, end: focused.selectionEnd } : null);
   priceDialog.focus = null;
   body.innerHTML = `<div class="apply-row"><div class="apply"><span id="usage-prices-apply-label">Apply to</span><button type="button" class="outline apply-to" aria-labelledby="usage-prices-apply-label usage-prices-selection"${priceDialog.pending || hasChanges ? " disabled" : ""}><span id="usage-prices-selection">${esc(!priceDialog.selected ? "All environments" : destination)}</span>${icon("chevron-down")}</button></div><span class="muted unit">USD / million tokens</span></div>
-    ${table}${status}`;
+    ${table}${unpricedHtml(selected)}${status}`;
   let foot = shellDialog.querySelector(".dialog-foot");
   if (!foot) {
     shellDialog.querySelector(".dialog-body").insertAdjacentHTML("afterend", `<div class="dialog-foot"></div>`);
@@ -1211,6 +1272,11 @@ shellDialog.addEventListener("input", (e) => {
 });
 shellDialog.addEventListener("click", (e) => {
   if (shellDialog.dataset.kind !== "prices") return;
+  const unpriced = e.target.closest("[data-price-unpriced]");
+  if (unpriced) {
+    addUnpricedRow(unpriced.dataset.machine, unpriced.dataset.priceUnpriced);
+    return drawPrices();
+  }
   if (e.target.closest("[data-add]")) {
     const id = `new:${priceDialog.next++}`;
     updateDraft({ id, model: "", isNew: true, values: {} });
