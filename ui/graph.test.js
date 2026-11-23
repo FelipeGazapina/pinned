@@ -435,6 +435,13 @@ test("a linear change trigger round-trips through the graph watch", () => {
   assert.deepEqual(watchOf({ kind: "linear-assigned", to: { kind: "me", id: "stale" } }).to, { kind: "me" });
 });
 
+test("an observability trigger round-trips through the graph watch with its source", () => {
+  const observes = { kind: "observability", source: { kind: "posthog" } };
+  assert.deepEqual(watchOf(observes), observes);
+  assert.deepEqual(triggerFromWatch(observes), observes);
+  assert.deepEqual(triggerFromWatch(watchOf(observes)), observes);
+});
+
 test("starting graph keeps a linear status watch", () => {
   const graph = startingGraph({ trigger: { kind: "linear-status", from: "", to: "Ready", scope: { team: "ENG", project: "" }, by: "anyone" } });
   assert.deepEqual(graph.nodes[0].watch, { kind: "linear-status", from: "", to: "Ready", scope: { team: "ENG", project: "" }, by: "anyone" });
