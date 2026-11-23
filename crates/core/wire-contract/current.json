@@ -10523,6 +10523,15 @@
                     "type": "null"
                   }
                 ]
+              },
+              "boxes_at_once": {
+                "description": "The account's Boxes at once. Only the Captains' and the orchestrator's scope take it, and\nonly the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -10655,7 +10664,8 @@
               "time_limit_min",
               "box_budget_cents",
               "placement",
-              "box_size"
+              "box_size",
+              "boxes_at_once"
             ]
           },
           "ReviewerPatch": {
@@ -10932,6 +10942,20 @@
                   "projects": {},
                   "proposed": []
                 }
+              },
+              "boxes_at_once": {
+                "description": "Boxes at once: how many boxes the account's agents (the orchestrator, the Captains, their\nworkers and the workflows) may have open at once. A box the user opens never counts. Only the\nuser's own app sets it. Read through `boxes_limit`, which holds it to `box_cap`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 8
+              },
+              "box_cap": {
+                "description": "The hub's fixed cap on the account's open boxes, the most Boxes at once can be. The hub\nwrites it into every answer; tastes from before it read the cap of then, 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 8
               }
             },
             "required": [
@@ -10940,7 +10964,9 @@
               "projects",
               "placement",
               "reviewer",
-              "worker_profiles"
+              "worker_profiles",
+              "boxes_at_once",
+              "box_cap"
             ]
           },
           "Taste": {
@@ -12788,6 +12814,32 @@
                   "question",
                   "choices"
                 ]
+              },
+              {
+                "description": "From a team box's node only: what its session of `workflow` on `subject` has spent on its\nmodel so far, in USD, a running total sent again at an interval. The hub keeps the most it\nwas told for the live run of that workflow and subject bound to this box, so a report lost\nor sent twice never counts twice, and refuses a box that does not run it.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_model_cost"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "subject": {
+                    "$ref": "#/$defs/Subject"
+                  },
+                  "usd": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "subject",
+                  "usd"
+                ]
               }
             ]
           },
@@ -13158,6 +13210,41 @@
               "in_doubt",
               "on_limit",
               "on_failure"
+            ]
+          },
+          "Subject": {
+            "description": "What a connector's session works on, which its callbacks into pinned report against.\nUntagged, so a stage message from a Linear session reads `\"issue\": \"<id>\"` as it always has.",
+            "anyOf": [
+              {
+                "title": "LinearIssue",
+                "description": "Linear's id for the issue, which `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "issue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issue"
+                ]
+              },
+              {
+                "title": "SlackThread",
+                "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "thread": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "channel",
+                  "thread"
+                ]
+              }
             ]
           },
           "Changes": {
@@ -23769,6 +23856,15 @@
                     "type": "null"
                   }
                 ]
+              },
+              "boxes_at_once": {
+                "description": "The account's Boxes at once. Only the Captains' and the orchestrator's scope take it, and\nonly the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -23896,7 +23992,8 @@
               "time_limit_min",
               "box_budget_cents",
               "placement",
-              "box_size"
+              "box_size",
+              "boxes_at_once"
             ]
           },
           "ReviewerPatch": {
@@ -24168,6 +24265,20 @@
                   "projects": {},
                   "proposed": []
                 }
+              },
+              "boxes_at_once": {
+                "description": "Boxes at once: how many boxes the account's agents (the orchestrator, the Captains, their\nworkers and the workflows) may have open at once. A box the user opens never counts. Only the\nuser's own app sets it. Read through `boxes_limit`, which holds it to `box_cap`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 8
+              },
+              "box_cap": {
+                "description": "The hub's fixed cap on the account's open boxes, the most Boxes at once can be. The hub\nwrites it into every answer; tastes from before it read the cap of then, 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 8
               }
             }
           },
@@ -25951,6 +26062,32 @@
                   "situation",
                   "question"
                 ]
+              },
+              {
+                "description": "From a team box's node only: what its session of `workflow` on `subject` has spent on its\nmodel so far, in USD, a running total sent again at an interval. The hub keeps the most it\nwas told for the live run of that workflow and subject bound to this box, so a report lost\nor sent twice never counts twice, and refuses a box that does not run it.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_model_cost"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "subject": {
+                    "$ref": "#/$defs/Subject"
+                  },
+                  "usd": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "subject",
+                  "usd"
+                ]
               }
             ]
           },
@@ -26300,6 +26437,41 @@
               "in_doubt",
               "on_limit",
               "on_failure"
+            ]
+          },
+          "Subject": {
+            "description": "What a connector's session works on, which its callbacks into pinned report against.\nUntagged, so a stage message from a Linear session reads `\"issue\": \"<id>\"` as it always has.",
+            "anyOf": [
+              {
+                "title": "LinearIssue",
+                "description": "Linear's id for the issue, which `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "issue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issue"
+                ]
+              },
+              {
+                "title": "SlackThread",
+                "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "thread": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "channel",
+                  "thread"
+                ]
+              }
             ]
           },
           "Changes": {
@@ -33476,6 +33648,15 @@
                     "type": "null"
                   }
                 ]
+              },
+              "boxes_at_once": {
+                "description": "The account's Boxes at once. Only the Captains' and the orchestrator's scope take it, and\nonly the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -33639,7 +33820,8 @@
               "time_limit_min",
               "box_budget_cents",
               "placement",
-              "box_size"
+              "box_size",
+              "boxes_at_once"
             ]
           },
           "ReviewerPatch": {
@@ -33916,6 +34098,20 @@
                   "projects": {},
                   "proposed": []
                 }
+              },
+              "boxes_at_once": {
+                "description": "Boxes at once: how many boxes the account's agents (the orchestrator, the Captains, their\nworkers and the workflows) may have open at once. A box the user opens never counts. Only the\nuser's own app sets it. Read through `boxes_limit`, which holds it to `box_cap`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 8
+              },
+              "box_cap": {
+                "description": "The hub's fixed cap on the account's open boxes, the most Boxes at once can be. The hub\nwrites it into every answer; tastes from before it read the cap of then, 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 8
               }
             },
             "required": [
@@ -33924,7 +34120,9 @@
               "projects",
               "placement",
               "reviewer",
-              "worker_profiles"
+              "worker_profiles",
+              "boxes_at_once",
+              "box_cap"
             ]
           },
           "Taste": {
@@ -36348,6 +36546,32 @@
                   "situation",
                   "question",
                   "choices"
+                ]
+              },
+              {
+                "description": "From a team box's node only: what its session of `workflow` on `subject` has spent on its\nmodel so far, in USD, a running total sent again at an interval. The hub keeps the most it\nwas told for the live run of that workflow and subject bound to this box, so a report lost\nor sent twice never counts twice, and refuses a box that does not run it.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_model_cost"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "subject": {
+                    "$ref": "#/$defs/Subject"
+                  },
+                  "usd": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "subject",
+                  "usd"
                 ]
               }
             ]
@@ -43613,6 +43837,15 @@
                     "type": "null"
                   }
                 ]
+              },
+              "boxes_at_once": {
+                "description": "The account's Boxes at once. Only the Captains' and the orchestrator's scope take it, and\nonly the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -43771,7 +44004,8 @@
               "time_limit_min",
               "box_budget_cents",
               "placement",
-              "box_size"
+              "box_size",
+              "boxes_at_once"
             ]
           },
           "ReviewerPatch": {
@@ -44043,6 +44277,20 @@
                   "projects": {},
                   "proposed": []
                 }
+              },
+              "boxes_at_once": {
+                "description": "Boxes at once: how many boxes the account's agents (the orchestrator, the Captains, their\nworkers and the workflows) may have open at once. A box the user opens never counts. Only the\nuser's own app sets it. Read through `boxes_limit`, which holds it to `box_cap`.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 8
+              },
+              "box_cap": {
+                "description": "The hub's fixed cap on the account's open boxes, the most Boxes at once can be. The hub\nwrites it into every answer; tastes from before it read the cap of then, 8.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 8
               }
             }
           },
@@ -46392,6 +46640,32 @@
                   "op",
                   "situation",
                   "question"
+                ]
+              },
+              {
+                "description": "From a team box's node only: what its session of `workflow` on `subject` has spent on its\nmodel so far, in USD, a running total sent again at an interval. The hub keeps the most it\nwas told for the live run of that workflow and subject bound to this box, so a report lost\nor sent twice never counts twice, and refuses a box that does not run it.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_model_cost"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "subject": {
+                    "$ref": "#/$defs/Subject"
+                  },
+                  "usd": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "subject",
+                  "usd"
                 ]
               }
             ]
@@ -56813,6 +57087,13 @@
                   "null"
                 ]
               },
+              "by": {
+                "description": "Who runs the step, as a short label: the worker's thread title, else its model. None for a step the\nCaptain reports itself.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "fixes": {
                 "type": "array",
                 "items": {
@@ -56971,6 +57252,13 @@
                 "format": "double"
               },
               "task": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "by": {
+                "description": "Who runs the step, as a short label: the worker's thread title, else its model. None for a step the\nCaptain reports itself.",
                 "type": [
                   "string",
                   "null"
@@ -65787,6 +66075,20 @@
               "projects": {},
               "proposed": []
             }
+          },
+          "boxes_at_once": {
+            "description": "Boxes at once: how many boxes the account's agents (the orchestrator, the Captains, their\nworkers and the workflows) may have open at once. A box the user opens never counts. Only the\nuser's own app sets it. Read through `boxes_limit`, which holds it to `box_cap`.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 8
+          },
+          "box_cap": {
+            "description": "The hub's fixed cap on the account's open boxes, the most Boxes at once can be. The hub\nwrites it into every answer; tastes from before it read the cap of then, 8.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 8
           }
         },
         "required": [
@@ -65795,7 +66097,9 @@
           "projects",
           "placement",
           "reviewer",
-          "worker_profiles"
+          "worker_profiles",
+          "boxes_at_once",
+          "box_cap"
         ],
         "$defs": {
           "Taste": {
@@ -66204,6 +66508,15 @@
                     "type": "null"
                   }
                 ]
+              },
+              "boxes_at_once": {
+                "description": "The account's Boxes at once. Only the Captains' and the orchestrator's scope take it, and\nonly the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -66588,6 +66901,20 @@
               "projects": {},
               "proposed": []
             }
+          },
+          "boxes_at_once": {
+            "description": "Boxes at once: how many boxes the account's agents (the orchestrator, the Captains, their\nworkers and the workflows) may have open at once. A box the user opens never counts. Only the\nuser's own app sets it. Read through `boxes_limit`, which holds it to `box_cap`.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 8
+          },
+          "box_cap": {
+            "description": "The hub's fixed cap on the account's open boxes, the most Boxes at once can be. The hub\nwrites it into every answer; tastes from before it read the cap of then, 8.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 8
           }
         },
         "$defs": {
@@ -66979,6 +67306,15 @@
                     "type": "null"
                   }
                 ]
+              },
+              "boxes_at_once": {
+                "description": "The account's Boxes at once. Only the Captains' and the orchestrator's scope take it, and\nonly the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
               }
             }
           },
@@ -68668,9 +69004,18 @@
             "default": null
           },
           "cost_usd": {
+            "description": "Its box's cost only, as before a run had a model cost, so an older app that reads it as\nthe box's still shows the box's. Its `BotLimits::usd` caps this and `model_usd` together.",
             "type": "number",
             "format": "double",
             "default": 0.0
+          },
+          "model_usd": {
+            "description": "The model cost its box's node reported, apart from `cost_usd`. None until the node first\nreports one, and from an older hub, which sends none.",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           },
           "active_secs": {
             "description": "Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's\n`BotLimits::minutes` count these only.",
@@ -68780,9 +69125,18 @@
             "default": null
           },
           "cost_usd": {
+            "description": "Its box's cost only, as before a run had a model cost, so an older app that reads it as\nthe box's still shows the box's. Its `BotLimits::usd` caps this and `model_usd` together.",
             "type": "number",
             "format": "double",
             "default": 0.0
+          },
+          "model_usd": {
+            "description": "The model cost its box's node reported, apart from `cost_usd`. None until the node first\nreports one, and from an older hub, which sends none.",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           },
           "active_secs": {
             "description": "Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's\n`BotLimits::minutes` count these only.",
@@ -73760,9 +74114,18 @@
                 "default": null
               },
               "cost_usd": {
+                "description": "Its box's cost only, as before a run had a model cost, so an older app that reads it as\nthe box's still shows the box's. Its `BotLimits::usd` caps this and `model_usd` together.",
                 "type": "number",
                 "format": "double",
                 "default": 0.0
+              },
+              "model_usd": {
+                "description": "The model cost its box's node reported, apart from `cost_usd`. None until the node first\nreports one, and from an older hub, which sends none.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
               },
               "active_secs": {
                 "description": "Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's\n`BotLimits::minutes` count these only.",
@@ -78519,9 +78882,18 @@
                 "default": null
               },
               "cost_usd": {
+                "description": "Its box's cost only, as before a run had a model cost, so an older app that reads it as\nthe box's still shows the box's. Its `BotLimits::usd` caps this and `model_usd` together.",
                 "type": "number",
                 "format": "double",
                 "default": 0.0
+              },
+              "model_usd": {
+                "description": "The model cost its box's node reported, apart from `cost_usd`. None until the node first\nreports one, and from an older hub, which sends none.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
               },
               "active_secs": {
                 "description": "Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's\n`BotLimits::minutes` count these only.",

@@ -645,3 +645,47 @@ test("the orchestrator tab and a hub without box sizes show no box size control"
   await old.show();
   assert.doesNotMatch(old.html(), /Default box size/);
 });
+
+const boxes = (boxes_at_once, box_cap = 8) => limited({ boxes_at_once, box_cap });
+const boxesRow = (html) => html.match(/<div class="taste-field taste-inline taste-boxes">.*?<\/div>/s)?.[0];
+
+test("Boxes at once sits next to Workers at once, from 0 to the hub's cap", async () => {
+  const p = page({ answer: () => boxes(8) });
+  await p.show();
+  const html = p.html();
+  assert.equal(
+    boxesRow(html),
+    `<div class="taste-field taste-inline taste-boxes"><label class="taste-label"><span>Boxes at once</span><input type="number" data-boxes-at-once min="0" max="8" step="1" value="8"></label><span class="taste-quiet">0 to 8. How many boxes agents may have open at once: the Orchestrator, the Captains, their workers and workflows. A box you open yourself never counts and is never refused.</span></div>`,
+  );
+  const at = (text) => html.indexOf(text);
+  assert.ok(at("<span>Workers at once</span>") < at("<span>Boxes at once</span>") && at("<span>Boxes at once</span>") < at("<span>Model tier</span>"), "right after Workers at once");
+});
+
+test("a Boxes at once stored past the cap shows the cap", async () => {
+  const p = page({ answer: () => boxes(20) });
+  await p.show();
+  assert.match(boxesRow(p.html()), /max="8" step="1" value="8"><\/label><span class="taste-quiet">0 to 8\./);
+  assert.doesNotMatch(p.html(), /taste-foot/, "showing the cap is no change to save");
+});
+
+test("the user's Boxes at once saves with the Captains, 0 included", async () => {
+  const p = page({ answer: (cmd, args) => (cmd === "set_taste" ? boxes(args.patch.boxes_at_once) : boxes(8)) });
+  await p.show();
+  p.pick("data-boxes-at-once", "0");
+  await p.settle();
+  assert.match(boxesRow(p.html()), /value="0"/);
+  assert.match(p.html(), /Unsaved changes/);
+  p.calls.length = 0;
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls, [["set_taste", { scope: { kind: "captains" }, patch: { boxes_at_once: 0 } }]]);
+  assert.doesNotMatch(p.html(), /Unsaved changes/);
+  p.pick("data-boxes-at-once", "30");
+  await p.settle();
+  assert.match(boxesRow(p.html()), /value="8"/, "a number past the cap is the cap");
+});
+
+test("a hub that predates Boxes at once shows no row for it", async () => {
+  const p = page({ answer: () => limited() });
+  await p.show();
+  assert.doesNotMatch(p.html(), /Boxes at once/);
+});

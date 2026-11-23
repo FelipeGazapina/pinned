@@ -51,8 +51,9 @@ test("a hub hello sends the current watch again", () => {
   state.active = active;
   sandbox.account = { email: "" };
   sandbox.showMachines = () => sandbox.publishThreadWatch();
-  sandbox.hub = { hub: () => Promise.resolve() };
+  sandbox.hub = { hub: (call) => Promise.resolve(call.cmd === "confirmations" ? [] : null) };
   sandbox.onHubSettings = () => {};
+  sandbox.onAgentConfirmations = () => {};
   sandbox.showAgentConsent = () => {};
   sandbox.marksHub = { hello: () => Promise.resolve() };
   const main = readFileSync(new URL("./main.js", import.meta.url), "utf8");

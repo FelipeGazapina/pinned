@@ -175,14 +175,15 @@ SHELL_PAGES["global-projects"] = { show() { renderGlobalProjectsPage(); } };
 const groupName = (group) => projectTagName(group, group.checkouts.map((c) => projectRepos.get(`${c.machine}:${c.path}`)).find(Boolean));
 const groupSlug = (group) => tagSlug(groupName(group));
 
-/** Each project's running workers by machine, as `projects()` counts them: worker tabs with a live
- * session or a headless child at work, a finished one left out (`threadState` "done", the rule the
- * sidebar folds its Finished group by), by project slug and machine id. */
+/** Each project's running workers by machine, by project slug and machine id, for the projects page and
+ * the Captains rail: worker tabs `atWork`, with a turn running or starting, or one that waits on the user,
+ * a finished, idle or sleeping one left out. Core's `projects()` counts any live worker not finished, so a
+ * worker resumed at its prompt counts there and not here. */
 function runningWorkers() {
   const by = new Map();
   for (const group of projectGroups(true)) {
     const counts = new Map();
-    for (const tab of group.tabs) if (tab.view.role === "worker" && (tab.view.running || tab.view.status === "working") && threadState(tab) !== "done") counts.set(tab.machine, (counts.get(tab.machine) ?? 0) + 1);
+    for (const tab of group.tabs) if (tab.view.role === "worker" && atWork(tab)) counts.set(tab.machine, (counts.get(tab.machine) ?? 0) + 1);
     by.set(groupSlug(group), counts);
   }
   return by;

@@ -45,6 +45,7 @@ function load({ signedIn = true, projects = [SHOP, SITE, BILLING], connections =
   };
   const calls = [];
   const context = {
+    visibleInterval: () => 0,
     console,
     addEventListener() {},
     setTimeout() {},

@@ -6593,6 +6593,106 @@ fn a_worker_box_whose_session_never_starts_a_turn_ends_and_fails_its_task_with_t
     wait_for("the row to go", || ana.rows(&hub) == 0);
 }
 
+/// A box machine's tabs as its node reports them while its worker waits on `question`: one tab
+/// with the questionnaire open, as `question_user` leaves it.
+fn tabs_asking(question: &str) -> Value {
+    use pinned_core::questions::{QOption, Question, Questionnaire};
+    let tab: pinned_core::wire::TabView = serde_json::from_value(json!({
+        "id": "tab-w", "cwd": "/workspace/site", "bypass": true, "running": true, "opened": 1_794_240_000u64, "role": "worker",
+    }))
+    .unwrap();
+    let question = Question { header: None, question: question.into(), changes: "the schema".into(), options: vec![QOption { label: "postgres".into(), description: None, recommended: true }], multi_select: false };
+    let tab = pinned_core::questions::shown(tab, &Questionnaire { id: "q-1".into(), title: None, questions: vec![question], projects: vec![], at: 1_794_240_000 });
+    json!({ "kind": "tabs", "tabs": [tab] })
+}
+
+/// Goes through `reap_once` (which keeps what the box's machine asks while it is online) and
+/// `tell_origin` (which reads the kept copy once it is offline): remove either and the task's
+/// error loses the question.
+#[test]
+fn a_worker_box_whose_link_dropped_with_a_question_open_names_it_in_its_tasks_error() {
+    let policy = Policy { offline: Duration::from_secs(2), ..fast() };
+    let hub = TestHub::start_with_boxes("rbox_asked", Signup::Open, policy);
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("rbox-asked-mac");
+    let (_mac, _, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": true } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
+    ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
+    let id = hub.boxes.live()[0].clone();
+
+    // The box's node goes, and the box's machine comes back showing a question open.
+    drop_box_node(&hub.boxes, &id);
+    let creds: Credentials = serde_json::from_str(&hub.boxes.file(&format!("{BOX_DIR}/account.json")).unwrap()).unwrap();
+    let asking = RawMachine::start_with(&hub.url, &creds.machine_token, vec![tabs_asking("Which \"database\"?\nPostgres or MySQL?")], |_| RawReply::Ok(Value::Null));
+    ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
+    // Many reaper passes (50 ms apart) see it online, which is what keeps it.
+    std::thread::sleep(Duration::from_millis(1000));
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working", "the box is online and holds its question: nothing ended it");
+
+    drop(asking);
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!(
+        (status["workState"].as_str(), status["error"].as_str()),
+        (Some("failed"), Some("Upstash Box: its box went offline and did not come back within 2 s, with 1 question unanswered: \"Which 'database'? Postgres or MySQL?\"")),
+        "{status}"
+    );
+    wait_for("the row to go", || ana.rows(&hub) == 0);
+}
+
+/// A box whose budget runs out while a questionnaire holds it: `reap_once` checks the budget before
+/// the idle verdict, so the money ends it however long its worker waits on the user. Only the budget
+/// can end this box here: its node is online, its tab is there, and `max_life` is four hours away.
+#[test]
+fn a_box_whose_money_runs_out_while_a_question_holds_it_still_ends_over_budget() {
+    use pinned_core::questions::{self, QOption, Question, Questionnaire};
+    use pinned_server::boxes::Seen;
+    let hub = TestHub::start_with_boxes("box_budget_question", Signup::Open, Policy { offline: Duration::from_secs(3600), tab_gone: Duration::from_secs(3600), max_life: Duration::from_secs(4 * 3600), ..fast() });
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "ana-mac");
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    ana.client.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+    box_mode(&mut ana.client, "session", "fresh");
+    ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 100 } })).unwrap();
+    // US$ 0.10 is the least a box can be given: one hour at US$ 0.10 an hour.
+    let opened = act(&ana.dir, &ana.tab, "open_box", json!({ "repo": "acme/site", "size": "small", "budget_usd": 0.10 })).unwrap();
+    assert_eq!(opened["result"]["budget_usd"].as_f64(), Some(0.10), "{opened}");
+    let box_machine = opened["result"]["machine"].as_str().unwrap().to_owned();
+    wait_for("the agent's box session", || box_tabs(&hub.boxes).iter().any(|t| t.running));
+
+    // The box's machine reports its tab with a questionnaire open, as a node does once its worker
+    // calls `question_user`. No node of this tree opens one yet, so a raw machine with the box's own
+    // token reports the tab the node showed.
+    let mut tab = box_tabs(&hub.boxes)[0].clone();
+    let question = Question { header: None, question: "Base the fix on main?".into(), changes: "which branch the PR targets".into(), options: vec![QOption { label: "main".into(), description: None, recommended: true }], multi_select: false };
+    tab = questions::shown(tab, &Questionnaire { id: "q-1".into(), title: None, questions: vec![question], projects: vec![], at: 1_794_240_000 });
+    tab.running = true;
+    let machine_token = hub.boxes.state.lock().unwrap().accounts[0].machine_token.clone();
+    drop_box_node(&hub.boxes, &hub.boxes.live()[0]);
+    let raw = RawMachine::start_with(&url, &machine_token, vec![json!({ "kind": "tabs", "tabs": [tab] })], |_| RawReply::Ok(Value::Null));
+    let live = hub.runtime.block_on(hub.hub().account(account.id.parse().unwrap())).unwrap();
+    wait_for("the hub to see the questionnaire hold the box", || live.seen_any(&box_machine) == Seen::Tab { running: true, quiet: false });
+
+    // Budget left, so the questionnaire holds it: the reaper has looked many times by now.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(live.seen_any(&box_machine), Seen::Tab { running: true, quiet: false });
+    let rows = || hub.runtime.block_on(hub.hub().db.boxes(live.id)).unwrap().len();
+    assert_eq!((hub.boxes.live().len(), rows()), (1, 1), "the box stays while it has money and an open question");
+
+    // An hour and a minute spent of a one-hour budget, with `max_life` still hours away.
+    admin_on(&hub.database, "update boxes set created_at = now() - interval '61 minutes'");
+    wait_for("the box to go", || hub.boxes.live().is_empty() && rows() == 0);
+    let stats = act(&ana.dir, &ana.tab, "delegation_stats", json!({ "days": 1 })).unwrap()["result"].clone();
+    // Idle, offline and a closed tab all end a box as done; only a limit (Expired) ends it as one. The
+    // record names that limit by the box's own clock, not by the row's age moved above, so the test
+    // reads the outcome alone: `max_life` was four hours away, so the limit hit was the budget.
+    assert_eq!(stats["slowest"][0]["outcome"].as_str(), Some("limit"), "{stats}");
+    drop(raw);
+}
+
 /// A raw machine paired to `ana`'s account, which asks the hub for what a node's thread asks.
 fn raw_caller(hub: &TestHub, client: &mut Client, name: &str, machines: &[(&str, bool)]) -> RawMachine {
     let code = client.hub(json!({ "cmd": "pair_code" })).unwrap();
@@ -13290,6 +13390,7 @@ mod teams_box_call;
 #[path = "hub/teams_calls.rs"] mod teams_calls;
 #[path = "hub/teams_runs.rs"] mod teams_runs;
 #[path = "hub/box_push_gate.rs"] mod box_push_gate;
+#[path = "hub/boxes_at_once.rs"] mod boxes_at_once;
 #[path = "hub/teams_go_ahead.rs"] mod teams_go_ahead;
 #[path = "hub/teams_separation_fixes.rs"] mod teams_separation_fixes;
 #[path = "hub/teams_hardening.rs"]
@@ -13302,6 +13403,7 @@ mod teams_hardening;
 #[path = "hub/teams_lifecycle.rs"] mod teams_lifecycle;
 #[path = "hub/teams_flood.rs"] mod teams_flood;
 #[path = "hub/teams_admission.rs"] mod teams_admission;
+#[path = "hub/teams_model_cost.rs"] mod teams_model_cost;
 #[path = "hub/teams_backstop.rs"] mod teams_backstop;
 #[path = "hub/teams_guard_tests.rs"] mod teams_guard_tests;
 #[path = "hub/teams_calls_guards.rs"] mod teams_calls_guards;

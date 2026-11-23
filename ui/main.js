@@ -1592,6 +1592,9 @@ function connectHub(signedIn) {
       account.email = frame.account.email;
       showMachines(frame.machines, frame.tabs);
       hub.hub({ cmd: "get_settings" }).then(onHubSettings, console.warn);
+      // A push sent while the socket was down is lost, so every hello rebuilds the list. The read
+      // lists the last decided ones after the waiting ones, and only those still waiting belong here.
+      hub.hub({ cmd: "confirmations" }).then((items) => onAgentConfirmations(items.filter((c) => c.decision == null)), console.warn);
       if (typeof fetchStuckBoxes === "function") fetchStuckBoxes();
       marksHub.hello(frame.account.id).catch(console.warn);
       showAgentConsent();

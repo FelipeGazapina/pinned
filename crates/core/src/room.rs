@@ -58,6 +58,9 @@ pub struct Post {
     pub to: Vec<String>,
     pub text: String,
     pub at: u64,
+    /// The id its author gave it. A repeat under the same id answers this post.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -129,6 +132,16 @@ pub enum Speech {
     Seat { name: String, text: String, to: Vec<String> },
     Card { text: String, to: Vec<String> },
     User { text: String },
+}
+
+impl Speech {
+    fn author(&self) -> Author {
+        match self {
+            Speech::Seat { name, .. } => Author::Seat { name: name.clone() },
+            Speech::Card { .. } => Author::Card,
+            Speech::User { .. } => Author::User,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -230,7 +243,20 @@ impl Store {
     }
 
     pub fn post(&mut self, id: &str, speech: Speech, now: u64) -> Result<Outcome, String> {
+        self.post_with(id, speech, None, now)
+    }
+
+    /// `post` under the author's own `post_id`. A repeat of that id appends nothing and answers the first post.
+    pub fn post_with(&mut self, id: &str, speech: Speech, post_id: Option<&str>, now: u64) -> Result<Outcome, String> {
         let index = self.index(id)?;
+        let post_id = post_id.map(str::trim).filter(|post_id| !post_id.is_empty());
+        if let Some(post_id) = post_id {
+            let room = &self.rooms[index];
+            let author = speech.author();
+            if let Some(first) = room.posts.iter().find(|post| post.author == author && post.post_id.as_deref() == Some(post_id)) {
+                return Ok(Outcome { wakes: vec![], closed: room.status != Status::Open, seq: first.seq });
+            }
+        }
         if self.rooms[index].status != Status::Open {
             return Err(format!("{id} is closed"));
         }
@@ -248,6 +274,9 @@ impl Store {
             Speech::User { text } => (Author::User, check_text(&text)?, self.audience(index, None, &[], true)?),
         };
         self.push(index, author.clone(), text, to, now);
+        if let Some(post) = self.rooms[index].posts.last_mut() {
+            post.post_id = post_id.map(str::to_owned);
+        }
         let closed = self.close_if_full(index, now);
         let wakes = self.wakes(index);
         self.quiet_author(index, &author);
@@ -379,8 +408,9 @@ impl Store {
         }
     }
 
+    /// What an open room still owes. A settled room owes nothing, so a restart does not send its close line again.
     pub fn pending_wakes(&self) -> Vec<(String, Wake)> {
-        self.rooms.iter().enumerate().filter(|(_, room)| room.published).flat_map(|(index, room)| self.wakes(index).into_iter().map(|wake| (room.id.clone(), wake))).collect()
+        self.rooms.iter().enumerate().filter(|(_, room)| room.published && room.status == Status::Open).flat_map(|(index, room)| self.wakes(index).into_iter().map(|wake| (room.id.clone(), wake))).collect()
     }
 
     pub fn rebind(&mut self, id: &str, owner_tab: &str, tab: &str, seats: &[(String, String, String)]) {
@@ -458,7 +488,7 @@ impl Store {
     fn push(&mut self, index: usize, author: Author, text: String, to: Vec<String>, now: u64) {
         let room = &mut self.rooms[index];
         room.seq += 1;
-        room.posts.push(Post { seq: room.seq, author, to, text, at: now });
+        room.posts.push(Post { seq: room.seq, author, to, text, at: now, post_id: None });
     }
 
     fn close_if_full(&mut self, index: usize, now: u64) -> bool {
@@ -489,7 +519,8 @@ impl Store {
     fn wakes(&self, index: usize) -> Vec<Wake> {
         let room = &self.rooms[index];
         let mut wakes = vec![];
-        for seat in room.seats.iter().filter(|seat| !seat.done && !seat.tab.is_empty()) {
+        // A seat with no tab yet still gets its wake, with an empty tab, and it stays owed until one binds.
+        for seat in room.seats.iter().filter(|seat| !seat.done) {
             if let Some(wake) = wake_for(room, Who::Seat(seat.name.clone()), seat.cursor, &seat.tab) {
                 wakes.push(wake);
             }
@@ -882,5 +913,109 @@ mod tests {
         store.ack_taken(&[key]);
         assert!(store.unacked_keys().is_empty());
         assert_eq!(store.pending_wakes(), vec![]);
+    }
+
+    #[test]
+    fn a_post_to_a_seat_with_no_tab_waits_and_arrives_when_the_seat_is_bound() {
+        let mut store = Store::load(None);
+        let id = open(&mut store);
+        store.bind_seat(&id, "Ana", "task-ana", "tab-ana").unwrap();
+        store.publish(&id).unwrap();
+        let outcome = store.post(&id, Speech::Seat { name: "Ana".into(), text: "Beto, take the tests".into(), to: names(&["Beto"]) }, 2).unwrap();
+        let beto = outcome.wakes.iter().find(|wake| wake.who == Who::Seat("Beto".into())).unwrap();
+        assert_eq!(beto.tab, "", "with no tab the wake waits instead of going out");
+        assert!(store.unacked_keys().contains(&wake_key(&id, "Beto", 1)), "the wake stays owed");
+        store.bind_seat(&id, "Beto", "task-beto", "tab-beto").unwrap();
+        let (_, wake) = store.pending_wakes().into_iter().find(|(_, wake)| wake.who == Who::Seat("Beto".into())).unwrap();
+        assert_eq!(wake.tab, "tab-beto");
+        assert_eq!(wake.text, "[room room-1]\nAna: Beto, take the tests");
+    }
+
+    #[test]
+    fn a_saved_room_loads_back_with_its_state_seats_and_pending_wakes() {
+        let dir = std::env::temp_dir().join(format!("pinned-room-reload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = Store::load(Some(&dir));
+        let id = open(&mut store);
+        bind(&mut store, &id);
+        store.post(&id, Speech::Seat { name: "Ana".into(), text: "Beto, look".into(), to: names(&["Beto"]) }, 2).unwrap();
+        let reloaded = Store::load(Some(&dir));
+        let room = reloaded.get(&id).unwrap();
+        assert_eq!(room.status, Status::Open);
+        assert_eq!(room.owner_tab, "tab-captain");
+        assert_eq!(room.tab, "tab-room");
+        assert_eq!(room.seats.iter().map(|seat| seat.name.as_str()).collect::<Vec<_>>(), vec!["Ana", "Beto"]);
+        assert_eq!(room.seats[1].tab, "tab-beto");
+        assert_eq!(room.seats[0].cursor, 1);
+        assert_eq!(room.posts.len(), 1);
+        let pending = reloaded.pending_wakes();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1.who, Who::Seat("Beto".into()));
+        assert_eq!(pending[0].1.tab, "tab-beto");
+        assert_eq!(pending[0].1.key, "room:room-1:Beto:1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_settled_room_owes_no_wake() {
+        let mut store = Store::load(None);
+        let id = open(&mut store);
+        bind(&mut store, &id);
+        store.close(&id, "enough", 2).unwrap();
+        assert!(store.pending_wakes().is_empty(), "the close line is not owed once the room is settled");
+    }
+
+    #[test]
+    fn a_corrupt_rooms_file_is_kept_aside_and_a_fresh_one_takes_its_place() {
+        let dir = std::env::temp_dir().join(format!("pinned-room-corrupt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(FILE), b"{ not json").unwrap();
+        let mut store = Store::load(Some(&dir));
+        assert!(store.published_ids().is_empty(), "nothing could be read out of it");
+        assert!(dir.join("rooms.json.bad").exists(), "the unreadable file is kept aside");
+        assert!(!dir.join(FILE).exists());
+        let id = open(&mut store);
+        store.publish(&id).unwrap();
+        assert!(Store::load(Some(&dir)).get(&id).is_some(), "the next save writes a clean file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rooms_file_from_an_older_version_loads() {
+        let dir = std::env::temp_dir().join(format!("pinned-room-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = r#"{
+  "next": 3,
+  "rooms": [
+    {
+      "id": "room-2",
+      "project": "/app",
+      "owner_tab": "tab-captain",
+      "brief": "Fix it.",
+      "status": "open",
+      "seq": 2,
+      "seats": [{ "name": "Ana" }, { "name": "Beto" }],
+      "opened": 9,
+      "posts": [{ "seq": 1, "author": { "who": "seat", "name": "Ana" }, "text": "hi", "at": 9 }]
+    }
+  ]
+}"#;
+        std::fs::write(dir.join(FILE), legacy).unwrap();
+        let store = Store::load(Some(&dir));
+        let room = store.get("room-2").unwrap();
+        assert_eq!(room.status, Status::Open);
+        assert_eq!(room.post_cap, DEFAULT_POST_CAP);
+        assert_eq!(room.tab, "");
+        assert_eq!(room.owner_cursor, 0);
+        assert_eq!(room.posts[0].to, Vec::<String>::new());
+        assert_eq!(room.seats[0].task, "");
+        assert_eq!(room.seats[0].cursor, 0);
+        assert!(!room.seats[0].done);
+        assert!(room.published);
+        assert_eq!(store.next, 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

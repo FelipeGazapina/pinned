@@ -236,6 +236,12 @@ alter table team_run_queue add column if not exists unread_passes integer not nu
 alter table teams add column if not exists line_held_at timestamptz;
 alter table teams add column if not exists line_held_why text;
 alter table team_runs add column if not exists reserved_at timestamptz;
+-- The model cost a run's box reported (`teams::db::record_model_cost`), the most it told: the
+-- run costs `cost_usd` (its box's time) plus this, which its bot's dollars limit caps. Null
+-- until the box first reports, so a run never measured is told apart from one that spent nothing.
+alter table team_runs add column if not exists model_usd double precision;
+alter table team_runs alter column model_usd drop not null;
+alter table team_runs alter column model_usd drop default;
 -- A run's limit call the limits tick opened (`teams::calls::tick`): the only call that counts as
 -- its limit call (`teams::db::runs_at_limit`). A session's own ask never sets it.
 alter table team_calls add column if not exists opened_by_hub boolean not null default false;
@@ -293,6 +299,13 @@ pub struct OpenedBox {
     pub role: Option<String>,
     pub machine: Option<String>,
 }
+/// The account `$1`'s boxes its agents have open: its rows not ending that a workflow, a worker or a
+/// Captain holds, and the session boxes (connector `$2`) an agent opened, kept in `agent_boxes`. A
+/// session box the user opened is none, and neither is a workflow's Run now, the user's own act.
+const AGENT_BOXES_OPEN: &str = "select count(*) from boxes b where b.account = $1 and b.phase in ('creating', 'booting', 'running') \
+     and not coalesce(b.subject->>'issue' like 'run-now:%', false) \
+     and (b.connector <> $2 or exists (select 1 from agent_boxes a where a.box = b.id and a.account = b.account))";
+
 const BOX_COLUMNS: &str = "id, account, machine, upstash, connector, subject, spec, size, phase, reason, extract(epoch from now() - created_at)::float8";
 /// How often a push reads again what synced projects take and the database's size.
 const SYNC_READ_EVERY: Duration = Duration::from_secs(60);
@@ -764,6 +777,8 @@ enum Needs<'a> {
     Index(&'a str),
     /// `alter table <table> alter column <column> drop not null`: the column's being nullable.
     Nullable(&'a str, &'a str),
+    /// `alter table <table> alter column <column> drop default`: the column's having no default.
+    NoDefault(&'a str, &'a str),
 }
 
 fn needs(statement: &str) -> Needs<'_> {
@@ -772,6 +787,7 @@ fn needs(statement: &str) -> Needs<'_> {
     match words[..] {
         ["create", "index", "if", "not", "exists", index, ..] => Needs::Index(index),
         ["alter", "table", table, "alter", "column", column, "drop", "not", "null"] => Needs::Nullable(table, column),
+        ["alter", "table", table, "alter", "column", column, "drop", "default"] => Needs::NoDefault(table, column),
         ["alter", "table", table, ..] if words[3..].starts_with(&ADD) => {
             Needs::Columns(table, words.windows(ADD.len() + 1).filter(|w| w[..ADD.len()] == ADD).map(|w| w[ADD.len()].trim_end_matches(',')).collect())
         }
@@ -790,6 +806,7 @@ async fn needed(client: &Client, needs: &Needs<'_>) -> Result<bool, tokio_postgr
         }
         Needs::Index(index) => client.query_one("select to_regclass($1::text) is null", &[index]).await?.get(0),
         Needs::Nullable(table, column) => client.query_one(&format!("select coalesce(bool_or(attnotnull), true) {COLUMN} and attname::text = $2::text"), &[table, column]).await?.get(0),
+        Needs::NoDefault(table, column) => client.query_one(&format!("select coalesce(bool_or(atthasdef), true) {COLUMN} and attname::text = $2::text"), &[table, column]).await?.get(0),
     })
 }
 
@@ -1779,6 +1796,58 @@ impl Db {
         Ok((readable(box_row(&stored))?, inserted == 1))
     }
 
+    /// `reserve_box` for a box an agent opens, held to `most` of the agents' boxes: how many are
+    /// open when that many already are. The agents' boxes are those `AGENT_BOXES_OPEN` counts. The
+    /// count and the writes run in one transaction that locks the account's row, so two opens at
+    /// once never both pass. A row the subject already has, or gets from an open that wins the
+    /// insert, is answered as it is, uncounted.
+    pub async fn reserve_agent_box(&self, row: &BoxRow, most: u32, opener: Option<&Opener>, started: u64) -> Result<Result<(BoxRow, bool), u32>, String> {
+        let (subject, mut spec) = (serde_json::to_value(&row.subject).unwrap(), serde_json::to_value(&row.spec).unwrap());
+        if row.work != BoxWork::Run {
+            spec["work"] = serde_json::to_value(&row.work).unwrap();
+        }
+        let (phase, reason) = row.phase.stored();
+        let size = serde_json::to_value(row.size).unwrap().as_str().unwrap().to_owned();
+        let started = i64::try_from(started).map_err(|_| format!("box {} started at an impossible time", row.id))?;
+        let stored = format!("select {BOX_COLUMNS} from boxes where account = $1 and connector = $2 and subject = $3");
+        let mut held = self.transaction_client().await?;
+        let tx = held.as_mut().expect("opened above").transaction().await.map_err(err)?;
+        // `no key update` serializes the reserves and leaves inserts that reference the account free.
+        tx.execute("select 1 from accounts where id = $1 for no key update", &[&row.account]).await.map_err(err)?;
+        if let Some(existing) = tx.query_opt(&stored, &[&row.account, &row.connector, &subject]).await.map_err(err)? {
+            return Ok(Ok((readable(box_row(&existing))?, false)));
+        }
+        let open: i64 = tx.query_one(AGENT_BOXES_OPEN, &[&row.account, &pinned_core::agent::INTERACTIVE_CONNECTOR]).await.map_err(err)?.get(0);
+        if open >= i64::from(most) {
+            return Ok(Err(u32::try_from(open).unwrap_or(u32::MAX)));
+        }
+        let inserted = tx
+            .execute(
+                "insert into boxes (id, account, machine, connector, subject, spec, size, phase, reason) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 on conflict (account, connector, subject) do nothing",
+                &[&row.id, &row.account, &row.machine, &row.connector, &subject, &spec, &size, &phase, &reason],
+            )
+            .await
+            .map_err(err)?;
+        if let Some(opener) = opener.filter(|_| inserted == 1) {
+            tx.execute(
+                "insert into agent_boxes (box, account, machine, tab, role, started) values ($1, $2, $3, $4, $5, $6) on conflict (box) do nothing",
+                &[&row.id, &row.account, &opener.machine, &opener.tab, &opener.role.name(), &started],
+            )
+            .await
+            .map_err(err)?;
+        }
+        let written = tx.query_one(&stored, &[&row.account, &row.connector, &subject]).await.map_err(err)?;
+        tx.commit().await.map_err(err)?;
+        Ok(Ok((readable(box_row(&written))?, inserted == 1)))
+    }
+
+    /// How many boxes the account's agents have open now, as `reserve_agent_box` counts them.
+    pub async fn agent_boxes_open(&self, account: Uuid) -> Result<u32, String> {
+        let open: i64 = self.client().await?.query_one(AGENT_BOXES_OPEN, &[&account, &pinned_core::agent::INTERACTIVE_CONNECTOR]).await.map_err(err)?.get(0);
+        Ok(u32::try_from(open).unwrap_or(u32::MAX))
+    }
+
     pub async fn boxes(&self, account: Uuid) -> Result<Vec<Result<BoxRow, Remains>>, String> {
         let rows = self.client().await?.query(&format!("select {BOX_COLUMNS} from boxes where account = $1 order by created_at"), &[&account]).await.map_err(err)?;
         Ok(rows.iter().map(box_row).collect())
@@ -1873,20 +1942,6 @@ impl Db {
     pub async fn box_exists(&self, id: &str) -> Result<bool, String> {
         let row = self.client().await?.query_one("select exists (select 1 from boxes where id = $1)", &[&id]).await.map_err(err)?;
         Ok(row.get(0))
-    }
-
-    /// Keeps that the agent session `opener` opened box row `id` at unix ms `started`.
-    pub async fn hold_agent_box(&self, id: &str, account: Uuid, opener: &Opener, started: u64) -> Result<(), String> {
-        let started = i64::try_from(started).map_err(|_| format!("box {id} started at an impossible time"))?;
-        self.client()
-            .await?
-            .execute(
-                "insert into agent_boxes (box, account, machine, tab, role, started) values ($1, $2, $3, $4, $5, $6) on conflict (box) do nothing",
-                &[&id, &account, &opener.machine, &opener.tab, &opener.role.name(), &started],
-            )
-            .await
-            .map_err(err)
-            .map(drop)
     }
 
     /// The agent session that opened the account's box row `id`, and when, while it is not recorded yet.
@@ -3069,7 +3124,34 @@ mod tests {
             Needs::Columns("team_calls", vec!["step_hash", "released_at"])
         );
         assert_eq!(needs("alter table invites alter column expires_at drop not null"), Needs::Nullable("invites", "expires_at"));
+        assert_eq!(needs("alter table team_runs alter column model_usd drop default"), Needs::NoDefault("team_runs", "model_usd"));
         assert_eq!(needs("create index if not exists tasks_due on tasks (next_at) where enabled and next_at is not null"), Needs::Index("tasks_due"));
+    }
+
+    /// Against the test Postgres (`PINNED_TEST_POSTGRES`, as the hub's tests use): a boot whose
+    /// column has no default skips `drop default`, so it takes no lock that waits on another
+    /// session's, and one whose column has a default runs it.
+    #[tokio::test]
+    #[ignore = "needs the test Postgres at PINNED_TEST_POSTGRES"]
+    async fn a_boot_drops_a_columns_default_only_when_it_has_one() {
+        let base = std::env::var("PINNED_TEST_POSTGRES").unwrap_or_else(|_| "postgres://pinned@127.0.0.1:5499".into());
+        let connect = || async {
+            let (client, connection) = tokio_postgres::connect(&format!("{base}/pinned"), NoTls).await.unwrap();
+            tokio::spawn(connection);
+            client
+        };
+        let (boot, other) = (connect().await, connect().await);
+        let schema = format!("no_default_{}", uuid::Uuid::new_v4().simple());
+        boot.batch_execute(&format!("create schema {schema}; set search_path to {schema}; set lock_timeout = 2000; create table team_runs (id int, model_usd double precision default 0)")).await.unwrap();
+        let drop = "alter table team_runs alter column model_usd drop default";
+        assert!(needed(&boot, &needs(drop)).await.unwrap(), "a default to drop");
+        create(&boot, drop).await.unwrap();
+        assert!(!needed(&boot, &needs(drop)).await.unwrap(), "no default left");
+        other.batch_execute(&format!("begin; lock table {schema}.team_runs in access share mode")).await.unwrap();
+        let skipped = create(&boot, drop).await;
+        other.batch_execute("rollback").await.unwrap();
+        boot.batch_execute(&format!("drop schema {schema} cascade")).await.unwrap();
+        assert!(skipped.is_ok(), "with no default the boot runs no statement that waits on the other session's lock: {skipped:?}");
     }
 
     #[test]

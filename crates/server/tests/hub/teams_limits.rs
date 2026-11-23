@@ -130,11 +130,11 @@ fn a_run_that_reaches_its_cost_limit_calls_who_on_limit_names() {
         limit = on_limit_calls(&calls_of(tb.team, &mut dina.client));
         !limit.is_empty()
     });
-    assert_eq!((&limit[0]["asked"], &limit[0]["question"]), (&json!([design()]), &json!("The run reached its limit: $0.001 of box time (model usage is not counted). Let it go on until the 4 hour limit, or stop it?")));
+    assert_eq!((&limit[0]["asked"], &limit[0]["question"]), (&json!([design()]), &json!("The run reached its limit: $0.001 spent on its box and model. Let it go on until the 4 hour limit, or stop it?")));
     let spent = listed(&mut tb, run);
     assert_eq!(spent["state"], json!("waiting"));
     assert!(spent["cost_usd"].as_f64().unwrap() >= 0.001, "{spent}");
-    tb.told(&hub, "[The run reached its limit: $0.001 of box time (model usage is not counted). Stop and wait for the answer]");
+    tb.told(&hub, "[The run reached its limit: $0.001 spent on its box and model. Stop and wait for the answer]");
     assert_eq!(tb.ask(&hub, "One more step?", &[]), Err("this run already waits on a call".into()), "no work while it waits");
     std::thread::sleep(Duration::from_secs(2));
     assert_eq!(listed(&mut tb, run)["cost_usd"], spent["cost_usd"], "nothing more is spent while it waits");

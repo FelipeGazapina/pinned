@@ -218,6 +218,7 @@ function tasteSaveCalls(saved, draft) {
   for (const kind of ["orchestrator", "captains"]) {
     const patch = tasteChanged(saved[kind], draft[kind]);
     if (kind === "captains" && draft.placement != null && !tasteSame(saved.placement, draft.placement)) patch.placement = draft.placement;
+    if (kind === "captains" && draft.boxes_at_once != null && draft.boxes_at_once !== saved.boxes_at_once) patch.boxes_at_once = draft.boxes_at_once;
     if (kind === "captains" && saved.captains.box_size != null && draft.captains.box_size == null) calls.push({ cmd: "reset_taste_field", scope: { kind }, field: "box_size" });
     if (Object.keys(patch).length) calls.push({ cmd: "set_taste", scope: { kind }, patch });
   }
@@ -238,9 +239,9 @@ function tasteSaveCalls(saved, draft) {
 function tasteRebase(saved, draft, fresh) {
   return tasteSaveCalls(saved, draft).reduce((next, call) => {
     if (call.cmd === "reset_taste_field") return tasteResetField(next, call.scope, call.field);
-    const { placement, ...fields } = call.patch;
+    const { placement, boxes_at_once, ...fields } = call.patch;
     const set = Object.keys(fields).length ? tasteSetFields(next, call.scope, fields) : next;
-    return placement ? { ...set, placement } : set;
+    return { ...set, ...(placement ? { placement } : {}), ...(boxes_at_once != null ? { boxes_at_once } : {}) };
   }, fresh);
 }
 

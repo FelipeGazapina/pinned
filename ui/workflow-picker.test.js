@@ -38,6 +38,7 @@ function load({ linear = null, bots = [], reply = () => ({}) } = {}) {
   };
   const calls = [];
   const context = {
+    visibleInterval: () => 0,
     console,
     addEventListener() {},
     setTimeout() {},

@@ -646,22 +646,29 @@ const runPage = (runOver, calls = []) => {
   return p;
 };
 
-test("the run page shows active time and waiting time apart, and what the box cost", () => {
-  const p = runPage({ state: "working", active_secs: 25 * 60, waiting_secs: 12 * 60, cost_usd: 0.4 });
+test("the run page shows active time and waiting time apart, and what the box and the model cost", () => {
+  const p = runPage({ state: "working", active_secs: 25 * 60, waiting_secs: 12 * 60, cost_usd: 0.12, model_usd: 0.4 });
   const t = text(p.eval("tcRunPageHtml()"));
   assert.ok(t.includes("Active time: 25 min"), t);
   assert.ok(t.includes("Waiting for people: 12 min (not counted toward the time limit)"), t);
-  assert.ok(t.includes("Box cost: US$ 0.40 (model usage not included)"), t);
+  assert.ok(t.includes("Cost: Box US$ 0.12 · Model US$ 0.40"), t);
+  assert.ok(!/box cost only|model usage not included|Box cost:/i.test(t), t);
   assert.ok(!/minutes of work/.test(t), "one line each, no second spelling");
 });
 
 test("a run that never waited has no waiting line, a cost of nothing says US$ 0.00, and an hour reads as hours", () => {
-  let t = text(runPage({ state: "working", active_secs: 20, waiting_secs: 0, cost_usd: 0 }).eval("tcRunPageHtml()"));
-  assert.ok(t.includes("Active time: Less than a minute") && t.includes("Box cost: US$ 0.00"), t);
+  let t = text(runPage({ state: "working", active_secs: 20, waiting_secs: 0, cost_usd: 0, model_usd: 0 }).eval("tcRunPageHtml()"));
+  assert.ok(t.includes("Active time: Less than a minute") && t.includes("Cost: Box US$ 0.00 · Model US$ 0.00"), t);
   assert.ok(!t.includes("Waiting for people"), t);
-  t = text(runPage({ state: "done", ended_at: at(17, 0), active_secs: 3900, waiting_secs: 7200, cost_usd: 1.234, outcome: "Published" }).eval("tcRunPageHtml()"));
-  assert.ok(t.includes("Active time: 1 h 5 min") && t.includes("Waiting for people: 2 h (not counted") && t.includes("Box cost: US$ 1.23"), t);
+  t = text(runPage({ state: "done", ended_at: at(17, 0), active_secs: 3900, waiting_secs: 7200, cost_usd: 1.234, model_usd: 0, outcome: "Published" }).eval("tcRunPageHtml()"));
+  assert.ok(t.includes("Active time: 1 h 5 min") && t.includes("Waiting for people: 2 h (not counted") && t.includes("Cost: Box US$ 1.23 · Model US$ 0.00"), t);
   assert.ok(t.includes("Finished Published"), "the outcome stays the run's subtitle");
+});
+
+test("a run from an older hub or box, with no model_usd, keeps the one box cost line", () => {
+  const t = text(runPage({ state: "working", active_secs: 25 * 60, cost_usd: 0.4 }).eval("tcRunPageHtml()"));
+  assert.ok(t.includes("Box cost: US$ 0.40 (model usage not included)"), t);
+  assert.ok(!/Model US\$|Cost: Box/.test(t), t);
 });
 
 test("a run with an open on_limit call is Limit reached, with the question and plain buttons for its choices", () => {

@@ -124,6 +124,9 @@ pub struct RoomPost {
     pub to: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room: Option<String>,
+    /// The caller's own id for this post. A repeat under it appends nothing and answers the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 /// `room_read`: the room since `since`, or the whole thread.
@@ -317,8 +320,8 @@ pub fn definition(name: &str) -> Option<Value> {
             &["brief", "seats"],
         ),
         "room_post" => (
-            "Say something in the room. A reply that stays only in this session is invisible. End your turn after posting. to names seats, or captain.",
-            json!({ "text": { "type": "string" }, "to": { "type": "array", "items": { "type": "string" } }, "room": { "type": "string" } }),
+            "Say something in the room. A reply that stays only in this session is invisible. End your turn after posting. to names seats, or captain. A retry with the same id posts nothing new.",
+            json!({ "text": { "type": "string" }, "to": { "type": "array", "items": { "type": "string" } }, "room": { "type": "string" }, "id": { "type": "string" } }),
             &["text"],
         ),
         "room_read" => ("Read the room since a seq, or the whole thread.", json!({ "since": { "type": "integer" }, "room": { "type": "string" } }), &[]),

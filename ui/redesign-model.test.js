@@ -636,3 +636,45 @@ test("glyphHtml draws each state's dot at its size", () => {
   assert.equal(p.run("glyphHtml('working', 8)"), `<span class="status-glyph" data-glyph="working" style="--glyph-size: 8px" aria-hidden="true"></span>`);
   assert.deepEqual(["needs", "unread", "done", "idle", "failed", "stopped", "bogus"].map((s) => p.run(`glyphHtml(${JSON.stringify(s)})`).match(/data-glyph="(\w+)" style="--glyph-size: (\d+)px"/).slice(1).join(" ")), ["needs 10", "unread 10", "done 10", "idle 10", "failed 10", "idle 10", "idle 10"]);
 });
+
+/** A Captain with a worker per kind of tab the strip must tell apart. `running` on the wire means the
+ * tab takes input: a session runs it, or it sleeps. Only a session with a turn on, or one still
+ * starting (no status, no session yet), is working. */
+function stripWorld() {
+  const captain = tab("Release", { id: "cap", status: "done", role: "orchestrator" });
+  const worker = (title, view, text) =>
+    tab(title, { role: "worker", spawned_by: "cap", stats: { active_ms: 160_000 }, ...view }, {
+      items: [user("2026-11-11T17:58:00Z", `${title}.`), ...(text ? [{ kind: "text", text }] : [])],
+    });
+  return {
+    captain,
+    slept: worker("Slept", { asleep: true, session: "s-1" }, "The slept worker is finished."),
+    resumed: worker("Resumed", { session: "s-2", status: undefined }, "The resumed worker is finished."),
+    asleepBare: worker("Asleep", { asleep: true }, "The asleep worker is finished."),
+    starting: worker("Starting", { updated: S - 5 }, null),
+    turn: worker("Turn", { status: "working", session: "s-3", updated: S - 30 }, null),
+  };
+}
+
+test("a worker that takes input but runs no turn is done with no clock, as its sleep or its finished turn left it", () => {
+  const w = stripWorld();
+  const p = page({ tabs: Object.values(w), active: w.captain });
+  p.context.captain = w.captain;
+  const rows = p.run("workersOf(captain).map(({ tab, agent, ...r }) => ({ title: r.title, state: r.state, step: r.step, elapsedMs: r.elapsedMs, since: r.since }))");
+  assert.deepEqual(JSON.parse(JSON.stringify(rows)), [
+    { title: "Slept", state: "done", step: "The slept worker is finished.", elapsedMs: 160000, since: null },
+    { title: "Resumed", state: "done", step: "The resumed worker is finished.", elapsedMs: 160000, since: null },
+    { title: "Asleep", state: "done", step: "The asleep worker is finished.", elapsedMs: 160000, since: null },
+    { title: "Starting", state: "working", step: null, elapsedMs: 160000, since: Date.parse("2026-11-11T17:58:00Z") },
+    { title: "Turn", state: "working", step: null, elapsedMs: 160000, since: Date.parse("2026-11-11T17:58:00Z") },
+  ]);
+});
+
+test("the workers strip counts 3 idle workers as done and a starting one and a running turn as working", () => {
+  const w = stripWorld();
+  const p = page({ tabs: Object.values(w), active: w.captain });
+  p.context.captain = w.captain;
+  assert.deepEqual({ ...p.run("workersSummary(workersOf(captain))") }, { total: 5, done: 3, working: 2, needs: 0, since: Date.parse("2026-11-11T17:58:00Z") });
+  p.context.three = Object.values(w).filter((t) => ["Slept", "Resumed", "Asleep", "Turn"].includes(t.title));
+  assert.deepEqual({ ...p.run("workersSummary(three.map((t) => threadWorker(t)))") }, { total: 4, done: 3, working: 1, needs: 0, since: Date.parse("2026-11-11T17:58:00Z") });
+});

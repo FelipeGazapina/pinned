@@ -40,6 +40,7 @@ function load({ bots = [], connectors = [], reply = () => ({}) } = {}) {
   };
   const calls = [];
   const context = {
+    visibleInterval: () => 0,
     console,
     addEventListener() {},
     setTimeout() {},

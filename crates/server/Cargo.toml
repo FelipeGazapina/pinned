@@ -33,6 +33,7 @@ uuid = { version = "1", features = ["v4"] }
 url = "2"
 subtle = "2"
 mimalloc = { version = "0.1", default-features = false }
+unicode-properties = "0.1"
 
 [dev-dependencies]
 flate2 = "1"

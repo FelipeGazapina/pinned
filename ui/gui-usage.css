@@ -250,6 +250,13 @@ body[data-page="usage"] #page-view .page-head { flex-wrap: nowrap; height: var(-
 #shell-dialog table.prices .icon:disabled { opacity: 0.64; }
 #shell-dialog table.prices .icon .i { width: 14px; height: 14px; }
 #shell-dialog .prices-body .hint { margin: 0; font-size: 12px; }
+#shell-dialog .unpriced { display: grid; gap: 8px; padding: 12px; border-radius: 8px; border: 1px solid var(--g-border); }
+#shell-dialog .unpriced h3 { margin: 0; font-size: 13px; font-weight: 600; }
+#shell-dialog .unpriced p { margin: 0; font-size: 12px; }
+#shell-dialog .unpriced ul { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: 13px; }
+#shell-dialog .unpriced li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+#shell-dialog .unpriced .model-id { flex: 1 1 40%; min-width: 0; word-break: break-all; }
+#shell-dialog .unpriced button { height: 28px; padding: 0 10px; border-radius: 6px; font-size: 12px; }
 #shell-dialog .save-status { display: grid; gap: 4px; font-size: 12px; }
 #shell-dialog .save-status div { display: flex; justify-content: space-between; gap: 12px; }
 #shell-dialog .save-status .failed { color: var(--g-error); text-align: right; }

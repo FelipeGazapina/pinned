@@ -83,6 +83,22 @@ function threadState(tab) {
   return worker && phase === "done" ? "done" : "idle";
 }
 
+/** Whether a turn runs or the session is starting. `view.running` only says the tab takes input: its
+ * session runs OR it sleeps, and a finished worker restored after a restart sleeps with no status.
+ * Rule, the one core reads a tab by (reading.rs, machine.rs): status "working", or no status while
+ * the tab neither sleeps nor holds a session yet (a session at its prompt fires no hook until a turn). */
+function turnRuns(tab) {
+  const v = tab.view;
+  return v.status === "working" || (!!v.running && !v.status && !v.asleep && !v.session);
+}
+
+/** Whether a worker counts as running on the projects page: its turn runs or it starts, or it takes
+ * input and waits on the user or still delegates. A finished or sleeping one does not. */
+function atWork(tab) {
+  const state = threadState(tab);
+  return state !== "done" && (turnRuns(tab) || (!!tab.view.running && state !== "idle"));
+}
+
 const answerChoice = (label, choice, about = null) => ({ label, about, choice });
 
 function pendingAsk(tab) {
@@ -147,7 +163,7 @@ function threadWorker(w, started = new Map()) {
       : thread === "needs" ? "needs"
       : thread === "working" ? "working"
       : phase === "done" ? "done"
-      : w.view.running ? "working"
+      : w.view.running ? (turnRuns(w) ? "working" : "done")
       : "stopped";
   const last = state === "done" ? t.items.findLast((i) => i.kind === "text") : t.items.findLast((i) => STEP_KINDS.has(i.kind));
   const since = state === "working" ? unixOf(lastPrompt(w)?.at) * 1000 : state === "needs" ? (w.view.updated ?? 0) * 1000 : 0;
