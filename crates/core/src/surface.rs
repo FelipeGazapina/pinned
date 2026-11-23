@@ -163,8 +163,8 @@ pub const ACTIONS: &[Action] = &[
     n("orchestrator_report", Excluded, "a Captain's report to the global orchestrator: a Captain calls tell_orchestrator"),
     n("open_global_orchestrator", Write, "Opens this machine's global orchestrator tab, not started, and answers its id. Only the global orchestrator's own session may call it.").wired(),
     n("open_taste_chat", Write, "Opens a thread that adjusts a scope's way of working by talking, not started, and answers its id."),
-    n("global_orchestrator_settings", Read, "The machine's global orchestrator settings: its name, whether this machine hosts it, and its busy and report policies.").wired(),
-    n("set_global_orchestrator_settings", Write, "Saves the machine's global orchestrator settings.").wired(),
+    n("global_orchestrator_settings", Read, "The machine's global orchestrator settings: its name, whether this machine hosts it, its busy and report policies, and whether auto-merge is on with its approval profile.").wired(),
+    n("set_global_orchestrator_settings", Confirm, "Saves the machine's global orchestrator settings, auto-merge and the approval profile included. The user approves it in the app, since auto-merge lets the Captains merge pull requests the profile clears.").wired(),
     n("auto_archive_settings", Excluded, "the user's own setting for when finished threads archive themselves"),
     n("set_auto_archive_settings", Excluded, "the user's own setting for when finished threads archive themselves"),
     n("set_background", Excluded, "the user's own setting for whether the app on a machine keeps a window"),
@@ -1156,8 +1156,8 @@ mod tests {
                 "save_idea", "delete_idea", "reports", "report_issue",
             ]
         );
-        for name in ["set_taste", "reset_taste_field", "set_box_size", "delete_connector", "extend_box"] {
-            assert_eq!(find(name).map(|a| a.class), Some(Confirm), "{name} carries limits or deletes, so the user approves it");
+        for name in ["set_taste", "reset_taste_field", "set_box_size", "delete_connector", "extend_box", "set_global_orchestrator_settings"] {
+            assert_eq!(find(name).map(|a| a.class), Some(Confirm), "{name} carries limits, deletes or turns on auto-merge, so the user approves it");
         }
         assert_eq!(find("list_schedules").map(|a| a.class), Some(Read));
         assert_eq!(find("schedule_runs").map(|a| a.class), Some(Read));
