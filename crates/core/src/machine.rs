@@ -8160,12 +8160,12 @@ const SEARCH_LIMIT: usize = 8;
 
 /// Claude Code's name for a folder under `projects/` and its temp folder: every character but a
 /// letter or digit becomes `-`.
-fn claude_slug(path: &Path) -> String {
+pub(crate) fn claude_slug(path: &Path) -> String {
     path.display().to_string().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
 /// Where Claude Code keeps each session's scratchpad: `/tmp/claude-<uid>`.
-fn claude_tmp() -> PathBuf {
+pub(crate) fn claude_tmp() -> PathBuf {
     #[cfg(unix)]
     return PathBuf::from(format!("/tmp/claude-{}", unsafe { libc::getuid() }));
     #[cfg(not(unix))]
