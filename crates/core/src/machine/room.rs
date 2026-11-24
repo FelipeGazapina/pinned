@@ -34,7 +34,7 @@ impl Machine {
         if working + need > limits.parallel as usize {
             return Err(super::workers_full(working));
         }
-        let id = self.rooms.lock().unwrap().open(&project.display().to_string(), tab, &brief, &names, call.post_cap, super::unix_millis())?;
+        let id = self.rooms.lock().unwrap().open(&project.display().to_string(), tab, &brief, &names, call.post_cap, call.rounds, call.synthesis.as_deref(), super::unix_millis())?;
         let room_tab = match self.add_room_tab(tab, &id, &brief, &project) {
             Ok(room_tab) => room_tab,
             Err(error) => {
@@ -74,7 +74,7 @@ impl Machine {
             None => room::Speech::Card { text: call.text, to: call.to },
         };
         let outcome = self.rooms.lock().unwrap().post_with(&place.id, speech, call.id.as_deref(), super::unix_millis())?;
-        self.after_speech(&place.id, outcome, true)
+        self.after_speech(&place.id, outcome, true, None)
     }
 
     pub(super) fn room_read(&self, tab: Option<&str>, task: Option<&str>, call: RoomRead) -> Result<String, String> {
@@ -91,7 +91,7 @@ impl Machine {
         let outcome = self.rooms.lock().unwrap().finish(&place.id, &name, &call.summary, super::unix_millis())?;
         // The seat's task stays up until its turn ends. Cancelling it here would settle the task
         // before that Done, and the seat would keep no workers-at-once slot to release on purpose.
-        self.after_speech(&place.id, outcome, false)
+        self.after_speech(&place.id, outcome, false, Some(&name))
     }
 
     pub(super) fn room_close(&self, tab: Option<&str>, _task: Option<&str>, call: RoomClose) -> Result<String, String> {
@@ -101,14 +101,14 @@ impl Machine {
         }
         let place = self.captain_place(tab, call.room.as_deref())?;
         let outcome = self.rooms.lock().unwrap().close(&place.id, call.reason.as_deref().unwrap_or(""), super::unix_millis())?;
-        self.after_speech(&place.id, outcome, true)
+        self.after_speech(&place.id, outcome, true, None)
     }
 
     /// A line typed into the room thread. It wakes every seat still working, and the Captain.
     pub(super) fn room_user_post(&self, tab: &str, text: &str) -> Result<(), String> {
         let id = self.tab(tab, |t| room::id_in(&t.env))?.ok_or_else(|| format!("no room on {tab}"))?;
         let outcome = self.rooms.lock().unwrap().post(&id, room::Speech::User { text: text.to_owned() }, super::unix_millis())?;
-        self.after_speech(&id, outcome, true)?;
+        self.after_speech(&id, outcome, true, None)?;
         Ok(())
     }
 
@@ -160,7 +160,7 @@ impl Machine {
             Ok(outcome) => outcome,
             Err(_) => return,
         };
-        let _ = self.after_speech(&id, outcome, false);
+        let _ = self.after_speech(&id, outcome, false, Some(&name));
     }
 
     /// A restart gives every tab a new id. Recreate a room thread, retie the seats, then send what is still unread.
@@ -187,7 +187,7 @@ impl Machine {
         for (id, wake) in pending {
             match by_room.iter_mut().find(|(room_id, _)| room_id == &id) {
                 Some((_, outcome)) => outcome.wakes.push(wake),
-                None => by_room.push((id, room::Outcome { seq: wake.through, closed: false, wakes: vec![wake] })),
+                None => by_room.push((id, room::Outcome { seq: wake.through, closed: false, wakes: vec![wake], rounds_closed: false })),
             }
         }
         for (id, outcome) in by_room {
@@ -211,7 +211,7 @@ impl Machine {
         for id in owned {
             let outcome = self.rooms.lock().unwrap().close(&id, "its Captain's tab was closed", super::unix_millis());
             if let Ok(outcome) = outcome {
-                let _ = self.after_speech(&id, outcome, true);
+                let _ = self.after_speech(&id, outcome, true, None);
             }
         }
     }
@@ -225,16 +225,21 @@ impl Machine {
         }
     }
 
-    fn after_speech(&self, id: &str, outcome: room::Outcome, stop_when_closed: bool) -> Result<String, String> {
+    /// A close stops every seat task still running when `stop_when_closed` is set or the rounds
+    /// closed the room. `keep` is the seat whose own call this was: its task ends with its turn.
+    fn after_speech(&self, id: &str, outcome: room::Outcome, stop_when_closed: bool, keep: Option<&str>) -> Result<String, String> {
         let (seq, closed) = (outcome.seq, outcome.closed);
-        self.deliver_room(id, outcome);
-        if closed && stop_when_closed {
-            self.stop_seats(id);
+        let stop = closed && (stop_when_closed || outcome.rounds_closed);
+        self.deliver_room(id, room::Outcome { rounds_closed: false, ..outcome });
+        if stop {
+            self.stop_seats(id, keep);
         }
         serde_json::to_string(&json!({ "seq": seq, "id": id, "closed": closed })).map_err(|e| e.to_string())
     }
 
+    /// Sends what `outcome` wakes. When the rounds closed the room, every seat task still running stops.
     fn deliver_room(&self, id: &str, outcome: room::Outcome) {
+        let stop = outcome.closed && outcome.rounds_closed;
         let mut follow = vec![];
         for wake in outcome.wakes {
             // No tab can carry it yet. It stays owed until `reopen_rooms` binds one.
@@ -249,7 +254,7 @@ impl Machine {
                 if self.seat_task_terminal(id, name) {
                     self.rooms.lock().unwrap().ack(id, &wake.who, wake.through);
                     if let Ok(next) = self.rooms.lock().unwrap().seat_gone(id, name, super::unix_millis()) {
-                        if !next.wakes.is_empty() {
+                        if !next.wakes.is_empty() || next.rounds_closed {
                             follow.push(next);
                         }
                     }
@@ -271,13 +276,18 @@ impl Machine {
         if let Some(tab) = self.rooms.lock().unwrap().get(id).map(|saved| saved.tab.clone()).filter(|tab| !tab.is_empty()) {
             self.emit(super::Event::Thread { tab });
         }
+        if stop {
+            self.stop_seats(id, None);
+        }
     }
 
-    fn stop_seats(&self, id: &str) {
+    /// Cancels every seat task still running, except `keep`'s.
+    fn stop_seats(&self, id: &str, keep: Option<&str>) {
         let (owner, tasks) = {
             let rooms = self.rooms.lock().unwrap();
             let Some(saved) = rooms.get(id) else { return };
-            (saved.owner_tab.clone(), rooms.seat_tasks(id))
+            let kept = saved.seats.iter().find(|seat| Some(seat.name.as_str()) == keep).map(|seat| seat.task.clone());
+            (saved.owner_tab.clone(), rooms.seat_tasks(id).into_iter().filter(|task| Some(task) != kept.as_ref()).collect::<Vec<_>>())
         };
         for task in tasks {
             if self.delegates.get(&task).is_some_and(|info| !info.state.terminal()) {
@@ -374,6 +384,7 @@ impl Machine {
 
     fn start_seat(&self, captain: &str, id: &str, brief: &str, name: &str, names: &[String], seat: &RoomSeatSpec, isolation: &str) -> Result<(String, String), String> {
         let others: Vec<String> = names.iter().filter(|other| other.as_str() != name).cloned().collect();
+        let rounds = self.rooms.lock().unwrap().get(id).and_then(|saved| saved.rounds.clone());
         let mut target = json!({ "machine": crate::placement::HERE });
         if let Some(model) = seat.model.as_ref().filter(|model| !model.is_empty()) {
             target["model"] = json!(model);
@@ -382,7 +393,7 @@ impl Machine {
             target["options"] = json!({ "effort": effort });
         }
         let mut args = json!({
-            "task": room::seat_brief(id, name, &others, brief),
+            "task": room::seat_brief(id, name, &others, brief, rounds.as_ref().map(|rounds| rounds.total), rounds.as_ref().and_then(|rounds| rounds.synthesis.as_deref())),
             "title": name,
             "isolation": isolation,
             "mode": "async",
@@ -523,6 +534,8 @@ mod tests {
 
     #[cfg(unix)]
     fn thread_claude(dir: &Path) -> PathBuf {
+        // A turn's Done prices its tokens, and the price download needs the TLS provider `main` installs.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let claude = dir.join("claude");
         let script = "#!/bin/sh\nif [ \"$1 $2\" = \"auth status\" ]; then echo '{\"loggedIn\":true,\"email\":\"ana@acme.dev\"}'; exit 0; fi\nprintf '%s\\0' \"$(pwd -P)\" \"$PINNED_ROLE\" \"$PINNED_PROJECT\" \"$CLAUDE_CONFIG_DIR\" \"$@\" > \"$0.tmp.$PINNED_TAB\" && mv \"$0.tmp.$PINNED_TAB\" \"$0.$PINNED_TAB\"\nexec sleep 30\n";
         std::fs::write(&claude, script).unwrap();
@@ -799,6 +812,101 @@ mod tests {
         assert_eq!(texts, vec!["the split is the colon"], "one message");
         let next: Value = serde_json::from_str(&say("and the tests", Some("say-2")).unwrap()).unwrap();
         assert_eq!(next["seq"], 2, "a fresh id posts");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    fn open_debate(m: &Machine, captain: &str, rounds: u32, synthesis: Option<&str>) -> Result<String, String> {
+        let mut args = json!({ "brief": "Which parser?", "seats": [{ "name": "Ana" }, { "name": "Beto" }], "rounds": rounds });
+        if let Some(seat) = synthesis {
+            args["synthesis"] = json!(seat);
+        }
+        m.team_tool(Some(captain), None, crate::team_tools::request("room_open", &args).unwrap())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_debate_that_names_no_seat_for_the_synthesis_opens_nothing() {
+        let dir = std::env::temp_dir().join(format!("pinned-room-refuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        let m = machine_on(&dir);
+        let (captain, path) = captain_on(&m, &dir, "app");
+        let refused = open_debate(&m, &captain, 2, Some("Zed")).unwrap_err();
+        assert!(refused.contains("Zed"), "{refused}");
+        assert_eq!(m.delegates.working_in(Path::new(&path)), 0, "no seat started");
+        assert_eq!(m.tabs.lock().unwrap().values().filter(|t| room::id_in(&t.env).is_some() && role_of(&t.env).is_none()).count(), 0, "no room tab");
+        assert_eq!(open_room(&m, &captain, "Fix the parser.")["id"], "room-1", "no room id used up");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_debate_runs_its_rounds_and_the_synthesis_closes_the_room() {
+        let dir = std::env::temp_dir().join(format!("pinned-room-debate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        let m = machine_on(&dir);
+        let (captain, path) = captain_on(&m, &dir, "app");
+        let body: Value = serde_json::from_str(&open_debate(&m, &captain, 2, Some("Beto")).unwrap()).unwrap();
+        let (ana_task, ana_tab) = seat_of(&body, "Ana");
+        let (beto_task, beto_tab) = seat_of(&body, "Beto");
+
+        posted(&m, &ana_tab, &ana_task, "split on the colon", json!([])).unwrap();
+        let again = posted(&m, &ana_tab, &ana_task, "and another thing", json!([])).unwrap_err();
+        assert!(again.contains("already posted in round 1 of 2"), "{again}");
+        posted(&m, &beto_tab, &beto_task, "split on the comma", json!([])).unwrap();
+        posted(&m, &ana_tab, &ana_task, "the colon still", json!([])).unwrap();
+        posted(&m, &beto_tab, &beto_task, "fine, the colon", json!([])).unwrap();
+        let late = posted(&m, &ana_tab, &ana_task, "one more", json!([])).unwrap_err();
+        assert!(late.contains("rounds are over"), "{late}");
+
+        let before = m.delegates.queued().get(&captain).copied().unwrap_or(0);
+        let synthesis = posted(&m, &beto_tab, &beto_task, "we split on the colon", json!([])).unwrap();
+        assert!(synthesis.contains("\"closed\":true"), "{synthesis}");
+        assert!(m.delegates.get(&ana_task).unwrap().state.terminal());
+        assert!(m.delegates.get(&beto_task).unwrap().state.terminal());
+        assert_eq!(m.delegates.working_in(Path::new(&path)), 0);
+        assert!(m.delegates.queued().get(&captain).copied().unwrap_or(0) > before, "the close line reaches the Captain");
+        let read: Value = serde_json::from_str(&m.team_tool(Some(&captain), None, crate::team_tools::request("room_read", &json!({})).unwrap()).unwrap()).unwrap();
+        assert_eq!(read["status"], "settled");
+        assert!(read["posts"].as_array().unwrap().iter().any(|post| post["text"].as_str().unwrap_or("").contains("we split on the colon")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_room_done_that_ends_the_last_round_stops_the_other_seat() {
+        let dir = std::env::temp_dir().join(format!("pinned-room-done-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        let m = machine_on(&dir);
+        let (captain, _path) = captain_on(&m, &dir, "app");
+        let body: Value = serde_json::from_str(&open_debate(&m, &captain, 1, None).unwrap()).unwrap();
+        let (ana_task, ana_tab) = seat_of(&body, "Ana");
+        let (beto_task, beto_tab) = seat_of(&body, "Beto");
+
+        posted(&m, &ana_tab, &ana_task, "split on the colon", json!([])).unwrap();
+        let finished = crate::team_tools::request("room_done", &json!({ "summary": "nothing to add" })).unwrap();
+        let done: Value = serde_json::from_str(&m.team_tool(Some(&beto_tab), Some(&beto_task), finished).unwrap()).unwrap();
+        assert_eq!(done["closed"], true);
+        assert!(m.delegates.get(&ana_task).unwrap().state.terminal(), "the round's end stops the other seat");
+        assert!(!m.delegates.get(&beto_task).unwrap().state.terminal(), "room_done leaves its own task until its turn ends");
+        m.record_event(AgentEvent {
+            status: AgentStatus::Done,
+            cwd: None,
+            message: None,
+            tab: Some(beto_tab.clone()),
+            session: None,
+            title: None,
+            resume_at: None,
+            prompt: None,
+            snapshot: None,
+            permission_mode: None,
+            hook_feedback: false,
+            reply: Some("done".into()),
+        });
+        assert!(m.delegates.get(&beto_task).unwrap().state.terminal(), "the Done after room_done settles the seat");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
