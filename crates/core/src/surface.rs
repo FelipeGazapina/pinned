@@ -206,7 +206,7 @@ pub const ACTIONS: &[Action] = &[
     n("pull_request_stack", Excluded, GIT),
     n("pull_request_filter_options", Excluded, GIT),
     n("pull_request_files", Excluded, GIT),
-    n("token_usage", Read, "The tokens and cost the machine's Claude transcripts record from unix time since on, by model and day.").wired(),
+    n("token_usage", Read, "The tokens and cost the machine's Claude transcripts record from unix time since on, by quarter hour, model and Claude session id.").wired(),
     n("session_costs", Read, "The cost, turns and active time the machine saved for each Claude session whose last message is at or after unix time since, with its title, project and account.").wired(),
     n("usage_prices", Read, "The model prices and mappings the user set on the machine.").wired(),
     n("set_usage_prices", Write, "Sets or clears model prices and mappings on the machine.").wired(),
