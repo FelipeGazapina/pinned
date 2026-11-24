@@ -8,6 +8,7 @@
 
 use super::{Answers, Classify, Fallback, Gate, Graph, NodeId, NodeKind, PortId, SessionSetup, Switch};
 use crate::agent::Subject;
+use crate::wire::{WorkflowRun, WorkflowRunClassified, WorkflowRunNode, WorkflowRunSession, WorkflowRunStatus, WorkflowRunStep};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -393,6 +394,55 @@ pub fn history(run: &Run) -> String {
         .replace('\u{2029}', "\\u2029")
         .replace('\u{85}', "\\u0085");
     format!("This session continues a run that already happened. Everything that happened so far is in this JSON.\n{body}")
+}
+
+/// What an app sees of `run` (`workflow_runs`): its trigger, answers, session and log, with no walk
+/// state. Names come from the graphs in `library` and the workflow `names` as they are now.
+pub fn view(run: &Run, library: &Library, names: &BTreeMap<String, String>) -> WorkflowRun {
+    let named = |workflow: &str, node: &NodeId| WorkflowRunNode {
+        workflow: workflow.to_owned(),
+        node: node.0.clone(),
+        name: library.get(workflow).and_then(|graph| graph.node(node)).map(|found| found.name.clone()).unwrap_or_default(),
+    };
+    // A classify inside a called workflow logs under that workflow, and `classified` keeps no workflow.
+    let workflow_of = |id: &NodeId| run.log.iter().rev().find(|entry| entry.node == *id).map_or(run.connector.as_str(), |entry| entry.connector.as_str());
+    let (status, why) = match &run.status {
+        Status::Running => (WorkflowRunStatus::Running, None),
+        Status::Waiting => (WorkflowRunStatus::Waiting, None),
+        Status::Done => (WorkflowRunStatus::Done, None),
+        Status::Failed { why } => (WorkflowRunStatus::Failed, Some(why.clone())),
+    };
+    let live = matches!(run.status, Status::Running | Status::Waiting);
+    WorkflowRun {
+        id: run.id.0.clone(),
+        workflow: run.connector.clone(),
+        workflow_name: names.get(&run.connector).cloned().unwrap_or_else(|| run.connector.clone()),
+        subject: run.subject.clone(),
+        status,
+        why,
+        started_at: run.log.first().map(|entry| entry.at.clone()),
+        last_step_at: run.log.last().map(|entry| entry.at.clone()),
+        trigger: run.context.get("trigger").cloned().unwrap_or(Value::Null),
+        classified: run
+            .classified
+            .iter()
+            .map(|(id, answers)| WorkflowRunClassified { node: id.0.clone(), name: named(workflow_of(id), id).name, answers: answers.answers.clone() })
+            .collect(),
+        session: match &run.session {
+            Session::None => WorkflowRunSession::None,
+            Session::Live { machine, tab, claude, .. } => WorkflowRunSession::Live { machine: machine.clone(), tab: tab.clone(), claude: claude.clone() },
+            Session::Detached { claude } => WorkflowRunSession::Detached { claude: claude.clone() },
+        },
+        steps: run
+            .log
+            .iter()
+            .map(|entry| {
+                let step = named(&entry.connector, &entry.node);
+                WorkflowRunStep { at: entry.at.clone(), workflow: step.workflow, node: step.node, name: step.name, what: entry.what.clone() }
+            })
+            .collect(),
+        waiting_on: front(run).ok().filter(|_| live).map(|(workflow, id)| named(&workflow, &id)),
+    }
 }
 
 /// The port a classify node takes for `answers`. Pure; `pages(port)` says whether that port's
@@ -1442,11 +1492,12 @@ mod tests {
     };
     use super::{
         branch_without_session, classify_port, drive, history, port_for, push, routing_classify,
-        start, start_follow_up, supply, Drive, Effect, Entry, Library, Session, Status, Supplied,
-        Wake,
+        start, start_follow_up, supply, view, Drive, Effect, Entry, Library, Session, Status,
+        Supplied, Wake,
     };
     use crate::agent::Subject;
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     const AT: &str = "2026-10-29T12:00:00Z";
     const CLAUDE: &str = "ses_1";
@@ -3223,5 +3274,117 @@ mod tests {
         let mut bug = start_follow_up(&library, "c1", slack(), json!({}), answers(&[("kind", "bug")], None), AT);
         assert_eq!(drive(&mut bug, &library), Drive::Done, "a follow-up never opens a session");
         assert!(matches!(bug.status, Status::Failed { .. }), "{:?}", bug.status);
+    }
+
+    fn sort_then_talk() -> Library {
+        let sort = NodeKind::Classify(Classify {
+            model: "typesafe-ai/jev".into(),
+            instructions: "Read it.".into(),
+            questions: vec![Question { name: "note".into(), ask: "What?".into(), choices: vec![] }],
+            branch_on: None,
+            gate: Gate::Direct,
+            fallback: Fallback::None,
+        });
+        library(vec![("c1", chain(vec![("t", "Trigger", trigger()), ("sort", "Sort", sort), ("k", "Ask Claude", talk("first"))]))])
+    }
+
+    /// Every key of `value` at any depth.
+    fn keys(value: &serde_json::Value, into: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(fields) => fields.iter().for_each(|(key, inner)| {
+                into.push(key.clone());
+                keys(inner, into);
+            }),
+            serde_json::Value::Array(items) => items.iter().for_each(|inner| keys(inner, into)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn workflow_runs_view_names_each_status_its_session_steps_and_the_step_a_live_run_is_on() {
+        let (t1, t2) = ("2026-10-29T12:01:00Z", "2026-10-29T12:02:00Z");
+        let lib = sort_then_talk();
+        let names = BTreeMap::from([("c1".to_owned(), "Triage".to_owned())]);
+        let mut run = start(&lib, "c1", linear(), json!("ENG-7: Broken button"), AT);
+        assert!(matches!(act(&mut run, &lib), Effect::Classify { .. }));
+        let running = serde_json::to_value(view(&run, &lib, &names)).unwrap();
+        assert_eq!((running["status"].clone(), running["session"].clone()), (json!("running"), json!({ "state": "none" })));
+        assert_eq!(running["waiting_on"], json!({ "workflow": "c1", "node": "sort", "name": "Sort" }), "a running run names its front step");
+        assert_eq!(running["classified"], json!([]));
+
+        supply(&mut run, Supplied::Classified(answers(&[("note", "free text")], None)), t1);
+        assert!(matches!(act(&mut run, &lib), Effect::Claim { .. }));
+        supply(&mut run, Supplied::Done, t1);
+        assert!(matches!(act(&mut run, &lib), Effect::Open { .. }));
+        supply(&mut run, opened(), t2);
+        assert_eq!(run.status, Status::Waiting);
+        let waiting = serde_json::to_value(view(&run, &lib, &names)).unwrap();
+        assert_eq!(
+            waiting,
+            json!({
+                "id": run.id.0,
+                "workflow": "c1",
+                "workflow_name": "Triage",
+                "subject": { "issue": "uuid" },
+                "status": "waiting",
+                "started_at": AT,
+                "last_step_at": t2,
+                "trigger": "ENG-7: Broken button",
+                "classified": [{ "node": "sort", "name": "Sort", "answers": [["note", "free text"]] }],
+                "session": { "state": "live", "machine": "mac", "tab": "tab-1" },
+                "steps": [
+                    { "at": AT, "workflow": "c1", "node": "t", "name": "Trigger", "what": "ENG-7: Broken button" },
+                    { "at": t1, "workflow": "c1", "node": "sort", "name": "Sort", "what": { "answers": { "note": "free text" }, "port": "out" } },
+                    { "at": t2, "workflow": "c1", "node": "k", "name": "Ask Claude", "what": { "talk": "first" } },
+                ],
+                "waiting_on": { "workflow": "c1", "node": "k", "name": "Ask Claude" },
+            })
+        );
+        let mut found = Vec::new();
+        keys(&waiting, &mut found);
+        for internal in ["stack", "pending", "ready", "sent", "claimed", "context", "reservation", "follow_up", "callable", "session_owner", "since", "saw_working", "await_working"] {
+            assert!(!found.iter().any(|key| key == internal), "{internal} stays off the wire: {found:?}");
+        }
+
+        walk(&mut run, &lib, answers(&[], None));
+        let done = serde_json::to_value(view(&run, &lib, &names)).unwrap();
+        assert_eq!(done["status"], json!("done"));
+        assert_eq!(done["session"], json!({ "state": "live", "machine": "mac", "tab": "tab-1", "claude": CLAUDE }), "the Claude id once a hook reported it");
+        assert!(done.get("waiting_on").is_none() && done.get("why").is_none(), "{done}");
+
+        let mut failed = start(&lib, "c1", slack(), json!({ "text": "help" }), AT);
+        let _ = act(&mut failed, &lib);
+        supply(&mut failed, Supplied::Failed("gateway down".into()), AT);
+        let failed = serde_json::to_value(view(&failed, &lib, &names)).unwrap();
+        assert_eq!((failed["status"].clone(), failed["why"].clone()), (json!("failed"), json!("gateway down")));
+        assert_eq!(failed["subject"], json!({ "channel": "C0123ABCD", "thread": "1792400050.000200" }));
+        assert!(failed.get("waiting_on").is_none(), "a failed run waits on nothing: {failed}");
+
+        let mut detached = run.clone();
+        detached.session = Session::Detached { claude: None };
+        assert_eq!(serde_json::to_value(view(&detached, &lib, &names)).unwrap()["session"], json!({ "state": "detached" }));
+    }
+
+    #[test]
+    fn workflow_runs_view_names_a_gone_workflow_by_its_id_and_a_gone_step_with_nothing() {
+        let lib = sort_then_talk();
+        let mut run = start(&lib, "c1", linear(), json!("ENG-7: Broken button"), AT);
+        let _ = act(&mut run, &lib);
+        let gone = serde_json::to_value(view(&run, &Library::new(), &BTreeMap::new())).unwrap();
+        assert_eq!(gone["workflow_name"], json!("c1"));
+        assert_eq!(gone["steps"][0]["name"], json!(""));
+        assert_eq!(gone["waiting_on"], json!({ "workflow": "c1", "node": "sort", "name": "" }));
+
+        let edited = library(vec![("c1", chain(vec![("t", "Start", trigger())]))]);
+        let names = BTreeMap::from([("c1".to_owned(), "Triage".to_owned())]);
+        let shown = serde_json::to_value(view(&run, &edited, &names)).unwrap();
+        assert_eq!((shown["steps"][0]["name"].clone(), shown["waiting_on"]["name"].clone()), (json!("Start"), json!("")), "a node the graph no longer has");
+
+        let never = start(&lib, "gone", linear(), json!("ENG-8"), AT);
+        let never = serde_json::to_value(view(&never, &lib, &names)).unwrap();
+        assert_eq!((never["workflow_name"].clone(), never["status"].clone()), (json!("gone"), json!("failed")));
+        assert!(never.get("started_at").is_none() && never.get("last_step_at").is_none(), "an empty log has no times: {never}");
+        assert_eq!(never["trigger"], json!("ENG-8"));
+        assert_eq!(never["steps"], json!([]));
     }
 }
