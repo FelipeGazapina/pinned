@@ -1006,6 +1006,7 @@ impl Hub {
                 return json(on);
             }
             HubCall::RunWorkflow { id } => return json(self.run_workflow(account, &id).await?),
+            HubCall::WorkflowRuns { workflow, limit } => (json(c().await?.workflow_runs(workflow.as_deref(), limit)), false),
             HubCall::GenerateWorkflow { .. } => return Err("Generate with AI was removed: ask an agent to create the workflow".into()),
             HubCall::OpenBox { repo, size, budget_usd } => (json(self.boxes.open_session(self, account, repo, size, budget_usd, None).await?), false),
             HubCall::BoxStatus { machine } => {
