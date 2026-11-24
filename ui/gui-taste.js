@@ -32,6 +32,7 @@ const TASTE_FIELD_LABELS = {
   escalate_process_failure: "The process did not work as designed",
   escalate_over_lines: "Too big to merge unseen",
   escalate_areas: "Always send to me",
+  manage_only: "Manage only",
 };
 const TASTE_TIER_ABOUT = { low: "Haiku and flash models", mid: "Sonnet, GLM and the like", high: "Opus and pro models" };
 
@@ -317,6 +318,7 @@ function tastePaceHtml(t) {
     <div class="taste-field">${tasteLabelHtml("autonomy")}<div class="taste-seg" role="group" aria-label="Autonomy">${autonomies}</div></div>
     ${tasteToggleHtml(t, "review_diffs", "Review each diff before accepting", "The Captain reads the worker's diff before merging it in.")}
     ${tasteToggleHtml(t, "second_opinion", "Second opinion on risky changes", "Another model reviews the change before it goes ahead.")}
+    ${tasteUi.scope.kind !== "orchestrator" && t.manage_only != null ? tasteToggleHtml(t, "manage_only", "Manage only", "The Captain starts without Claude Code's Edit, Write and NotebookEdit tools and hands every change to a worker. Applies from its next start. Bash stays, so the shell can still change files.") : ""}
   </section>`;
 }
 

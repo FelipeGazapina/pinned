@@ -2783,14 +2783,20 @@ impl Machine {
             prompt.extend(tastes.as_ref().and_then(Tastes::boxes_brief));
         }
         if let Some(role) = role {
-            if !role.disallowed_tools().is_empty() {
+            // A Captain's taste, read once so its refused tools and its prompt agree on Manage only.
+            let scoped = tastes.as_ref().filter(|_| role == Role::Orchestrator).map(|t| t.resolve(&captain_scope(&cwd)));
+            let manage_only = scoped.as_ref().is_some_and(|t| t.manage_only);
+            let mut refused = role.disallowed_tools().to_vec();
+            if manage_only && account.provider == Provider::Claude {
+                refused.extend(crate::agent::MANAGE_ONLY_TOOLS);
+            }
+            if !refused.is_empty() {
                 // --disallowedTools takes any number of values, so the prompt's flag after it keeps it from swallowing the rest.
                 args.push("--disallowedTools".to_owned());
-                args.extend(role.disallowed_tools().iter().map(|t| t.to_string()));
+                args.extend(refused.iter().map(|t| t.to_string()));
             }
-            prompt.push(role.prompt().to_owned());
+            prompt.push(if manage_only { crate::agent::manage_only_prompt() } else { role.prompt().to_owned() });
             if role == Role::Orchestrator {
-                let scoped = tastes.as_ref().map(|t| t.resolve(&captain_scope(&cwd)));
                 prompt.extend(scoped.as_ref().map(taste::Taste::brief));
                 prompt.extend(scoped.map(|t| t.limits().hint()));
                 prompt.extend(tastes.as_ref().and_then(Tastes::boxes_brief));
@@ -15207,6 +15213,57 @@ Have another model review a risky change before it goes ahead.";
     }
 
     #[test]
+    #[cfg(unix)]
+    fn a_manage_only_capitao_starts_without_the_edit_tools_and_the_global_orchestrator_never_does() {
+        let dir = temp("manage-only");
+        let (site, api) = (dir.join("site"), dir.join("api"));
+        for (repo, name) in [(&site, "site"), (&api, "api")] {
+            std::fs::create_dir_all(repo).unwrap();
+            git(repo, &["init", "-q"]);
+            git(repo, &["remote", "add", "origin", &format!("git@github.com:acme/{name}.git")]);
+        }
+        let claude = recording_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let answer = Arc::new(Mutex::new(json!({ "projects": { "github.com/acme/site": { "manage_only": true } } })));
+        let current = answer.clone();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::GetTastes => Ok(current.lock().unwrap().clone()),
+            _ => Err("not this test's".into()),
+        }));
+        let line = "This session is manage-only: pinned started it without the Edit, Write and NotebookEdit tools, so you cannot edit files. Re-brief or reassign a stuck or failed worker; never take its task over yourself.";
+        let step_in = "Step in and do the task yourself";
+        let refuses = |args: &[String]| args.windows(5).any(|w| w == ["--disallowedTools", "Edit", "Write", "NotebookEdit", "--append-system-prompt"]);
+        let open = |repo: &Path| m.call(Call::OpenOrchestrator { path: repo.display().to_string() }).unwrap().as_str().unwrap().to_owned();
+        let (site_tab, api_tab) = (open(&site), open(&api));
+        m.start_claude(&site_tab, 80, 24).unwrap();
+        m.start_claude(&api_tab, 80, 24).unwrap();
+
+        let args = started(&claude, &site_tab);
+        assert!(refuses(&args), "{args:?}");
+        let prompt = args.last().unwrap();
+        assert!(prompt.contains(line) && !prompt.contains(step_in), "{prompt}");
+        m.tab(&site_tab, |t| (t.claude_session, t.launch) = (Some("s1".into()), vec!["--resume".into(), "s1".into()])).unwrap();
+        m.relaunch(&site_tab, 80, 24).unwrap();
+        let args = started(&claude, &site_tab);
+        assert!(args.windows(2).any(|w| w == ["--resume", "s1"]) && refuses(&args), "a resume refuses them too: {args:?}");
+        let args = started(&claude, &api_tab);
+        assert!(!args.iter().any(|a| a == "--disallowedTools"), "{args:?}");
+        assert!(args.last().unwrap().contains(step_in) && !args.last().unwrap().contains(line), "{args:?}");
+
+        // Captains (all) on reaches a project that sets nothing, and never the global orchestrator.
+        let on = serde_json::to_value(taste::Taste { manage_only: true, ..taste::Taste::default() }).unwrap();
+        *answer.lock().unwrap() = json!({ "orchestrator": on, "captains": on });
+        m.relaunch(&api_tab, 80, 24).unwrap();
+        let args = started(&claude, &api_tab);
+        assert!(refuses(&args) && args.last().unwrap().contains(line), "{args:?}");
+        let global_tab = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+        m.start_claude(&global_tab, 80, 24).unwrap();
+        let args = started(&claude, &global_tab);
+        assert!(!args.iter().any(|a| a == "--disallowedTools" || a.contains(line)), "{args:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_machines_own_taste_goes_to_the_account_before_its_first_read_and_again_on_each_connect() {
         let dir = temp("taste-share");
         let config = dir.join("config");
@@ -15359,7 +15416,7 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2,"review_diffs":false,"second_opinion":true}"#), Err(both.into()));
         assert_eq!(tool(&chat, r#""name":"taste_reset","scope":"captains","field":"review_diffs""#), Err(one.into()));
         assert_eq!(tool(&chat, r#""name":"taste_reset","scope":"project:github.com/acme/site","field":"second_opinion""#), Err(other.into()));
-        for (name, value) in [("escalate_breaking_change", "false"), ("escalate_process_failure", "false"), ("escalate_over_lines", "750"), ("escalate_areas", r#"["Billing"]"#)] {
+        for (name, value) in [("escalate_breaking_change", "false"), ("escalate_process_failure", "false"), ("escalate_over_lines", "750"), ("escalate_areas", r#"["Billing"]"#), ("manage_only", "true")] {
             let refused = Err(format!("{name} is changed only by the user, on the Way of working page; nothing changed"));
             for scope in ["captains", "project:github.com/acme/site"] {
                 assert_eq!(tool(&chat, &format!(r#""name":"taste_set","scope":"{scope}","patch":{{"{name}":{value}}}"#)), refused, "{name} alone on {scope}");
@@ -15374,6 +15431,7 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!((&got["effective"]["review_diffs"], &got["effective"]["second_opinion"]), (&json!(true), &json!(false)), "taste_get still shows both");
         let escalation = ["escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas"].map(|name| got["effective"][name].clone());
         assert_eq!(escalation, [json!(true), json!(true), json!(500), json!(["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"])], "taste_get shows the escalation settings");
+        assert_eq!(got["effective"]["manage_only"], json!(false), "taste_get shows Manage only");
         let set: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2}"#).unwrap()).unwrap();
         assert_eq!(set["effective"]["parallel"], json!(2), "a field the agent may change still changes");
 
@@ -15427,6 +15485,11 @@ Have another model review a risky change before it goes ahead.";
         assert!(captains.captains.escalate_areas.is_empty());
         let reset = m.reset_local_taste_field(&TasteScope::Captains, TasteField::EscalateAreas).unwrap();
         assert_eq!(reset.captains.escalate_areas.len(), 3, "the Captains get the default areas back");
+
+        let set = m.set_local_taste(&site, TastePatch { manage_only: Some(true), ..TastePatch::default() }).unwrap();
+        assert!(set.resolve(&site).manage_only, "the page's own set turns Manage only on");
+        let reset = m.reset_local_taste_field(&site, TasteField::ManageOnly).unwrap();
+        assert!(!reset.resolve(&site).manage_only, "a reset inherits the Captains' Manage only");
         let _ = std::fs::remove_dir_all(dir);
     }
 
