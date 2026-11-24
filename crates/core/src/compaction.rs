@@ -41,7 +41,7 @@ impl Settings {
     /// Refuses a threshold under [`MIN_OFFER_TOKENS`].
     pub fn check(&self) -> Result<(), String> {
         match self.offer_tokens {
-            Some(tokens) if tokens < MIN_OFFER_TOKENS => Err(format!("offer_tokens must be at least {MIN_OFFER_TOKENS} tokens, or null for never")),
+            Some(tokens) if tokens < MIN_OFFER_TOKENS => Err("offer_tokens must be at least 10000 tokens, or null for never".into()),
             _ => Ok(()),
         }
     }
