@@ -17,11 +17,15 @@ impl Machine {
     /// `delegate_task`'s request as the profile it names sets it up. The name is looked up in the
     /// caller's project's profiles, then the account's. The profile fills in the model, effort and
     /// tools the call leaves out, makes the worker read-only when it is, and puts its prompt ahead
-    /// of the task. A replayed request, and one another machine sent already set up, pass as they are.
+    /// of the task. One another machine sent, already set up there, passes as it is. A replayed
+    /// request answers with the task it started, so it names no profile its record does not have.
     pub(super) fn profile_request(&self, caller: &Caller, mut request: Request) -> Result<Request, String> {
         let Some(asked) = request.profile.clone() else { return Ok(request) };
-        let sent = caller.tab.as_deref().is_some_and(|tab| Origin::of_key(tab).is_some());
-        if sent || self.delegates.requested(&caller.key(), request.client_request_id.as_deref()).is_some() {
+        if caller.tab.as_deref().is_some_and(|tab| Origin::of_key(tab).is_some()) {
+            return Ok(request);
+        }
+        if self.delegates.requested(&caller.key(), request.client_request_id.as_deref()).is_some() {
+            request.profile = None;
             return Ok(request);
         }
         let cwd = match (&caller.tab, &caller.task) {
@@ -236,6 +240,14 @@ mod tests {
         let again = delegate_task(&m, &captain, call);
         assert_eq!((&again["taskId"], &again["profile"]), (&first["taskId"], &json!("Scout")));
         assert_eq!(m.delegates.working_for(&format!("tab:{captain}")), 1, "the replay started nothing");
+        let plain = json!({ "task": "Read the parser.", "clientRequestId": "req-2", "target": { "providerInstanceId": "work" } });
+        let first = delegate_task(&m, &captain, plain.clone());
+        let _ = launched(&dir, &first);
+        let mut named = plain;
+        named["profile"] = json!("ghost");
+        let again = delegate_task(&m, &captain, named);
+        assert_eq!((&again["taskId"], again.get("profile")), (&first["taskId"], None), "a replay names no profile its task did not start with");
+        assert_eq!(m.delegates.get(first["taskId"].as_str().unwrap()).unwrap().profile, None);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
