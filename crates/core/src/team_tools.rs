@@ -114,6 +114,12 @@ pub struct RoomOpen {
     pub seats: Vec<RoomSeatSpec>,
     #[serde(default, rename = "postCap", skip_serializing_if = "Option::is_none")]
     pub post_cap: Option<u32>,
+    /// The seats debate in this many rounds, each posting once a round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rounds: Option<u32>,
+    /// The seat that writes the synthesis after the last round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis: Option<String>,
 }
 
 /// `room_post`: say something in the room. `to` names seats, or `captain`. Empty wakes every other seat.
@@ -305,7 +311,7 @@ pub fn definition(name: &str) -> Option<Value> {
         "board_read" => ("Read your Captain's board, or one task's part of it.", json!({ "taskId": task_id }), &[]),
         "ask_worker" => ("Ask another worker of your chain a question.", json!({ "taskId": task_id, "question": { "type": "string" } }), &["taskId", "question"]),
         "room_open" => (
-            "Open one room and seat workers who must read each other while they work. Each seat counts as a worker. If the last seat does not fit, nothing opens.",
+            "Open one room and seat workers who must read each other while they work. Each seat counts as a worker. If the last seat does not fit, nothing opens. With rounds, each seat posts once per round, and after the last round the synthesis seat posts once more to close the room.",
             json!({
                 "brief": { "type": "string" },
                 "seats": { "type": "array", "items": { "type": "object", "properties": {
@@ -315,7 +321,9 @@ pub fn definition(name: &str) -> Option<Value> {
                     "tools": { "type": "array", "items": { "type": "string" } },
                     "isolation": { "type": "string", "enum": ["shared", "worktree"] }
                 }, "required": ["name"] } },
-                "postCap": { "type": "integer", "minimum": 1, "maximum": 200 }
+                "postCap": { "type": "integer", "minimum": 1, "maximum": 200 },
+                "rounds": { "type": "integer", "minimum": 1, "maximum": crate::room::MAX_ROUNDS },
+                "synthesis": { "type": "string", "description": "The name of the seat that writes the synthesis after the last round. Needs rounds." }
             }),
             &["brief", "seats"],
         ),
@@ -370,6 +378,7 @@ mod tests {
             (json!({ "taskId": "t1" }), "board_read"),
             (json!({ "taskId": "t1", "question": "which branch?" }), "ask_worker"),
             (json!({ "brief": "Fix it.", "seats": [{ "name": "Ana" }, { "name": "Beto" }] }), "room_open"),
+            (json!({ "brief": "Fix it.", "seats": [{ "name": "Ana" }, { "name": "Beto" }], "rounds": 2, "synthesis": "Ana" }), "room_open"),
             (json!({ "text": "hi" }), "room_post"),
             (json!({}), "room_read"),
             (json!({ "summary": "done" }), "room_done"),
@@ -383,5 +392,12 @@ mod tests {
             assert_eq!(serde_json::from_value::<TeamTool>(back).unwrap(), tool, "{name} round-trips");
         }
         assert_eq!(request("task_fix", &json!({})).unwrap_err(), "task_fix: missing field `taskId`");
+        let open = definition("room_open").unwrap();
+        assert_eq!(open["inputSchema"]["properties"]["rounds"]["maximum"], 10);
+        assert_eq!(open["inputSchema"]["properties"]["synthesis"]["type"], "string");
+        let debate = request("room_open", &json!({ "brief": "Fix it.", "seats": [{ "name": "Ana" }, { "name": "Beto" }], "rounds": 2, "synthesis": "Ana" })).unwrap();
+        assert!(matches!(debate, TeamTool::RoomOpen(RoomOpen { rounds: Some(2), synthesis: Some(ref seat), .. }) if seat == "Ana"));
+        let plain = request("room_open", &json!({ "brief": "Fix it.", "seats": [{ "name": "Ana" }, { "name": "Beto" }] })).unwrap();
+        assert!(matches!(plain, TeamTool::RoomOpen(RoomOpen { rounds: None, synthesis: None, .. })));
     }
 }
