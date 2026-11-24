@@ -272,6 +272,7 @@ pub const ACTIONS: &[Action] = &[
     h("connect_posthog", Confirm, "Connects PostHog error tracking for observability workflows: `project` is the project id, `host` is us, eu or a self-hosted https:// address. The user enters the key in the app; an agent never sends one.").wired().asks(&["key"]),
     h("disconnect_posthog", Confirm, "Disconnects PostHog.").wired(),
     h("vercel_models", Read, "The chat and decision models a workflow may use.").wired(),
+    h("classify", Read, "Asks a decision model on the account's Vercel AI Gateway, with the account's key, which category fits text: give two to 20 categories, each a name and an optional description, or a yes/no question, answered as the categories yes and no. Answers pick, its probability, every category's probability in the order given, and confidence: sure at or above sure_at (0.85 when left out), unsure below unsure_below (0.6 when left out), likely between. model is a decision model's id, typesafe-ai/jev when left out. Limits: 8,000 characters of text, 20 categories, and 4,000 characters of instructions, question and categories together. Each act is one gateway call.").wired(),
     h("connect_upstash", Confirm, "Connects Upstash for boxes. The user enters the keys in the app; an agent never sends one.").wired().asks(&["key", "claude_token"]),
     h("disconnect_upstash", Confirm, "Deletes the account's boxes and disconnects Upstash.").wired(),
     h("list_schedules", Read, "Every scheduled task of the account as JSON, soonest first, with its next run (next_at) and last run.").wired(),
@@ -1311,6 +1312,7 @@ mod tests {
             mint_box_claude_token: Confirm on "hub" => { "machine": "m1", "account": "bloom" };
             cancel_box_claude_token: Write on "hub" => { "machine": "m1", "account": "bloom" };
             unclaimed_ends: Read on "hub" => {};
+            classify: Read on "hub" => { "text": "The export button 500s", "question": "Is this a bug report?" };
         }
 
         #[test]

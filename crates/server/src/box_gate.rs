@@ -91,6 +91,8 @@ pub fn box_may_send(call: &HubCall) -> Result<(), String> {
         | HubCall::AutoArchive { .. }
         | HubCall::Team { .. } => return Ok(()),
         HubCall::Mirror { .. } | HubCall::Handback { .. } => return Err("a box may not keep a copy of the account's keys".into()),
+        // A decision model asked with the account's key, with no spend limit, on text a box may have read anywhere.
+        HubCall::Classify { .. } => return Err("a box may not spend the account's Vercel AI Gateway key".into()),
         // A Capitão's report on its own work, and a worker it hands to another box, which is held
         // to this gate as this box is.
         HubCall::Relay { to: RelayTo::Orchestrator { .. }, .. } => return Ok(()),
@@ -301,6 +303,18 @@ mod tests {
             assert_eq!(box_may_act(BOX, &act, true, false), Err(refused.to_owned()), "on the box itself");
             assert_eq!(box_may_act(BOX, &act, false, false), Err(refused.to_owned()), "on another machine");
         }
+    }
+
+    #[test]
+    fn a_box_may_not_spend_the_accounts_gateway_key_on_classify() {
+        let refused = Err("a box may not spend the account's Vercel AI Gateway key".to_owned());
+        let args = serde_json::json!({ "text": "The export button 500s", "question": "Is this a bug report?" });
+        let mut sent = args.clone();
+        sent["cmd"] = serde_json::json!("classify");
+        assert_eq!(box_may_send(&call(sent)), refused);
+        assert_eq!(box_may_act(BOX, &acted("classify", args.clone()), true, true), refused, "on the box itself");
+        assert_eq!(box_may_act(BOX, &acted("classify", args), false, true), refused, "on another machine");
+        assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "vercel_models" }))), Ok(()), "the keyless model list stays a read");
     }
 
     #[test]
