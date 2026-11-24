@@ -15359,7 +15359,7 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2,"review_diffs":false,"second_opinion":true}"#), Err(both.into()));
         assert_eq!(tool(&chat, r#""name":"taste_reset","scope":"captains","field":"review_diffs""#), Err(one.into()));
         assert_eq!(tool(&chat, r#""name":"taste_reset","scope":"project:github.com/acme/site","field":"second_opinion""#), Err(other.into()));
-        for (name, value) in [("escalate_breaking_change", "false"), ("escalate_process_failure", "false"), ("escalate_over_lines", "750"), ("escalate_areas", r#"["Billing"]"#)] {
+        for (name, value) in [("escalate_breaking_change", "false"), ("escalate_process_failure", "false"), ("escalate_over_lines", "750"), ("escalate_areas", r#"["Billing"]"#), ("manage_only", "true")] {
             let refused = Err(format!("{name} is changed only by the user, on the Way of working page; nothing changed"));
             for scope in ["captains", "project:github.com/acme/site"] {
                 assert_eq!(tool(&chat, &format!(r#""name":"taste_set","scope":"{scope}","patch":{{"{name}":{value}}}"#)), refused, "{name} alone on {scope}");
@@ -15374,6 +15374,7 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!((&got["effective"]["review_diffs"], &got["effective"]["second_opinion"]), (&json!(true), &json!(false)), "taste_get still shows both");
         let escalation = ["escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas"].map(|name| got["effective"][name].clone());
         assert_eq!(escalation, [json!(true), json!(true), json!(500), json!(["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"])], "taste_get shows the escalation settings");
+        assert_eq!(got["effective"]["manage_only"], json!(false), "taste_get shows Manage only");
         let set: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2}"#).unwrap()).unwrap();
         assert_eq!(set["effective"]["parallel"], json!(2), "a field the agent may change still changes");
 
@@ -15427,6 +15428,11 @@ Have another model review a risky change before it goes ahead.";
         assert!(captains.captains.escalate_areas.is_empty());
         let reset = m.reset_local_taste_field(&TasteScope::Captains, TasteField::EscalateAreas).unwrap();
         assert_eq!(reset.captains.escalate_areas.len(), 3, "the Captains get the default areas back");
+
+        let set = m.set_local_taste(&site, TastePatch { manage_only: Some(true), ..TastePatch::default() }).unwrap();
+        assert!(set.resolve(&site).manage_only, "the page's own set turns Manage only on");
+        let reset = m.reset_local_taste_field(&site, TasteField::ManageOnly).unwrap();
+        assert!(!reset.resolve(&site).manage_only, "a reset inherits the Captains' Manage only");
         let _ = std::fs::remove_dir_all(dir);
     }
 

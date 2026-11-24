@@ -236,8 +236,8 @@ async fn end_turn(turn: Option<ExtendTurn>) {
     }
 }
 
-/// Refuses a call that changes a review or escalation setting, which only the user makes on the Way of working page,
-/// approved or not and whoever sends it. The user's own app calls the hub's SetTaste directly, so this is not in its way.
+/// Refuses a call that changes a review or escalation setting or Manage only, which only the user makes on the Way of
+/// working page, approved or not and whoever sends it. The user's own app calls the hub's SetTaste directly, so this is not in its way.
 pub fn refuse_review_setting(call: &HubCall) -> Result<(), String> {
     match call {
         HubCall::SetTaste { patch, .. } => taste::refuse_review_settings(patch.review_settings()),
@@ -826,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn refuse_review_setting_refuses_each_escalation_setting_alone_mixed_or_reset() {
+    fn refuse_review_setting_refuses_each_escalation_setting_and_manage_only_alone_mixed_or_reset() {
         use pinned_core::taste::{TasteField, TastePatch, TasteScope};
         let scope = TasteScope::Project { repo: "github.com/acme/site".into() };
         let set = |patch: TastePatch| HubCall::SetTaste { scope: scope.clone(), patch };
@@ -835,6 +835,7 @@ mod tests {
             ("escalate_process_failure", TasteField::EscalateProcessFailure, TastePatch { escalate_process_failure: Some(false), ..TastePatch::default() }),
             ("escalate_over_lines", TasteField::EscalateOverLines, TastePatch { escalate_over_lines: Some(750), ..TastePatch::default() }),
             ("escalate_areas", TasteField::EscalateAreas, TastePatch { escalate_areas: Some(vec!["Billing".into()]), ..TastePatch::default() }),
+            ("manage_only", TasteField::ManageOnly, TastePatch { manage_only: Some(true), ..TastePatch::default() }),
         ];
         for (name, field, patch) in patches {
             let refused = Err(format!("{name} is changed only by the user, on the Way of working page; nothing changed"));
