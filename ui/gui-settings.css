@@ -348,6 +348,15 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
 #settings .mcp-found { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 #settings .mcp-found > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 600px) { #settings .mcp-fields { grid-template-columns: minmax(0, 1fr); } }
+/* Workflow runs: one card per run that opens to its detail; the trigger's JSON scrolls in its own box, and long step values wrap. */
+#settings .workflow-run summary { cursor: pointer; }
+#settings .workflow-run summary > span { margin-left: 6px; }
+#settings .workflow-run[data-status="failed"] .workflow-run-status { color: var(--g-error); }
+#settings .workflow-run h3 { margin: 14px 0 6px; font-size: 13px; font-weight: 600; }
+#settings .workflow-run pre { max-height: 240px; overflow: auto; margin: 0; padding: 6px 8px; border-radius: 6px; background: rgb(var(--g-ink-rgb) / 0.04);
+  font: 12px/1.5 var(--g-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+#settings .workflow-run :is(ul, ol) { margin: 0; padding-left: 18px; }
+#settings .workflow-run-steps code { overflow-wrap: anywhere; }
 #settings-page #memory .memory-row { margin: 8px 0 8px 20px; }
 #settings-page #memory .memory-size { flex: none; font-variant-numeric: tabular-nums; }
 #settings-page #memory button { display: inline-flex; align-items: center; gap: 6px; }
