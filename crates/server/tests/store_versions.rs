@@ -26,9 +26,9 @@ async fn fresh(name: &str, dir: &std::path::Path) -> (String, Db, Uuid) {
 async fn an_older_version_never_replaces_a_newer_one_and_a_reopened_hub_writes_above_the_stored_version() {
     let dir = tempfile::tempdir().unwrap();
     let (url, db, account) = fresh("versions", dir.path()).await;
-    assert!(db.save_store(account, 2, Some(r#"{"n":2}"#), Some(r#"[{"run":2}]"#), None).await.unwrap(), "version 2 lands");
-    assert!(!db.save_store(account, 1, Some(r#"{"n":1}"#), None, None).await.unwrap(), "version 1 comes too late and is not written");
-    assert!(!db.save_store(account, 2, Some(r#"{"n":"again"}"#), None, None).await.unwrap(), "nor is a second version 2");
+    assert!(db.save_store(account, 2, Some(r#"{"n":2}"#), Some(r#"[{"run":2}]"#), None, None).await.unwrap(), "version 2 lands");
+    assert!(!db.save_store(account, 1, Some(r#"{"n":1}"#), None, None, None).await.unwrap(), "version 1 comes too late and is not written");
+    assert!(!db.save_store(account, 2, Some(r#"{"n":"again"}"#), None, None, None).await.unwrap(), "nor is a second version 2");
     let keys = |v: &str| BTreeMap::from([("linear".to_owned(), v.to_owned())]);
     assert!(db.save_secrets(account, 3, &keys("three")).await.unwrap());
     assert!(!db.save_secrets(account, 1, &keys("one")).await.unwrap());
@@ -42,7 +42,7 @@ async fn an_older_version_never_replaces_a_newer_one_and_a_reopened_hub_writes_a
     let reopened = Db::connect(&url, Sealer::load(&dir.path().join("hub.key")).unwrap()).await.unwrap();
     let stored = reopened.connectors(account).await.unwrap();
     assert_eq!(stored.version, 3);
-    assert!(reopened.save_store(account, stored.version + 1, Some(r#"{"n":4}"#), None, None).await.unwrap(), "a write after reopening is accepted");
+    assert!(reopened.save_store(account, stored.version + 1, Some(r#"{"n":4}"#), None, None, None).await.unwrap(), "a write after reopening is accepted");
     assert_eq!(reopened.connectors(account).await.unwrap().store, serde_json::json!({ "n": 4 }), "runs absent means no runs in the row");
 }
 
@@ -51,13 +51,31 @@ async fn jobs_land_under_jobs_beside_the_runs_and_a_write_without_them_removes_t
     let dir = tempfile::tempdir().unwrap();
     let (_, db, account) = fresh("jobs", dir.path()).await;
     let jobs = r#"[{"id":"j","source":{"kind":"owner"}}]"#;
-    assert!(db.save_store(account, 1, Some(r#"{"n":1,"jobs":"stale"}"#), Some(r#"[{"run":1}]"#), Some(jobs)).await.unwrap());
+    assert!(db.save_store(account, 1, Some(r#"{"n":1,"jobs":"stale"}"#), Some(r#"[{"run":1}]"#), Some(jobs), None).await.unwrap());
     let stored = db.connectors(account).await.unwrap();
     assert_eq!(stored.store["jobs"], serde_json::from_str::<serde_json::Value>(jobs).unwrap(), "the row's jobs are the ones given, not the store's own key");
     assert_eq!(stored.store["runs"], serde_json::json!([{ "run": 1 }]));
     assert_eq!(stored.store["n"], 1);
-    assert!(db.save_store(account, 2, Some(r#"{"n":2}"#), None, None).await.unwrap());
+    assert!(db.save_store(account, 2, Some(r#"{"n":2}"#), None, None, None).await.unwrap());
     assert_eq!(db.connectors(account).await.unwrap().store, serde_json::json!({ "n": 2 }), "jobs absent means no jobs in the row");
+}
+
+#[tokio::test]
+async fn lines_land_under_lines_beside_the_runs_and_the_jobs_and_a_write_without_them_removes_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, db, account) = fresh("lines", dir.path()).await;
+    let (jobs, lines) = (r#"[{"id":"j","source":{"kind":"owner"}}]"#, r#"[{"id":"l","stages":["intake","build","gate","approve"]}]"#);
+    assert!(db.save_store(account, 1, Some(r#"{"n":1,"lines":"stale"}"#), Some(r#"[{"run":1}]"#), Some(jobs), Some(lines)).await.unwrap());
+    let stored = db.connectors(account).await.unwrap();
+    assert_eq!(stored.store["lines"], serde_json::from_str::<serde_json::Value>(lines).unwrap(), "the row's lines are the ones given, not the store's own key");
+    assert_eq!(stored.store["jobs"], serde_json::from_str::<serde_json::Value>(jobs).unwrap());
+    assert_eq!(stored.store["runs"], serde_json::json!([{ "run": 1 }]));
+    assert_eq!(stored.store["n"], 1);
+    assert!(db.save_store(account, 2, Some(r#"{"n":2}"#), Some(r#"[{"run":2}]"#), Some(jobs), None).await.unwrap());
+    let stored = db.connectors(account).await.unwrap();
+    assert_eq!(stored.store.get("lines"), None, "lines absent means no lines in the row");
+    assert_eq!(stored.store["runs"], serde_json::json!([{ "run": 2 }]));
+    assert_eq!(stored.store["jobs"], serde_json::from_str::<serde_json::Value>(jobs).unwrap());
 }
 
 
@@ -69,7 +87,7 @@ async fn a_document_as_deep_as_the_hub_accepts_lands_and_reads_back() {
     // The store at the deepest a save accepts, and runs one less, under `runs` in the same row.
     let store = format!(r#"{{"deep":{}0{}}}"#, "[".repeat(depth - 1), "]".repeat(depth - 1));
     let runs = format!("{}0{}", "[".repeat(depth - 1), "]".repeat(depth - 1));
-    assert!(db.save_store(account, 1, Some(&store), Some(&runs), None).await.unwrap());
+    assert!(db.save_store(account, 1, Some(&store), Some(&runs), None, None).await.unwrap());
     let stored = db.connectors(account).await.unwrap();
     assert!(stored.store["deep"].is_array() && stored.store["runs"].is_array(), "the row reads back as a document");
 }
@@ -79,11 +97,11 @@ async fn postgres_refusing_a_document_is_a_permanent_failure_and_a_later_documen
     let dir = tempfile::tempdir().unwrap();
     let (_, db, account) = fresh("refused", dir.path()).await;
     // jsonb has no \u0000; serde reads it as a plain string.
-    match db.save_store(account, 1, Some(r#"{"n":"a\u0000b"}"#), None, None).await {
+    match db.save_store(account, 1, Some(r#"{"n":"a\u0000b"}"#), None, None, None).await {
         Err(WriteFailure::Refused { sqlstate }) => assert!(sqlstate.starts_with("22"), "a data exception: {sqlstate}"),
         other => panic!("expected a refusal, got {other:?}"),
     }
-    assert!(db.save_store(account, 2, Some(r#"{"n":2}"#), None, None).await.unwrap());
+    assert!(db.save_store(account, 2, Some(r#"{"n":2}"#), None, None, None).await.unwrap());
     assert_eq!(db.connectors(account).await.unwrap().store, serde_json::json!({ "n": 2 }));
 }
 
@@ -101,7 +119,7 @@ async fn a_write_given_up_that_postgres_runs_late_does_not_replace_the_newer_doc
     other.batch_execute("begin").await.unwrap();
     other.execute("select 1 from accounts where id = $1 for update", &[&account]).await.unwrap();
 
-    match db.save_store(account, 1, Some(r#"{"n":1}"#), None, None).await {
+    match db.save_store(account, 1, Some(r#"{"n":1}"#), None, None, None).await {
         Err(WriteFailure::Failed(e)) => assert!(e.contains("given up"), "{e}"),
         other => panic!("expected the write to give up, got {other:?}"),
     }
@@ -121,7 +139,7 @@ async fn a_write_given_up_that_postgres_runs_late_does_not_replace_the_newer_doc
     let row = other.query_one("select store, store_version from accounts where id = $1", &[&account]).await.unwrap();
     assert_eq!((row.get::<_, serde_json::Value>(0), row.get::<_, i64>(1)), (serde_json::json!({ "n": 2 }), 2), "the late write of version 1 did not land");
 
-    assert!(db.save_store(account, 3, Some(r#"{"n":3}"#), None, None).await.unwrap(), "the hub writes again on a new connection");
+    assert!(db.save_store(account, 3, Some(r#"{"n":3}"#), None, None, None).await.unwrap(), "the hub writes again on a new connection");
     assert_eq!(db.connectors(account).await.unwrap().store, serde_json::json!({ "n": 3 }));
 }
 
@@ -135,7 +153,7 @@ async fn the_later_save_of_the_lower_numbered_of_two_hub_processes_lands_in_the_
     use std::time::Duration;
     let dir = tempfile::tempdir().unwrap();
     let (url, db, account) = fresh("two_processes", dir.path()).await;
-    assert!(db.save_store(account, 5, Some(r#"{"n":0}"#), None, None).await.unwrap());
+    assert!(db.save_store(account, 5, Some(r#"{"n":0}"#), None, None, None).await.unwrap());
     let process = || async { Db::connect(&url, Sealer::load(&dir.path().join("hub.key")).unwrap()).await.unwrap() };
     let first = AccountStore::load(process().await, account).await.unwrap();
     let second = AccountStore::load(process().await, account).await.unwrap();
@@ -174,7 +192,7 @@ async fn a_document_save_accepts_lands_in_jsonb_and_one_jsonb_refuses_is_refused
     let storage = AccountStore::load(db.clone(), account).await.unwrap();
     for refused in [r#"{"n":"a\u0000b"}"#, r#"{"n":{"\u0000":1}}"#, r#"{"n":"\ud800"}"#, r#"{"n":"\udc00\ud800"}"#] {
         assert!(storage.save(refused.as_bytes()).is_err(), "save refuses {refused}");
-        assert!(matches!(db.save_store(account, 1, Some(refused), None, None).await, Err(WriteFailure::Refused { .. })), "as jsonb does: {refused}");
+        assert!(matches!(db.save_store(account, 1, Some(refused), None, None, None).await, Err(WriteFailure::Refused { .. })), "as jsonb does: {refused}");
     }
     let store = r#"{"a":"x\\u0000y","b\\u0000":"\\\\u0000","c":"😀","d":"é"}"#;
     storage.save(store.as_bytes()).unwrap();
@@ -216,12 +234,12 @@ async fn a_statement_the_schema_does_not_fit_is_a_failure_to_retry_not_a_refusal
     let (other, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await.unwrap();
     tokio::spawn(connection);
     other.batch_execute("alter table accounts rename column store_version to store_version_moved").await.unwrap();
-    match db.save_store(account, 1, Some(r#"{"n":1}"#), None, None).await {
+    match db.save_store(account, 1, Some(r#"{"n":1}"#), None, None, None).await {
         Err(WriteFailure::Failed(_)) => {}
         other => panic!("expected a failure to retry, got {other:?}"),
     }
     other.batch_execute("alter table accounts rename column store_version_moved to store_version").await.unwrap();
-    assert!(db.save_store(account, 1, Some(r#"{"n":1}"#), None, None).await.unwrap(), "the same write lands once the schema fits");
+    assert!(db.save_store(account, 1, Some(r#"{"n":1}"#), None, None, None).await.unwrap(), "the same write lands once the schema fits");
 }
 
 /// A row the hub cannot read, a number jsonb holds that serde_json can't (past f64), makes
