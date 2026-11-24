@@ -98,6 +98,8 @@ function page({ answer = () => tastesWith(), projects = {}, machineViews = null,
     pickEffort: async (target) => (fire("change", { target }), settle()),
     type: (value) => fire("input", { target: { value, matches: (sel) => sel === "[data-note-input]" } }),
     submit: () => fire("submit", { target: { matches: (sel) => sel === "[data-note-form]" }, preventDefault() {} }),
+    typeArea: (value) => fire("input", { target: { value, matches: (sel) => sel === "[data-area-input]" } }),
+    submitArea: () => fire("submit", { target: { matches: (sel) => sel === "[data-area-form]" }, preventDefault() {} }),
     submitSkill: (name) => fire("submit", { target: { matches: (sel) => sel === "[data-skill-form]", querySelector: () => ({ value: name }) }, preventDefault() {} }),
   };
 }
@@ -688,4 +690,108 @@ test("a hub that predates Boxes at once shows no row for it", async () => {
   const p = page({ answer: () => limited() });
   await p.show();
   assert.doesNotMatch(p.html(), /Boxes at once/);
+});
+
+const escalation = { escalate_breaking_change: true, escalate_process_failure: true, escalate_over_lines: 500, escalate_areas: ["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"] };
+const escalating = (over = {}) => tastesWith({ orchestrator: { ...balanced, ...escalation }, captains: { ...balanced, ...escalation }, ...over });
+const escalateSection = (html) => html.match(/<section class="taste-section taste-escalate">.*?<\/section>/s)?.[0];
+
+test("Escalate to me shows the defaults on the Captains, right after Pace", async () => {
+  const p = page({ answer: () => escalating() });
+  await p.show();
+  const html = p.html();
+  const section = escalateSection(html);
+  assert.ok(section, "the section is drawn");
+  assert.ok(html.indexOf("<h2>Pace</h2>") < html.indexOf("<h2>Escalate to me</h2>") && html.indexOf("<h2>Escalate to me</h2>") < html.indexOf("<h2>Delegation limits</h2>"), "right after Pace");
+  assert.match(section, /role="switch" aria-checked="true" aria-label="Breaks an older version" data-act="toggle" data-field="escalate_breaking_change"/);
+  assert.match(section, /role="switch" aria-checked="true" aria-label="The process did not work as designed" data-act="toggle" data-field="escalate_process_failure"/);
+  assert.match(section, /<span>Too big to merge unseen<\/span><input type="number" data-escalate-lines min="1" max="100000" step="1" value="500"><\/label><span class="taste-quiet">Changed lines, not counting tests, docs and generated files\.<\/span>/);
+  assert.deepEqual([...section.matchAll(/<li><span>([^<]*)<\/span>/g)].map(([, area]) => unesc(area)), escalation.escalate_areas);
+  assert.match(section, /<span>Always send to me<\/span>/);
+  assert.doesNotMatch(section, /changed here/);
+  assert.deepEqual(lines(html), balancedBrief(), "the brief is unchanged");
+  for (const kind of ["orchestrator", "captains"]) {
+    await p.click(new RegExp(`data-act="scope" data-kind="${kind}"`));
+    assert.ok(escalateSection(p.html()), `the ${kind} tab draws it`);
+  }
+});
+
+test("each escalation switch flips and saves only what changed", async () => {
+  const p = page({ answer: (cmd, args) => (cmd === "get_tastes" ? escalating() : escalating({ captains: { ...balanced, ...escalation, ...args.patch } })) });
+  await p.show();
+  await p.click(/data-field="escalate_breaking_change"/);
+  assert.match(p.html(), /aria-checked="false" aria-label="Breaks an older version"/);
+  await p.click(/data-field="escalate_process_failure"/);
+  assert.match(p.html(), /aria-checked="false" aria-label="The process did not work as designed"/);
+  assert.match(p.html(), /class="taste-card active" data-act="profile" data-profile="balanced"/, "the profile stays as it was");
+  assert.deepEqual(lines(p.html()), balancedBrief(), "the brief stays as it was");
+  p.calls.length = 0;
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls, [["set_taste", { scope: { kind: "captains" }, patch: { escalate_breaking_change: false, escalate_process_failure: false } }]]);
+});
+
+test("the line limit takes a whole number from 1 to 100000 and ignores anything else", async () => {
+  const p = page({ answer: (cmd, args) => (cmd === "get_tastes" ? escalating() : escalating({ captains: { ...balanced, ...escalation, ...args.patch } })) });
+  await p.show();
+  p.pick("data-escalate-lines", "750");
+  await p.settle();
+  assert.match(escalateSection(p.html()), /data-escalate-lines[^>]*value="750"/);
+  for (const typed of ["0", "abc", "100001", "2.5", ""]) {
+    p.pick("data-escalate-lines", typed);
+    await p.settle();
+    assert.match(escalateSection(p.html()), /data-escalate-lines[^>]*value="750"/, `${JSON.stringify(typed)} changes nothing`);
+  }
+  p.calls.length = 0;
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls, [["set_taste", { scope: { kind: "captains" }, patch: { escalate_over_lines: 750 } }]]);
+});
+
+test("an area adds trimmed, a blank one adds nothing, and an area removes down to an empty list", async () => {
+  const p = page({ answer: (cmd, args) => (cmd === "get_tastes" ? escalating() : escalating({ captains: { ...balanced, ...escalation, ...args.patch } })) });
+  await p.show();
+  const areas = () => [...escalateSection(p.html()).matchAll(/<li><span>([^<]*)<\/span>/g)].map(([, area]) => unesc(area));
+  p.typeArea("   ");
+  p.submitArea();
+  await p.settle();
+  assert.deepEqual(areas(), escalation.escalate_areas, "a blank area adds nothing");
+  assert.doesNotMatch(p.html(), /Unsaved changes/);
+  p.typeArea("  Database migrations ");
+  p.submitArea();
+  await p.settle();
+  assert.deepEqual(areas(), [...escalation.escalate_areas, "Database migrations"]);
+  assert.match(escalateSection(p.html()), /data-area-input value=""/, "the input empties");
+  for (let i = 0; i < 4; i++) await p.click(/data-act="unarea" data-area="0"/);
+  assert.deepEqual(areas(), []);
+  p.calls.length = 0;
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls, [["set_taste", { scope: { kind: "captains" }, patch: { escalate_areas: [] } }]]);
+});
+
+test("a project tab marks an escalation setting changed here, and Reset inherits again", async () => {
+  const p = page({ answer: () => escalating({ projects: { [SITE]: { escalate_over_lines: 90, escalate_areas: ["Billing"] } } }) });
+  await p.show();
+  await p.click(/data-act="scope" data-kind="project"/);
+  let section = escalateSection(p.html());
+  assert.match(section, /value="90"><\/label><span class="taste-tag changed">changed here<\/span><button type="button" class="taste-reset" data-act="reset" data-field="escalate_over_lines" aria-label="Inherit too big to merge unseen from Captains \(all\)"/);
+  assert.match(section, /<span>Always send to me<\/span><span class="taste-tag changed">changed here<\/span><button type="button" class="taste-reset" data-act="reset" data-field="escalate_areas"/);
+  assert.equal(section.match(/changed here/g).length, 2, "only the project's own fields are tagged");
+  await p.click(/data-field="escalate_breaking_change"/);
+  assert.match(escalateSection(p.html()), /data-field="escalate_breaking_change"><span><\/span><\/button>\s*<span class="taste-switch-text"><b>Breaks an older version<\/b><span>[^<]*<\/span><\/span><span class="taste-tags"><span class="taste-tag changed">changed here/);
+  await p.click(/data-act="reset" data-field="escalate_over_lines"/);
+  section = escalateSection(p.html());
+  assert.match(section, /data-escalate-lines[^>]*value="500"><\/label><span class="taste-quiet">/, "the project inherits the Captains' limit");
+  p.calls.length = 0;
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls, [
+    ["reset_taste_field", { scope: { kind: "project", repo: SITE }, field: "escalate_over_lines" }],
+    ["set_taste", { scope: { kind: "project", repo: SITE }, patch: { escalate_breaking_change: false } }],
+  ]);
+});
+
+test("a hub that predates the escalation settings asks for an update and draws no control", async () => {
+  const p = page();
+  await p.show();
+  const section = escalateSection(p.html());
+  assert.match(section, /<h2>Escalate to me<\/h2>.*<p class="taste-quiet">Update pinned on the hub to choose what is escalated to you\.<\/p><\/section>$/s);
+  assert.doesNotMatch(section, /<button|<input|<form/);
 });
