@@ -2475,18 +2475,20 @@ impl Db {
         Ok(rows.iter().map(|r| r.get(0)).collect())
     }
 
-    /// Writes the store, an object as JSON text, with `runs` under `runs` (none removes them),
-    /// unless the row holds this version or a newer one. True when it was written. The text goes
-    /// to Postgres as it is; the hub never builds the document.
-    pub async fn save_store(&self, account: Uuid, version: i64, store: Option<&str>, runs: Option<&str>) -> Result<bool, WriteFailure> {
+    /// Writes the store, an object as JSON text, with `runs` under `runs` and `jobs` under `jobs`
+    /// (none removes them), unless the row holds this version or a newer one. True when it was
+    /// written. The text goes to Postgres as it is; the hub never builds the document.
+    pub async fn save_store(&self, account: Uuid, version: i64, store: Option<&str>, runs: Option<&str>, jobs: Option<&str>) -> Result<bool, WriteFailure> {
         let store = store.unwrap_or("{}");
         let written = self
             .connection
             .write(
-                "update accounts set store = case when $4::text is null then $3::text::jsonb - 'runs'
-                   else ($3::text::jsonb - 'runs') || jsonb_build_object('runs', $4::text::jsonb) end, store_version = $2
+                "update accounts set store = ($3::text::jsonb - 'runs' - 'jobs')
+                   || (case when $4::text is null then '{}'::jsonb else jsonb_build_object('runs', $4::text::jsonb) end)
+                   || (case when $5::text is null then '{}'::jsonb else jsonb_build_object('jobs', $5::text::jsonb) end),
+                   store_version = $2
                  where id = $1 and store_version < $2",
-                &[&account, &version, &store, &runs],
+                &[&account, &version, &store, &runs, &jobs],
             )
             .await?;
         Ok(written == 1)
