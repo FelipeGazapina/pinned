@@ -183,6 +183,20 @@ pub struct Taste {
     /// The Captain starts without the file-editing tools and hands every change to a worker. Only
     /// the Captains' and a project's scope use it.
     pub manage_only: bool,
+    /// Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may
+    /// write to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The
+    /// orchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.
+    /// pinned's own project memory is a different thing and stays. Only the user sets it.
+    #[serde(default = "claude_memory_on")]
+    pub claude_memory: bool,
+    /// The same for the project's workers, resolved from its project scope like its other worker
+    /// limits. Only the Captains' and a project's scope use it. Only the user sets it.
+    #[serde(default = "claude_memory_on")]
+    pub worker_claude_memory: bool,
+}
+
+fn claude_memory_on() -> bool {
+    true
 }
 
 /// A scope's delegation limits, resolved: what `delegate_task` and the boxes enforce.
@@ -258,6 +272,10 @@ pub struct TastePatch {
     pub escalate_areas: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manage_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_memory: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_claude_memory: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
@@ -299,11 +317,13 @@ pub enum TasteField {
     EscalateOverLines,
     EscalateAreas,
     ManageOnly,
+    ClaudeMemory,
+    WorkerClaudeMemory,
 }
 
 impl TasteField {
     /// The JSON name of a setting only the user changes on the Way of working page: a review setting, Boxes at
-    /// once, an escalation setting or Manage only. None for the rest.
+    /// once, an escalation setting, Manage only or a Claude Code memory switch. None for the rest.
     pub fn review_setting(self) -> Option<&'static str> {
         match self {
             TasteField::ReviewDiffs => Some("review_diffs"),
@@ -314,6 +334,8 @@ impl TasteField {
             TasteField::EscalateOverLines => Some("escalate_over_lines"),
             TasteField::EscalateAreas => Some("escalate_areas"),
             TasteField::ManageOnly => Some("manage_only"),
+            TasteField::ClaudeMemory => Some("claude_memory"),
+            TasteField::WorkerClaudeMemory => Some("worker_claude_memory"),
             _ => None,
         }
     }
@@ -475,6 +497,8 @@ fn balanced() -> Taste {
         escalate_over_lines: 500,
         escalate_areas: ["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"].map(str::to_owned).to_vec(),
         manage_only: false,
+        claude_memory: true,
+        worker_claude_memory: true,
     }
 }
 
@@ -626,6 +650,8 @@ impl Taste {
             TasteField::EscalateOverLines => self.escalate_over_lines = default.escalate_over_lines,
             TasteField::EscalateAreas => self.escalate_areas = default.escalate_areas,
             TasteField::ManageOnly => self.manage_only = default.manage_only,
+            TasteField::ClaudeMemory => self.claude_memory = default.claude_memory,
+            TasteField::WorkerClaudeMemory => self.worker_claude_memory = default.worker_claude_memory,
         }
     }
 }
@@ -769,6 +795,8 @@ impl TastePatch {
             ("escalate_over_lines", self.escalate_over_lines.is_some()),
             ("escalate_areas", self.escalate_areas.is_some()),
             ("manage_only", self.manage_only.is_some()),
+            ("claude_memory", self.claude_memory.is_some()),
+            ("worker_claude_memory", self.worker_claude_memory.is_some()),
         ]
             .into_iter()
             .filter(|(_, set)| *set)
@@ -813,6 +841,8 @@ impl TastePatch {
         put(&self.escalate_over_lines, &mut taste.escalate_over_lines);
         put(&self.escalate_areas, &mut taste.escalate_areas);
         put(&self.manage_only, &mut taste.manage_only);
+        put(&self.claude_memory, &mut taste.claude_memory);
+        put(&self.worker_claude_memory, &mut taste.worker_claude_memory);
     }
 
     /// Takes each field `newer` sets, and keeps the rest.
@@ -846,6 +876,8 @@ impl TastePatch {
         take(newer.escalate_over_lines, &mut self.escalate_over_lines);
         take(newer.escalate_areas, &mut self.escalate_areas);
         take(newer.manage_only, &mut self.manage_only);
+        take(newer.claude_memory, &mut self.claude_memory);
+        take(newer.worker_claude_memory, &mut self.worker_claude_memory);
     }
 
     /// Drops each field equal to `base`'s, so the scope inherits it again.
@@ -885,6 +917,8 @@ impl TastePatch {
         drop_same(&mut self.escalate_over_lines, &base.escalate_over_lines);
         drop_same(&mut self.escalate_areas, &base.escalate_areas);
         drop_same(&mut self.manage_only, &base.manage_only);
+        drop_same(&mut self.claude_memory, &base.claude_memory);
+        drop_same(&mut self.worker_claude_memory, &base.worker_claude_memory);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -925,6 +959,8 @@ impl TastePatch {
             TasteField::EscalateOverLines => self.escalate_over_lines = None,
             TasteField::EscalateAreas => self.escalate_areas = None,
             TasteField::ManageOnly => self.manage_only = None,
+            TasteField::ClaudeMemory => self.claude_memory = None,
+            TasteField::WorkerClaudeMemory => self.worker_claude_memory = None,
         }
     }
 }
@@ -1245,7 +1281,7 @@ pub fn chat_prompt(scope: &TasteScope) -> String {
     format!(
         "Help me adjust the way of working of {who} in pinned (scope {name}).
 
-You have three tools for it. taste_get(scope) reads a scope: the settings its sessions get (effective), what the scope sets itself (own), and the brief text they start with. taste_set(scope, patch) changes the fields the patch names and keeps the rest; a project's field set to the Captains' value goes back to inheriting it. taste_reset(scope, field) makes a project inherit the field again, or gives the orchestrator and the Captains its default back. A scope is orchestrator, captains, or project: followed by the project's repo, as in project:github.com/acme/site. The fields are strategy (cheap_with_guidance, escalate_on_failure or strongest_first), ladder (models, cheapest first), hard_model, parallel (workers at once, 1 to 100), autonomy (ask_first, decide_and_tell or report_at_end), skills ({{name, enabled}}), context (notes every turn carries) and default_model (a model, with its provider when that matters: the model new sessions start on when they name none, on a Claude Code or OpenCode Go account that lists it), and the delegation limits pinned enforces: tier (low, mid or high), default_effort and max_effort (low, medium, high, xhigh or max; default_effort is the effort of a worker whose call names none and of new sessions that name none), budget_cents (per worker, 0 for no cap), time_limit_min (1 to 10080) and box_budget_cents (per box, 0 for none), and box_size (small, medium or large: the size of a box opened with none named; captains holds the account's, a project overrides it, small when neither does). Leave review_diffs, second_opinion, boxes_at_once, manage_only and the escalation settings (escalate_breaking_change, escalate_process_failure, escalate_over_lines and escalate_areas) alone: taste_set and taste_reset refuse them, and only the user sets them, on the Way of working page. The Way of working page shows each change as soon as it lands, and new sessions start with it.
+You have three tools for it. taste_get(scope) reads a scope: the settings its sessions get (effective), what the scope sets itself (own), and the brief text they start with. taste_set(scope, patch) changes the fields the patch names and keeps the rest; a project's field set to the Captains' value goes back to inheriting it. taste_reset(scope, field) makes a project inherit the field again, or gives the orchestrator and the Captains its default back. A scope is orchestrator, captains, or project: followed by the project's repo, as in project:github.com/acme/site. The fields are strategy (cheap_with_guidance, escalate_on_failure or strongest_first), ladder (models, cheapest first), hard_model, parallel (workers at once, 1 to 100), autonomy (ask_first, decide_and_tell or report_at_end), skills ({{name, enabled}}), context (notes every turn carries) and default_model (a model, with its provider when that matters: the model new sessions start on when they name none, on a Claude Code or OpenCode Go account that lists it), and the delegation limits pinned enforces: tier (low, mid or high), default_effort and max_effort (low, medium, high, xhigh or max; default_effort is the effort of a worker whose call names none and of new sessions that name none), budget_cents (per worker, 0 for no cap), time_limit_min (1 to 10080) and box_budget_cents (per box, 0 for none), and box_size (small, medium or large: the size of a box opened with none named; captains holds the account's, a project overrides it, small when neither does). Leave review_diffs, second_opinion, boxes_at_once, manage_only, claude_memory, worker_claude_memory and the escalation settings (escalate_breaking_change, escalate_process_failure, escalate_over_lines and escalate_areas) alone: taste_set and taste_reset refuse them, and only the user sets them, on the Way of working page. The Way of working page shows each change as soon as it lands, and new sessions start with it.
 
 Start with taste_get(\"{name}\"). Then interview me: one short question at a time, each with two or three answers to pick from, and change nothing yet. When you know what to change, list the changes in plain words, apply them with taste_set or taste_reset once I agree, and read the scope again to show me the new brief.",
         who = scope.label(),
@@ -1528,6 +1564,8 @@ mod tests {
             escalate_over_lines: 500,
             escalate_areas: vec!["Release and version bumps".into(), "CI and deploy config".into(), "Sign-in, tokens and secrets".into()],
             manage_only: false,
+            claude_memory: true,
+            worker_claude_memory: true,
         };
         assert_eq!(tastes.resolve(&site()), expected);
         assert_eq!(tastes.resolve(&TasteScope::Project { repo: "github.com/acme/api".into() }).parallel, 2, "a project with no patch is the Capitães'");
@@ -1642,14 +1680,14 @@ Deploys go through the VPS."
                 "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
                 "tier": "high", "default_model": null, "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
                 "box_size": null, "escalate_breaking_change": true, "escalate_process_failure": true, "escalate_over_lines": 500, "escalate_areas": areas,
-                "manage_only": false,
+                "manage_only": false, "claude_memory": true, "worker_claude_memory": true,
             },
             "captains": {
                 "strategy": "escalate_on_failure", "ladder": [{ "model": "glm-5.3" }, { "model": "claude-sonnet-5-5" }, opus], "hard_model": opus,
                 "parallel": 5, "autonomy": "decide_and_tell", "review_diffs": true, "second_opinion": false, "skills": [], "context": [],
                 "tier": "high", "default_model": null, "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
                 "box_size": null, "escalate_breaking_change": true, "escalate_process_failure": true, "escalate_over_lines": 500, "escalate_areas": areas,
-                "manage_only": false,
+                "manage_only": false, "claude_memory": true, "worker_claude_memory": true,
             },
             "projects": { "github.com/acme/site": { "hard_model": { "provider": "cursor", "model": "grok-4.7" }, "parallel": 4 } },
             "placement": { "prefer": [], "avoid": [], "heavy": "worktree" },
@@ -2269,6 +2307,62 @@ Deploys go through the VPS."
         tastes.reset(&TasteScope::Captains, TasteField::ManageOnly);
         assert!(!tastes.captains.manage_only, "a reset gives the Captains off back");
         assert_eq!(tastes.set(&TasteScope::Orchestrator, TastePatch { manage_only: Some(true), ..TastePatch::default() }), Ok(()), "the orchestrator's scope takes it and nothing reads it");
+    }
+
+    #[test]
+    fn claude_memory_is_on_by_default_and_a_project_sets_inherits_and_resets_each_switch() {
+        assert!(Taste::default().claude_memory && Taste::default().worker_claude_memory);
+        let old: Tastes = serde_json::from_value(json!({ "captains": { "parallel": 3 }, "projects": { "github.com/acme/site": { "parallel": 2 } } })).unwrap();
+        for scope in [&old.orchestrator, &old.captains, &old.resolve(&site())] {
+            assert_eq!((scope.claude_memory, scope.worker_claude_memory), (true, true), "tastes from before the fields");
+        }
+        let old_orchestrator: Taste = serde_json::from_value(json!({ "parallel": 3 })).unwrap();
+        assert_eq!((old_orchestrator.claude_memory, old_orchestrator.worker_claude_memory), (true, true), "a taste saved before the fields");
+        let api = TasteScope::Project { repo: "github.com/acme/api".into() };
+
+        let mut tastes = Tastes::default();
+        tastes.set(&site(), TastePatch { claude_memory: Some(false), worker_claude_memory: Some(false), ..TastePatch::default() }).unwrap();
+        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "claude_memory": false, "worker_claude_memory": false } }));
+        let resolved = |tastes: &Tastes, scope: &TasteScope| (tastes.resolve(scope).claude_memory, tastes.resolve(scope).worker_claude_memory);
+        assert_eq!((resolved(&tastes, &site()), resolved(&tastes, &api)), ((false, false), (true, true)), "another project stays on");
+        tastes.set(&site(), TastePatch { parallel: Some(2), claude_memory: Some(true), ..TastePatch::default() }).unwrap();
+        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 2, "worker_claude_memory": false } }), "the Captains' value set on the project is dropped");
+        tastes.reset(&site(), TasteField::WorkerClaudeMemory);
+        assert_eq!(resolved(&tastes, &site()), (true, true), "a reset inherits again");
+
+        tastes.set(&TasteScope::Captains, TastePatch { worker_claude_memory: Some(false), ..TastePatch::default() }).unwrap();
+        assert_eq!((resolved(&tastes, &site()), resolved(&tastes, &api)), ((true, false), (true, false)), "a project without its own inherits the Captains'");
+        tastes.set(&site(), TastePatch { worker_claude_memory: Some(true), ..TastePatch::default() }).unwrap();
+        assert_eq!((resolved(&tastes, &site()), resolved(&tastes, &api)), ((true, true), (true, false)), "a project's own beats the Captains'");
+        tastes.reset(&TasteScope::Captains, TasteField::WorkerClaudeMemory);
+        assert!(tastes.captains.worker_claude_memory, "a reset gives the Captains on back");
+
+        tastes.set(&TasteScope::Orchestrator, TastePatch { claude_memory: Some(false), ..TastePatch::default() }).unwrap();
+        assert_eq!((tastes.resolve(&TasteScope::Orchestrator).claude_memory, tastes.captains.claude_memory), (false, true), "the orchestrator's switch is its own");
+        tastes.reset(&TasteScope::Orchestrator, TasteField::ClaudeMemory);
+        assert!(tastes.orchestrator.claude_memory);
+    }
+
+    #[test]
+    fn the_claude_memory_switches_leave_the_profile_and_the_brief_alone() {
+        let mut taste = preset(Profile::Balanced);
+        let brief = taste.brief();
+        taste.claude_memory = false;
+        taste.worker_claude_memory = false;
+        assert_eq!((taste.profile(), taste.brief()), (Profile::Balanced, brief));
+        taste.apply(Profile::Aggressive);
+        assert_eq!((taste.profile(), taste.claude_memory, taste.worker_claude_memory), (Profile::Aggressive, false, false), "a preset keeps them");
+    }
+
+    #[test]
+    fn the_claude_memory_switches_are_the_users_own() {
+        let one = TastePatch { claude_memory: Some(false), ..TastePatch::default() };
+        assert_eq!(refuse_review_settings(one.review_settings()), Err("claude_memory is changed only by the user, on the Way of working page; nothing changed".to_owned()));
+        let both = TastePatch { claude_memory: Some(false), worker_claude_memory: Some(false), parallel: Some(2), ..TastePatch::default() };
+        assert_eq!(refuse_review_settings(both.review_settings()), Err("claude_memory and worker_claude_memory are changed only by the user, on the Way of working page; nothing changed".to_owned()));
+        assert_eq!(refuse_review_settings(TasteField::WorkerClaudeMemory.review_setting()), Err("worker_claude_memory is changed only by the user, on the Way of working page; nothing changed".to_owned()));
+        assert_eq!(serde_json::to_value(TasteField::ClaudeMemory).unwrap(), json!("claude_memory"));
+        assert_eq!(serde_json::to_value(TasteField::WorkerClaudeMemory).unwrap(), json!("worker_claude_memory"));
     }
 
     #[test]

@@ -1492,7 +1492,7 @@ fn restore_var(name: &str, value: Option<String>) {
     #[test]
     fn the_taste_tools_offer_no_review_setting() {
         let taste = |name: &str| project_tools().into_iter().find(|(audience, tool)| *audience == Audience::TasteChat && tool["name"] == name).unwrap().1;
-        let owners = ["review_diffs", "second_opinion", "escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas", "manage_only"];
+        let owners = ["review_diffs", "second_opinion", "escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas", "manage_only", "claude_memory", "worker_claude_memory"];
         let set = taste("taste_set");
         let patch = set["inputSchema"]["properties"]["patch"]["properties"].as_object().unwrap();
         assert!(!owners.iter().any(|name| patch.contains_key(*name)), "taste_set still offers a review setting: {set}");

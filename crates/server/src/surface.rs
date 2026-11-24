@@ -826,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn refuse_review_setting_refuses_each_escalation_setting_and_manage_only_alone_mixed_or_reset() {
+    fn refuse_review_setting_refuses_each_escalation_setting_manage_only_and_claude_memory_alone_mixed_or_reset() {
         use pinned_core::taste::{TasteField, TastePatch, TasteScope};
         let scope = TasteScope::Project { repo: "github.com/acme/site".into() };
         let set = |patch: TastePatch| HubCall::SetTaste { scope: scope.clone(), patch };
@@ -836,6 +836,8 @@ mod tests {
             ("escalate_over_lines", TasteField::EscalateOverLines, TastePatch { escalate_over_lines: Some(750), ..TastePatch::default() }),
             ("escalate_areas", TasteField::EscalateAreas, TastePatch { escalate_areas: Some(vec!["Billing".into()]), ..TastePatch::default() }),
             ("manage_only", TasteField::ManageOnly, TastePatch { manage_only: Some(true), ..TastePatch::default() }),
+            ("claude_memory", TasteField::ClaudeMemory, TastePatch { claude_memory: Some(false), ..TastePatch::default() }),
+            ("worker_claude_memory", TasteField::WorkerClaudeMemory, TastePatch { worker_claude_memory: Some(false), ..TastePatch::default() }),
         ];
         for (name, field, patch) in patches {
             let refused = Err(format!("{name} is changed only by the user, on the Way of working page; nothing changed"));

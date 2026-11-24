@@ -34,6 +34,8 @@ const TASTE_FIELD_LABELS = {
   escalate_over_lines: "Too big to merge unseen",
   escalate_areas: "Always send to me",
   manage_only: "Manage only",
+  claude_memory: "Claude Code memory",
+  worker_claude_memory: "Claude Code memory for workers",
 };
 const TASTE_TIER_ABOUT = { low: "Haiku and flash models", mid: "Sonnet, GLM and the like", high: "Opus and pro models" };
 
@@ -334,6 +336,8 @@ function tastePaceHtml(t) {
     ${tasteToggleHtml(t, "review_diffs", "Review each diff before accepting", "The Captain reads the worker's diff before merging it in.")}
     ${tasteToggleHtml(t, "second_opinion", "Second opinion on risky changes", "Another model reviews the change before it goes ahead.")}
     ${tasteUi.scope.kind !== "orchestrator" && t.manage_only != null ? tasteToggleHtml(t, "manage_only", "Manage only", "The Captain starts without Claude Code's Edit, Write and NotebookEdit tools and hands every change to a worker. Applies from its next start. Bash stays, so the shell can still change files.") : ""}
+    ${t.claude_memory != null ? tasteToggleHtml(t, "claude_memory", TASTE_FIELD_LABELS.claude_memory, tasteUi.scope.kind === "orchestrator" ? "The Orchestrator loads Claude Code's own memory (MEMORY.md) and may write to it. Off saves tokens; pinned's project memory stays. Applies from its next start." : "The Captain loads Claude Code's own memory (MEMORY.md) and may write to it. Off saves tokens; pinned's project memory stays. Applies from its next start.") : ""}
+    ${tasteUi.scope.kind !== "orchestrator" && t.worker_claude_memory != null ? tasteToggleHtml(t, "worker_claude_memory", TASTE_FIELD_LABELS.worker_claude_memory, "Workers load Claude Code's own memory (MEMORY.md). Off saves tokens; pinned's project memory stays. Applies to workers started after the change.") : ""}
   </section>`;
 }
 
