@@ -22,6 +22,8 @@ pub const GUARD_SUBCOMMAND: &str = "guard";
 const COMPACTION: [(&str, &str, bool); 2] = [("PreCompact", "compacting", true), ("PostCompact", "compacted", false)];
 /// The global orchestrator's own settings file, beside the one every other session loads.
 pub const GLOBAL_SETTINGS: &str = "claude-settings-global.json";
+/// A worker tab's own settings file, beside the shared one: its Bash calls go to the worker guard first.
+pub const WORKER_SETTINGS: &str = "claude-settings-worker.json";
 /// The file tools the global orchestrator keeps, each held to its folders by the guard hook.
 const GUARDED: &str = "Read|Write|Edit|MultiEdit|Grep|Glob|LS";
 
@@ -37,7 +39,8 @@ const RECALL_WAIT: Duration = Duration::from_millis(300);
 const HAND_OVER_WAIT: Duration = Duration::from_secs(10);
 
 /// Claude Code settings layered onto the harnessed session via `--settings`, so the user's
-/// own ~/.claude/settings.json stays untouched.
+/// own ~/.claude/settings.json stays untouched. A worker tab loads the worker file and the global
+/// orchestrator its own instead.
 pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
     std::fs::write(path, serde_json::to_vec_pretty(&settings(exe))?)
 }
@@ -48,8 +51,31 @@ pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
 pub fn write_global_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
     let mut settings = settings(exe);
     settings["permissions"]["deny"] = serde_json::json!(["Bash", "NotebookEdit"]);
-    settings["hooks"]["PreToolUse"] = serde_json::json!([{ "matcher": GUARDED, "hooks": [subcommand(exe, GUARD_SUBCOMMAND)] }]);
+    settings["hooks"]["PreToolUse"] = serde_json::json!([{ "matcher": GUARDED, "hooks": [subcommand(exe, &[GUARD_SUBCOMMAND])] }]);
     std::fs::write(path, serde_json::to_vec_pretty(&settings)?)
+}
+
+/// A worker tab's settings (`WORKER_SETTINGS`): every session's, with each Bash call sent to the
+/// worker guard, which holds an irreversible command for the owner.
+pub fn write_worker_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
+    std::fs::write(path, serde_json::to_vec_pretty(&with_worker_guard(settings(exe), exe))?)
+}
+
+/// `settings` with the worker guard's Bash entry last in `PreToolUse`, so a team box's hook stays first.
+fn with_worker_guard(mut settings: serde_json::Value, exe: &Path) -> serde_json::Value {
+    let entry = serde_json::json!({ "matcher": "Bash", "hooks": [subcommand(exe, &[crate::preauth::worker_guard::SUBCOMMAND])] });
+    match settings["hooks"]["PreToolUse"].as_array_mut() {
+        Some(entries) => entries.push(entry),
+        None => settings["hooks"]["PreToolUse"] = serde_json::json!([entry]),
+    }
+    settings
+}
+
+/// The inline `--settings` of a headless Claude worker: the worker guard on Bash, told that no
+/// prompt can show, so it refuses what it holds.
+pub fn headless_worker_settings(exe: &Path) -> String {
+    let guard = subcommand(exe, &[crate::preauth::worker_guard::SUBCOMMAND, crate::preauth::worker_guard::HEADLESS]);
+    serde_json::json!({ "hooks": { "PreToolUse": [{ "matcher": "Bash", "hooks": [guard] }] } }).to_string()
 }
 
 /// Every session's settings, plus, in a team's box, the hook that asks the team before a step the
@@ -67,7 +93,7 @@ pub(crate) fn settings_for(exe: &Path, team_box: bool) -> serde_json::Value {
         hooks.insert(hook_event.into(), serde_json::json!([{ "hooks": [hook_command(exe, arg)] }]));
     }
     if team_box {
-        hooks.insert("PreToolUse".into(), serde_json::json!([{ "hooks": [subcommand(exe, crate::preauth::team_hook::SUBCOMMAND)] }]));
+        hooks.insert("PreToolUse".into(), serde_json::json!([{ "hooks": [subcommand(exe, &[crate::preauth::team_hook::SUBCOMMAND])] }]));
     }
     serde_json::json!({
         "hooks": hooks,
@@ -80,13 +106,13 @@ pub(crate) fn settings_for(exe: &Path, team_box: bool) -> serde_json::Value {
 }
 
 #[cfg(unix)]
-fn subcommand(exe: &Path, name: &str) -> serde_json::Value {
-    serde_json::json!({ "type": "command", "command": format!("'{}' {name}", exe.display()) })
+fn subcommand(exe: &Path, args: &[&str]) -> serde_json::Value {
+    serde_json::json!({ "type": "command", "command": format!("'{}' {}", exe.display(), args.join(" ")) })
 }
 
 #[cfg(windows)]
-fn subcommand(exe: &Path, name: &str) -> serde_json::Value {
-    serde_json::json!({ "type": "command", "command": exe, "args": [name] })
+fn subcommand(exe: &Path, args: &[&str]) -> serde_json::Value {
+    serde_json::json!({ "type": "command", "command": exe, "args": args })
 }
 
 /// Runs as the global orchestrator's PreToolUse hook: asks the machine whether the tool call
@@ -879,6 +905,32 @@ mod tests {
         assert_eq!(settings["hooks"]["Stop"], serde_json::json!([{ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' hook done" }] }]), "its turns still report");
         assert_eq!(settings["permissions"]["allow"], serde_json::json!(reminders::permissions()));
         let _ = std::fs::remove_file(file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_workers_settings_send_bash_to_the_worker_guard_and_keep_every_other_key() {
+        let exe = Path::new("/Applications/pinned.app/Contents/MacOS/pinned");
+        let (shared_file, worker_file) = (std::env::temp_dir().join(format!("pinned-shared-settings-{}.json", std::process::id())), std::env::temp_dir().join(format!("pinned-worker-settings-{}.json", std::process::id())));
+        write_settings(&shared_file, exe).unwrap();
+        write_worker_settings(&worker_file, exe).unwrap();
+        let read = |file: &Path| serde_json::from_slice::<serde_json::Value>(&std::fs::read(file).unwrap()).unwrap();
+        let (shared, mut worker) = (read(&shared_file), read(&worker_file));
+        let guard = serde_json::json!({ "matcher": "Bash", "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' worker-guard" }] });
+        assert_eq!(worker["hooks"]["PreToolUse"], serde_json::json!([guard]));
+        assert_eq!(shared["hooks"]["PreToolUse"], serde_json::Value::Null, "outside a team box the shared file has no PreToolUse");
+        worker["hooks"].as_object_mut().unwrap().remove("PreToolUse");
+        assert_eq!(worker, shared, "every other key is the shared file's");
+
+        let team = with_worker_guard(settings_for(exe, true), exe);
+        let team_guard = serde_json::json!({ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' team-guard" }] });
+        assert_eq!(team["hooks"]["PreToolUse"], serde_json::json!([team_guard, guard]), "a team box's hook stays first, unchanged");
+        assert_eq!(
+            headless_worker_settings(exe),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"'/Applications/pinned.app/Contents/MacOS/pinned' worker-guard headless"}]}]}}"#
+        );
+        let _ = std::fs::remove_file(shared_file);
+        let _ = std::fs::remove_file(worker_file);
     }
 
     #[test]

@@ -62,6 +62,8 @@ fn claude_args(spec: &SpawnSpec) -> Vec<String> {
         Access::Auto => args.extend(["--permission-mode".into(), "auto".into()]),
         Access::ReadOnly => args.extend(super::claude_read_only_args()),
     }
+    // No prompt shows in a headless worker, so the worker guard refuses what it holds.
+    args.extend(["--settings".into(), crate::hooks::headless_worker_settings(spec.exe)]);
     let configs: Vec<String> = spec.mcp_config.into_iter().chain(spec.session_mcp.map(|files| files.file.as_path())).map(|config| config.display().to_string()).collect();
     if !configs.is_empty() {
         args.push("--mcp-config".into());

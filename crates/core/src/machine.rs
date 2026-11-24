@@ -189,6 +189,7 @@ impl Launch {
         let settings = files.join("claude-settings.json");
         hooks::write_settings(&settings, exe)?;
         hooks::write_global_settings(&files.join(hooks::GLOBAL_SETTINGS), exe)?;
+        hooks::write_worker_settings(&files.join(hooks::WORKER_SETTINGS), exe)?;
         let mcp_config = files.join("claude-mcp.json");
         reminders::write_mcp_config(&mcp_config, exe, true)?;
         let plugin_dir = files.join("plugin");
@@ -220,9 +221,16 @@ impl Launch {
     }
 
     /// The settings file every Claude Code session started with `env` loads. The global
-    /// orchestrator's own: no Bash, and its file tools held to its folders.
+    /// orchestrator's own: no Bash, and its file tools held to its folders. A worker's own: its
+    /// Bash calls go to the worker guard first.
     fn shared_settings(&self, env: &[(String, String)]) -> PathBuf {
-        if global::is_global(env) { self.settings.with_file_name(hooks::GLOBAL_SETTINGS) } else { self.settings.clone() }
+        if global::is_global(env) {
+            self.settings.with_file_name(hooks::GLOBAL_SETTINGS)
+        } else if env.iter().any(|(k, v)| k == ROLE_ENV && Role::parse(v) == Some(Role::Worker)) {
+            self.settings.with_file_name(hooks::WORKER_SETTINGS)
+        } else {
+            self.settings.clone()
+        }
     }
 
     /// The settings of its own an interactive Claude Code session in `cwd` loads: the shared ones
@@ -1252,6 +1260,8 @@ pub struct Machine {
     /// The sessions the hub or their folders kept open, and when: they are not looked at again
     /// for `auto_archive::RETRY_SECS`.
     auto_archive_kept: Mutex<HashMap<String, Instant>>,
+    /// From what context size the app offers to compact a session here.
+    compaction: Mutex<crate::compaction::Settings>,
     /// `~/.pinned/orquestrador`, the global orchestrator's folder and the key of the global memory.
     global_dir: PathBuf,
     /// Every message handed to a Capitão or to the global orchestrator here. Never locked while
@@ -1472,6 +1482,7 @@ impl Machine {
             global: Mutex::new(global::Settings::load(dir.as_deref())),
             auto_archive: Mutex::new(crate::auto_archive::Settings::load(dir.as_deref())),
             auto_archive_kept: Mutex::default(),
+            compaction: Mutex::new(crate::compaction::Settings::load(dir.as_deref())),
             global_dir,
             turns: sent.turns(),
             sent: Mutex::new(sent),
@@ -1777,6 +1788,8 @@ impl Machine {
             Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
             Call::AutoArchiveSettings => json(self.auto_archive_settings()),
             Call::SetAutoArchiveSettings { settings } => json(self.set_auto_archive_settings(settings)?),
+            Call::CompactionSettings => json(self.compaction_settings()),
+            Call::SetCompactionSettings { settings } => json(self.set_compaction_settings(settings)?),
             Call::SetBackground { on } => json(self.set_background(on)?),
             Call::ReadSession { tab, items } => self.read_session_here(&tab, read_items(items)).ok_or_else(|| format!("no session {tab} on this machine")),
             Call::RepoLook { path, look } => self.repo_look(&path, &look),
@@ -3630,6 +3643,17 @@ impl Machine {
         settings.save(self.orchestration_dir.as_deref())?;
         *self.auto_archive.lock().unwrap() = settings;
         self.auto_archive_kept.lock().unwrap().clear();
+        Ok(settings)
+    }
+
+    pub fn compaction_settings(&self) -> crate::compaction::Settings {
+        *self.compaction.lock().unwrap()
+    }
+
+    pub fn set_compaction_settings(&self, settings: crate::compaction::Settings) -> Result<crate::compaction::Settings, String> {
+        settings.check()?;
+        settings.save(self.orchestration_dir.as_deref())?;
+        *self.compaction.lock().unwrap() = settings;
         Ok(settings)
     }
 
@@ -8204,12 +8228,12 @@ const SEARCH_LIMIT: usize = 8;
 
 /// Claude Code's name for a folder under `projects/` and its temp folder: every character but a
 /// letter or digit becomes `-`.
-fn claude_slug(path: &Path) -> String {
+pub(crate) fn claude_slug(path: &Path) -> String {
     path.display().to_string().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
 /// Where Claude Code keeps each session's scratchpad: `/tmp/claude-<uid>`.
-fn claude_tmp() -> PathBuf {
+pub(crate) fn claude_tmp() -> PathBuf {
     #[cfg(unix)]
     return PathBuf::from(format!("/tmp/claude-{}", unsafe { libc::getuid() }));
     #[cfg(not(unix))]
@@ -11340,11 +11364,12 @@ pub(crate) mod tests {
     }
 
     /// A machine whose sessions run `claude_keeping_settings`, and the shared settings file it
-    /// passes them, written as `Launch::prepare` writes it.
+    /// passes them, written as `Launch::prepare` writes it, with the worker file beside it.
     #[cfg(unix)]
     fn carrying_machine(root: &Path) -> (Arc<Machine>, PathBuf) {
         let shared = root.join("claude-settings.json");
         hooks::write_settings(&shared, Path::new("/opt/pinned/bin/pinned")).unwrap();
+        hooks::write_worker_settings(&shared.with_file_name(hooks::WORKER_SETTINGS), Path::new("/opt/pinned/bin/pinned")).unwrap();
         let claude = claude_keeping_settings(root);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), settings: shared.clone(), ..launch() }, Some(root.join("config")), None, |_| {});
         (m, shared)
@@ -11403,21 +11428,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_worker_tab_loads_the_worker_settings_and_every_other_session_keeps_its_file() {
+        let launch = Launch { settings: Path::new("/run/pinned-1").join("claude-settings.json"), ..launch() };
+        let app = Path::new("/work/app");
+        let file = |env: Vec<(String, String)>| launch.shared_settings(&env).file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(file(role_env(Role::Worker, app)), hooks::WORKER_SETTINGS);
+        assert_eq!(file(role_env(Role::Orchestrator, app)), "claude-settings.json", "a Captain");
+        assert_eq!(file(role_env(Role::Reviewer, app)), "claude-settings.json", "a reviewer");
+        assert_eq!(file(vec![]), "claude-settings.json", "a plain thread");
+        assert_eq!(file(global::env()), hooks::GLOBAL_SETTINGS);
+    }
+
+    #[test]
     #[cfg(unix)]
     fn a_worker_in_a_worktree_pinned_made_carries_the_main_checkouts_approved_mcp_servers() {
         let root = temp("mcp-carry-worktree");
         let (m, shared) = carrying_machine(&root);
-        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        let worker = shared.with_file_name(hooks::WORKER_SETTINGS);
+        let worker_json: Value = serde_json::from_slice(&std::fs::read(&worker).unwrap()).unwrap();
         let repo = mcp_repo(&root, &["a", "b"], &["a", "b"], Some(json!({ "enabledMcpjsonServers": ["a"] })));
         let task = delegate_from(&m, &repo, "worktree");
         let (path, got) = started_settings(&root);
         let cwd = m.delegates.get(&task).unwrap().cwd;
         assert_ne!(dunce::canonicalize(&cwd).unwrap(), dunce::canonicalize(&repo).unwrap(), "the worker runs in a worktree of its own");
-        carries(&got, &shared_json, &["a"]);
-        assert_ne!(path, shared, "the session has a settings file of its own");
+        carries(&got, &worker_json, &["a"]);
+        assert_eq!(got["hooks"]["PreToolUse"][0]["matcher"], "Bash", "it keeps the worker guard");
+        assert_ne!(path, worker, "the session has a settings file of its own");
         assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&path).unwrap().permissions()) & 0o777, 0o600, "only its user reads it");
         assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(path.parent().unwrap()).unwrap().permissions()) & 0o777, 0o700, "in a folder only its user opens");
-        assert_eq!(std::fs::read(&shared).unwrap(), serde_json::to_vec_pretty(&shared_json).unwrap(), "the shared file is never written");
+        assert_eq!(std::fs::read(&worker).unwrap(), serde_json::to_vec_pretty(&worker_json).unwrap(), "the worker file is never written");
         let config = claude_config_at(&root.join("config/home/.claude.json"));
         assert!(!trusted(&config, &repo), "the main checkout is never trusted: {config}");
         assert!(!config.to_string().contains("McpServers"), "nothing is approved in the account's config: {config}");
@@ -11429,16 +11468,17 @@ pub(crate) mod tests {
     fn a_declined_server_is_never_carried() {
         let root = temp("mcp-carry-declined");
         let (m, shared) = carrying_machine(&root);
-        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        let worker = shared.with_file_name(hooks::WORKER_SETTINGS);
+        let worker_json: Value = serde_json::from_slice(&std::fs::read(&worker).unwrap()).unwrap();
         let repo = mcp_repo(&root, &["a", "b"], &["a", "b"], Some(json!({ "enabledMcpjsonServers": ["a", "b"], "disabledMcpjsonServers": ["a"] })));
         delegate_from(&m, &repo, "worktree");
         let (_, got) = started_settings(&root);
-        carries(&got, &shared_json, &["b"]);
+        carries(&got, &worker_json, &["b"]);
         let local = repo.join(".claude/settings.local.json");
         std::fs::write(&local, json!({ "enabledMcpjsonServers": ["a"], "disabledMcpjsonServers": ["a"] }).to_string()).unwrap();
         delegate_from(&m, &repo, "worktree");
         let (path, got) = started_settings(&root);
-        assert_eq!((path, got), (shared, shared_json), "with every approved name declined, the session gets the shared settings");
+        assert_eq!((path, got), (worker, worker_json), "with every approved name declined, the session gets the worker settings");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -11447,12 +11487,13 @@ pub(crate) mod tests {
     fn only_servers_in_the_opened_checkouts_mcp_json_are_carried() {
         let root = temp("mcp-carry-listed");
         let (m, shared) = carrying_machine(&root);
-        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        let worker = shared.with_file_name(hooks::WORKER_SETTINGS);
+        let worker_json: Value = serde_json::from_slice(&std::fs::read(&worker).unwrap()).unwrap();
         // The worktree has the committed `.mcp.json`, with `a` only; the main checkout's lists more.
         let repo = mcp_repo(&root, &["a"], &["a", "b", "gone"], Some(json!({ "enabledMcpjsonServers": ["a", "gone", "b"] })));
         delegate_from(&m, &repo, "worktree");
         let (_, got) = started_settings(&root);
-        carries(&got, &shared_json, &["a"]);
+        carries(&got, &worker_json, &["a"]);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -11461,16 +11502,17 @@ pub(crate) mod tests {
     fn all_future_servers_carry_only_the_names_it_lists() {
         let root = temp("mcp-carry-all-future");
         let (m, shared) = carrying_machine(&root);
-        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        let worker = shared.with_file_name(hooks::WORKER_SETTINGS);
+        let worker_json: Value = serde_json::from_slice(&std::fs::read(&worker).unwrap()).unwrap();
         let repo = mcp_repo(&root, &["a", "b"], &["a", "b"], Some(json!({ "enableAllProjectMcpServers": true, "enabledMcpjsonServers": ["b"] })));
         delegate_from(&m, &repo, "worktree");
         let (_, got) = started_settings(&root);
-        carries(&got, &shared_json, &["b"]);
+        carries(&got, &worker_json, &["b"]);
         std::fs::write(repo.join(".claude/settings.local.json"), json!({ "enableAllProjectMcpServers": true, "enabledMcpjsonServers": [] }).to_string()).unwrap();
         delegate_from(&m, &repo, "worktree");
         let (path, got) = started_settings(&root);
         assert!(got.get("enableAllProjectMcpServers").is_none(), "{got}");
-        assert_eq!((path, got), (shared, shared_json), "\"all future\" alone carries no name");
+        assert_eq!((path, got), (worker, worker_json), "\"all future\" alone carries no name");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -14928,6 +14970,25 @@ while True:
     }
 
     #[test]
+    fn compaction_settings_refuse_a_threshold_under_10000_and_survive_a_restart() {
+        use crate::compaction::{Settings, SETTINGS_FILE};
+        let dir = temp("compaction-settings");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        assert_eq!(m.call(Call::CompactionSettings), Ok(json!({ "offer_tokens": 200000 })));
+        let low = Settings { offer_tokens: Some(9_999) };
+        assert_eq!(m.call(Call::SetCompactionSettings { settings: low }), Err("offer_tokens must be at least 10000 tokens, or null for never".into()));
+        assert!(!dir.join("config").join(SETTINGS_FILE).exists(), "a refused threshold saves nothing");
+        assert_eq!(m.call(Call::CompactionSettings), Ok(json!({ "offer_tokens": 200000 })));
+        let fifty = Settings { offer_tokens: Some(50_000) };
+        assert_eq!(m.call(Call::SetCompactionSettings { settings: fifty }), Ok(json!({ "offer_tokens": 50000 })));
+        assert_eq!(m.call(Call::CompactionSettings), Ok(json!({ "offer_tokens": 50000 })));
+        drop(m);
+        let again = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        assert_eq!(again.compaction_settings(), fifty, "it survives a restart");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_worker_with_a_task_still_running_is_not_archived() {
         use crate::delegate::{Access, Claim, Mode, NewTask, Parent};
         let folder = temp("auto-archive-child-folder");
@@ -16314,6 +16375,20 @@ Have another model review a risky change before it goes ahead.";
         let report = act("save_skill", json!({ "text": "# nothing", "copies": [{ "dir": dir.join("no-such-skill").display().to_string(), "since": "abc" }] })).unwrap();
         assert_eq!(report["copies"][0]["outcome"], "missing", "a save reaches the skills writer, which finds no such copy: {report}");
         assert!(act("read_skill", json!({ "dir": dir.join("no-such-skill").display().to_string() })).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_agent_reads_and_sets_the_compaction_threshold_through_the_surface() {
+        let dir = temp("act-compaction");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let caller = m.open_tab(None, false).unwrap();
+        let act = |action: &str, args: Value| act_as(&m, &caller, action, args);
+        assert_eq!(act("compaction_settings", json!({})), Ok(json!({ "offer_tokens": 200000 })));
+        assert_eq!(act("set_compaction_settings", json!({ "settings": { "offer_tokens": null } })), Ok(json!({ "offer_tokens": null })));
+        assert_eq!(act("compaction_settings", json!({})), Ok(json!({ "offer_tokens": null })), "the read sees what the write saved");
+        assert_eq!(act("set_compaction_settings", json!({ "settings": { "offer_tokens": 5000 } })), Err("offer_tokens must be at least 10000 tokens, or null for never".into()));
+        assert_eq!(m.compaction_settings(), crate::compaction::Settings { offer_tokens: None }, "a refused act saves nothing");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -17945,7 +18020,7 @@ Have another model review a risky change before it goes ahead.";
                 &path,
                 &config.join("accounts/work").display().to_string(),
                 "--settings",
-                "s",
+                hooks::WORKER_SETTINGS,
                 "--plugin-dir",
                 "p",
                 "--name",

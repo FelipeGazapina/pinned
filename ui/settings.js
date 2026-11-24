@@ -2817,6 +2817,7 @@ settingsSection({ page: "general", label: "General", icon: "settings", show: () 
   { title: "Run in the background", terms: ["no window background memory ram web app dock hidden segundo plano"] },
   { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },
   { title: "Send shortcut", terms: ["enter new line multiline cmd ctrl composer"] },
+  { title: "Compaction", terms: ["compact context tokens threshold summarize history cache composer never"] },
 ] });
 settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = readOnlyWithoutHub("Connectors", integrationsHtml())), loadExternalAgents(), loadBoxLogins(), loadConvexProjects()), search: [
   { title: "External agents (MCP)", terms: ["mcp oauth grok external agent remote connector orchestrator captain capitao capitão token revoke"], id: "external-agents" },

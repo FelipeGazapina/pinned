@@ -1266,6 +1266,36 @@
                 ]
               },
               {
+                "description": "`compaction::Settings` of this machine: from what context size the app offers to compact a\nsession.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "compaction_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `compaction::Settings` saved, answered as saved. A threshold under\n`compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_compaction_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/CompactionSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`on`, as saved. Whether the desktop app on this machine runs in the background, with no\nwindow, which it applies at once: on closes the window, off opens it. A machine without the\napp refuses it.",
                 "type": "object",
                 "properties": {
@@ -4366,6 +4396,25 @@
             "required": [
               "workers",
               "sessions"
+            ]
+          },
+          "CompactionSettings": {
+            "description": "When this machine's sessions are offered a compaction.",
+            "type": "object",
+            "properties": {
+              "offer_tokens": {
+                "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 200000
+              }
+            },
+            "required": [
+              "offer_tokens"
             ]
           },
           "RepoLook": {
@@ -15091,6 +15140,36 @@
                 ]
               },
               {
+                "description": "`compaction::Settings` of this machine: from what context size the app offers to compact a\nsession.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "compaction_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `compaction::Settings` saved, answered as saved. A threshold under\n`compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_compaction_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/CompactionSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`on`, as saved. Whether the desktop app on this machine runs in the background, with no\nwindow, which it applies at once: on closes the window, off opens it. A machine without the\napp refuses it.",
                 "type": "object",
                 "properties": {
@@ -18141,6 +18220,22 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": null
+              }
+            }
+          },
+          "CompactionSettings": {
+            "description": "When this machine's sessions are offered a compaction.",
+            "type": "object",
+            "properties": {
+              "offer_tokens": {
+                "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 200000
               }
             }
           },
@@ -49980,6 +50075,47 @@
               "likely",
               "unsure"
             ]
+          }
+        }
+      }
+    },
+    "CompactionSettings": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "CompactionSettings",
+        "description": "When this machine's sessions are offered a compaction.",
+        "type": "object",
+        "properties": {
+          "offer_tokens": {
+            "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "default": 200000
+          }
+        },
+        "required": [
+          "offer_tokens"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "CompactionSettings",
+        "description": "When this machine's sessions are offered a compaction.",
+        "type": "object",
+        "properties": {
+          "offer_tokens": {
+            "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "default": 200000
           }
         }
       }
@@ -82420,6 +82556,36 @@
                 ]
               },
               {
+                "description": "`compaction::Settings` of this machine: from what context size the app offers to compact a\nsession.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "compaction_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `compaction::Settings` saved, answered as saved. A threshold under\n`compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_compaction_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/CompactionSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`on`, as saved. Whether the desktop app on this machine runs in the background, with no\nwindow, which it applies at once: on closes the window, off opens it. A machine without the\napp refuses it.",
                 "type": "object",
                 "properties": {
@@ -85522,6 +85688,25 @@
               "sessions"
             ]
           },
+          "CompactionSettings": {
+            "description": "When this machine's sessions are offered a compaction.",
+            "type": "object",
+            "properties": {
+              "offer_tokens": {
+                "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 200000
+              }
+            },
+            "required": [
+              "offer_tokens"
+            ]
+          },
           "RepoLook": {
             "description": "What the global orchestrator asks of a checkout.",
             "oneOf": [
@@ -88095,6 +88280,36 @@
                   },
                   "settings": {
                     "$ref": "#/$defs/AutoArchiveSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
+                "description": "`compaction::Settings` of this machine: from what context size the app offers to compact a\nsession.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "compaction_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `compaction::Settings` saved, answered as saved. A threshold under\n`compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_compaction_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/CompactionSettings"
                   }
                 },
                 "required": [
@@ -91153,6 +91368,22 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": null
+              }
+            }
+          },
+          "CompactionSettings": {
+            "description": "When this machine's sessions are offered a compaction.",
+            "type": "object",
+            "properties": {
+              "offer_tokens": {
+                "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 200000
               }
             }
           },
