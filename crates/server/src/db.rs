@@ -122,6 +122,8 @@ create table if not exists agent_confirmations (id uuid primary key, account uui
   target text, result jsonb, unique (account, machine, tab, action, request_id));
 -- Why this act waits, when the hub says more than the action's own text: a schedule act's reason.
 alter table agent_confirmations add column if not exists about text;
+-- Why the session asks, as it said in `act`: one line, secrets masked, at most 200 characters.
+alter table agent_confirmations add column if not exists reason text;
 -- A scheduled task per row, as the `schedule::Task` it is (without its hub-computed last run), and
 -- the columns the scheduler reads. `next_at` is unix seconds, computed on every save.
 create table if not exists tasks (id uuid primary key, account uuid not null references accounts on delete cascade,
@@ -592,7 +594,7 @@ pub struct Held {
 }
 
 const CONFIRMATION_COLUMNS: &str = "c.id, extract(epoch from c.created_at)::bigint, c.machine, coalesce(m.name, ''), c.tab, c.title, c.role, c.action, c.args,
-  c.request_id, c.approved, extract(epoch from c.decided_at)::bigint, c.outcome, c.session, c.target, c.result, c.about";
+  c.request_id, c.approved, extract(epoch from c.decided_at)::bigint, c.outcome, c.session, c.target, c.result, c.about, c.reason";
 
 fn held(r: &tokio_postgres::Row) -> Held {
     let role: String = r.get(6);
@@ -614,6 +616,7 @@ fn held(r: &tokio_postgres::Row) -> Held {
         decision: decided_at.and(r.get::<_, Option<bool>>(10)).map(|approved| if approved { Decision::Approved } else { Decision::Denied }),
         decided_at,
         outcome: r.get(12),
+        reason: r.get(17),
     };
     Held { confirmation, session: r.get(13), result: r.get::<_, Option<Value>>(15).unwrap_or(Value::Null) }
 }
@@ -2244,9 +2247,9 @@ impl Db {
         let request_id = asked.request_id.as_deref();
         let inserted = client
             .query_opt(
-                "insert into agent_confirmations (id, account, machine, tab, session, role, title, action, args, request_id, target, about) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                "insert into agent_confirmations (id, account, machine, tab, session, role, title, action, args, request_id, target, about, reason) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                  on conflict (account, machine, tab, action, request_id) do nothing returning id",
-                &[&id, &account, &machine, &asked.tab, &session, &asked.role.name(), &asked.title, &asked.action, &asked.args, &request_id, &asked.target, &Some(asked.about.as_str()).filter(|about| !about.is_empty())],
+                &[&id, &account, &machine, &asked.tab, &session, &asked.role.name(), &asked.title, &asked.action, &asked.args, &request_id, &asked.target, &Some(asked.about.as_str()).filter(|about| !about.is_empty()), &asked.reason],
             )
             .await
             .map_err(err)?;
