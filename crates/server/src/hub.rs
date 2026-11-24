@@ -2141,7 +2141,7 @@ struct Fires {
     runtime: tokio::runtime::Handle,
 }
 
-/// How long `PgStorage::claim_fire` waits for the database before it answers an error. A check
+/// How long each `PgStorage` fires call (claim, release, read, keep) waits for the database before it answers an error. A check
 /// claims its changes one at a time and stops at the first claim that answers an error, so a
 /// stalled database holds a check up for one `CLAIM_WAIT` at most, within its call timeout.
 const CLAIM_WAIT: Duration = Duration::from_secs(10);

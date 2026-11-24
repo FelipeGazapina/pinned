@@ -210,6 +210,7 @@ mod tests {
         let watchdog = start(runtime.handle(), addr, FAST, move |why| said.send(why).unwrap());
         watchdog.disarm();
         runtime.shutdown_background();
-        assert!(stuck.recv_timeout(Duration::from_secs(1)).is_err(), "a disarmed watchdog fired");
+        // Past `stuck_after` and two more checks, an armed watchdog would have fired on this dead runtime.
+        assert!(stuck.recv_timeout(FAST.stuck_after + FAST.every * 3).is_err(), "a disarmed watchdog fired");
     }
 }
