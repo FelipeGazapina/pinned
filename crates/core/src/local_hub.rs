@@ -373,6 +373,7 @@ impl LocalHub<'_> {
                 Ok(days) => done(Ok(self.machine.local_delegation_stats(days))),
                 Err(error) => Answer::Done(Err(error)),
             },
+            HubCall::WorkflowRuns { workflow, limit } if self.account.is_none() => done(Ok(self.connectors.workflow_runs(workflow.as_deref(), limit))),
             HubCall::Mirror { .. }
             | HubCall::Handback { .. }
             | HubCall::SetOfflineRunner { .. }
@@ -416,6 +417,7 @@ impl LocalHub<'_> {
             | HubCall::RemoteAsked { .. }
             | HubCall::RecordTasks { .. }
             | HubCall::DelegationStats { .. }
+            | HubCall::WorkflowRuns { .. }
             | HubCall::UnclaimedEnds
             | HubCall::SessionMarks
             | HubCall::MarkSessions { .. }
@@ -620,6 +622,12 @@ mod tests {
         live_run(&dir.join("store"), "wf", subject.clone());
         let connectors = Arc::new(Connectors::new(FileStorage::new(dir.join("store")), "/bin/pinned".into()));
         let signed_in = LocalHub { connectors: &connectors, machine: &machine, place_as: "macbook", taste_dir: Some(&taste), account: Some(&kept) };
+        let runs = HubCall::WorkflowRuns { workflow: None, limit: None };
+        let signed_out_runs = LocalHub { account: None, ..signed_in };
+        let Answer::Done(Ok(answered)) = drive(&signed_out_runs, runs.clone()) else { panic!("signed out, the app answers its own workflow runs") };
+        assert_eq!(answered, serde_json::to_value(connectors.workflow_runs(None, None)).unwrap());
+        assert_eq!((answered[0]["workflow"].as_str(), answered.as_array().map(Vec::len)), (Some("wf"), Some(1)), "{answered}");
+        assert_eq!(drive(&signed_in, runs), Answer::HubOnly, "a signed-in copy leaves the account's runs to the hub");
         let own = drive(
             &signed_in,
             HubCall::RunSet { connector: "wf".into(), subject: subject.clone(), name: "title".into(), value: "Export".into() },

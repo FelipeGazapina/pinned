@@ -273,6 +273,7 @@ pub fn hub_rule(call: &HubCall) -> Rule {
         HubCall::GetSettings { .. }
         | HubCall::ListSchedules { .. }
         | HubCall::ScheduleRuns { .. }
+        | HubCall::WorkflowRuns { .. }
         | HubCall::RunWorkflow { .. }
         | HubCall::SaveConnector { .. }
         | HubCall::DeleteConnector { .. }
@@ -474,6 +475,7 @@ mod tests {
             json!({ "cmd": "delete_schedule", "id": "t1" }),
             json!({ "cmd": "schedule_runs", "id": "t1" }),
             json!({ "cmd": "run_workflow", "id": "c1" }),
+            json!({ "cmd": "workflow_runs" }),
         ];
         for call in workflows {
             let cmd = call["cmd"].as_str().unwrap().to_owned();

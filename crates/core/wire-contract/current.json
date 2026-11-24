@@ -6013,6 +6013,33 @@
                 ]
               },
               {
+                "description": "`Vec<WorkflowRun>`: the account's workflow runs, newest first, only those `workflow`'s\ntrigger started when it names one. No `limit` answers 50; at most 200.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "workflow_runs"
+                  },
+                  "workflow": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.",
                 "type": "object",
                 "properties": {
@@ -19694,6 +19721,33 @@
                 ]
               },
               {
+                "description": "`Vec<WorkflowRun>`: the account's workflow runs, newest first, only those `workflow`'s\ntrigger started when it names one. No `limit` answers 50; at most 200.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "workflow_runs"
+                  },
+                  "workflow": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.",
                 "type": "object",
                 "properties": {
@@ -29455,6 +29509,33 @@
                 "required": [
                   "cmd",
                   "id"
+                ]
+              },
+              {
+                "description": "`Vec<WorkflowRun>`: the account's workflow runs, newest first, only those `workflow`'s\ntrigger started when it names one. No `limit` answers 50; at most 200.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "workflow_runs"
+                  },
+                  "workflow": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               },
               {
@@ -40034,6 +40115,33 @@
                 "required": [
                   "cmd",
                   "id"
+                ]
+              },
+              {
+                "description": "`Vec<WorkflowRun>`: the account's workflow runs, newest first, only those `workflow`'s\ntrigger started when it names one. No `limit` answers 50; at most 200.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "workflow_runs"
+                  },
+                  "workflow": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               },
               {
@@ -92242,6 +92350,575 @@
             "enum": [
               "chat",
               "decision"
+            ]
+          }
+        }
+      }
+    },
+    "WorkflowRun": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "WorkflowRun",
+        "description": "One workflow run as `workflow_runs` answers it, built from `graph::runner::Run` by\n`runner::view`. The stored run and its walk state never reach an app.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "workflow": {
+            "description": "The workflow whose trigger started the run.",
+            "type": "string"
+          },
+          "workflow_name": {
+            "description": "That workflow's name now, or its id when the account no longer has it.",
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/$defs/Subject"
+          },
+          "status": {
+            "$ref": "#/$defs/WorkflowRunStatus"
+          },
+          "why": {
+            "description": "Why it failed. Only on a failed run.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "description": "RFC 3339 of the first and the last step. None while the log is empty.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_step_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trigger": {
+            "description": "The trigger's payload as the run got it: the Linear issue, Slack message or error. Text\nfrom outside pinned.",
+            "default": null
+          },
+          "classified": {
+            "description": "Each classify step that answered, by node id.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/WorkflowRunClassified"
+            }
+          },
+          "session": {
+            "$ref": "#/$defs/WorkflowRunSession"
+          },
+          "steps": {
+            "description": "Every log entry, in order.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/WorkflowRunStep"
+            }
+          },
+          "waiting_on": {
+            "description": "The step a running or waiting run is on.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkflowRunNode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "workflow",
+          "workflow_name",
+          "subject",
+          "status",
+          "trigger",
+          "classified",
+          "session",
+          "steps"
+        ],
+        "$defs": {
+          "Subject": {
+            "description": "What a connector's session works on, which its callbacks into pinned report against.\nUntagged, so a stage message from a Linear session reads `\"issue\": \"<id>\"` as it always has.",
+            "anyOf": [
+              {
+                "title": "LinearIssue",
+                "description": "Linear's id for the issue, which `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "issue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issue"
+                ]
+              },
+              {
+                "title": "SlackThread",
+                "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "thread": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "channel",
+                  "thread"
+                ]
+              }
+            ]
+          },
+          "WorkflowRunStatus": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "running",
+                  "done",
+                  "failed"
+                ]
+              },
+              {
+                "description": "Waiting for its session to end its turn.",
+                "type": "string",
+                "const": "waiting"
+              }
+            ]
+          },
+          "WorkflowRunClassified": {
+            "description": "What a classify step answered: (question, answer) pairs in question order.",
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "answers": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ],
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              }
+            },
+            "required": [
+              "node",
+              "name",
+              "answers"
+            ]
+          },
+          "WorkflowRunSession": {
+            "description": "A run's session, without the runner's wait bookkeeping.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "live"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "claude": {
+                    "description": "Claude Code's session id, once a hook reported it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "state",
+                  "machine",
+                  "tab"
+                ]
+              },
+              {
+                "description": "The tab is gone.",
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "detached"
+                  },
+                  "claude": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              }
+            ]
+          },
+          "WorkflowRunStep": {
+            "description": "One log entry: when, which step, and what happened there, as the runner logged it.",
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "workflow": {
+                "type": "string"
+              },
+              "node": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "what": true
+            },
+            "required": [
+              "at",
+              "workflow",
+              "node",
+              "name",
+              "what"
+            ]
+          },
+          "WorkflowRunNode": {
+            "description": "A step of a workflow. `name` is the node's name in the workflow's graph now, `\"\"` when the\nworkflow or the node is gone.",
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "type": "string"
+              },
+              "node": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "workflow",
+              "node",
+              "name"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "WorkflowRun",
+        "description": "One workflow run as `workflow_runs` answers it, built from `graph::runner::Run` by\n`runner::view`. The stored run and its walk state never reach an app.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "workflow": {
+            "description": "The workflow whose trigger started the run.",
+            "type": "string"
+          },
+          "workflow_name": {
+            "description": "That workflow's name now, or its id when the account no longer has it.",
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/$defs/Subject"
+          },
+          "status": {
+            "$ref": "#/$defs/WorkflowRunStatus"
+          },
+          "why": {
+            "description": "Why it failed. Only on a failed run.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "description": "RFC 3339 of the first and the last step. None while the log is empty.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_step_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trigger": {
+            "description": "The trigger's payload as the run got it: the Linear issue, Slack message or error. Text\nfrom outside pinned.",
+            "default": null
+          },
+          "classified": {
+            "description": "Each classify step that answered, by node id.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/WorkflowRunClassified"
+            }
+          },
+          "session": {
+            "$ref": "#/$defs/WorkflowRunSession"
+          },
+          "steps": {
+            "description": "Every log entry, in order.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/WorkflowRunStep"
+            }
+          },
+          "waiting_on": {
+            "description": "The step a running or waiting run is on.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkflowRunNode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "workflow",
+          "workflow_name",
+          "subject",
+          "status",
+          "classified",
+          "session",
+          "steps"
+        ],
+        "$defs": {
+          "Subject": {
+            "description": "What a connector's session works on, which its callbacks into pinned report against.\nUntagged, so a stage message from a Linear session reads `\"issue\": \"<id>\"` as it always has.",
+            "anyOf": [
+              {
+                "title": "LinearIssue",
+                "description": "Linear's id for the issue, which `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "issue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issue"
+                ]
+              },
+              {
+                "title": "SlackThread",
+                "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "thread": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "channel",
+                  "thread"
+                ]
+              }
+            ]
+          },
+          "WorkflowRunStatus": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "running",
+                  "done",
+                  "failed"
+                ]
+              },
+              {
+                "description": "Waiting for its session to end its turn.",
+                "type": "string",
+                "const": "waiting"
+              }
+            ]
+          },
+          "WorkflowRunClassified": {
+            "description": "What a classify step answered: (question, answer) pairs in question order.",
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "answers": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ],
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              }
+            },
+            "required": [
+              "node",
+              "name",
+              "answers"
+            ]
+          },
+          "WorkflowRunSession": {
+            "description": "A run's session, without the runner's wait bookkeeping.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "live"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "claude": {
+                    "description": "Claude Code's session id, once a hook reported it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "state",
+                  "machine",
+                  "tab"
+                ]
+              },
+              {
+                "description": "The tab is gone.",
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "detached"
+                  },
+                  "claude": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              }
+            ]
+          },
+          "WorkflowRunStep": {
+            "description": "One log entry: when, which step, and what happened there, as the runner logged it.",
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "workflow": {
+                "type": "string"
+              },
+              "node": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "what": true
+            },
+            "required": [
+              "at",
+              "workflow",
+              "node",
+              "name",
+              "what"
+            ]
+          },
+          "WorkflowRunNode": {
+            "description": "A step of a workflow. `name` is the node's name in the workflow's graph now, `\"\"` when the\nworkflow or the node is gone.",
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "type": "string"
+              },
+              "node": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "workflow",
+              "node",
+              "name"
             ]
           }
         }

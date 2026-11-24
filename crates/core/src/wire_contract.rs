@@ -121,6 +121,7 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("McpServer".into(), schemas::<crate::mcp::Entry>());
     outbound.insert("McpLoad".into(), schemas::<crate::mcp::Load>());
     outbound.insert("RunStarted".into(), schemas::<crate::wire::RunStarted>());
+    outbound.insert("WorkflowRun".into(), schemas::<crate::wire::WorkflowRun>());
     outbound.insert("Team".into(), schemas::<crate::teams::Team>());
     outbound.insert("TeamMember".into(), schemas::<crate::teams::Member>());
     outbound.insert("TeamInvite".into(), schemas::<crate::teams::TeamInvite>());

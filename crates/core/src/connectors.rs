@@ -5748,6 +5748,20 @@ impl Connectors {
         self.runs.lock().unwrap().clone()
     }
 
+    /// `workflow_runs`: the runs `workflow`'s trigger started, or every run, newest first, at most
+    /// `limit` (50 when left out, 200 at most). Reads only.
+    pub fn workflow_runs(&self, workflow: Option<&str>, limit: Option<u32>) -> Vec<crate::wire::WorkflowRun> {
+        let (library, names) = (self.library(), self.names());
+        let limit = limit.unwrap_or(50).clamp(1, 200) as usize;
+        let runs = self.runs.lock().unwrap();
+        runs.iter()
+            .rev()
+            .filter(|run| workflow.is_none_or(|id| run.connector == id))
+            .take(limit)
+            .map(|run| runner::view(run, &library, &names))
+            .collect()
+    }
+
     /// Points the live session at `claude` and stores the run. The ignored live test uses a missing
     /// id so the next resume fails and the run opens a history-seeded session.
     #[doc(hidden)]
@@ -8347,6 +8361,33 @@ mod tests {
         assert!(runs.iter().any(|run| run.id.0 == "run-mac"), "the waiting run stays");
         assert!(!runs.iter().any(|run| run.id.0 == "old-0"), "the oldest finished run is dropped");
         assert!(runs.iter().any(|run| run.id.0 == format!("old-{}", RUNS_FINISHED_KEPT + 49)), "the newest finished run stays");
+    }
+
+    #[test]
+    fn workflow_runs_answers_newest_first_filtered_by_workflow_and_held_to_the_limit() {
+        let (connectors, dir) = stored("workflow-runs", vec![linear_connector()]);
+        let of = |connector: &str, id: &str| {
+            let mut run = finished_run(id);
+            run.connector = connector.into();
+            run
+        };
+        connectors.runs.lock().unwrap().extend([of("c1", "a"), of("c2", "b"), of("c1", "c"), of("c2", "d"), of("c1", "e")]);
+        let ids = |runs: Vec<crate::wire::WorkflowRun>| runs.into_iter().map(|run| run.id).collect::<Vec<_>>();
+        assert_eq!(ids(connectors.workflow_runs(None, None)), ["e", "d", "c", "b", "a"], "newest first");
+        assert_eq!(ids(connectors.workflow_runs(Some("c2"), None)), ["d", "b"]);
+        assert_eq!(ids(connectors.workflow_runs(Some("gone"), None)), Vec::<String>::new(), "an unknown workflow has no runs");
+        assert_eq!(ids(connectors.workflow_runs(None, Some(2))), ["e", "d"]);
+        assert_eq!(ids(connectors.workflow_runs(None, Some(0))), ["e"], "at least one");
+        let runs = connectors.workflow_runs(None, None);
+        assert_eq!((runs[0].workflow_name.as_str(), runs[1].workflow_name.as_str()), ("Resolve", "c2"), "a workflow the account no longer has goes by its id");
+
+        connectors.runs.lock().unwrap().extend((0..300).map(|n| of("c1", &format!("old-{n}"))));
+        let runs = connectors.workflow_runs(None, None);
+        assert_eq!((runs.len(), runs[0].id.as_str()), (50, "old-299"), "50 when no limit is asked");
+        assert_eq!(connectors.workflow_runs(None, Some(1000)).len(), 200, "200 at most");
+        assert_eq!(connectors.runs.lock().unwrap().len(), 305, "a read prunes nothing");
+        assert!(!dir.join("runs.json").exists(), "a read saves nothing");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The subjects each workflow holds a release mark for, without their times.
