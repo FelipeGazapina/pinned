@@ -61,7 +61,22 @@ body[data-page="needs-you"] #page-view .page-head .range { display: block; }
 .ny-typed input:focus::placeholder { color: var(--g-side-muted); }
 .ny-send { flex: none; height: 44px; padding: 0 14px; border: 0; border-radius: 12px; background: var(--g-primary); color: var(--g-on-primary); font-weight: 600; }
 .ny-typed:has(input:placeholder-shown) .ny-send { display: none; }
-.ny-card :focus-visible { outline: 2px solid var(--ny-link); outline-offset: 2px; }
+.ny-card :focus-visible, .ny-group-send:focus-visible { outline: 2px solid var(--ny-link); outline-offset: 2px; }
+
+/* A project's decisions, gathered: a tap picks, and the button at the foot sends the picks. */
+.ny-group { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 10px 8px 8px; border: 1px solid var(--ny-line); border-radius: 20px;
+  background: rgb(var(--g-ink-rgb) / 0.03); }
+.ny-group-head { display: flex; align-items: baseline; gap: 10px; min-width: 0; padding: 0 6px; }
+.ny-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
+.ny-group-count { flex: none; font-size: 13px; color: var(--g-side-muted); font-variant-numeric: tabular-nums; }
+.ny-group-cards { display: flex; flex-direction: column; gap: 8px; }
+.ny-group-send { flex: none; height: 44px; border-radius: 12px; }
+.ny-group-send:disabled { opacity: 0.55; cursor: default; }
+.ny-card [aria-pressed="true"] { box-shadow: 0 0 0 2px var(--g-raised), 0 0 0 4px var(--ny-link); }
+.ny-option[aria-pressed="true"] { border-color: transparent; background: var(--g-hover); }
+.ny-pick { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 15px; }
+.ny-picked { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ny-pick .ny-quiet { height: 44px; border-radius: 12px; }
 
 @media (max-width: 767px) {
   body[data-page="needs-you"] #page-view .page-head :is(h1, .range) { display: none; }
