@@ -58,6 +58,7 @@ function app() {
     marksHub: { hello: () => Promise.resolve() },
     // The real onAgentConfirmations, which writes what the hub lists, is all that a push would do.
     agentSurfaceChanged() {},
+    agentReadTastes() {},
     Hub: class {
       constructor(url, token, listeners) {
         this.listeners = listeners;
