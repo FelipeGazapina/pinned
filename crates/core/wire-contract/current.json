@@ -10656,6 +10656,12 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -10793,7 +10799,8 @@
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
-              "escalate_areas"
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "ReviewerPatch": {
@@ -11007,7 +11014,8 @@
                     "Release and version bumps",
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
-                  ]
+                  ],
+                  "manage_only": false
                 }
               },
               "captains": {
@@ -11048,7 +11056,8 @@
                     "Release and version bumps",
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
-                  ]
+                  ],
+                  "manage_only": false
                 }
               },
               "projects": {
@@ -11269,6 +11278,11 @@
                   "CI and deploy config",
                   "Sign-in, tokens and secrets"
                 ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -11291,7 +11305,8 @@
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
-              "escalate_areas"
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "Reviewer": {
@@ -24164,6 +24179,12 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -24296,7 +24317,8 @@
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
-              "escalate_areas"
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "ReviewerPatch": {
@@ -24505,7 +24527,8 @@
                     "Release and version bumps",
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
-                  ]
+                  ],
+                  "manage_only": false
                 }
               },
               "captains": {
@@ -24546,7 +24569,8 @@
                     "Release and version bumps",
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
-                  ]
+                  ],
+                  "manage_only": false
                 }
               },
               "projects": {
@@ -24757,6 +24781,11 @@
                   "CI and deploy config",
                   "Sign-in, tokens and secrets"
                 ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             }
           },
@@ -34098,6 +34127,12 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -34266,7 +34301,8 @@
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
-              "escalate_areas"
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "ReviewerPatch": {
@@ -34480,7 +34516,8 @@
                     "Release and version bumps",
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
-                  ]
+                  ],
+                  "manage_only": false
                 }
               },
               "captains": {
@@ -34521,7 +34558,8 @@
                     "Release and version bumps",
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
-                  ]
+                  ],
+                  "manage_only": false
                 }
               },
               "projects": {
@@ -34742,6 +34780,11 @@
                   "CI and deploy config",
                   "Sign-in, tokens and secrets"
                 ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -34764,7 +34807,8 @@
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
-              "escalate_areas"
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "Reviewer": {
@@ -44502,6 +44546,12 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -44665,7 +44715,8 @@
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
-              "escalate_areas"
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "ReviewerPatch": {
@@ -44874,7 +44925,8 @@
                     "Release and version bumps",
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
-                  ]
+                  ],
+                  "manage_only": false
                 }
               },
               "captains": {
@@ -44915,7 +44967,8 @@
                     "Release and version bumps",
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
-                  ]
+                  ],
+                  "manage_only": false
                 }
               },
               "projects": {
@@ -45126,6 +45179,11 @@
                   "CI and deploy config",
                   "Sign-in, tokens and secrets"
                 ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             }
           },
@@ -67016,7 +67074,8 @@
                 "Release and version bumps",
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
-              ]
+              ],
+              "manage_only": false
             }
           },
           "captains": {
@@ -67057,7 +67116,8 @@
                 "Release and version bumps",
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
-              ]
+              ],
+              "manage_only": false
             }
           },
           "projects": {
@@ -67278,6 +67338,11 @@
                   "CI and deploy config",
                   "Sign-in, tokens and secrets"
                 ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -67300,7 +67365,8 @@
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
-              "escalate_areas"
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "Strategy": {
@@ -67599,6 +67665,12 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -67920,7 +67992,8 @@
                 "Release and version bumps",
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
-              ]
+              ],
+              "manage_only": false
             }
           },
           "captains": {
@@ -67961,7 +68034,8 @@
                 "Release and version bumps",
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
-              ]
+              ],
+              "manage_only": false
             }
           },
           "projects": {
@@ -68172,6 +68246,11 @@
                   "CI and deploy config",
                   "Sign-in, tokens and secrets"
                 ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             }
           },
@@ -68471,6 +68550,12 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
