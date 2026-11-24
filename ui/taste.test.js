@@ -138,6 +138,41 @@ test("a Captains change sends only the fields it changed and touches no project"
   assert.deepEqual(here(tasteSaveCalls(saved, undone)), [], "an undone toggle saves nothing");
 });
 
+/** Rust's default escalation settings, which the fixture's presets leave out. */
+const escalation = { escalate_breaking_change: true, escalate_process_failure: true, escalate_over_lines: 500, escalate_areas: ["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"] };
+const escalating = (projects = {}) => ({ ...defaults(projects), orchestrator: { ...fixture.presets.balanced, ...escalation }, captains: { ...fixture.presets.balanced, ...escalation } });
+
+test("a changed escalation setting saves with the Captains, and only what changed", () => {
+  const { tasteSaveCalls, tasteSetField } = taste();
+  const saved = escalating();
+  let draft = tasteSetField(saved, captains, "escalate_over_lines", 750);
+  draft = tasteSetField(draft, captains, "escalate_areas", []);
+  draft = tasteSetField(tasteSetField(draft, captains, "escalate_breaking_change", false), captains, "escalate_breaking_change", true);
+  assert.deepEqual(here(tasteSaveCalls(saved, draft)), [{ cmd: "set_taste", scope: { kind: "captains" }, patch: { escalate_over_lines: 750, escalate_areas: [] } }]);
+});
+
+test("a project overrides an escalation setting, and Reset makes it inherit again", () => {
+  const { tasteSaveCalls, tasteSetField, tasteResetField, tasteResolve } = taste();
+  const saved = escalating();
+  const draft = tasteSetField(saved, site, "escalate_process_failure", false);
+  assert.deepEqual(here(draft.projects), { [SITE]: { escalate_process_failure: false } });
+  assert.equal(tasteResolve(draft, site).escalate_process_failure, false);
+  assert.deepEqual(here(tasteSaveCalls(saved, draft)), [{ cmd: "set_taste", scope: site, patch: { escalate_process_failure: false } }]);
+  const back = tasteResetField(draft, site, "escalate_process_failure");
+  assert.deepEqual(here(back.projects), {});
+  assert.equal(tasteResolve(back, site).escalate_process_failure, true);
+  const stored = escalating({ [SITE]: { escalate_over_lines: 90 } });
+  assert.deepEqual(here(tasteSaveCalls(stored, tasteResetField(stored, site, "escalate_over_lines"))), [{ cmd: "reset_taste_field", scope: site, field: "escalate_over_lines" }]);
+});
+
+test("the escalation settings leave the profile as it was, and a profile leaves them alone", () => {
+  const { tasteProfile, tasteApplyProfile } = taste();
+  const changed = { ...fixture.presets.economical, ...escalation, escalate_breaking_change: false, escalate_over_lines: 42, escalate_areas: [] };
+  assert.equal(tasteProfile(changed), "economical");
+  const applied = tasteApplyProfile({ ...escalating(), captains: changed }, captains, "aggressive");
+  assert.deepEqual([applied.captains.escalate_breaking_change, applied.captains.escalate_over_lines, here(applied.captains.escalate_areas)], [false, 42, []]);
+});
+
 test("a rebase makes unsaved edits again over the tastes another device saved", () => {
   const { tasteRebase, tasteSetField, tasteResetField } = taste();
   const saved = defaults({ [SITE]: { parallel: 4, review_diffs: false } });

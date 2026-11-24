@@ -1,5 +1,5 @@
-//! The writes of one account's row behind `PgStorage`: the store document (workflows and runs)
-//! and the connector keys. Each kind keeps one slot that holds only its newest document, so a
+//! The writes of one account's row behind `PgStorage`: the store document (workflows, runs and
+//! jobs) and the connector keys. Each kind keeps one slot that holds only its newest document, so a
 //! write that stalls holds at most one waiting document of each kind, never a queue of them.
 //!
 //! Every document takes a sequence number when it is queued, under the lock of the state it was
@@ -56,11 +56,12 @@ pub(crate) enum Landed {
     Gone,
 }
 
-/// The store and the runs as the state held them, JSON text that `save` and `save_runs` read
-/// through; the database joins them into the row's one document.
+/// The store, the runs and the jobs as the state held them, JSON text that `save`, `save_runs`
+/// and `save_jobs` read through; the database joins them into the row's one document.
 pub(crate) struct StoreBytes {
     pub(crate) store: Option<Vec<u8>>,
     pub(crate) runs: Vec<u8>,
+    pub(crate) jobs: Vec<u8>,
 }
 
 struct Queued<T> {
@@ -119,14 +120,14 @@ impl Writes {
         writes
     }
 
-    /// Queues the store and the runs as the account's newest document. The caller holds the lock
-    /// of the state they come from, so the numbers follow the order the state changed in.
-    pub(crate) fn queue_store(&self, store: Option<Vec<u8>>, runs: Vec<u8>) -> u64 {
-        let bytes = store.as_ref().map_or(0, Vec::len) + runs.len();
+    /// Queues the store, the runs and the jobs as the account's newest document. The caller holds
+    /// the lock of the state they come from, so the numbers follow the order the state changed in.
+    pub(crate) fn queue_store(&self, store: Option<Vec<u8>>, runs: Vec<u8>, jobs: Vec<u8>) -> u64 {
+        let bytes = store.as_ref().map_or(0, Vec::len) + runs.len() + jobs.len();
         let mut slots = self.slots.lock().unwrap();
         slots.next += 1;
         let seq = slots.next;
-        slots.store = Some(Queued { seq, doc: Arc::new(StoreBytes { store, runs }), bytes, renumbered: 0 });
+        slots.store = Some(Queued { seq, doc: Arc::new(StoreBytes { store, runs, jobs }), bytes, renumbered: 0 });
         drop(slots);
         self.queued.notify_one();
         seq
@@ -381,8 +382,12 @@ mod tests {
         let mut doc: Value = bytes.store.as_ref().map_or(serde_json::json!({}), |store| serde_json::from_slice(store).unwrap());
         let object = doc.as_object_mut().unwrap();
         object.remove("runs");
+        object.remove("jobs");
         if !bytes.runs.is_empty() {
             object.insert("runs".to_owned(), serde_json::from_slice(&bytes.runs).unwrap());
+        }
+        if !bytes.jobs.is_empty() {
+            object.insert("jobs".to_owned(), serde_json::from_slice(&bytes.jobs).unwrap());
         }
         doc
     }
@@ -461,7 +466,7 @@ mod tests {
         let fake = Arc::new(Fake { gate: Some(gate.clone()), ..Fake::default() });
         let writes = writes(&fake);
         for n in 1..=50 {
-            writes.queue_store(store(n), br#"[{"id":"r"}]"#.to_vec());
+            writes.queue_store(store(n), br#"[{"id":"r"}]"#.to_vec(), vec![]);
             settle().await;
         }
         let pending = writes.pending();
@@ -478,12 +483,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_jobs_ride_in_the_store_document_beside_the_runs() {
+        let gate = Arc::new(Semaphore::new(0));
+        let fake = Arc::new(Fake { gate: Some(gate.clone()), ..Fake::default() });
+        let writes = writes(&fake);
+        let (runs, jobs) = (br#"[{"id":"r"}]"#.to_vec(), br#"[{"id":"j","source":{"kind":"owner"}}]"#.to_vec());
+        writes.queue_store(Some(br#"{"n":1,"jobs":"stale"}"#.to_vec()), runs.clone(), jobs.clone());
+        assert_eq!(writes.pending().store_bytes, br#"{"n":1,"jobs":"stale"}"#.len() + runs.len() + jobs.len(), "the jobs count in the queued bytes");
+        gate.add_permits(1);
+        assert!(writes.flush(Duration::from_secs(5)).await);
+        assert_eq!(
+            fake.written.lock().unwrap().last().unwrap(),
+            &serde_json::json!({ "n": 1, "runs": [{ "id": "r" }], "jobs": [{ "id": "j", "source": { "kind": "owner" } }] })
+        );
+    }
+
+    #[tokio::test]
     async fn store_and_keys_each_keep_their_own_newest_document() {
         let gate = Arc::new(Semaphore::new(0));
         let fake = Arc::new(Fake { gate: Some(gate.clone()), ..Fake::default() });
         let writes = writes(&fake);
         for n in 1..=5 {
-            writes.queue_store(store(n), vec![]);
+            writes.queue_store(store(n), vec![], vec![]);
             writes.queue_secrets(BTreeMap::from([("k".to_owned(), format!("v{n}"))]));
             settle().await;
         }
@@ -499,11 +520,11 @@ mod tests {
     async fn a_failed_write_is_retried_and_a_newer_save_meanwhile_is_what_lands() {
         let fake = Arc::new(Fake { fail: AtomicUsize::new(3), ..Fake::default() });
         let writes = writes(&fake);
-        writes.queue_store(store(1), vec![]);
+        writes.queue_store(store(1), vec![], vec![]);
         settle().await;
         assert_eq!(fake.tried.load(Ordering::SeqCst), 1);
         assert_eq!(writes.pending().store, 1, "a failed document stays pending");
-        writes.queue_store(store(2), vec![]);
+        writes.queue_store(store(2), vec![], vec![]);
         tokio::time::sleep(Duration::from_secs(30)).await;
         assert_eq!(writes.pending(), Pending::default());
         assert_eq!(*fake.written.lock().unwrap(), vec![serde_json::json!({ "n": 2 })], "document 1 never lands after document 2");
@@ -514,7 +535,7 @@ mod tests {
     async fn a_flush_retries_at_once_and_writes_what_waits() {
         let fake = Arc::new(Fake { fail: AtomicUsize::new(4), ..Fake::default() });
         let writes = writes(&fake);
-        writes.queue_store(store(7), vec![]);
+        writes.queue_store(store(7), vec![], vec![]);
         writes.queue_secrets(BTreeMap::from([("k".to_owned(), "v".to_owned())]));
         let started = tokio::time::Instant::now();
         assert!(writes.flush(Duration::from_secs(10)).await, "the flush wrote both documents");
@@ -528,7 +549,7 @@ mod tests {
         let gate = Arc::new(Semaphore::new(0));
         let fake = Arc::new(Fake { gate: Some(gate), ..Fake::default() });
         let writes = writes(&fake);
-        writes.queue_store(store(1), vec![]);
+        writes.queue_store(store(1), vec![], vec![]);
         assert!(!writes.flush(Duration::from_secs(10)).await);
         assert_eq!(writes.pending().store, 1);
     }
@@ -537,7 +558,7 @@ mod tests {
     async fn a_closed_writer_still_writes_what_waits_then_ends() {
         let fake = Arc::new(Fake::default());
         let writes = writes(&fake);
-        writes.queue_store(store(3), vec![]);
+        writes.queue_store(store(3), vec![], vec![]);
         writes.close();
         assert!(writes.flush(Duration::from_secs(5)).await);
         settle().await;
@@ -549,7 +570,7 @@ mod tests {
     async fn the_versions_start_above_what_the_row_held_and_grow() {
         let fake = Arc::new(Fake::default());
         let writes = writes_above(&fake, 41);
-        writes.queue_store(store(1), vec![]);
+        writes.queue_store(store(1), vec![], vec![]);
         assert!(writes.flush(Duration::from_secs(5)).await);
         writes.queue_secrets(BTreeMap::from([("k".to_owned(), "v".to_owned())]));
         assert!(writes.flush(Duration::from_secs(5)).await);
@@ -563,13 +584,13 @@ mod tests {
         let fake = Arc::new(Fake { row: Mutex::new((10, 10)), ..Fake::default() });
         let (first, second) = (writes_above(&fake, 10), writes_above(&fake, 10));
         for n in 1..=20 {
-            first.queue_store(store(n), vec![]);
+            first.queue_store(store(n), vec![], vec![]);
             first.queue_secrets(BTreeMap::from([("k".to_owned(), format!("first {n}"))]));
             assert!(first.flush(Duration::from_secs(5)).await);
         }
         assert_eq!(*fake.row.lock().unwrap(), (49, 50));
 
-        second.queue_store(store(100), vec![]);
+        second.queue_store(store(100), vec![], vec![]);
         second.queue_secrets(BTreeMap::from([("k".to_owned(), "second".to_owned())]));
         assert!(second.flush(Duration::from_secs(5)).await);
         assert_eq!(fake.written.lock().unwrap().last().unwrap(), &serde_json::json!({ "n": 100 }), "the second process's later store is in the row");
@@ -578,7 +599,7 @@ mod tests {
 
         // The first saves again, numbered above the row or renumbered above it: the write that
         // lands last wins.
-        first.queue_store(store(21), vec![]);
+        first.queue_store(store(21), vec![], vec![]);
         first.queue_secrets(BTreeMap::from([("k".to_owned(), "first again".to_owned())]));
         assert!(first.flush(Duration::from_secs(5)).await);
         assert_eq!(fake.written.lock().unwrap().last().unwrap(), &serde_json::json!({ "n": 21 }));
@@ -592,7 +613,7 @@ mod tests {
         let overtakes = 3 * RENUMBER_AT_MOST as usize;
         let fake = Arc::new(Fake { row: Mutex::new((100, 100)), overtakes: AtomicUsize::new(overtakes), ..Fake::default() });
         let writes = writes(&fake);
-        writes.queue_store(store(1), vec![]);
+        writes.queue_store(store(1), vec![], vec![]);
         settle().await;
         assert_eq!(fake.tried.load(Ordering::SeqCst), 1 + RENUMBER_AT_MOST as usize, "written once, renumbered {RENUMBER_AT_MOST} times, then a backoff");
         assert_eq!(writes.pending().store, 1, "the document is kept");
@@ -610,11 +631,11 @@ mod tests {
     async fn a_retry_that_finds_its_own_given_up_write_in_the_row_writes_the_same_document_higher() {
         let fake = Arc::new(Fake { lost_answers: AtomicUsize::new(1), ..Fake::default() });
         let writes = writes(&fake);
-        writes.queue_store(store(1), vec![]);
+        writes.queue_store(store(1), vec![], vec![]);
         assert!(writes.flush(Duration::from_secs(5)).await);
         assert_eq!(*fake.versions.lock().unwrap(), vec![1, 2]);
         assert_eq!(*fake.written.lock().unwrap(), vec![serde_json::json!({ "n": 1 }); 2]);
-        writes.queue_store(store(2), vec![]);
+        writes.queue_store(store(2), vec![], vec![]);
         assert!(writes.flush(Duration::from_secs(5)).await);
         assert_eq!(*fake.versions.lock().unwrap(), vec![1, 2, 3], "numbers only grow");
     }
@@ -623,10 +644,10 @@ mod tests {
     async fn a_document_postgres_refuses_fails_once_and_a_later_save_lands() {
         let fake = Arc::new(Fake::default());
         let writes = writes(&fake);
-        writes.queue_store(Some(br#"{"n":"a\u0000b"}"#.to_vec()), vec![]);
+        writes.queue_store(Some(br#"{"n":"a\u0000b"}"#.to_vec()), vec![], vec![]);
         assert!(writes.flush(Duration::from_secs(5)).await, "the refused document leaves its slot");
         assert_eq!(fake.tried.load(Ordering::SeqCst), 1, "and is tried once, not retried");
-        writes.queue_store(store(2), vec![]);
+        writes.queue_store(store(2), vec![], vec![]);
         assert!(writes.flush(Duration::from_secs(5)).await);
         assert_eq!(*fake.written.lock().unwrap(), vec![serde_json::json!({ "n": 2 })]);
     }
@@ -635,7 +656,7 @@ mod tests {
     async fn a_document_whose_account_row_is_gone_is_tried_once_and_its_slot_empties() {
         let fake = Arc::new(Fake { gone: true.into(), ..Fake::default() });
         let writes = writes(&fake);
-        writes.queue_store(store(1), vec![]);
+        writes.queue_store(store(1), vec![], vec![]);
         writes.queue_secrets(BTreeMap::from([("k".to_owned(), "v".to_owned())]));
         let started = tokio::time::Instant::now();
         assert!(writes.flush(Duration::from_secs(5)).await, "both slots empty");
@@ -649,8 +670,8 @@ mod tests {
         let quick = Arc::new(Fake { gate: Some(gate_a.clone()), ..Fake::default() });
         let slow = Arc::new(Fake { gate: Some(gate_b.clone()), ..Fake::default() });
         let (a, b) = (writes(&quick), writes(&slow));
-        a.queue_store(store(1), vec![]);
-        b.queue_store(store(1), vec![]);
+        a.queue_store(store(1), vec![], vec![]);
+        b.queue_store(store(1), vec![], vec![]);
         let late = {
             let (a, quick) = (a.clone(), quick.clone());
             tokio::spawn(async move {
@@ -660,7 +681,7 @@ mod tests {
                 // Account a's flush has returned; a connector saves again while b still writes,
                 // and a's write of it takes a second.
                 settle().await;
-                a.queue_store(store(2), vec![]);
+                a.queue_store(store(2), vec![], vec![]);
                 settle().await;
                 gate_b.add_permits(10);
                 tokio::time::sleep(Duration::from_secs(1)).await;

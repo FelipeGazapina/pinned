@@ -15310,11 +15310,21 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2,"review_diffs":false,"second_opinion":true}"#), Err(both.into()));
         assert_eq!(tool(&chat, r#""name":"taste_reset","scope":"captains","field":"review_diffs""#), Err(one.into()));
         assert_eq!(tool(&chat, r#""name":"taste_reset","scope":"project:github.com/acme/site","field":"second_opinion""#), Err(other.into()));
+        for (name, value) in [("escalate_breaking_change", "false"), ("escalate_process_failure", "false"), ("escalate_over_lines", "750"), ("escalate_areas", r#"["Billing"]"#)] {
+            let refused = Err(format!("{name} is changed only by the user, on the Way of working page; nothing changed"));
+            for scope in ["captains", "project:github.com/acme/site"] {
+                assert_eq!(tool(&chat, &format!(r#""name":"taste_set","scope":"{scope}","patch":{{"{name}":{value}}}"#)), refused, "{name} alone on {scope}");
+                assert_eq!(tool(&chat, &format!(r#""name":"taste_set","scope":"{scope}","patch":{{"parallel":2,"{name}":{value}}}"#)), refused, "{name} with parallel on {scope}");
+                assert_eq!(tool(&chat, &format!(r#""name":"taste_reset","scope":"{scope}","field":"{name}""#)), refused, "a reset of {name} on {scope}");
+            }
+        }
         assert_eq!(m.local_tastes(), before, "a refused call changed the way of working");
         assert_eq!(events.lock().unwrap().iter().filter(|e| e["kind"] == "tastes-changed").count(), 0, "a refused call emitted a change");
 
         let got: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_get","scope":"captains""#).unwrap()).unwrap();
         assert_eq!((&got["effective"]["review_diffs"], &got["effective"]["second_opinion"]), (&json!(true), &json!(false)), "taste_get still shows both");
+        let escalation = ["escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas"].map(|name| got["effective"][name].clone());
+        assert_eq!(escalation, [json!(true), json!(true), json!(500), json!(["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"])], "taste_get shows the escalation settings");
         let set: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2}"#).unwrap()).unwrap();
         assert_eq!(set["effective"]["parallel"], json!(2), "a field the agent may change still changes");
 
@@ -15358,6 +15368,16 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!((set.resolve(&site).review_diffs, set.resolve(&site).second_opinion), (false, true));
         let reset = m.reset_local_taste_field(&site, TasteField::ReviewDiffs).unwrap();
         assert_eq!((reset.resolve(&site).review_diffs, reset.resolve(&site).second_opinion), (true, true), "a reset inherits the Captains' review setting");
+
+        let escalation = TastePatch { escalate_breaking_change: Some(false), escalate_process_failure: Some(false), escalate_over_lines: Some(750), escalate_areas: Some(vec!["Billing".into()]), ..TastePatch::default() };
+        let set = m.set_local_taste(&site, escalation).unwrap().resolve(&site);
+        assert_eq!((set.escalate_breaking_change, set.escalate_process_failure, set.escalate_over_lines, set.escalate_areas), (false, false, 750, vec!["Billing".to_owned()]), "the page's own set changes them");
+        let reset = m.reset_local_taste_field(&site, TasteField::EscalateOverLines).unwrap();
+        assert_eq!((reset.resolve(&site).escalate_over_lines, reset.resolve(&site).escalate_breaking_change), (500, false), "a reset inherits the Captains' line limit");
+        let captains = m.set_local_taste(&TasteScope::Captains, TastePatch { escalate_areas: Some(vec![]), ..TastePatch::default() }).unwrap();
+        assert!(captains.captains.escalate_areas.is_empty());
+        let reset = m.reset_local_taste_field(&TasteScope::Captains, TasteField::EscalateAreas).unwrap();
+        assert_eq!(reset.captains.escalate_areas.len(), 3, "the Captains get the default areas back");
         let _ = std::fs::remove_dir_all(dir);
     }
 
