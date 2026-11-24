@@ -26,6 +26,8 @@ const MAX_PARALLEL: u32 = 100;
 const MAX_TIME_LIMIT_MIN: u32 = 7 * 24 * 60;
 /// Eight hours, the old default of `delegate_task`'s `limitMs`.
 const DEFAULT_TIME_LIMIT_MIN: u32 = 8 * 60;
+/// Far above any change a person reviews.
+const MAX_ESCALATE_OVER_LINES: u32 = 100_000;
 const OPUS: &str = "claude-opus-5-5";
 
 /// A model as `orchestrator_capabilities` names it, and the provider it runs through when that matters.
@@ -155,6 +157,15 @@ pub struct Taste {
     /// set, since every box belongs to a project. Always written, null included, so a page tells a
     /// hub that has it from one that predates it.
     pub box_size: Option<BoxSize>,
+    /// Escalate to the user a change that breaks an older version.
+    pub escalate_breaking_change: bool,
+    /// Escalate to the user a run whose process did not work as designed.
+    pub escalate_process_failure: bool,
+    /// Escalate to the user a change past this many changed lines, not counting tests, docs and
+    /// generated files. 1 to 100000.
+    pub escalate_over_lines: u32,
+    /// Areas whose changes always go to the user, as free text.
+    pub escalate_areas: Vec<String>,
 }
 
 /// A scope's delegation limits, resolved: what `delegate_task` and the boxes enforce.
@@ -215,6 +226,14 @@ pub struct TastePatch {
     /// only the user's own app sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boxes_at_once: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalate_breaking_change: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalate_process_failure: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalate_over_lines: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalate_areas: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
@@ -250,22 +269,30 @@ pub enum TasteField {
     Placement,
     BoxSize,
     BoxesAtOnce,
+    EscalateBreakingChange,
+    EscalateProcessFailure,
+    EscalateOverLines,
+    EscalateAreas,
 }
 
 impl TasteField {
-    /// The JSON name of a setting only the user changes on the Way of working page: a review setting, or Boxes at
-    /// once. None for the rest.
+    /// The JSON name of a setting only the user changes on the Way of working page: a review setting, Boxes at
+    /// once, or an escalation setting. None for the rest.
     pub fn review_setting(self) -> Option<&'static str> {
         match self {
             TasteField::ReviewDiffs => Some("review_diffs"),
             TasteField::SecondOpinion => Some("second_opinion"),
             TasteField::BoxesAtOnce => Some("boxes_at_once"),
+            TasteField::EscalateBreakingChange => Some("escalate_breaking_change"),
+            TasteField::EscalateProcessFailure => Some("escalate_process_failure"),
+            TasteField::EscalateOverLines => Some("escalate_over_lines"),
+            TasteField::EscalateAreas => Some("escalate_areas"),
             _ => None,
         }
     }
 }
 
-/// The refusal of an agent's change to review settings, which only the user makes on the Way of working page.
+/// The refusal of an agent's change to review or escalation settings, which only the user makes on the Way of working page.
 /// Refused whole, so the other fields of the same change wait too.
 pub fn refuse_review_settings(named: impl IntoIterator<Item = &'static str>) -> Result<(), String> {
     let named: Vec<&str> = named.into_iter().collect();
@@ -415,6 +442,10 @@ fn balanced() -> Taste {
         time_limit_min: DEFAULT_TIME_LIMIT_MIN,
         box_budget_cents: 0,
         box_size: None,
+        escalate_breaking_change: true,
+        escalate_process_failure: true,
+        escalate_over_lines: 500,
+        escalate_areas: ["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"].map(str::to_owned).to_vec(),
     }
 }
 
@@ -488,6 +519,9 @@ impl Taste {
         if !(1..=MAX_TIME_LIMIT_MIN).contains(&self.time_limit_min) {
             return Err(format!("the time limit goes from 1 to {MAX_TIME_LIMIT_MIN} minutes"));
         }
+        if !(1..=MAX_ESCALATE_OVER_LINES).contains(&self.escalate_over_lines) {
+            return Err(format!("the line limit goes from 1 to {MAX_ESCALATE_OVER_LINES} changed lines"));
+        }
         if self.default_effort.is_some_and(|effort| effort > self.max_effort) {
             return Err("the default effort is above the most effort allowed".into());
         }
@@ -554,6 +588,10 @@ impl Taste {
             TasteField::BoxBudgetCents => self.box_budget_cents = default.box_budget_cents,
             TasteField::Placement | TasteField::BoxesAtOnce => {}
             TasteField::BoxSize => self.box_size = default.box_size,
+            TasteField::EscalateBreakingChange => self.escalate_breaking_change = default.escalate_breaking_change,
+            TasteField::EscalateProcessFailure => self.escalate_process_failure = default.escalate_process_failure,
+            TasteField::EscalateOverLines => self.escalate_over_lines = default.escalate_over_lines,
+            TasteField::EscalateAreas => self.escalate_areas = default.escalate_areas,
         }
     }
 }
@@ -685,10 +723,18 @@ pub(crate) fn usd(cents: u32) -> String {
 }
 
 impl TastePatch {
-    /// The settings this patch sets that only the user changes, on the Way of working page: the review settings and
-    /// Boxes at once, by name.
+    /// The settings this patch sets that only the user changes, on the Way of working page: the review settings,
+    /// Boxes at once and the escalation settings, by name.
     pub fn review_settings(&self) -> Vec<&'static str> {
-        [("review_diffs", self.review_diffs.is_some()), ("second_opinion", self.second_opinion.is_some()), ("boxes_at_once", self.boxes_at_once.is_some())]
+        [
+            ("review_diffs", self.review_diffs.is_some()),
+            ("second_opinion", self.second_opinion.is_some()),
+            ("boxes_at_once", self.boxes_at_once.is_some()),
+            ("escalate_breaking_change", self.escalate_breaking_change.is_some()),
+            ("escalate_process_failure", self.escalate_process_failure.is_some()),
+            ("escalate_over_lines", self.escalate_over_lines.is_some()),
+            ("escalate_areas", self.escalate_areas.is_some()),
+        ]
             .into_iter()
             .filter(|(_, set)| *set)
             .map(|(name, _)| name)
@@ -724,6 +770,10 @@ impl TastePatch {
         if self.box_size.is_some() {
             taste.box_size = self.box_size;
         }
+        put(&self.escalate_breaking_change, &mut taste.escalate_breaking_change);
+        put(&self.escalate_process_failure, &mut taste.escalate_process_failure);
+        put(&self.escalate_over_lines, &mut taste.escalate_over_lines);
+        put(&self.escalate_areas, &mut taste.escalate_areas);
     }
 
     /// Takes each field `newer` sets, and keeps the rest.
@@ -751,6 +801,10 @@ impl TastePatch {
         take(newer.box_size, &mut self.box_size);
         take(newer.placement, &mut self.placement);
         take(newer.boxes_at_once, &mut self.boxes_at_once);
+        take(newer.escalate_breaking_change, &mut self.escalate_breaking_change);
+        take(newer.escalate_process_failure, &mut self.escalate_process_failure);
+        take(newer.escalate_over_lines, &mut self.escalate_over_lines);
+        take(newer.escalate_areas, &mut self.escalate_areas);
     }
 
     /// Drops each field equal to `base`'s, so the scope inherits it again.
@@ -782,6 +836,10 @@ impl TastePatch {
         if self.box_size.is_some() && self.box_size == base.box_size {
             self.box_size = None;
         }
+        drop_same(&mut self.escalate_breaking_change, &base.escalate_breaking_change);
+        drop_same(&mut self.escalate_process_failure, &base.escalate_process_failure);
+        drop_same(&mut self.escalate_over_lines, &base.escalate_over_lines);
+        drop_same(&mut self.escalate_areas, &base.escalate_areas);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -816,6 +874,10 @@ impl TastePatch {
             TasteField::Placement => self.placement = None,
             TasteField::BoxSize => self.box_size = None,
             TasteField::BoxesAtOnce => self.boxes_at_once = None,
+            TasteField::EscalateBreakingChange => self.escalate_breaking_change = None,
+            TasteField::EscalateProcessFailure => self.escalate_process_failure = None,
+            TasteField::EscalateOverLines => self.escalate_over_lines = None,
+            TasteField::EscalateAreas => self.escalate_areas = None,
         }
     }
 }
@@ -847,8 +909,12 @@ impl Tastes {
     }
 
     /// Applies `patch` to the scope, or changes nothing when the result fails `Taste::check`. A
-    /// project's patch keeps only the fields that differ from the Capitães'.
+    /// project's patch keeps only the fields that differ from the Capitães'. Each escalation area is
+    /// trimmed, and a blank one dropped.
     pub fn set(&mut self, scope: &TasteScope, mut patch: TastePatch) -> Result<(), String> {
+        if let Some(areas) = &mut patch.escalate_areas {
+            *areas = areas.iter().map(|area| area.trim()).filter(|area| !area.is_empty()).map(str::to_owned).collect();
+        }
         if let Some(boxes) = patch.boxes_at_once.take() {
             if matches!(scope, TasteScope::Project { .. }) {
                 return Err("Boxes at once belongs to the account: set it for Captains (all), not for one project".into());
@@ -1132,7 +1198,7 @@ pub fn chat_prompt(scope: &TasteScope) -> String {
     format!(
         "Help me adjust the way of working of {who} in pinned (scope {name}).
 
-You have three tools for it. taste_get(scope) reads a scope: the settings its sessions get (effective), what the scope sets itself (own), and the brief text they start with. taste_set(scope, patch) changes the fields the patch names and keeps the rest; a project's field set to the Captains' value goes back to inheriting it. taste_reset(scope, field) makes a project inherit the field again, or gives the orchestrator and the Captains its default back. A scope is orchestrator, captains, or project: followed by the project's repo, as in project:github.com/acme/site. The fields are strategy (cheap_with_guidance, escalate_on_failure or strongest_first), ladder (models, cheapest first), hard_model, parallel (workers at once, 1 to 100), autonomy (ask_first, decide_and_tell or report_at_end), skills ({{name, enabled}}) and context (notes every turn carries), and the delegation limits pinned enforces: tier (low, mid or high), default_effort and max_effort (low, medium, high, xhigh or max), budget_cents (per worker, 0 for no cap), time_limit_min (1 to 10080) and box_budget_cents (per box, 0 for none), and box_size (small, medium or large: the size of a box opened with none named; captains holds the account's, a project overrides it, small when neither does). Leave review_diffs, second_opinion and boxes_at_once alone: taste_set and taste_reset refuse them, and only the user sets them, on the Way of working page. The Way of working page shows each change as soon as it lands, and new sessions start with it.
+You have three tools for it. taste_get(scope) reads a scope: the settings its sessions get (effective), what the scope sets itself (own), and the brief text they start with. taste_set(scope, patch) changes the fields the patch names and keeps the rest; a project's field set to the Captains' value goes back to inheriting it. taste_reset(scope, field) makes a project inherit the field again, or gives the orchestrator and the Captains its default back. A scope is orchestrator, captains, or project: followed by the project's repo, as in project:github.com/acme/site. The fields are strategy (cheap_with_guidance, escalate_on_failure or strongest_first), ladder (models, cheapest first), hard_model, parallel (workers at once, 1 to 100), autonomy (ask_first, decide_and_tell or report_at_end), skills ({{name, enabled}}) and context (notes every turn carries), and the delegation limits pinned enforces: tier (low, mid or high), default_effort and max_effort (low, medium, high, xhigh or max), budget_cents (per worker, 0 for no cap), time_limit_min (1 to 10080) and box_budget_cents (per box, 0 for none), and box_size (small, medium or large: the size of a box opened with none named; captains holds the account's, a project overrides it, small when neither does). Leave review_diffs, second_opinion, boxes_at_once and the escalation settings (escalate_breaking_change, escalate_process_failure, escalate_over_lines and escalate_areas) alone: taste_set and taste_reset refuse them, and only the user sets them, on the Way of working page. The Way of working page shows each change as soon as it lands, and new sessions start with it.
 
 Start with taste_get(\"{name}\"). Then interview me: one short question at a time, each with two or three answers to pick from, and change nothing yet. When you know what to change, list the changes in plain words, apply them with taste_set or taste_reset once I agree, and read the scope again to show me the new brief.",
         who = scope.label(),
@@ -1295,6 +1361,15 @@ impl Tastes {
         Ok(())
     }
 
+    /// These tastes with the items written on, and every project the copy does not name gone. A
+    /// setting the copy does not carry, such as the escalation settings or Boxes at once, keeps its
+    /// value here.
+    pub fn with_copy_items(&self, items: &BTreeMap<crate::account_copy::Item, crate::account_copy::Version>) -> Result<Tastes, String> {
+        let mut tastes = Tastes { projects: BTreeMap::new(), ..self.clone() };
+        tastes.apply_copy_items(items)?;
+        Ok(tastes)
+    }
+
     /// The tastes those items are, starting from the defaults so a project the copy does not name
     /// is gone.
     pub fn from_copy_items(items: &BTreeMap<crate::account_copy::Item, crate::account_copy::Version>) -> Result<Tastes, String> {
@@ -1400,6 +1475,10 @@ mod tests {
             time_limit_min: 480,
             box_budget_cents: 0,
             box_size: None,
+            escalate_breaking_change: true,
+            escalate_process_failure: true,
+            escalate_over_lines: 500,
+            escalate_areas: vec!["Release and version bumps".into(), "CI and deploy config".into(), "Sign-in, tokens and secrets".into()],
         };
         assert_eq!(tastes.resolve(&site()), expected);
         assert_eq!(tastes.resolve(&TasteScope::Project { repo: "github.com/acme/api".into() }).parallel, 2, "a project with no patch is the Capitães'");
@@ -1507,18 +1586,19 @@ Deploys go through the VPS."
         let patch = TastePatch { parallel: Some(4), hard_model: Some(ModelRef { provider: Some("cursor".into()), model: "grok-4.7".into() }), ..TastePatch::default() };
         let tastes = Tastes { orchestrator: preset(Profile::Aggressive), projects: BTreeMap::from([(SITE.to_owned(), patch)]), ..Tastes::default() };
         let opus = json!({ "model": "claude-opus-5-5" });
+        let areas = json!(["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"]);
         let json = json!({
             "orchestrator": {
                 "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 8, "autonomy": "report_at_end",
                 "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
                 "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
-                "box_size": null,
+                "box_size": null, "escalate_breaking_change": true, "escalate_process_failure": true, "escalate_over_lines": 500, "escalate_areas": areas,
             },
             "captains": {
                 "strategy": "escalate_on_failure", "ladder": [{ "model": "glm-5.3" }, { "model": "claude-sonnet-5-5" }, opus], "hard_model": opus,
                 "parallel": 5, "autonomy": "decide_and_tell", "review_diffs": true, "second_opinion": false, "skills": [], "context": [],
                 "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
-                "box_size": null,
+                "box_size": null, "escalate_breaking_change": true, "escalate_process_failure": true, "escalate_over_lines": 500, "escalate_areas": areas,
             },
             "projects": { "github.com/acme/site": { "hard_model": { "provider": "cursor", "model": "grok-4.7" }, "parallel": 4 } },
             "placement": { "prefer": [], "avoid": [], "heavy": "worktree" },
@@ -1982,5 +2062,137 @@ Deploys go through the VPS."
         assert_eq!(with(0).boxes_note(), ZERO_NOTE);
         assert_eq!(with(3).boxes_brief(), None, "the prompt says nothing more while boxes are allowed");
         assert_eq!(with(0).boxes_brief().as_deref(), Some(ZERO_NOTE));
+    }
+
+    fn areas(list: &[&str]) -> Vec<String> {
+        list.iter().map(|area| (*area).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_escalation_settings_default_on_every_preset_and_read_so_from_older_tastes() {
+        let defaults = (true, true, 500, areas(&["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"]));
+        for taste in [Taste::default(), preset(Profile::Economical), preset(Profile::Balanced), preset(Profile::Aggressive)] {
+            assert_eq!((taste.escalate_breaking_change, taste.escalate_process_failure, taste.escalate_over_lines, taste.escalate_areas), defaults.clone());
+        }
+        let old: Tastes = serde_json::from_value(json!({ "captains": { "parallel": 3 }, "projects": { "github.com/acme/site": { "parallel": 2 } } })).unwrap();
+        assert_eq!((old.captains.escalate_over_lines, old.orchestrator.escalate_areas.len()), (500, 3), "tastes from before the fields");
+        assert_eq!(old.resolve(&site()).escalate_over_lines, 500);
+        let patch: TastePatch = serde_json::from_value(json!({ "parallel": 2 })).unwrap();
+        assert_eq!((patch.escalate_breaking_change, patch.escalate_process_failure, patch.escalate_over_lines, patch.escalate_areas), (None, None, None, None), "an old app's patch leaves them alone");
+    }
+
+    #[test]
+    fn a_project_sets_inherits_and_resets_each_escalation_setting() {
+        let mut tastes = Tastes::default();
+        let patch = TastePatch {
+            escalate_breaking_change: Some(false),
+            escalate_process_failure: Some(false),
+            escalate_over_lines: Some(750),
+            escalate_areas: Some(areas(&["Billing"])),
+            ..TastePatch::default()
+        };
+        tastes.set(&site(), patch).unwrap();
+        assert_eq!(
+            serde_json::to_value(&tastes.projects).unwrap(),
+            json!({ "github.com/acme/site": { "escalate_breaking_change": false, "escalate_process_failure": false, "escalate_over_lines": 750, "escalate_areas": ["Billing"] } })
+        );
+        let resolved = tastes.resolve(&site());
+        assert_eq!((resolved.escalate_breaking_change, resolved.escalate_over_lines, resolved.escalate_areas), (false, 750, areas(&["Billing"])));
+        assert_eq!(tastes.resolve(&TasteScope::Project { repo: "github.com/acme/api".into() }).escalate_over_lines, 500, "another project inherits the Captains'");
+
+        tastes.set(&site(), TastePatch { escalate_over_lines: Some(500), ..TastePatch::default() }).unwrap();
+        assert!(tastes.projects[SITE].escalate_over_lines.is_none(), "the Captains' value set on the project is dropped");
+        for field in [TasteField::EscalateBreakingChange, TasteField::EscalateProcessFailure, TasteField::EscalateAreas] {
+            tastes.reset(&site(), field);
+        }
+        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({}), "each reset inherits again");
+
+        tastes.set(&TasteScope::Captains, TastePatch { escalate_over_lines: Some(80), escalate_areas: Some(vec![]), escalate_process_failure: Some(false), ..TastePatch::default() }).unwrap();
+        assert_eq!((tastes.resolve(&site()).escalate_over_lines, tastes.resolve(&site()).escalate_areas.len()), (80, 0), "a project inherits the Captains' change");
+        tastes.reset(&TasteScope::Captains, TasteField::EscalateOverLines);
+        tastes.reset(&TasteScope::Captains, TasteField::EscalateAreas);
+        assert_eq!((tastes.captains.escalate_over_lines, tastes.captains.escalate_areas.len(), tastes.captains.escalate_process_failure), (500, 3, false), "a reset gives the default back");
+        tastes.reset(&TasteScope::Captains, TasteField::EscalateProcessFailure);
+        assert!(tastes.captains.escalate_process_failure);
+    }
+
+    #[test]
+    fn the_line_limit_goes_from_1_to_100000_and_a_refused_one_changes_nothing() {
+        let mut tastes = Tastes::default();
+        let before = tastes.clone();
+        let lines = |n: u32| TastePatch { escalate_over_lines: Some(n), parallel: Some(2), ..TastePatch::default() };
+        for n in [0, 100_001] {
+            for scope in [TasteScope::Orchestrator, TasteScope::Captains, site()] {
+                assert_eq!(tastes.set(&scope, lines(n)), Err("the line limit goes from 1 to 100000 changed lines".into()), "{n} on {}", scope.name());
+            }
+        }
+        assert_eq!(tastes, before);
+        tastes.set(&TasteScope::Captains, lines(1)).unwrap();
+        tastes.set(&site(), lines(100_000)).unwrap();
+        assert_eq!((tastes.captains.escalate_over_lines, tastes.resolve(&site()).escalate_over_lines), (1, 100_000));
+    }
+
+    #[test]
+    fn blank_escalation_areas_are_dropped_and_an_empty_list_is_allowed() {
+        let mut tastes = Tastes::default();
+        tastes.set(&TasteScope::Captains, TastePatch { escalate_areas: Some(areas(&["  Billing ", "", "   ", "Auth"])), ..TastePatch::default() }).unwrap();
+        assert_eq!(tastes.captains.escalate_areas, areas(&["Billing", "Auth"]));
+        tastes.set(&site(), TastePatch { escalate_areas: Some(areas(&[" "])), ..TastePatch::default() }).unwrap();
+        assert_eq!(tastes.resolve(&site()).escalate_areas, Vec::<String>::new());
+        assert_eq!(tastes.projects[SITE].escalate_areas, Some(vec![]), "an emptied list is the project's own");
+    }
+
+    #[test]
+    fn the_escalation_settings_leave_the_profile_and_the_brief_alone() {
+        let mut taste = preset(Profile::Economical);
+        let brief = taste.brief();
+        taste.escalate_breaking_change = false;
+        taste.escalate_process_failure = false;
+        taste.escalate_over_lines = 42;
+        taste.escalate_areas = areas(&["Billing"]);
+        assert_eq!((taste.profile(), taste.brief()), (Profile::Economical, brief));
+        taste.apply(Profile::Aggressive);
+        assert_eq!((taste.profile(), taste.escalate_breaking_change, taste.escalate_over_lines, taste.escalate_areas.clone()), (Profile::Aggressive, false, 42, areas(&["Billing"])), "a preset keeps them");
+    }
+
+    #[test]
+    fn the_escalation_settings_are_the_users_own() {
+        let names = ["escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas"];
+        let refused = |name: &str| Err(format!("{name} is changed only by the user, on the Way of working page; nothing changed"));
+        let patches = [
+            TastePatch { escalate_breaking_change: Some(false), ..TastePatch::default() },
+            TastePatch { escalate_process_failure: Some(false), ..TastePatch::default() },
+            TastePatch { escalate_over_lines: Some(9), ..TastePatch::default() },
+            TastePatch { escalate_areas: Some(vec![]), ..TastePatch::default() },
+        ];
+        let fields = [TasteField::EscalateBreakingChange, TasteField::EscalateProcessFailure, TasteField::EscalateOverLines, TasteField::EscalateAreas];
+        for ((name, patch), field) in names.into_iter().zip(patches).zip(fields) {
+            assert_eq!(refuse_review_settings(patch.review_settings()), refused(name));
+            assert_eq!(refuse_review_settings(TastePatch { parallel: Some(2), ..patch }.review_settings()), refused(name), "mixed with an allowed field");
+            assert_eq!(refuse_review_settings(field.review_setting()), refused(name));
+        }
+        let all = TastePatch { escalate_over_lines: Some(9), escalate_areas: Some(vec![]), ..TastePatch::default() };
+        assert_eq!(refuse_review_settings(all.review_settings()), Err("escalate_over_lines and escalate_areas are changed only by the user, on the Way of working page; nothing changed".into()));
+        assert_eq!(serde_json::to_value(TasteField::EscalateOverLines).unwrap(), json!("escalate_over_lines"));
+    }
+
+    #[test]
+    fn the_offline_copy_carries_no_escalation_item_and_a_handback_keeps_them() {
+        let mut stored = Tastes::default();
+        let mine = TastePatch { escalate_breaking_change: Some(false), escalate_over_lines: Some(90), escalate_areas: Some(areas(&["Billing"])), ..TastePatch::default() };
+        stored.set(&TasteScope::Captains, mine.clone()).unwrap();
+        stored.set(&TasteScope::Orchestrator, mine).unwrap();
+        stored.set(&TasteScope::Captains, TastePatch { boxes_at_once: Some(3), ..TastePatch::default() }).unwrap();
+        stored.set(&site(), TastePatch { parallel: Some(4), ..TastePatch::default() }).unwrap();
+        let items = stored.copy_items();
+        assert!(!items.keys().any(|item| item.as_str().contains("escalate_")), "{:?}", items.keys().map(|item| item.as_str()).collect::<Vec<_>>());
+
+        let mut edited = Tastes::default();
+        edited.set(&TasteScope::Captains, TastePatch { parallel: Some(2), ..TastePatch::default() }).unwrap();
+        let back = stored.with_copy_items(&edited.copy_items()).unwrap();
+        assert_eq!(back.captains.parallel, 2, "the copy's edit lands");
+        assert_eq!((back.captains.escalate_breaking_change, back.captains.escalate_over_lines, back.captains.escalate_areas.clone()), (false, 90, areas(&["Billing"])));
+        assert_eq!((back.orchestrator.escalate_over_lines, back.boxes_at_once), (90, 3), "what the copy does not carry keeps its stored value");
+        assert!(back.projects.is_empty(), "a project the copy does not name is gone");
     }
 }
