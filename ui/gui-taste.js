@@ -5,9 +5,9 @@
 /** `saved` is the backend's last answer and `draft` the page's edits over it. `projects` holds
  * every online machine's project list, each project with its `machine`, null until it arrives.
  * `skills` holds the skills those machines list, by name. `flash` holds the brief lines the last
- * edit changed, drawn highlighted by the next render only. `note` is the note being typed, and
- * `adding` whether the add-skill form is open. */
-const tasteUi = { saved: null, draft: null, scope: { kind: "captains" }, projects: null, skills: new Map(), error: null, saving: false, toast: false, flash: new Set(), note: "", adding: false, chatting: false };
+ * edit changed, drawn highlighted by the next render only. `note` is the note being typed, `area`
+ * the escalation area being typed, and `adding` whether the add-skill form is open. */
+const tasteUi = { saved: null, draft: null, scope: { kind: "captains" }, projects: null, skills: new Map(), error: null, saving: false, toast: false, flash: new Set(), note: "", area: "", adding: false, chatting: false };
 let tasteToastTimer = 0;
 
 const TASTE_FIELD_LABELS = {
@@ -28,6 +28,10 @@ const TASTE_FIELD_LABELS = {
   box_budget_cents: "Box budget",
   box_size: "Default box size",
   boxes_at_once: "Boxes at once",
+  escalate_breaking_change: "Breaks an older version",
+  escalate_process_failure: "The process did not work as designed",
+  escalate_over_lines: "Too big to merge unseen",
+  escalate_areas: "Always send to me",
 };
 const TASTE_TIER_ABOUT = { low: "Haiku and flash models", mid: "Sonnet, GLM and the like", high: "Opus and pro models" };
 
@@ -301,17 +305,40 @@ function tastePlacementHtml() {
       <p class="taste-quiet">A machine with under 10 GB of disk free takes no heavy worker.</p></div>`);
 }
 
-function tastePaceHtml(t) {
-  const autonomies = TASTE_AUTONOMIES.map((a) => `<button type="button" data-act="set" data-field="autonomy" data-value="${a.id}" aria-pressed="${a.id === t.autonomy}">${a.label}</button>`).join("");
-  const toggle = (field, title, about) => `<div class="taste-switch-row">
+/** A switch row for a yes-or-no field, with its tag on a project tab. */
+const tasteToggleHtml = (t, field, title, about) => `<div class="taste-switch-row">
     <button type="button" class="taste-switch" role="switch" aria-checked="${t[field]}" aria-label="${title}" data-act="toggle" data-field="${field}"><span></span></button>
     <span class="taste-switch-text"><b>${title}</b><span>${about}</span></span><span class="taste-tags">${tasteTagHtml(field)}</span></div>`;
+
+function tastePaceHtml(t) {
+  const autonomies = TASTE_AUTONOMIES.map((a) => `<button type="button" data-act="set" data-field="autonomy" data-value="${a.id}" aria-pressed="${a.id === t.autonomy}">${a.label}</button>`).join("");
   return `<section class="taste-section"><h2>Pace</h2>
     ${tasteUi.scope.kind === "orchestrator" ? tasteParallelHtml(t) : ""}
     <div class="taste-field">${tasteLabelHtml("autonomy")}<div class="taste-seg" role="group" aria-label="Autonomy">${autonomies}</div></div>
-    ${toggle("review_diffs", "Review each diff before accepting", "The Captain reads the worker's diff before merging it in.")}
-    ${toggle("second_opinion", "Second opinion on risky changes", "Another model reviews the change before it goes ahead.")}
+    ${tasteToggleHtml(t, "review_diffs", "Review each diff before accepting", "The Captain reads the worker's diff before merging it in.")}
+    ${tasteToggleHtml(t, "second_opinion", "Second opinion on risky changes", "Another model reviews the change before it goes ahead.")}
   </section>`;
+}
+
+/** What the agents bring to the user instead of deciding alone. Only the user sets it, here. A hub
+ * that predates it sends none, so there is nothing to edit. */
+function tasteEscalateHtml(t) {
+  const section = (body) => `<section class="taste-section taste-escalate"><div class="taste-heading"><h2>Escalate to me</h2><p>What the agents bring to you instead of deciding alone.</p></div>${body}</section>`;
+  if (t.escalate_over_lines == null) return section(`<p class="taste-quiet">Update pinned on the hub to choose what is escalated to you.</p>`);
+  const areas = t.escalate_areas.map((area, i) => `<li><span>${esc(area)}</span><button type="button" class="taste-icon" data-act="unarea" data-area="${i}" aria-label="Remove ${esc(area)}">${icon("trash-2")}</button></li>`).join("");
+  return section(`${tasteToggleHtml(t, "escalate_breaking_change", TASTE_FIELD_LABELS.escalate_breaking_change, "A change an older app or hub version can no longer work with.")}
+    ${tasteToggleHtml(t, "escalate_process_failure", TASTE_FIELD_LABELS.escalate_process_failure, "A step was skipped, failed or ran out of rounds.")}
+    <div class="taste-field taste-inline"><label class="taste-label"><span>${TASTE_FIELD_LABELS.escalate_over_lines}</span><input type="number" data-escalate-lines min="1" max="${TASTE_MAX_ESCALATE_LINES}" step="1" value="${t.escalate_over_lines}"></label>${tasteTagHtml("escalate_over_lines")}<span class="taste-quiet">Changed lines, not counting tests, docs and generated files.</span></div>
+    <div class="taste-field">${tasteLabelHtml("escalate_areas")}<ul class="taste-notes">${areas}</ul>
+      <form class="taste-note-form" data-area-form><input type="text" data-area-input value="${esc(tasteUi.area)}" placeholder="E.g. database migrations" aria-label="New area">
+      <button type="submit" class="primary">Add</button></form></div>`);
+}
+
+/** A typed line limit, a whole number from 1 to 100000. Anything else changes nothing. */
+function tasteEditLines(text) {
+  const n = Number(text);
+  if (text.trim() === "" || !Number.isInteger(n) || n < 1 || n > TASTE_MAX_ESCALATE_LINES) return tasteRender();
+  tasteEditField("escalate_over_lines", n);
 }
 
 function tasteSkillsHtml(t) {
@@ -396,7 +423,7 @@ function tasteRender() {
     <div class="taste-scopes"><div class="taste-seg" role="group" aria-label="Whose way of working">${tabs}</div>${scope.kind === "project" ? `<span class="taste-quiet">Inherits from Captains (all).</span>` : ""}</div>
     <div class="taste-split"><div class="taste-controls">
       <section class="taste-section"><div class="taste-heading"><h2>Profile</h2><p>Sets every field below. Changing a field makes it Custom.</p></div><div class="taste-cards">${cards}${custom}</div></section>
-      ${tasteModelsHtml(t, catalog, names)}${tastePaceHtml(t)}${tasteLimitsHtml(t)}${tastePlacementHtml()}${tasteSkillsHtml(t)}${tasteContextHtml(t)}${tasteReviewerHtml(t)}${tasteProfilesHtml(t)}
+      ${tasteModelsHtml(t, catalog, names)}${tastePaceHtml(t)}${tasteEscalateHtml(t)}${tasteLimitsHtml(t)}${tastePlacementHtml()}${tasteSkillsHtml(t)}${tasteContextHtml(t)}${tasteReviewerHtml(t)}${tasteProfilesHtml(t)}
     </div>${tastePreviewHtml(t)}</div>
     ${delegationSectionHtml()}
   </div></div>${tasteFootHtml()}`);
@@ -419,6 +446,7 @@ const TASTE_ACTS = {
   down: (b) => tasteMoveRung(b.dataset.rung, 1),
   remove: (b) => tasteEditField("ladder", tasteShown().ladder.filter((ref) => tasteRefKey(ref) !== b.dataset.rung)),
   unnote: (b) => tasteEditField("context", tasteShown().context.filter((_, i) => i !== Number(b.dataset.note))),
+  unarea: (b) => tasteEditField("escalate_areas", tasteShown().escalate_areas.filter((_, i) => i !== Number(b.dataset.area))),
   skill: (b) => tasteEditField("skills", tasteShown().skills.map((s, i) => (i === Number(b.dataset.skill) ? { ...s, enabled: !s.enabled } : s))),
   adding: () => {
     tasteUi.adding = true;
@@ -459,13 +487,16 @@ pageView.addEventListener("change", (e) => {
   if (document.body.dataset.page !== "taste") return;
   if (e.target.matches("[data-effort]")) return tasteEditEffort(e.target.dataset.effort, e.target.value || null);
   if (e.target.matches("[data-boxes-at-once]")) return tasteEditBoxes(e.target.value);
+  if (e.target.matches("[data-escalate-lines]")) return tasteEditLines(e.target.value);
   if (!e.target.value) return;
   if (e.target.matches("[data-place-add]")) tasteEditPlacement(placementAdd(tasteUi.draft.placement, e.target.dataset.placeAdd, e.target.value));
   else if (e.target.matches("[data-add-model]")) tasteEditField("ladder", [...tasteShown().ladder, tasteRefOf(e.target.value)]);
   else if (e.target.matches("[data-hard-model]")) tasteEditField("hard_model", tasteRefOf(e.target.value));
 });
 pageView.addEventListener("input", (e) => {
-  if (document.body.dataset.page === "taste" && e.target.matches("[data-note-input]")) tasteUi.note = e.target.value;
+  if (document.body.dataset.page !== "taste") return;
+  if (e.target.matches("[data-note-input]")) tasteUi.note = e.target.value;
+  else if (e.target.matches("[data-area-input]")) tasteUi.area = e.target.value;
 });
 pageView.addEventListener("submit", (e) => {
   if (document.body.dataset.page !== "taste" || !e.target.matches("[data-skill-form]")) return;
@@ -482,6 +513,14 @@ pageView.addEventListener("submit", (e) => {
   if (!note) return;
   tasteUi.note = "";
   tasteEditField("context", [...tasteShown().context, note]);
+});
+pageView.addEventListener("submit", (e) => {
+  if (document.body.dataset.page !== "taste" || !e.target.matches("[data-area-form]")) return;
+  e.preventDefault();
+  const area = tasteUi.area.trim();
+  if (!area) return;
+  tasteUi.area = "";
+  tasteEditField("escalate_areas", [...tasteShown().escalate_areas, area]);
 });
 
 /** A taste chat's session changed the tastes: the page reads them again, keeping unsaved edits. */

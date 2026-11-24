@@ -236,8 +236,8 @@ async fn end_turn(turn: Option<ExtendTurn>) {
     }
 }
 
-/// Refuses a call that changes a review setting, which only the user makes on the Way of working page, approved or
-/// not and whoever sends it. The user's own app calls the hub's SetTaste directly, so this is not in its way.
+/// Refuses a call that changes a review or escalation setting, which only the user makes on the Way of working page,
+/// approved or not and whoever sends it. The user's own app calls the hub's SetTaste directly, so this is not in its way.
 pub fn refuse_review_setting(call: &HubCall) -> Result<(), String> {
     match call {
         HubCall::SetTaste { patch, .. } => taste::refuse_review_settings(patch.review_settings()),
@@ -823,5 +823,25 @@ mod tests {
             Call::ActFor { caller, call } => assert_eq!((caller.as_str(), call["cmd"].as_str()), ("tab-a", Some("enqueue"))),
             bare => panic!("{bare:?}"),
         }
+    }
+
+    #[test]
+    fn refuse_review_setting_refuses_each_escalation_setting_alone_mixed_or_reset() {
+        use pinned_core::taste::{TasteField, TastePatch, TasteScope};
+        let scope = TasteScope::Project { repo: "github.com/acme/site".into() };
+        let set = |patch: TastePatch| HubCall::SetTaste { scope: scope.clone(), patch };
+        let patches = [
+            ("escalate_breaking_change", TasteField::EscalateBreakingChange, TastePatch { escalate_breaking_change: Some(false), ..TastePatch::default() }),
+            ("escalate_process_failure", TasteField::EscalateProcessFailure, TastePatch { escalate_process_failure: Some(false), ..TastePatch::default() }),
+            ("escalate_over_lines", TasteField::EscalateOverLines, TastePatch { escalate_over_lines: Some(750), ..TastePatch::default() }),
+            ("escalate_areas", TasteField::EscalateAreas, TastePatch { escalate_areas: Some(vec!["Billing".into()]), ..TastePatch::default() }),
+        ];
+        for (name, field, patch) in patches {
+            let refused = Err(format!("{name} is changed only by the user, on the Way of working page; nothing changed"));
+            assert_eq!(refuse_review_setting(&set(patch.clone())), refused, "{name} alone");
+            assert_eq!(refuse_review_setting(&set(TastePatch { parallel: Some(2), ..patch })), refused, "{name} with parallel");
+            assert_eq!(refuse_review_setting(&HubCall::ResetTasteField { scope: scope.clone(), field }), refused, "a reset of {name}");
+        }
+        assert_eq!(refuse_review_setting(&set(TastePatch { parallel: Some(2), ..TastePatch::default() })), Ok(()), "parallel alone is allowed");
     }
 }
