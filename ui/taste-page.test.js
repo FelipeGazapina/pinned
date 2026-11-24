@@ -918,3 +918,41 @@ test("a hub that predates worker profiles asks for an update and draws no contro
   assert.match(section, /<h2>Worker profiles<\/h2>.*<p class="taste-quiet">Update pinned on the hub to set worker profiles\.<\/p><\/section>$/s);
   assert.doesNotMatch(section, /<button|<input|<form/);
 });
+
+test("Done with a blank name keeps the form open, marks the name and adds no row", async () => {
+  const p = page({ answer: profileHub({ account: [scout], projects: {} }) });
+  await p.show();
+  await p.click(/data-act="wpadd"/);
+  assert.match(profilesSection(p.html()), /data-wp-field="name" value="" placeholder="E.g. scout" required>/);
+  p.fill("name", "   ");
+  p.fill("prompt", "You test.");
+  await p.submitProfile();
+  let section = profilesSection(p.html());
+  assert.match(section, /data-wp-field="name" value="   " placeholder="E.g. scout" required aria-invalid="true" aria-describedby="wp-name-error">/);
+  assert.match(section, /<p class="taste-error" id="wp-name-error" role="alert">Name the profile.<\/p>/);
+  assert.match(section, /<textarea data-wp-field="prompt"[^>]*>You test.<\/textarea>/, "what was typed stays");
+  assert.equal((section.match(/data-act="wpremove"/g) ?? []).length, 1, "no row was added");
+  assert.doesNotMatch(p.html(), /Unsaved changes/);
+  p.fill("name", "tester");
+  await p.submitProfile();
+  section = profilesSection(p.html());
+  assert.doesNotMatch(section, /data-wp-form|wp-name-error/);
+  assert.match(section, /aria-label="Edit tester"/);
+});
+
+test("the form takes focus when it opens, the rows' Edit waits while it is open, and focus comes back when it closes", async () => {
+  const p = page({ answer: profileHub({ account: [scout, fixer], projects: {} }) });
+  await p.show();
+  const focused = [];
+  p.context.pageView.querySelector = (selector) => ({ focus: () => focused.push(selector), scrollIntoView: () => focused.push(`view ${selector}`) });
+  await p.click(/data-act="wpadd"/);
+  assert.match(profilesSection(p.html()), /aria-label="Edit scout" disabled>/, "Edit on another row would drop what was typed");
+  await p.click(/data-act="wpcancel"/);
+  await p.click(/aria-label="Edit fixer"/);
+  await p.submitProfile();
+  await p.click(/aria-label="Edit fixer"/);
+  await p.click(/data-act="wpcancel"/);
+  const name = '[data-wp-field="name"]';
+  const opened = ["view [data-wp-form]", name];
+  assert.deepEqual(focused, [...opened, '[data-act="wpadd"]', ...opened, '[data-act="wpedit"][data-wp="1"]', ...opened, '[data-act="wpedit"][data-wp="1"]']);
+});
