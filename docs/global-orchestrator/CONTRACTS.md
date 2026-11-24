@@ -432,9 +432,9 @@ Offered to every seat (`Audience::Everyone` in `reminders.rs`), so the global or
 | Tool | Arguments | Result (tool text) |
 |---|---|---|
 | `actions` | `search` (optional: words matched against name and description) | `{"actions":[{"name":"rename_machine","class":"write","on":"hub","description":"…","args":{JSON Schema}}]}`, every wired action that is not excluded. `on` is `machine` for a `Call` (act takes `machine`) or `hub`. Read on the node from the manifest; no hub call. |
-| `act` | `action`, `args` (object, default `{}`), `request_id` (optional), `machine` (optional id or name, for an `on: machine` action) | `ActAnswer` as one line of JSON. A refusal is a tool error with its reason. |
+| `act` | `action`, `args` (object, default `{}`), `request_id` (optional), `machine` (optional id or name, for an `on: machine` action), `reason` (optional: for a confirm action, one short sentence, up to 200 characters, on why it asks, which the user reads before approving) | `ActAnswer` as one line of JSON. A refusal is a tool error with its reason. |
 
-`ProjectTool::Actions { search: Option<String> }` and `ProjectTool::Act { action, args: Value, request_id: Option<String>, machine: Option<String> }` carry them on the socket. The node sends `HubCall::Act`; without a hub it answers `this machine is not linked to a hub, which keeps the audit trail act writes`.
+`ProjectTool::Actions { search: Option<String> }` and `ProjectTool::Act { action, args: Value, request_id: Option<String>, machine: Option<String>, reason: Option<String> }` carry them on the socket, and `AgentAct` takes the same `reason`. The node sends `HubCall::Act`; without a hub it answers `this machine is not linked to a hub, which keeps the audit trail act writes`.
 
 `ActAnswer`, tagged by `outcome`:
 
@@ -453,7 +453,7 @@ Offered to every seat (`Audience::Everyone` in `reminders.rs`), so the global or
 1. The caller is the tab `act.tab` in the tabs the origin machine last reported. None: refused, `<machine> runs no session <tab>`. The hub reads the role and the Claude session from that `TabView`; the node sends neither.
 2. Role: `global_orchestrator` (`orchestrator_global`), `captain` (`Role::Orchestrator`), `worker` (`Role::Worker`), `taste_chat`, `workflow` (a `connector` tab), else `session`.
 3. Refusals, in order: no such action (`no action <name>; call actions to list them`), excluded (`<name> is not open to agents: <about>`), not wired (`<name> is a <class> action that is not wired yet`), a secret in the arguments (13.7), arguments that don't parse (`<name>: <serde error>`) or that the action's check refuses (13.1), a `starts_work` action on another machine (`<name> starts work only on this session's own machine for now`).
-4. `confirm`: a row in `agent_confirmations`, unique per (account, machine, tab, action, `request_id`), and `ToClient::Confirmations` to the account's clients. A `machine` named for an action on a machine is resolved now and kept as its id, so a later rename can't move the action. Answers `pending`.
+4. `confirm`: a row in `agent_confirmations`, unique per (account, machine, tab, action, `request_id`), and `ToClient::Confirmations` to the account's clients. A `machine` named for an action on a machine is resolved now and kept as its id, so a later rename can't move the action. The act's `reason` is kept cleaned: on one line without invisible characters (`pinned_lines::flat`), secrets masked (`surface::mask_secrets`), then cut at 200 characters with "…"; a reason that is blank after that is none. Answers `pending`. An act that runs at once or is refused ignores `reason`.
 5. `read` / `write`:
    - `HubCall`: `Hub::hub_call(account, call)`, the path a signed-in client's call takes.
    - `Call` on the origin machine (no `machine`, or `machine` naming the origin): `Call::ActFor { caller: act.tab, call }` to the origin machine.
@@ -463,7 +463,7 @@ Offered to every seat (`Audience::Everyone` in `reminders.rs`), so the global or
 
 The audit row of something that already ran is written after it runs. When that write fails, the hub logs it and still answers, so the session does not run the action twice.
 
-**Audit trail.** Table `agent_actions (id uuid, account, machine, tab, role, action, args text, outcome text, detail text, request_id text, at timestamptz)`, indexed on (account, at). `args` is `surface::summary`: the arguments as compact JSON, secrets replaced by `[hidden]`, strings cut at 200 characters, the whole at 1000. `outcome` is `done`, `failed`, `refused`, `pending`, `approved` or `denied`. `detail` is the error or refusal. For an act that loosened a session's permissions it says so (`surface::widening`): `loosened permissions: <tab> now skips its permission prompts` for `set_bypass` with `on: true`, and `loosened permissions: the new tab in <path> skips its permission prompts` for `open_tab` with `bypass`.
+**Audit trail.** Table `agent_actions (id uuid, account, machine, tab, role, action, args text, outcome text, detail text, request_id text, at timestamptz)`, indexed on (account, at). `args` is `surface::summary`: the arguments as compact JSON, secrets replaced by `[hidden]`, strings cut at 200 characters, the whole at 1000. `outcome` is `done`, `failed`, `refused`, `pending`, `approved` or `denied`. `detail` is the error or refusal. A held act's `pending` row has `Reason: <reason>`, its cleaned reason, or `""` when it gave none; the `approved`, `denied`, `done` and `failed` rows never carry it. For an act that loosened a session's permissions it says so (`surface::widening`): `loosened permissions: <tab> now skips its permission prompts` for `set_bypass` with `on: true`, and `loosened permissions: the new tab in <path> skips its permission prompts` for `open_tab` with `bypass`.
 
 `AuditEntry` (outbound root):
 
@@ -475,7 +475,7 @@ The audit row of something that already ran is written after it runs. When that 
 
 ### 13.5 Confirmations
 
-Table `agent_confirmations (id uuid, account, machine, tab, session text, role, title text, action, args jsonb, request_id text, created_at, decided_at, approved bool, outcome text, notified bool, target text, result jsonb)`, unique (account, machine, tab, action, request_id). It lives on the hub, so a node restart loses nothing.
+Table `agent_confirmations (id uuid, account, machine, tab, session text, role, title text, action, args jsonb, request_id text, created_at, decided_at, approved bool, outcome text, notified bool, target text, result jsonb, reason text)`, unique (account, machine, tab, action, request_id). It lives on the hub, so a node restart loses nothing.
 
 `Confirmation` (outbound root):
 
@@ -483,7 +483,9 @@ Table `agent_confirmations (id uuid, account, machine, tab, session text, role, 
 {"id":"<uuid>","at":1794249424,"machine":"<id>","machine_name":"MacBook","tab":"tab-2b-7","title":"Clean up old machines","role":"worker","action":"remove_machine","about":"Removes a machine from the account…","args":{"id":"<machine id>"},"request_id":"r-9","decision":"approved","decided_at":1794249500,"outcome":"done"}
 ```
 
-`decision`, `decided_at` and `outcome` are absent while it waits. `target` (the machine's id) is present when `act` named another `machine` for an action on a machine; approving runs it there. The table also keeps the redacted result for the notice.
+`decision`, `decided_at` and `outcome` are absent while it waits. `target` (the machine's id) is present when `act` named another `machine` for an action on a machine; approving runs it there. `reason` is the act's cleaned reason (13.4 step 4), absent when it gave none; the nullable `reason` column keeps it, and a row from before the column reads as none. The table also keeps the redacted result for the notice.
+
+The app draws a held `set_taste` or `reset_taste_field` as a proposal, on the Needs you card and on the Waiting on you row of Agent activity, in place of the raw arguments: a title that names the scope ("Change the way of working of Captains (all)", "of the Orchestrator" or "of Captain <the repo's last segment>"), one row per field, `<label>: <now> → <next>`, where `now` is the scope's current value from `get_tastes` ("unknown" until it is read) and `next` is the proposed value, or for a reset "Inherits <value> from Captains (all)" on a project and "Built-in default" on the Orchestrator or Captains, then `Reason: <reason>` when there is one, and the same Approve and Deny. A field the page has no words for shows by its JSON name and value. `tasteProposal` in `ui/taste.js` works out the rows; the hub checks the patch again when the owner approves, so a stale card cannot apply a bad taste. Every other action keeps its arguments as JSON and shows its reason too.
 
 | Wire | From | Answer |
 |---|---|---|
