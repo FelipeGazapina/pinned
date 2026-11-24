@@ -1260,6 +1260,8 @@ pub struct Machine {
     /// The sessions the hub or their folders kept open, and when: they are not looked at again
     /// for `auto_archive::RETRY_SECS`.
     auto_archive_kept: Mutex<HashMap<String, Instant>>,
+    /// From what context size the app offers to compact a session here.
+    compaction: Mutex<crate::compaction::Settings>,
     /// `~/.pinned/orquestrador`, the global orchestrator's folder and the key of the global memory.
     global_dir: PathBuf,
     /// Every message handed to a Capitão or to the global orchestrator here. Never locked while
@@ -1480,6 +1482,7 @@ impl Machine {
             global: Mutex::new(global::Settings::load(dir.as_deref())),
             auto_archive: Mutex::new(crate::auto_archive::Settings::load(dir.as_deref())),
             auto_archive_kept: Mutex::default(),
+            compaction: Mutex::new(crate::compaction::Settings::load(dir.as_deref())),
             global_dir,
             turns: sent.turns(),
             sent: Mutex::new(sent),
@@ -1785,6 +1788,8 @@ impl Machine {
             Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
             Call::AutoArchiveSettings => json(self.auto_archive_settings()),
             Call::SetAutoArchiveSettings { settings } => json(self.set_auto_archive_settings(settings)?),
+            Call::CompactionSettings => json(self.compaction_settings()),
+            Call::SetCompactionSettings { settings } => json(self.set_compaction_settings(settings)?),
             Call::SetBackground { on } => json(self.set_background(on)?),
             Call::ReadSession { tab, items } => self.read_session_here(&tab, read_items(items)).ok_or_else(|| format!("no session {tab} on this machine")),
             Call::RepoLook { path, look } => self.repo_look(&path, &look),
@@ -3615,6 +3620,17 @@ impl Machine {
         settings.save(self.orchestration_dir.as_deref())?;
         *self.auto_archive.lock().unwrap() = settings;
         self.auto_archive_kept.lock().unwrap().clear();
+        Ok(settings)
+    }
+
+    pub fn compaction_settings(&self) -> crate::compaction::Settings {
+        *self.compaction.lock().unwrap()
+    }
+
+    pub fn set_compaction_settings(&self, settings: crate::compaction::Settings) -> Result<crate::compaction::Settings, String> {
+        settings.check()?;
+        settings.save(self.orchestration_dir.as_deref())?;
+        *self.compaction.lock().unwrap() = settings;
         Ok(settings)
     }
 
@@ -14904,6 +14920,25 @@ while True:
     }
 
     #[test]
+    fn compaction_settings_refuse_a_threshold_under_10000_and_survive_a_restart() {
+        use crate::compaction::{Settings, SETTINGS_FILE};
+        let dir = temp("compaction-settings");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        assert_eq!(m.call(Call::CompactionSettings), Ok(json!({ "offer_tokens": 200000 })));
+        let low = Settings { offer_tokens: Some(9_999) };
+        assert_eq!(m.call(Call::SetCompactionSettings { settings: low }), Err("offer_tokens must be at least 10000 tokens, or null for never".into()));
+        assert!(!dir.join("config").join(SETTINGS_FILE).exists(), "a refused threshold saves nothing");
+        assert_eq!(m.call(Call::CompactionSettings), Ok(json!({ "offer_tokens": 200000 })));
+        let fifty = Settings { offer_tokens: Some(50_000) };
+        assert_eq!(m.call(Call::SetCompactionSettings { settings: fifty }), Ok(json!({ "offer_tokens": 50000 })));
+        assert_eq!(m.call(Call::CompactionSettings), Ok(json!({ "offer_tokens": 50000 })));
+        drop(m);
+        let again = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        assert_eq!(again.compaction_settings(), fifty, "it survives a restart");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_worker_with_a_task_still_running_is_not_archived() {
         use crate::delegate::{Access, Claim, Mode, NewTask, Parent};
         let folder = temp("auto-archive-child-folder");
@@ -16109,6 +16144,20 @@ Have another model review a risky change before it goes ahead.";
         let report = act("save_skill", json!({ "text": "# nothing", "copies": [{ "dir": dir.join("no-such-skill").display().to_string(), "since": "abc" }] })).unwrap();
         assert_eq!(report["copies"][0]["outcome"], "missing", "a save reaches the skills writer, which finds no such copy: {report}");
         assert!(act("read_skill", json!({ "dir": dir.join("no-such-skill").display().to_string() })).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_agent_reads_and_sets_the_compaction_threshold_through_the_surface() {
+        let dir = temp("act-compaction");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let caller = m.open_tab(None, false).unwrap();
+        let act = |action: &str, args: Value| act_as(&m, &caller, action, args);
+        assert_eq!(act("compaction_settings", json!({})), Ok(json!({ "offer_tokens": 200000 })));
+        assert_eq!(act("set_compaction_settings", json!({ "settings": { "offer_tokens": null } })), Ok(json!({ "offer_tokens": null })));
+        assert_eq!(act("compaction_settings", json!({})), Ok(json!({ "offer_tokens": null })), "the read sees what the write saved");
+        assert_eq!(act("set_compaction_settings", json!({ "settings": { "offer_tokens": 5000 } })), Err("offer_tokens must be at least 10000 tokens, or null for never".into()));
+        assert_eq!(m.compaction_settings(), crate::compaction::Settings { offer_tokens: None }, "a refused act saves nothing");
         let _ = std::fs::remove_dir_all(dir);
     }
 

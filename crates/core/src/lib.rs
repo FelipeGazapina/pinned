@@ -11,6 +11,7 @@ pub mod classify;
 pub mod claude_models;
 pub mod cli;
 pub mod commands;
+pub mod compaction;
 pub mod connectors;
 pub mod convex;
 pub mod delegate;
