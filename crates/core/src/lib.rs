@@ -27,6 +27,7 @@ pub mod history;
 pub mod hooks;
 pub mod ideas;
 pub mod ipc;
+pub mod jobs;
 pub mod linear;
 pub mod link;
 pub mod load;
