@@ -3,7 +3,7 @@
 //! sends a call of any of them to the machine as `agent::Message::Team`, which
 //! `Machine::team_tool` (`machine/team.rs`) hands to the tool's own module.
 //!
-//! The room tools are offered. Each other unit turns its own tools on in its own `*_offered`
+//! The room tools and the board tools are offered. Each other unit turns its own tools on in its own `*_offered`
 //! function below, and fills in its machine side:
 //! - `task_fix`: U9 (`machine/send_back.rs`)
 //! - `feature_map_read`, `feature_map_set`: U3 (`machine/feature_map.rs`)
@@ -114,6 +114,12 @@ pub struct RoomOpen {
     pub seats: Vec<RoomSeatSpec>,
     #[serde(default, rename = "postCap", skip_serializing_if = "Option::is_none")]
     pub post_cap: Option<u32>,
+    /// The seats debate in this many rounds, each posting once a round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rounds: Option<u32>,
+    /// The seat that writes the synthesis after the last round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis: Option<String>,
 }
 
 /// `room_post`: say something in the room. `to` names seats, or `captain`. Empty wakes every other seat.
@@ -251,14 +257,13 @@ fn profile_propose_offered(_seat: &TeamSeat) -> bool {
     false
 }
 
-/// U11 turns `board_note` on.
-fn board_note_offered(_seat: &TeamSeat) -> bool {
-    false
+/// The Captain and a worker share the board, as they share a room. A plain thread does not.
+fn board_note_offered(seat: &TeamSeat) -> bool {
+    room_post_offered(seat)
 }
 
-/// U11 turns `board_read` on.
-fn board_read_offered(_seat: &TeamSeat) -> bool {
-    false
+fn board_read_offered(seat: &TeamSeat) -> bool {
+    room_post_offered(seat)
 }
 
 /// U12 turns `ask_worker` on.
@@ -305,7 +310,7 @@ pub fn definition(name: &str) -> Option<Value> {
         "board_read" => ("Read your Captain's board, or one task's part of it.", json!({ "taskId": task_id }), &[]),
         "ask_worker" => ("Ask another worker of your chain a question.", json!({ "taskId": task_id, "question": { "type": "string" } }), &["taskId", "question"]),
         "room_open" => (
-            "Open one room and seat workers who must read each other while they work. Each seat counts as a worker. If the last seat does not fit, nothing opens.",
+            "Open one room and seat workers who must read each other while they work. Each seat counts as a worker. If the last seat does not fit, nothing opens. With rounds, each seat posts once per round, and after the last round the synthesis seat posts once more to close the room.",
             json!({
                 "brief": { "type": "string" },
                 "seats": { "type": "array", "items": { "type": "object", "properties": {
@@ -315,7 +320,9 @@ pub fn definition(name: &str) -> Option<Value> {
                     "tools": { "type": "array", "items": { "type": "string" } },
                     "isolation": { "type": "string", "enum": ["shared", "worktree"] }
                 }, "required": ["name"] } },
-                "postCap": { "type": "integer", "minimum": 1, "maximum": 200 }
+                "postCap": { "type": "integer", "minimum": 1, "maximum": 200 },
+                "rounds": { "type": "integer", "minimum": 1, "maximum": crate::room::MAX_ROUNDS },
+                "synthesis": { "type": "string", "description": "The name of the seat that writes the synthesis after the last round. Needs rounds." }
             }),
             &["brief", "seats"],
         ),
@@ -341,15 +348,15 @@ mod tests {
     }
 
     #[test]
-    fn only_the_room_tools_are_offered() {
+    fn only_the_board_and_room_tools_are_offered() {
         let names = |list: &[&str]| list.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
         assert_eq!(offered_names(TeamSeat::default()), Vec::<String>::new());
         assert_eq!(offered_names(TeamSeat { captain: true, child: true, ..TeamSeat::default() }), Vec::<String>::new());
-        assert_eq!(offered_names(TeamSeat { captain: true, ..TeamSeat::default() }), names(&["room_open", "room_post", "room_read", "room_close"]));
-        assert_eq!(offered_names(TeamSeat { worker: true, ..TeamSeat::default() }), names(&["room_post", "room_read", "room_done"]));
-        assert_eq!(offered_names(TeamSeat { worker: true, child: true, ..TeamSeat::default() }), names(&["room_post", "room_read", "room_done"]));
+        assert_eq!(offered_names(TeamSeat { captain: true, ..TeamSeat::default() }), names(&["board_note", "board_read", "room_open", "room_post", "room_read", "room_close"]));
+        assert_eq!(offered_names(TeamSeat { worker: true, ..TeamSeat::default() }), names(&["board_note", "board_read", "room_post", "room_read", "room_done"]));
+        assert_eq!(offered_names(TeamSeat { worker: true, child: true, ..TeamSeat::default() }), names(&["board_note", "board_read", "room_post", "room_read", "room_done"]));
         let captain = offered_names(TeamSeat { captain: true, ..TeamSeat::default() });
-        for name in ["task_fix", "feature_map_read", "feature_map_set", "profile_propose", "board_note", "board_read", "ask_worker"] {
+        for name in ["task_fix", "feature_map_read", "feature_map_set", "profile_propose", "ask_worker"] {
             assert!(!captain.iter().any(|offered| offered == name), "{name} is offered");
         }
     }
@@ -370,6 +377,7 @@ mod tests {
             (json!({ "taskId": "t1" }), "board_read"),
             (json!({ "taskId": "t1", "question": "which branch?" }), "ask_worker"),
             (json!({ "brief": "Fix it.", "seats": [{ "name": "Ana" }, { "name": "Beto" }] }), "room_open"),
+            (json!({ "brief": "Fix it.", "seats": [{ "name": "Ana" }, { "name": "Beto" }], "rounds": 2, "synthesis": "Ana" }), "room_open"),
             (json!({ "text": "hi" }), "room_post"),
             (json!({}), "room_read"),
             (json!({ "summary": "done" }), "room_done"),
@@ -383,5 +391,12 @@ mod tests {
             assert_eq!(serde_json::from_value::<TeamTool>(back).unwrap(), tool, "{name} round-trips");
         }
         assert_eq!(request("task_fix", &json!({})).unwrap_err(), "task_fix: missing field `taskId`");
+        let open = definition("room_open").unwrap();
+        assert_eq!(open["inputSchema"]["properties"]["rounds"]["maximum"], 10);
+        assert_eq!(open["inputSchema"]["properties"]["synthesis"]["type"], "string");
+        let debate = request("room_open", &json!({ "brief": "Fix it.", "seats": [{ "name": "Ana" }, { "name": "Beto" }], "rounds": 2, "synthesis": "Ana" })).unwrap();
+        assert!(matches!(debate, TeamTool::RoomOpen(RoomOpen { rounds: Some(2), synthesis: Some(ref seat), .. }) if seat == "Ana"));
+        let plain = request("room_open", &json!({ "brief": "Fix it.", "seats": [{ "name": "Ana" }, { "name": "Beto" }] })).unwrap();
+        assert!(matches!(plain, TeamTool::RoomOpen(RoomOpen { rounds: None, synthesis: None, .. })));
     }
 }
