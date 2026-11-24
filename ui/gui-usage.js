@@ -365,13 +365,15 @@ function threadsHtml(buckets) {
   const many = selected.length > 1;
   const records = selected.flatMap((m) => usageState.envs.get(m)?.threads ?? []).filter((r) => inWindow.has(bucketOf(days, r.last_at)))
     .sort((a, b) => (a.cost_usd == null) - (b.cost_usd == null) || (b.cost_usd ?? 0) - (a.cost_usd ?? 0) || b.last_at - a.last_at);
-  const muted = (text) => `<span class="muted">${text}</span>`;
-  const rows = records.map((r) => `<tr><td>${esc(r.title || "New thread")}</td><td title="${esc(r.project)}">${esc(String(r.project).split(/[\\/]/).filter(Boolean).pop() || "/")}</td>${
-    many ? `<td>${esc(machineName(r.machine))}</td>` : ""}<td class="num fig">${esc(r.turns)}</td><td class="num fig">${r.active_ms == null ? muted("—") : esc(durationLabel(r.active_ms / 1000))}</td>
-    <td class="num fig strong">${r.cost_usd == null ? muted("Unknown") : esc(costLabel(r.cost_usd))}</td></tr>`).join("");
-  const cols = ["Thread", "Project", ...(many ? ["Machine"] : []), "Turns", "Active time", "Cost"];
-  return `<section class="breakdown"><h2>Threads</h2><div class="table-region" role="region" aria-label="Cost by thread" tabindex="0"><table class="by-time"><thead><tr>${
-    cols.map((c, i) => `<th${i >= cols.length - 3 ? ` class="num"` : ""}>${c}</th>`).join("")}</tr></thead>
+  const rows = records.map((r) => {
+    const title = r.title || "New thread";
+    return `<tr><td title="${esc(title)}"><span class="clip">${esc(title)}</span></td><td class="opt" title="${esc(r.project)}">${esc(String(r.project).split(/[\\/]/).filter(Boolean).pop() || "/")}</td>${
+      many ? `<td class="opt">${esc(machineName(r.machine))}</td>` : ""}<td class="num fig">${esc(r.turns)}</td>${r.active_ms == null ? `<td class="num fig muted">—</td>` : `<td class="num fig">${esc(durationLabel(r.active_ms / 1000))}</td>`}
+      ${r.cost_usd == null ? `<td class="num fig muted">Unknown</td>` : `<td class="num fig strong">${esc(costLabel(r.cost_usd))}</td>`}</tr>`;
+  }).join("");
+  const cols = [["Thread", ""], ["Project", "opt"], ...(many ? [["Machine", "opt"]] : []), ["Turns", "num"], ["Active time", "num"], ["Cost", "num"]];
+  return `<section class="breakdown"><h2>Threads</h2><div class="table-region" role="region" aria-label="Cost by thread" tabindex="0"><table class="by-time threads"><thead><tr>${
+    cols.map(([name, cls]) => `<th${cls ? ` class="${cls}"` : ""}>${name}</th>`).join("")}</tr></thead>
     <tbody>${rows || `<tr class="empty"><td colspan="${cols.length}">No saved threads in this window.</td></tr>`}</tbody></table></div></section>`;
 }
 

@@ -65,9 +65,9 @@ test("each figure reads as the tab showed it, and an unknown one says so", () =>
   const [known, blank] = rowsOf(html);
   assert.equal(known, "Thread known site 4 2m $3.00");
   assert.equal(blank, "New thread docs 2 — Unknown");
-  assert.match(html, /<td title="\/w\/site">site<\/td>/, "the project shows its folder, with the whole path on hover");
-  assert.match(html, /<span class="muted">Unknown<\/span>/);
-  assert.match(html, /<span class="muted">—<\/span>/);
+  assert.match(html, /<td class="opt" title="\/w\/site">site<\/td>/, "the project shows its folder, with the whole path on hover");
+  assert.match(html, /<td class="num fig muted">Unknown<\/td>/);
+  assert.match(html, /<td class="num fig muted">—<\/td>/);
   assert.equal(rowsOf(page({ threads: { macbook: [saved("tiny", { cost_usd: 0.004 })] } }))[0], "Thread tiny site 2 2m <$0.01");
 });
 
@@ -100,6 +100,18 @@ test("a title and a project are escaped", () => {
   assert.doesNotMatch(html, /<img|<b>/);
   assert.match(html, /&#60;img src=x onerror=&#34;alert\(1\)&#34;&#62;/);
   assert.match(html, /title="\/w\/&#60;b&#62;&#34;q&#34;"/);
+});
+
+test("a long title is cut short with the whole of it on hover, and a phone leaves out the project and machine", () => {
+  const long = "Rework the onboarding flow so a new account lands on its first project with the sample data loaded";
+  const html = page({ threads: { macbook: [saved("long", { title: long })], macmini: [] } });
+  assert.match(html, new RegExp(`<td title="${long}"><span class="clip">${long}</span></td>`));
+  assert.match(html, /<table class="by-time threads">/);
+  assert.match(html, /<th class="opt">Project<\/th><th class="opt">Machine<\/th>/);
+  assert.match(html, /<td class="opt" title="\/w\/site">site<\/td><td class="opt">MacBook<\/td>/);
+  const css = read("gui-usage.css");
+  assert.match(css, /\.usage table\.threads \.clip \{[^}]*max-width: [^;]+; overflow: hidden; text-overflow: ellipsis;/);
+  assert.match(css, /@media \(max-width: 639px\) \{\n  \.usage table\.threads \.opt \{ display: none; \}/);
 });
 
 test("the Cost view alone adds the Threads section", () => {
