@@ -2380,6 +2380,13 @@ pub trait Storage: Send + Sync {
     fn save_jobs(&self, _bytes: &[u8]) -> Result<(), String> {
         Ok(())
     }
+    /// Lines (`crate::jobs::Line`), kept beside the store and never sent to apps. The default keeps none.
+    fn load_lines(&self) -> Option<Vec<u8>> {
+        None
+    }
+    fn save_lines(&self, _bytes: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 pub struct FileStorage {
@@ -2472,6 +2479,14 @@ impl Storage for FileStorage {
 
     fn save_jobs(&self, bytes: &[u8]) -> Result<(), String> {
         replace_file(&self.dir, "jobs.json", bytes)
+    }
+
+    fn load_lines(&self) -> Option<Vec<u8>> {
+        std::fs::read(self.dir.join("lines.json")).ok()
+    }
+
+    fn save_lines(&self, bytes: &[u8]) -> Result<(), String> {
+        replace_file(&self.dir, "lines.json", bytes)
     }
 
     fn claim_fire(&self, workflow: &str, key: &str, claimer: &str, retry: bool) -> Result<bool, String> {
