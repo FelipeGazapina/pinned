@@ -3,7 +3,7 @@
 //! sends a call of any of them to the machine as `agent::Message::Team`, which
 //! `Machine::team_tool` (`machine/team.rs`) hands to the tool's own module.
 //!
-//! The room tools are offered. Each other unit turns its own tools on in its own `*_offered`
+//! The room tools and the board tools are offered. Each other unit turns its own tools on in its own `*_offered`
 //! function below, and fills in its machine side:
 //! - `task_fix`: U9 (`machine/send_back.rs`)
 //! - `feature_map_read`, `feature_map_set`: U3 (`machine/feature_map.rs`)
@@ -257,14 +257,13 @@ fn profile_propose_offered(_seat: &TeamSeat) -> bool {
     false
 }
 
-/// U11 turns `board_note` on.
-fn board_note_offered(_seat: &TeamSeat) -> bool {
-    false
+/// The Captain and a worker share the board, as they share a room. A plain thread does not.
+fn board_note_offered(seat: &TeamSeat) -> bool {
+    room_post_offered(seat)
 }
 
-/// U11 turns `board_read` on.
-fn board_read_offered(_seat: &TeamSeat) -> bool {
-    false
+fn board_read_offered(seat: &TeamSeat) -> bool {
+    room_post_offered(seat)
 }
 
 /// U12 turns `ask_worker` on.
@@ -349,15 +348,15 @@ mod tests {
     }
 
     #[test]
-    fn only_the_room_tools_are_offered() {
+    fn only_the_board_and_room_tools_are_offered() {
         let names = |list: &[&str]| list.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
         assert_eq!(offered_names(TeamSeat::default()), Vec::<String>::new());
         assert_eq!(offered_names(TeamSeat { captain: true, child: true, ..TeamSeat::default() }), Vec::<String>::new());
-        assert_eq!(offered_names(TeamSeat { captain: true, ..TeamSeat::default() }), names(&["room_open", "room_post", "room_read", "room_close"]));
-        assert_eq!(offered_names(TeamSeat { worker: true, ..TeamSeat::default() }), names(&["room_post", "room_read", "room_done"]));
-        assert_eq!(offered_names(TeamSeat { worker: true, child: true, ..TeamSeat::default() }), names(&["room_post", "room_read", "room_done"]));
+        assert_eq!(offered_names(TeamSeat { captain: true, ..TeamSeat::default() }), names(&["board_note", "board_read", "room_open", "room_post", "room_read", "room_close"]));
+        assert_eq!(offered_names(TeamSeat { worker: true, ..TeamSeat::default() }), names(&["board_note", "board_read", "room_post", "room_read", "room_done"]));
+        assert_eq!(offered_names(TeamSeat { worker: true, child: true, ..TeamSeat::default() }), names(&["board_note", "board_read", "room_post", "room_read", "room_done"]));
         let captain = offered_names(TeamSeat { captain: true, ..TeamSeat::default() });
-        for name in ["task_fix", "feature_map_read", "feature_map_set", "profile_propose", "board_note", "board_read", "ask_worker"] {
+        for name in ["task_fix", "feature_map_read", "feature_map_set", "profile_propose", "ask_worker"] {
             assert!(!captain.iter().any(|offered| offered == name), "{name} is offered");
         }
     }
