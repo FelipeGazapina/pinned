@@ -10581,6 +10581,35 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "escalate_breaking_change": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_process_failure": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_over_lines": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "escalate_areas": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
               }
             }
           },
@@ -10714,7 +10743,11 @@
               "box_budget_cents",
               "placement",
               "box_size",
-              "boxes_at_once"
+              "boxes_at_once",
+              "escalate_breaking_change",
+              "escalate_process_failure",
+              "escalate_over_lines",
+              "escalate_areas"
             ]
           },
           "ReviewerPatch": {
@@ -10920,7 +10953,15 @@
                   "budget_cents": 0,
                   "time_limit_min": 480,
                   "box_budget_cents": 0,
-                  "box_size": null
+                  "box_size": null,
+                  "escalate_breaking_change": true,
+                  "escalate_process_failure": true,
+                  "escalate_over_lines": 500,
+                  "escalate_areas": [
+                    "Release and version bumps",
+                    "CI and deploy config",
+                    "Sign-in, tokens and secrets"
+                  ]
                 }
               },
               "captains": {
@@ -10953,7 +10994,15 @@
                   "budget_cents": 0,
                   "time_limit_min": 480,
                   "box_budget_cents": 0,
-                  "box_size": null
+                  "box_size": null,
+                  "escalate_breaking_change": true,
+                  "escalate_process_failure": true,
+                  "escalate_over_lines": 500,
+                  "escalate_areas": [
+                    "Release and version bumps",
+                    "CI and deploy config",
+                    "Sign-in, tokens and secrets"
+                  ]
                 }
               },
               "projects": {
@@ -11145,6 +11194,35 @@
                   }
                 ],
                 "default": null
+              },
+              "escalate_breaking_change": {
+                "description": "Escalate to the user a change that breaks an older version.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_process_failure": {
+                "description": "Escalate to the user a run whose process did not work as designed.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_over_lines": {
+                "description": "Escalate to the user a change past this many changed lines, not counting tests, docs and\ngenerated files. 1 to 100000.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 500
+              },
+              "escalate_areas": {
+                "description": "Areas whose changes always go to the user, as free text.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [
+                  "Release and version bumps",
+                  "CI and deploy config",
+                  "Sign-in, tokens and secrets"
+                ]
               }
             },
             "required": [
@@ -11163,7 +11241,11 @@
               "budget_cents",
               "time_limit_min",
               "box_budget_cents",
-              "box_size"
+              "box_size",
+              "escalate_breaking_change",
+              "escalate_process_failure",
+              "escalate_over_lines",
+              "escalate_areas"
             ]
           },
           "Reviewer": {
@@ -23961,6 +24043,35 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "escalate_breaking_change": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_process_failure": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_over_lines": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "escalate_areas": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
               }
             }
           },
@@ -24089,7 +24200,11 @@
               "box_budget_cents",
               "placement",
               "box_size",
-              "boxes_at_once"
+              "boxes_at_once",
+              "escalate_breaking_change",
+              "escalate_process_failure",
+              "escalate_over_lines",
+              "escalate_areas"
             ]
           },
           "ReviewerPatch": {
@@ -24290,7 +24405,15 @@
                   "budget_cents": 0,
                   "time_limit_min": 480,
                   "box_budget_cents": 0,
-                  "box_size": null
+                  "box_size": null,
+                  "escalate_breaking_change": true,
+                  "escalate_process_failure": true,
+                  "escalate_over_lines": 500,
+                  "escalate_areas": [
+                    "Release and version bumps",
+                    "CI and deploy config",
+                    "Sign-in, tokens and secrets"
+                  ]
                 }
               },
               "captains": {
@@ -24323,7 +24446,15 @@
                   "budget_cents": 0,
                   "time_limit_min": 480,
                   "box_budget_cents": 0,
-                  "box_size": null
+                  "box_size": null,
+                  "escalate_breaking_change": true,
+                  "escalate_process_failure": true,
+                  "escalate_over_lines": 500,
+                  "escalate_areas": [
+                    "Release and version bumps",
+                    "CI and deploy config",
+                    "Sign-in, tokens and secrets"
+                  ]
                 }
               },
               "projects": {
@@ -24505,6 +24636,35 @@
                   }
                 ],
                 "default": null
+              },
+              "escalate_breaking_change": {
+                "description": "Escalate to the user a change that breaks an older version.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_process_failure": {
+                "description": "Escalate to the user a run whose process did not work as designed.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_over_lines": {
+                "description": "Escalate to the user a change past this many changed lines, not counting tests, docs and\ngenerated files. 1 to 100000.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 500
+              },
+              "escalate_areas": {
+                "description": "Areas whose changes always go to the user, as free text.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [
+                  "Release and version bumps",
+                  "CI and deploy config",
+                  "Sign-in, tokens and secrets"
+                ]
               }
             }
           },
@@ -33790,6 +33950,35 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "escalate_breaking_change": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_process_failure": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_over_lines": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "escalate_areas": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
               }
             }
           },
@@ -33954,7 +34143,11 @@
               "box_budget_cents",
               "placement",
               "box_size",
-              "boxes_at_once"
+              "boxes_at_once",
+              "escalate_breaking_change",
+              "escalate_process_failure",
+              "escalate_over_lines",
+              "escalate_areas"
             ]
           },
           "ReviewerPatch": {
@@ -34160,7 +34353,15 @@
                   "budget_cents": 0,
                   "time_limit_min": 480,
                   "box_budget_cents": 0,
-                  "box_size": null
+                  "box_size": null,
+                  "escalate_breaking_change": true,
+                  "escalate_process_failure": true,
+                  "escalate_over_lines": 500,
+                  "escalate_areas": [
+                    "Release and version bumps",
+                    "CI and deploy config",
+                    "Sign-in, tokens and secrets"
+                  ]
                 }
               },
               "captains": {
@@ -34193,7 +34394,15 @@
                   "budget_cents": 0,
                   "time_limit_min": 480,
                   "box_budget_cents": 0,
-                  "box_size": null
+                  "box_size": null,
+                  "escalate_breaking_change": true,
+                  "escalate_process_failure": true,
+                  "escalate_over_lines": 500,
+                  "escalate_areas": [
+                    "Release and version bumps",
+                    "CI and deploy config",
+                    "Sign-in, tokens and secrets"
+                  ]
                 }
               },
               "projects": {
@@ -34385,6 +34594,35 @@
                   }
                 ],
                 "default": null
+              },
+              "escalate_breaking_change": {
+                "description": "Escalate to the user a change that breaks an older version.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_process_failure": {
+                "description": "Escalate to the user a run whose process did not work as designed.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_over_lines": {
+                "description": "Escalate to the user a change past this many changed lines, not counting tests, docs and\ngenerated files. 1 to 100000.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 500
+              },
+              "escalate_areas": {
+                "description": "Areas whose changes always go to the user, as free text.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [
+                  "Release and version bumps",
+                  "CI and deploy config",
+                  "Sign-in, tokens and secrets"
+                ]
               }
             },
             "required": [
@@ -34403,7 +34641,11 @@
               "budget_cents",
               "time_limit_min",
               "box_budget_cents",
-              "box_size"
+              "box_size",
+              "escalate_breaking_change",
+              "escalate_process_failure",
+              "escalate_over_lines",
+              "escalate_areas"
             ]
           },
           "Reviewer": {
@@ -44085,6 +44327,35 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "escalate_breaking_change": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_process_failure": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_over_lines": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "escalate_areas": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
               }
             }
           },
@@ -44244,7 +44515,11 @@
               "box_budget_cents",
               "placement",
               "box_size",
-              "boxes_at_once"
+              "boxes_at_once",
+              "escalate_breaking_change",
+              "escalate_process_failure",
+              "escalate_over_lines",
+              "escalate_areas"
             ]
           },
           "ReviewerPatch": {
@@ -44445,7 +44720,15 @@
                   "budget_cents": 0,
                   "time_limit_min": 480,
                   "box_budget_cents": 0,
-                  "box_size": null
+                  "box_size": null,
+                  "escalate_breaking_change": true,
+                  "escalate_process_failure": true,
+                  "escalate_over_lines": 500,
+                  "escalate_areas": [
+                    "Release and version bumps",
+                    "CI and deploy config",
+                    "Sign-in, tokens and secrets"
+                  ]
                 }
               },
               "captains": {
@@ -44478,7 +44761,15 @@
                   "budget_cents": 0,
                   "time_limit_min": 480,
                   "box_budget_cents": 0,
-                  "box_size": null
+                  "box_size": null,
+                  "escalate_breaking_change": true,
+                  "escalate_process_failure": true,
+                  "escalate_over_lines": 500,
+                  "escalate_areas": [
+                    "Release and version bumps",
+                    "CI and deploy config",
+                    "Sign-in, tokens and secrets"
+                  ]
                 }
               },
               "projects": {
@@ -44660,6 +44951,35 @@
                   }
                 ],
                 "default": null
+              },
+              "escalate_breaking_change": {
+                "description": "Escalate to the user a change that breaks an older version.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_process_failure": {
+                "description": "Escalate to the user a run whose process did not work as designed.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_over_lines": {
+                "description": "Escalate to the user a change past this many changed lines, not counting tests, docs and\ngenerated files. 1 to 100000.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 500
+              },
+              "escalate_areas": {
+                "description": "Areas whose changes always go to the user, as free text.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [
+                  "Release and version bumps",
+                  "CI and deploy config",
+                  "Sign-in, tokens and secrets"
+                ]
               }
             }
           },
@@ -66542,7 +66862,15 @@
               "budget_cents": 0,
               "time_limit_min": 480,
               "box_budget_cents": 0,
-              "box_size": null
+              "box_size": null,
+              "escalate_breaking_change": true,
+              "escalate_process_failure": true,
+              "escalate_over_lines": 500,
+              "escalate_areas": [
+                "Release and version bumps",
+                "CI and deploy config",
+                "Sign-in, tokens and secrets"
+              ]
             }
           },
           "captains": {
@@ -66575,7 +66903,15 @@
               "budget_cents": 0,
               "time_limit_min": 480,
               "box_budget_cents": 0,
-              "box_size": null
+              "box_size": null,
+              "escalate_breaking_change": true,
+              "escalate_process_failure": true,
+              "escalate_over_lines": 500,
+              "escalate_areas": [
+                "Release and version bumps",
+                "CI and deploy config",
+                "Sign-in, tokens and secrets"
+              ]
             }
           },
           "projects": {
@@ -66767,6 +67103,35 @@
                   }
                 ],
                 "default": null
+              },
+              "escalate_breaking_change": {
+                "description": "Escalate to the user a change that breaks an older version.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_process_failure": {
+                "description": "Escalate to the user a run whose process did not work as designed.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_over_lines": {
+                "description": "Escalate to the user a change past this many changed lines, not counting tests, docs and\ngenerated files. 1 to 100000.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 500
+              },
+              "escalate_areas": {
+                "description": "Areas whose changes always go to the user, as free text.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [
+                  "Release and version bumps",
+                  "CI and deploy config",
+                  "Sign-in, tokens and secrets"
+                ]
               }
             },
             "required": [
@@ -66785,7 +67150,11 @@
               "budget_cents",
               "time_limit_min",
               "box_budget_cents",
-              "box_size"
+              "box_size",
+              "escalate_breaking_change",
+              "escalate_process_failure",
+              "escalate_over_lines",
+              "escalate_areas"
             ]
           },
           "Strategy": {
@@ -67055,6 +67424,35 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "escalate_breaking_change": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_process_failure": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_over_lines": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "escalate_areas": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
               }
             }
           },
@@ -67368,7 +67766,15 @@
               "budget_cents": 0,
               "time_limit_min": 480,
               "box_budget_cents": 0,
-              "box_size": null
+              "box_size": null,
+              "escalate_breaking_change": true,
+              "escalate_process_failure": true,
+              "escalate_over_lines": 500,
+              "escalate_areas": [
+                "Release and version bumps",
+                "CI and deploy config",
+                "Sign-in, tokens and secrets"
+              ]
             }
           },
           "captains": {
@@ -67401,7 +67807,15 @@
               "budget_cents": 0,
               "time_limit_min": 480,
               "box_budget_cents": 0,
-              "box_size": null
+              "box_size": null,
+              "escalate_breaking_change": true,
+              "escalate_process_failure": true,
+              "escalate_over_lines": 500,
+              "escalate_areas": [
+                "Release and version bumps",
+                "CI and deploy config",
+                "Sign-in, tokens and secrets"
+              ]
             }
           },
           "projects": {
@@ -67583,6 +67997,35 @@
                   }
                 ],
                 "default": null
+              },
+              "escalate_breaking_change": {
+                "description": "Escalate to the user a change that breaks an older version.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_process_failure": {
+                "description": "Escalate to the user a run whose process did not work as designed.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_over_lines": {
+                "description": "Escalate to the user a change past this many changed lines, not counting tests, docs and\ngenerated files. 1 to 100000.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 500
+              },
+              "escalate_areas": {
+                "description": "Areas whose changes always go to the user, as free text.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [
+                  "Release and version bumps",
+                  "CI and deploy config",
+                  "Sign-in, tokens and secrets"
+                ]
               }
             }
           },
@@ -67853,6 +68296,35 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "escalate_breaking_change": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_process_failure": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_over_lines": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "escalate_areas": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
               }
             }
           },
