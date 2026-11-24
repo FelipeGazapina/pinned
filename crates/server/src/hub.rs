@@ -824,10 +824,11 @@ impl Hub {
         }
     }
 
-    /// The user's Run now of workflow `id`: it goes where a triggered run of it would go, to its
-    /// machine, any machine, or its Upstash Box, and each machine holds it to its project's limits.
-    pub async fn run_workflow(&self, account: &Account, id: &str) -> Result<RunStarted, String> {
-        let run = self.connectors(account).await?.run_now(id, "the account's owner, from Settings › Workflows")?;
+    /// The user's Run now of workflow `id`, started by `by` (as "Run now by <by>"): from Settings, or
+    /// from the hub's scheduler for a scheduled task. It goes where a triggered run of it would go, to
+    /// its machine, any machine, or its Upstash Box, and each machine holds it to its project's limits.
+    pub async fn run_workflow(&self, account: &Account, id: &str, by: &str) -> Result<RunStarted, String> {
+        let run = self.connectors(account).await?.run_now(id, by)?;
         let placed = self.open_placed(account.id, Work::Run(run)).await?.ok_or("no machine started the run")?;
         Ok(account.started(id, placed))
     }
@@ -1005,7 +1006,7 @@ impl Hub {
                 self.db.set_release_protection(account.id, on, &row).await?;
                 return json(on);
             }
-            HubCall::RunWorkflow { id } => return json(self.run_workflow(account, &id).await?),
+            HubCall::RunWorkflow { id } => return json(self.run_workflow(account, &id, "the account's owner, from Settings › Workflows").await?),
             HubCall::GenerateWorkflow { .. } => return Err("Generate with AI was removed: ask an agent to create the workflow".into()),
             HubCall::OpenBox { repo, size, budget_usd } => (json(self.boxes.open_session(self, account, repo, size, budget_usd, None).await?), false),
             HubCall::BoxStatus { machine } => {
@@ -1488,7 +1489,7 @@ impl Hub {
         Ok(settings)
     }
 
-    async fn push_settings(&self, account: &Account) {
+    pub(crate) async fn push_settings(&self, account: &Account) {
         self.copies.changed(account.id);
         if let Ok(settings) = self.settings(account).await {
             account.broadcast(&ToClient::Settings { settings });
@@ -1496,7 +1497,8 @@ impl Hub {
     }
 
     /// The schedule calls, for `actor`, who is recorded as a new task's creator and held to the caps
-    /// that apply to agents. Tasks are stored and edited here; nothing fires them yet.
+    /// that apply to agents. Tasks are stored and edited here. The hub's scheduler (`scheduler::pass`)
+    /// fires the due ones whose action is a workflow; prompt tasks are not fired yet.
     pub async fn schedule_call(self: &Arc<Self>, account: &Arc<Account>, call: HubCall, actor: Actor) -> Result<Value, String> {
         let unknown = |id: &str| format!("this account has no task {id}");
         let parse = task_key;

@@ -12,6 +12,7 @@ pub mod oauth;
 pub mod relay;
 pub mod reports;
 pub mod remote;
+pub mod scheduler;
 pub mod self_update;
 mod store_writes;
 pub mod sync_limits;
@@ -106,6 +107,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
     });
     hub.watch_all().await?;
     teams::spawn_tick(&hub);
+    scheduler::spawn(&hub);
     // Counts of what the hub holds, so memory that grows can be told apart by cause.
     let census = Arc::downgrade(&hub);
     tokio::spawn(async move {
