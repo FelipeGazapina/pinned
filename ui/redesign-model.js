@@ -27,7 +27,8 @@
 //   when its current run or wait began, for a `.ticker`.
 //
 // workersSummary(rows) -> { total, done, working, needs, since }
-//   Counts for the block's header and the phone pill; `since` is the earliest working row's.
+//   Counts for the block's header and the phone pill. `done` counts every finished row (done, failed,
+//   stopped), so it reads "N of N done" once nothing is left; `since` is the earliest working row's.
 //
 // waitsOnUser(tab) -> boolean
 //   The thread has a waiting kind, a menu on its screen, or an answer on its way, so a message to
@@ -221,10 +222,14 @@ function workersOf(tab) {
  * takes typed words reads the message as the reason to decline. */
 const waitsOnUser = (tab) => !!(waitingKindOf(tab.view) || tab.answering || tab.menu || terminalMenu(tab));
 
+/** The worker states that are over: a done, a failed or a cancelled (stopped) worker. */
+const FINISHED_STATES = new Set(["done", "failed", "stopped"]);
+
 function workersSummary(rows) {
   const count = (state) => rows.filter((r) => r.state === state).length;
   const starts = rows.filter((r) => r.state === "working" && r.since).map((r) => r.since);
-  return { total: rows.length, done: count("done"), working: count("working"), needs: count("needs"), since: starts.length ? Math.min(...starts) : null };
+  const finished = rows.filter((r) => FINISHED_STATES.has(r.state)).length;
+  return { total: rows.length, done: finished, working: count("working"), needs: count("needs"), since: starts.length ? Math.min(...starts) : null };
 }
 
 const hhmm = (unix) => new Date(unix * 1000).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false });
