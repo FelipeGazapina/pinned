@@ -795,3 +795,50 @@ test("a hub that predates the escalation settings asks for an update and draws n
   assert.match(section, /<h2>Escalate to me<\/h2>.*<p class="taste-quiet">Update pinned on the hub to choose what is escalated to you\.<\/p><\/section>$/s);
   assert.doesNotMatch(section, /<button|<input|<form/);
 });
+
+const managing = (over = {}) => tastesWith({ orchestrator: { ...balanced, manage_only: false }, captains: { ...balanced, manage_only: false }, ...over });
+const paceSection = (html) => html.match(/<section class="taste-section"><h2>Pace<\/h2>.*?<\/section>/s)?.[0];
+const MANAGE_ONLY_HINT = "The Captain starts without Claude Code's Edit, Write and NotebookEdit tools and hands every change to a worker. Applies from its next start. Bash stays, so the shell can still change files.";
+
+test("Manage only is a switch in the Captains' Pace that flips and saves only itself", async () => {
+  const p = page({ answer: (cmd, args) => (cmd === "get_tastes" ? managing() : managing({ captains: { ...balanced, manage_only: false, ...args.patch } })) });
+  await p.show();
+  const section = paceSection(p.html());
+  assert.match(section, /role="switch" aria-checked="false" aria-label="Manage only" data-act="toggle" data-field="manage_only"/);
+  assert.ok(section.includes(`<b>Manage only</b><span>${MANAGE_ONLY_HINT}</span>`), "the hint says when it applies and that Bash stays");
+  assert.ok(section.indexOf('data-field="second_opinion"') < section.indexOf('data-field="manage_only"'), "after the review switches");
+  await p.click(/data-field="manage_only"/);
+  assert.match(paceSection(p.html()), /aria-checked="true" aria-label="Manage only"/);
+  assert.match(p.html(), /class="taste-card active" data-act="profile" data-profile="balanced"/, "the profile stays as it was");
+  assert.deepEqual(lines(p.html()), balancedBrief(), "the brief stays as it was");
+  p.calls.length = 0;
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls, [["set_taste", { scope: { kind: "captains" }, patch: { manage_only: true } }]]);
+});
+
+test("a project tab marks Manage only changed here, and Reset inherits it again", async () => {
+  const p = page({ answer: () => managing({ projects: { [SITE]: { manage_only: true } } }) });
+  await p.show();
+  await p.click(/data-act="scope" data-kind="project"/);
+  const section = paceSection(p.html());
+  assert.match(section, /aria-checked="true" aria-label="Manage only"/);
+  assert.match(section, /<b>Manage only<\/b><span>[^<]*<\/span><\/span><span class="taste-tags"><span class="taste-tag changed">changed here<\/span><button type="button" class="taste-reset" data-act="reset" data-field="manage_only" aria-label="Inherit manage only from Captains \(all\)"/);
+  await p.click(/data-act="reset" data-field="manage_only"/);
+  assert.match(paceSection(p.html()), /aria-checked="false" aria-label="Manage only"/, "the project inherits the Captains' off");
+  p.calls.length = 0;
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls, [["reset_taste_field", { scope: { kind: "project", repo: SITE }, field: "manage_only" }]]);
+});
+
+test("the Orchestrator tab, and a hub that predates Manage only, draw no switch for it", async () => {
+  const p = page({ answer: () => managing() });
+  await p.show();
+  await p.click(/data-act="scope" data-kind="orchestrator"/);
+  assert.doesNotMatch(p.html(), /data-field="manage_only"/);
+  const old = page({ answer: () => tastesWith({ projects: { [SITE]: { parallel: 4 } } }) });
+  await old.show();
+  for (const kind of ["captains", "orchestrator", "project"]) {
+    await old.click(new RegExp(`data-act="scope" data-kind="${kind}"`));
+    assert.doesNotMatch(old.html(), /data-field="manage_only"/, `the ${kind} tab`);
+  }
+});

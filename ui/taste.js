@@ -9,7 +9,8 @@ const TASTE_KNOBS = ["strategy", "ladder", "hard_model", "parallel", "autonomy",
 const TASTE_LIMITS = ["tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"];
 /** What the agents escalate to the user. Only the user sets these, and no profile does. */
 const TASTE_ESCALATION = ["escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas"];
-const TASTE_FIELDS = [...TASTE_KNOBS, "skills", "context", ...TASTE_LIMITS, ...TASTE_ESCALATION];
+/** `manage_only` starts the Captain without the file-editing tools. Only the user sets it, and no profile does. */
+const TASTE_FIELDS = [...TASTE_KNOBS, "skills", "context", ...TASTE_LIMITS, ...TASTE_ESCALATION, "manage_only"];
 /** The most changed lines the escalation limit may be, as Rust's `MAX_ESCALATE_OVER_LINES`. */
 const TASTE_MAX_ESCALATE_LINES = 100000;
 const TASTE_MAX_PARALLEL = 100;

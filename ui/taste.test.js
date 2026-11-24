@@ -173,6 +173,32 @@ test("the escalation settings leave the profile as it was, and a profile leaves 
   assert.deepEqual([applied.captains.escalate_breaking_change, applied.captains.escalate_over_lines, here(applied.captains.escalate_areas)], [false, 42, []]);
 });
 
+/** Rust's default Manage only, which the fixture's presets leave out. */
+const managing = (projects = {}) => ({ ...defaults(projects), orchestrator: { ...fixture.presets.balanced, manage_only: false }, captains: { ...fixture.presets.balanced, manage_only: false } });
+
+test("manage_only saves with the Captains or a project, and a project's Reset makes it inherit again", () => {
+  const { tasteSaveCalls, tasteSetField, tasteResetField, tasteResolve } = taste();
+  const saved = managing();
+  assert.deepEqual(here(tasteSaveCalls(saved, tasteSetField(saved, captains, "manage_only", true))), [{ cmd: "set_taste", scope: { kind: "captains" }, patch: { manage_only: true } }]);
+  const draft = tasteSetField(saved, site, "manage_only", true);
+  assert.deepEqual(here(draft.projects), { [SITE]: { manage_only: true } });
+  assert.equal(tasteResolve(draft, site).manage_only, true);
+  assert.deepEqual(here(tasteSaveCalls(saved, draft)), [{ cmd: "set_taste", scope: site, patch: { manage_only: true } }]);
+  const stored = managing({ [SITE]: { manage_only: true } });
+  const back = tasteResetField(stored, site, "manage_only");
+  assert.equal(tasteResolve(back, site).manage_only, false);
+  assert.deepEqual(here(tasteSaveCalls(stored, back)), [{ cmd: "reset_taste_field", scope: site, field: "manage_only" }]);
+});
+
+test("manage_only leaves the profile as it was, and a profile leaves it alone", () => {
+  const { tasteProfile, tasteApplyProfile } = taste();
+  for (const id of ["economical", "balanced", "aggressive"]) assert.equal(tasteProfile({ ...fixture.presets[id], manage_only: true }), id);
+  const applied = tasteApplyProfile({ ...managing(), captains: { ...fixture.presets.economical, manage_only: true } }, captains, "aggressive");
+  assert.deepEqual([tasteProfile(applied.captains), applied.captains.manage_only], ["aggressive", true]);
+  const project = tasteApplyProfile(managing({ [SITE]: { manage_only: true } }), site, "aggressive");
+  assert.equal(project.projects[SITE].manage_only, true, "a project's own stays");
+});
+
 test("a rebase makes unsaved edits again over the tastes another device saved", () => {
   const { tasteRebase, tasteSetField, tasteResetField } = taste();
   const saved = defaults({ [SITE]: { parallel: 4, review_diffs: false } });
