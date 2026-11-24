@@ -150,3 +150,13 @@ button.taste-card:hover { background: var(--g-hover); }
 .taste-chip[data-state="online"] { background: color-mix(in srgb, var(--g-success) 14%, transparent); color: var(--g-success); }
 .taste-policy { display: flex; flex-direction: column; gap: 4px; }
 .taste-policy p { margin: 0; }
+
+.taste-profile-form { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid var(--g-border); border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.03); }
+.taste-profile-form > .taste-label { flex-direction: column; align-items: stretch; gap: 4px; }
+.taste-profile-form input, .taste-profile-form textarea { min-width: 0; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--g-input); background: var(--g-canvas);
+  color: var(--g-fg); font: inherit; font-size: 13px; font-weight: 400; outline: 0; }
+.taste-profile-form textarea { min-height: 88px; resize: vertical; }
+.taste-profile-form input:focus, .taste-profile-form textarea:focus { border-color: rgb(var(--g-primary-rgb) / 0.6); }
+.taste-profile-form .taste-skill-actions button { height: 32px; padding: 0 14px; }
+.taste-heading-actions button:disabled { opacity: 0.5; cursor: default; }
+@media (pointer: coarse) { .taste-profile-form input, .taste-profile-form textarea { font-size: 16px; } }

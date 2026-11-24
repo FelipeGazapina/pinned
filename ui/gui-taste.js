@@ -428,7 +428,7 @@ function tasteRender() {
     ${delegationSectionHtml()}
   </div></div>${tasteFootHtml()}`);
   tasteUi.flash = new Set();
-  const back = focused && [...pageView.querySelectorAll("button, select, input")].find((el) => tasteFocusKey(el) === focused);
+  const back = focused && [...pageView.querySelectorAll("button, select, input, textarea")].find((el) => tasteFocusKey(el) === focused);
   back?.focus({ preventScroll: true });
 }
 

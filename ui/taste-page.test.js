@@ -101,6 +101,8 @@ function page({ answer = () => tastesWith(), projects = {}, machineViews = null,
     typeArea: (value) => fire("input", { target: { value, matches: (sel) => sel === "[data-area-input]" } }),
     submitArea: () => fire("submit", { target: { matches: (sel) => sel === "[data-area-form]" }, preventDefault() {} }),
     submitSkill: (name) => fire("submit", { target: { matches: (sel) => sel === "[data-skill-form]", querySelector: () => ({ value: name }) }, preventDefault() {} }),
+    fill: (field, value) => fire("input", { target: { value, dataset: { wpField: field }, matches: (sel) => sel === "[data-wp-field]" } }),
+    submitProfile: async () => (fire("submit", { target: { matches: (sel) => sel === "[data-wp-form]" }, preventDefault() {} }), settle()),
   };
 }
 
@@ -793,5 +795,126 @@ test("a hub that predates the escalation settings asks for an update and draws n
   await p.show();
   const section = escalateSection(p.html());
   assert.match(section, /<h2>Escalate to me<\/h2>.*<p class="taste-quiet">Update pinned on the hub to choose what is escalated to you\.<\/p><\/section>$/s);
+  assert.doesNotMatch(section, /<button|<input|<form/);
+});
+
+const scout = { name: "scout", skills: [], tools: ["Read"], access: "read_only", delivers: "A map of the code.", by: "user", prompt: "You map code." };
+const fixer = { name: "fixer", skills: [{ name: "tdd", enabled: true }], tools: [], access: "edit", model: { model: "glm-5.3" }, effort: "high", delivers: "", by: "user", prompt: "" };
+const profilesSection = (html) => html.match(/<section class="taste-section taste-profiles">.*?<\/section>/s)[0];
+/** A backend whose `set_worker_profiles` stores the list, or answers `refuse`'s error when it gives one. */
+const profileHub = (worker_profiles, refuse = () => null) => {
+  let stored = tastesWith({ worker_profiles: { proposed: [], ...worker_profiles } });
+  return (cmd, args) => {
+    if (cmd !== "set_worker_profiles") return stored;
+    const error = refuse(args);
+    if (error) throw new Error(error);
+    const lists = stored.worker_profiles;
+    stored = { ...stored, worker_profiles: args.project ? { ...lists, projects: { ...lists.projects, [args.project]: args.profiles } } : { ...lists, account: args.profiles } };
+    return stored;
+  };
+};
+
+test("the Captains tab lists the account's profiles, and a project tab only that project's", async () => {
+  const p = page({ answer: profileHub({ account: [scout], projects: { [SITE]: [fixer] }, proposed: [{ ...fixer, name: "tester", by: "orchestrator" }] }), projects: { mm: [{ path: "/p/site", name: "site", repo: SITE }] } });
+  await p.show();
+  let section = profilesSection(p.html());
+  assert.match(section, /<b>scout<\/b><span class="taste-chip">Read-only<\/span><\/span>\s*<span class="taste-skill-about">Model: none · Effort: none<\/span><span class="taste-skill-about">Delivers: A map of the code.<\/span>/);
+  assert.match(section, /data-act="wpedit" data-wp="0" aria-label="Edit scout"/);
+  assert.match(section, /data-act="wpremove" data-wp="0" aria-label="Remove scout"/);
+  assert.doesNotMatch(section, /fixer|tester|apply here too/, "neither a project's profile nor a proposal");
+  await p.click(/data-act="scope" data-kind="orchestrator"/);
+  assert.match(profilesSection(p.html()), /aria-label="Edit scout"/, "the orchestrator tab edits the account's list too");
+  await p.click(/data-act="scope" data-kind="project"/);
+  section = profilesSection(p.html());
+  assert.match(section, /<b>fixer<\/b><span class="taste-chip">Can edit<\/span><\/span>\s*<span class="taste-skill-about">Model: GLM-5.3 · Effort: high<\/span><\/span>/);
+  assert.match(section, /<p class="taste-quiet">The account's profiles, under Captains \(all\), apply here too. A profile here wins over the account's profile of the same name.<\/p>/);
+  assert.doesNotMatch(section, /scout/);
+});
+
+test("Add profile, the form and Done add a profile, and Save sends it", async () => {
+  const p = page({ answer: profileHub({ account: [], projects: {} }) });
+  await p.show();
+  assert.match(profilesSection(p.html()), /<p class="taste-quiet">No profiles yet.<\/p>/);
+  await p.click(/data-act="wpadd"/);
+  assert.match(profilesSection(p.html()), /<form class="taste-profile-form" data-wp-form aria-label="New profile">/);
+  assert.match(profilesSection(p.html()), /data-act="wpadd" disabled/);
+  p.fill("name", " scout ");
+  p.fill("model", "claude-sonnet-5-5");
+  p.fill("effort", "high");
+  p.fill("access", "read_only");
+  p.fill("prompt", "You map code.\nYou never edit it.");
+  p.fill("delivers", "A map of the code.");
+  p.fill("tools", " Read, Grep ,, Bash ");
+  await p.click(/aria-label="More workers at once"/);
+  const form = profilesSection(p.html());
+  assert.match(form, /data-wp-field="name" value=" scout "/, "what was typed survives a render");
+  assert.match(form, /<option value="claude-sonnet-5-5" title="claude-sonnet-5-5" selected>Claude Sonnet 5.5<\/option>/);
+  assert.match(form, /<option value="read_only" selected>Read-only<\/option>/);
+  assert.match(form, /<textarea data-wp-field="prompt"[^>]*>You map code.\nYou never edit it.<\/textarea>/);
+  await p.submitProfile();
+  const section = profilesSection(p.html());
+  assert.match(section, /<b>scout<\/b><span class="taste-chip">Read-only<\/span><\/span>\s*<span class="taste-skill-about">Model: Claude Sonnet 5.5 · Effort: high<\/span>/);
+  assert.doesNotMatch(section, /data-wp-form/);
+  assert.match(p.html(), /Unsaved changes/);
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.filter(([cmd]) => cmd === "set_worker_profiles"), [
+    ["set_worker_profiles", { profiles: [{ skills: [], by: "user", name: "scout", model: { model: "claude-sonnet-5-5" }, effort: "high", access: "read_only", prompt: "You map code.\nYou never edit it.", delivers: "A map of the code.", tools: ["Read", "Grep", "Bash"] }] }],
+  ]);
+  assert.doesNotMatch(p.html(), /taste-foot/);
+});
+
+test("editing a profile keeps its skills and a model outside the catalog, and Cancel changes nothing", async () => {
+  const grok = { ...scout, name: "critic", model: { provider: "cursor", model: "grok-4.7" } };
+  const p = page({ answer: profileHub({ account: [fixer, grok], projects: {} }) });
+  await p.show();
+  await p.click(/aria-label="Edit critic"/);
+  assert.match(profilesSection(p.html()), /<option value="grok-4.7\ncursor" selected>grok-4.7 through cursor<\/option>/);
+  await p.click(/data-act="wpcancel"/);
+  assert.doesNotMatch(profilesSection(p.html()), /data-wp-form/);
+  await p.click(/aria-label="Edit fixer"/);
+  const form = profilesSection(p.html());
+  assert.match(form, /aria-label="Edit fixer"/);
+  assert.match(form, /<option value="glm-5.3" title="glm-5.3" selected>GLM-5.3<\/option>/);
+  assert.match(form, /<option value="high" selected>high<\/option>/);
+  p.fill("prompt", "You fix what the scout found.");
+  await p.submitProfile();
+  await p.click(/aria-label="Edit critic"/);
+  await p.submitProfile();
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.filter(([cmd]) => cmd === "set_worker_profiles"), [["set_worker_profiles", { profiles: [{ ...fixer, prompt: "You fix what the scout found." }, grok] }]]);
+});
+
+test("Remove, then Save, sends the list without the profile, and a project's list names its project", async () => {
+  const p = page({ answer: profileHub({ account: [scout, fixer], projects: { [SITE]: [scout] } }), projects: { mm: [{ path: "/p/site", name: "site", repo: SITE }] } });
+  await p.show();
+  await p.click(/aria-label="Remove scout"/);
+  assert.doesNotMatch(profilesSection(p.html()), /scout/);
+  await p.click(/data-act="scope" data-kind="project"/);
+  await p.click(/aria-label="Remove scout"/);
+  assert.match(profilesSection(p.html()), /<p class="taste-quiet">This project has no profiles of its own.<\/p>/);
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.filter(([cmd]) => cmd === "set_worker_profiles"), [
+    ["set_worker_profiles", { profiles: [fixer] }],
+    ["set_worker_profiles", { project: SITE, profiles: [] }],
+  ]);
+});
+
+test("a refused profile save shows the hub's error in the footer and keeps the draft", async () => {
+  const p = page({ answer: profileHub({ account: [scout], projects: {} }, (args) => (args.profiles.length > 1 ? "two profiles are named Scout" : null)) });
+  await p.show();
+  await p.click(/data-act="wpadd"/);
+  p.fill("name", "Scout");
+  await p.submitProfile();
+  await p.click(/data-act="save"/);
+  const html = p.html();
+  assert.match(html, /<span class="taste-unsaved">Unsaved changes<\/span><span class="taste-error" role="alert">two profiles are named Scout<\/span>/);
+  assert.match(profilesSection(html), /aria-label="Edit scout".*aria-label="Edit Scout"/s, "the draft stands");
+});
+
+test("a hub that predates worker profiles asks for an update and draws no control", async () => {
+  const p = page();
+  await p.show();
+  const section = profilesSection(p.html());
+  assert.match(section, /<h2>Worker profiles<\/h2>.*<p class="taste-quiet">Update pinned on the hub to set worker profiles\.<\/p><\/section>$/s);
   assert.doesNotMatch(section, /<button|<input|<form/);
 });
