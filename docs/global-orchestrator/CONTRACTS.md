@@ -691,3 +691,45 @@ Issue #127. A saved workflow runs now, from Settings › Workflows or from an ag
 **App.** Each card in Settings › Workflows has a Run now button between its text and its switch. While the call runs it reads `Starting…`, disabled. Then a line under the card says `Started on <machine>. Open session` (which reveals the tab), or `Didn't start: <the refusal>`. A `slack-message` or `called` workflow, or one with an unknown trigger, shows the button disabled with the reason as its tooltip.
 
 **Not like a triggered run.** A Run now opens the first session only. Graph steps after it (more talks, replies, issue moves) need the trigger's subject and are not walked, and `{{trigger.*}}` spans in its text stay as written. Triggered runs themselves still open with `Call::Run`, outside the delegation limits and metrics, as before.
+
+### 13.14 Classify (#523)
+
+An agent asks a decision model on the account's Vercel AI Gateway which of its categories, or yes or no to its question, fits a text. It is the call the Slack router, a graph Classify step and the Linear duplicate check already make (`vercel::choose`), offered through `actions` and `act`. The workflow Classify step already runs under any trigger and is unchanged.
+
+| Wire | From | Answer |
+|---|---|---|
+| `HubCall::Classify { text, categories?, question?, instructions?, model?, unsure_below?, sure_at? }` | an agent through `act` (read); the hub and a signed-out desktop's local hub answer it | `classify::Answer` (outbound root `ClassifyAnswer`), or the refusal |
+
+```json
+{"cmd":"classify","text":"The export button 500s","categories":[{"name":"bug","description":"something broke"},{"name":"question"}],"instructions":"Support tickets."}
+{"cmd":"classify","text":"The export button 500s","question":"Is this a bug report?"}
+```
+
+**Answer.** `{"pick":"bug","probability":0.91,"probabilities":[{"name":"bug","probability":0.91},{"name":"question","probability":0.09}],"confidence":"sure"}`. `probabilities` lists every category in the order given, and a question's as `yes` then `no`. A category the model gave no probability has 0. `confidence` is `sure` when the pick's probability is at or above `sure_at`, `unsure` below `unsure_below`, and `likely` between.
+
+**Defaults and limits** (`crates/core/src/classify.rs`). The model is `typesafe-ai/jev` (`classify::DEFAULT_MODEL`, a copy of the UI's `DECISION_MODEL`). `unsure_below` is 0.6 and `sure_at` is 0.85, the router's `UNSURE_BELOW` and `MIN_CONFIDENCE_TO_PAGE`. A call takes at most 8,000 characters of text, 20 categories, and 4,000 characters of guidance: the instructions, the question, and every category's name and description together. A question is sent as the categories `yes` and `no`, each described as that answer to the question.
+
+**Refusals.** The checks run before anything else, with no key and no network, and each error starts with `classify: ` and says what to fix:
+
+- a blank `text`, or one over 8,000 characters (`classify: text is <n> characters, over the limit of 8000: send a shorter text`);
+- both `categories` and a non-blank `question` (`classify: give categories or a question, not both`), or neither (`classify: give two or more categories, or a yes/no question`);
+- one category, or more than 20 (`classify: <n> categories is over the limit of 20: give fewer`);
+- a category with a blank name, or two names equal once trimmed, ignoring case (`classify: two categories are named "bug": give each a different name`);
+- guidance over 4,000 characters;
+- `unsure_below` or `sure_at` outside 0 to 1, or `unsure_below` above `sure_at` once the defaults fill in (equal is allowed, and then nothing is `likely`);
+- a `model` that is not `<provider>/<name>`, each part of ASCII letters, digits, `.`, `_` and `-`. A blank `model` is left out.
+
+Then, without a Vercel key, `Vercel AI Gateway is not connected: connect it in pinned's Connectors settings`.
+
+**One billed call.** `Connectors::agent_classify` (the graph step already owns the name `classify`) asks `vercel::choose` once: `POST /evaluate` with the account's key. It never retries. When the call names a `model`, a keyless `GET /models/<id>` (`vercel::kind_of`) comes first, which costs nothing and sends no key: a chat model is refused with `classify: <model> is a chat model: give a decision model, or leave model out for typesafe-ai/jev`, and the lookup's own errors, `not_a_model` among them, pass through unchanged. With `model` left out, an act makes exactly one gateway request. The key never appears in an answer or an error.
+
+**Framing.** The model's `state` is `{"text": untrusted::frame("an agent's classify call", text)}`: the fixed header that says it is data, and a fence the text cannot close. The instructions are `Choose the category that best fits the text.`, then the question, then the caller's `instructions`. The text never reaches the instructions or the category descriptions.
+
+**Access.**
+
+- Agents: `classify` is a `read`, so it runs at once with no confirmation, and `act` writes its audit row as for any act.
+- Boxes: `box_gate::box_may_send` refuses it with `a box may not spend the account's Vercel AI Gateway key`, as a box's act through `box_may_act`. This is stricter than `vercel_models`, which needs no key: a box reads the most injected content, and this call has no spend limit. It blocks a Captain running in a box too.
+- Teams: `teams::hub_rule` puts it under `Gate::Never` with the other reads made with a key: `classify does not run on a team`.
+- Machines: `http::forward` refuses it, as any direct `HubCall` that is not a workflow callback: `a machine may only forward a workflow session's callbacks`.
+- External agents: the `/mcp` tools have no `act` (`docs/external-mcp.md`), so they can't reach it.
+- The local hub: a signed-out desktop, and a signed-in copy while the hub is off, answer it from their own connectors, as `vercel_models`.
