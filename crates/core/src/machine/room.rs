@@ -296,7 +296,7 @@ impl Machine {
         }
     }
 
-    fn captain_project(&self, tab: &str) -> Result<PathBuf, String> {
+    pub(super) fn captain_project(&self, tab: &str) -> Result<PathBuf, String> {
         let (env, task, cwd) = self.tab(tab, |t| (t.env.clone(), t.task.clone(), t.cwd.clone()))?;
         if crate::global_orchestrator::is_global(&env) {
             return Err(super::NO_PROJECT_WORK.into());
