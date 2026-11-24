@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.18.11 (Unreleased)
+
+### Added
+
+- Needs you groups a project's decisions when it has two or more: approvals, questions and plans. You pick each answer inside the group, and one button sends them all.
+- The Usage page lists each session's cost, turns and active time on its thread. A by-session breakdown lists every session, and a row opens its thread.
+- Settings › Memory, in the desktop app, shows how much memory the app, its webviews, each thread and each terminal hold.
+- Settings › Workflows lists the account's workflow runs, newest first. Agents can read the same list.
+- Settings sets the compaction offer threshold per machine. The default is 200,000 tokens, and it can be turned off.
+- Way of working sets a default model and effort for new sessions, for Captains or for one project. A session that names no model starts on it.
+- Way of working has "Manage only" for Captains or for one project. A Captain in that mode has no file-editing tools and hands the work to workers.
+- Way of working has "Escalate to me", which only the owner can change: breaking changes, process failures, diffs over a line count (500 by default), and areas you name.
+- Way of working has an auto-merge switch and an approval profile for Captains and the Orchestrator. Running Captains and the Orchestrator are told when either changes.
+- A worker thread in a project whose review is on, with at least one rule, gets one read-only reviewer thread under it. The reviewer reads the worker's change against the rules, and its findings arrive in the worker's notice.
+- A worker's Bash commands pass a guard first. Deletes outside its worktree, force pushes and database drops wait for your approval. The guard runs on the machine and makes no network call.
+- Rooms can run a debate in rounds: each seat posts once per round, and one named seat writes the synthesis at the end.
+- The team board shows each Captain's real progress, notes, hand-offs, blocks and spend.
+- Agents and workflows can call `classify` to route, rank or filter a text with a decision model on the account's Vercel AI Gateway key.
+- Connectors has a PostHog card (US, EU or self-hosted). A workflow can start a run for each new PostHog error.
+
+### Changed
+
+- The hub keeps your last save of the Orchestrator's settings. A machine that missed the save gets it when it connects.
+
+### Fixed
+
+- The hub no longer freezes when several machines of one account connect while the database is slow. If the hub ever stops answering for 60 seconds, it exits so Railway restarts it.
+- Each hub connection attempt gives up after 20 seconds, the app tries again when the Mac wakes, and the connection bar clears as soon as the hub answers.
+
 ## 0.18.10 (2026-11-23)
 
 ### Added
