@@ -2117,11 +2117,13 @@ impl Account {
     }
 }
 
-/// One moment of the account document. Store, runs and jobs share a row, so they share this lock.
+/// One moment of the account document. Store, runs, jobs and lines share a row, so they share
+/// this lock.
 struct Stored {
     store: Option<Vec<u8>>,
     runs: Vec<u8>,
     jobs: Vec<u8>,
+    lines: Vec<u8>,
 }
 
 /// Keeps an account's store and keys in memory and writes them to its row behind the
@@ -2218,16 +2220,17 @@ impl PgStorage {
                 let version = i64::try_from(version).map_err(|_| store_writes::WriteFailure::Failed("a version past i64".into()))?;
                 match doc {
                     store_writes::Doc::Store(bytes) => {
-                        // `save`, `save_runs` and `save_jobs` read the text through, so it is UTF-8; Postgres
-                        // answers text that is not with 22021 too. The text is borrowed from
-                        // `bytes`, which this write holds, not copied.
+                        // `save`, `save_runs`, `save_jobs` and `save_lines` read the text through, so it
+                        // is UTF-8; Postgres answers text that is not with 22021 too. The text is
+                        // borrowed from `bytes`, which this write holds, not copied.
                         fn text(bytes: &[u8]) -> Result<&str, store_writes::WriteFailure> {
                             std::str::from_utf8(bytes).map_err(|_| store_writes::WriteFailure::Refused { sqlstate: "22021".into() })
                         }
                         let store = bytes.store.as_deref().map(text).transpose()?;
                         let runs = (!bytes.runs.is_empty()).then(|| text(&bytes.runs)).transpose()?;
                         let jobs = (!bytes.jobs.is_empty()).then(|| text(&bytes.jobs)).transpose()?;
-                        if db.save_store(account, version, store, runs, jobs).await? {
+                        let lines = (!bytes.lines.is_empty()).then(|| text(&bytes.lines)).transpose()?;
+                        if db.save_store(account, version, store, runs, jobs, lines).await? {
                             return Ok(Landed::Written);
                         }
                         let Some((stored, _)) = db.stored_versions(account).await? else { return Ok(Landed::Gone) };
@@ -2250,10 +2253,10 @@ impl PgStorage {
     fn with_writer(account: Uuid, stored: db::Connectors, refuse_runs: Arc<AtomicBool>, write: store_writes::Write, fires: Option<Fires>) -> PgStorage {
         let mut doc = stored.store;
         let mut take = |key: &str| doc.as_object_mut().and_then(|map| map.remove(key)).and_then(|value| serde_json::to_vec(&value).ok()).unwrap_or_default();
-        let (runs, jobs) = (take("runs"), take("jobs"));
+        let (runs, jobs, lines) = (take("runs"), take("jobs"), take("lines"));
         let store = (doc != serde_json::json!({})).then(|| serde_json::to_vec(&doc).unwrap());
         PgStorage(Arc::new(Persisted {
-            state: Mutex::new(Stored { store, runs, jobs }),
+            state: Mutex::new(Stored { store, runs, jobs, lines }),
             keys: Mutex::new(stored.secrets),
             writes: Writes::start(account, u64::try_from(stored.version).unwrap_or(0), write),
             refuse_runs,
@@ -2261,10 +2264,11 @@ impl PgStorage {
         }))
     }
 
-    /// Queues the store, the runs and the jobs as one document. Callers hold the `state` lock, so
-    /// the documents take their numbers in the order the state changed and the newest one wins.
+    /// Queues the store, the runs, the jobs and the lines as one document. Callers hold the `state`
+    /// lock, so the documents take their numbers in the order the state changed and the newest one
+    /// wins.
     fn persist(&self, state: &Stored) {
-        self.0.writes.queue_store(state.store.clone(), state.runs.clone(), state.jobs.clone());
+        self.0.writes.queue_store(state.store.clone(), state.runs.clone(), state.jobs.clone(), state.lines.clone());
     }
 }
 
@@ -2336,6 +2340,24 @@ impl Storage for PgStorage {
         }
         let mut state = self.0.state.lock().unwrap();
         state.jobs = bytes.to_vec();
+        self.persist(&state);
+        Ok(())
+    }
+
+    fn load_lines(&self) -> Option<Vec<u8>> {
+        let lines = self.0.state.lock().unwrap().lines.clone();
+        (!lines.is_empty()).then_some(lines)
+    }
+
+    fn save_lines(&self, bytes: &[u8]) -> Result<(), String> {
+        if !bytes.is_empty() {
+            let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+            serde_json::from_str::<serde::de::IgnoredAny>(text).map_err(|e| e.to_string())?;
+            // One less: the lines sit under the store's `lines`.
+            jsonb_takes(bytes, DOCUMENT_DEPTH - 1)?;
+        }
+        let mut state = self.0.state.lock().unwrap();
+        state.lines = bytes.to_vec();
         self.persist(&state);
         Ok(())
     }
@@ -3121,14 +3143,15 @@ mod tests {
         assert!(serde_json::from_str::<Value>(&doc.to_string()).is_ok());
     }
 
-    /// A writer that keeps each store document as the database joins it, `runs` and `jobs` in.
+    /// A writer that keeps each store document as the database joins it, `runs`, `jobs` and `lines`
+    /// in.
     fn joined_writes(written: Arc<Mutex<Vec<Value>>>) -> store_writes::Write {
         Arc::new(move |_, _, doc| {
             let written = written.clone();
             Box::pin(async move {
                 if let store_writes::Doc::Store(bytes) = doc {
                     let mut doc: Value = serde_json::from_slice(bytes.store.as_deref().unwrap_or(b"{}")).unwrap();
-                    for (key, text) in [("runs", &bytes.runs), ("jobs", &bytes.jobs)] {
+                    for (key, text) in [("runs", &bytes.runs), ("jobs", &bytes.jobs), ("lines", &bytes.lines)] {
                         if !text.is_empty() {
                             doc[key] = serde_json::from_slice(text).unwrap();
                         }
@@ -3169,6 +3192,45 @@ mod tests {
         assert!(storage.save_jobs(b"[\"\xff\"]").is_err(), "and text that is not UTF-8");
         assert_eq!(storage.0.writes.pending(), store_writes::Pending::default(), "nothing refused was queued");
         assert_eq!(storage.load_jobs().as_deref(), Some(&br#"[{"id":"j"}]"#[..]), "the jobs held stay");
+    }
+
+    #[tokio::test]
+    async fn the_lines_load_apart_from_the_store_the_runs_and_the_jobs_and_a_document_without_them_holds_none() {
+        let read = |bytes: Option<Vec<u8>>| serde_json::from_slice::<Value>(&bytes.unwrap()).unwrap();
+        let stored = db::Connectors { store: serde_json::json!({ "a": 1, "runs": [{ "run": 1 }], "jobs": [{ "id": "j" }], "lines": [{ "id": "l" }] }), secrets: BTreeMap::new(), version: 0 };
+        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), joined_writes(Arc::default()), None);
+        assert_eq!(read(storage.load()), serde_json::json!({ "a": 1 }), "the store holds none of the runs, the jobs and the lines");
+        assert_eq!(read(storage.load_runs()), serde_json::json!([{ "run": 1 }]));
+        assert_eq!(read(storage.load_jobs()), serde_json::json!([{ "id": "j" }]));
+        assert_eq!(read(storage.load_lines()), serde_json::json!([{ "id": "l" }]));
+
+        let stored = db::Connectors { store: serde_json::json!({ "a": 1, "runs": [], "jobs": [] }), secrets: BTreeMap::new(), version: 0 };
+        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), joined_writes(Arc::default()), None);
+        assert_eq!(storage.load_lines(), None, "a document without lines holds none");
+    }
+
+    #[tokio::test]
+    async fn saving_the_store_the_runs_or_the_jobs_keeps_the_lines_and_lines_that_are_not_json_are_refused() {
+        let written = Arc::new(Mutex::new(vec![]));
+        let stored = db::Connectors { store: serde_json::json!({}), secrets: BTreeMap::new(), version: 0 };
+        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), joined_writes(written.clone()), None);
+        storage.save_lines(br#"[{"id":"l"}]"#).unwrap();
+        storage.save(br#"{"n":1}"#).unwrap();
+        storage.save_runs(br#"[{"run":1}]"#).unwrap();
+        storage.save_jobs(br#"[{"id":"j"}]"#).unwrap();
+        assert!(storage.0.writes.flush(Duration::from_secs(5)).await);
+        assert_eq!(
+            written.lock().unwrap().last().unwrap(),
+            &serde_json::json!({ "n": 1, "runs": [{ "run": 1 }], "jobs": [{ "id": "j" }], "lines": [{ "id": "l" }] }),
+            "the last document holds the lines"
+        );
+
+        let nested = format!("{}0{}", "[".repeat(DOCUMENT_DEPTH), "]".repeat(DOCUMENT_DEPTH));
+        assert!(storage.save_lines(nested.as_bytes()).is_err(), "lines sit one level under the store");
+        assert!(storage.save_lines(b"[{").is_err(), "lines that are not JSON are refused");
+        assert!(storage.save_lines(b"[\"\xff\"]").is_err(), "and text that is not UTF-8");
+        assert_eq!(storage.0.writes.pending(), store_writes::Pending::default(), "nothing refused was queued");
+        assert_eq!(storage.load_lines().as_deref(), Some(&br#"[{"id":"l"}]"#[..]), "the lines held stay");
     }
 
     /// serde_json reads `\u0000` and, through `IgnoredAny`, a lone UTF-16 surrogate, but jsonb
