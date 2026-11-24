@@ -58,7 +58,7 @@ function page(world) {
     machineName: (id) => ({ mini: "mac-mini", book: "macbook", vps: "vps" })[id] ?? id,
   };
   vm.createContext(context);
-  vm.runInContext([line(chat, "const OFFER_SECS"), decl(chat, "function offerOf"), line(model, "const GLYPH_LOOKS"), line(model, "const glyphHtml"), line(model, "const runsInBox"), line(model, "const boxMarkHtml"), decl(agentSurface, "const AGENT_BOX_COPY"), line(agentSurface, "const AGENT_TITLE_ONLY"), `agentActionTitle = (action, args) => AGENT_BOX_COPY[action]?.(args) ?? ({ pair_code: "Pair a new machine" })[action] ?? action;`, read("gui-needs-you.js")].join("\n"), context);
+  vm.runInContext([line(chat, "const OFFER_SECS"), decl(chat, "function offerOf"), line(model, "const askSig"), line(model, "const GLYPH_LOOKS"), line(model, "const glyphHtml"), line(model, "const runsInBox"), line(model, "const boxMarkHtml"), decl(agentSurface, "const AGENT_BOX_COPY"), line(agentSurface, "const AGENT_TITLE_ONLY"), `agentActionTitle = (action, args) => AGENT_BOX_COPY[action]?.(args) ?? ({ pair_code: "Pair a new machine" })[action] ?? action;`, read("gui-needs-you.js")].join("\n"), context);
   return (code, args = {}) => {
     Object.assign(context, { args });
     return vm.runInContext(code, context);
@@ -301,6 +301,195 @@ test("an approval, a question and a plan card draw the same markup as before", (
   assert.equal(html(card("approval", { line: null, ask: { kind: "approval", text: null, command: "git push origin readme-tidy", choices: [approve, decline], typed: false } })), "<article class=\"ny-card\" data-key=\"thread:approval\" data-kind=\"approval\" aria-label=\"Approval: Tidy the README\"><div class=\"ny-head\"><span class=\"status-glyph\" data-glyph=\"needs\" style=\"--glyph-size: 10px\" aria-hidden=\"true\"></span><span class=\"ny-kind\">Approval</span><span class=\"ny-where\">pinned · mac-mini</span><span class=\"ticker ny-when\" data-since=\"1794420480000\"></span></div><div class=\"ny-name\">Tidy the README</div><pre>git push origin readme-tidy</pre><fieldset class=\"ny-fields\"><div class=\"ny-actions\"><button type=\"button\" class=\"ny-secondary\" data-ny=\"decline\">Decline</button><button type=\"button\" class=\"ny-primary\" data-ny=\"approve\">Approve</button><button type=\"button\" class=\"ny-link\" data-ny=\"open\">Open</button></div></fieldset></article>");
   assert.equal(html(card("question", { line: "Which hero image?", ask: { kind: "question", text: "Which hero image?", command: null, typed: true, choices: [{ label: "The product screenshot", about: "Already in the repo", choice: { option: 1 } }] } })), "<article class=\"ny-card\" data-key=\"thread:question\" data-kind=\"question\" aria-label=\"Question: Tidy the README\"><div class=\"ny-head\"><span class=\"status-glyph\" data-glyph=\"needs\" style=\"--glyph-size: 10px\" aria-hidden=\"true\"></span><span class=\"ny-kind\">Question</span><span class=\"ny-where\">pinned · mac-mini</span><span class=\"ticker ny-when\" data-since=\"1794420480000\"></span></div><div class=\"ny-name\">Tidy the README</div><p class=\"ny-line\">Which hero image?</p><fieldset class=\"ny-fields\"><div class=\"ny-options\"><button type=\"button\" class=\"ny-option\" data-ny=\"option\" data-option=\"1\"><span class=\"ny-label\">The product screenshot</span><span class=\"ny-about\">Already in the repo</span></button><form class=\"ny-typed\" data-ny-form><input type=\"text\" name=\"answer\" placeholder=\"Type or dictate another answer\" aria-label=\"Type or dictate another answer\" autocomplete=\"off\" enterkeyhint=\"send\"><button type=\"submit\" class=\"ny-send\">Send</button></form></div></fieldset></article>");
   assert.equal(html(card("plan", { line: null, ask: { kind: "plan", text: "1. Add a hello comment", command: null, choices: [{ label: "Yes, and use auto mode", about: null, choice: { option: 1 } }], typed: false } })), "<article class=\"ny-card\" data-key=\"thread:plan\" data-kind=\"plan\" aria-label=\"Plan: Tidy the README\"><div class=\"ny-head\"><span class=\"status-glyph\" data-glyph=\"needs\" style=\"--glyph-size: 10px\" aria-hidden=\"true\"></span><span class=\"ny-kind\">Plan</span><span class=\"ny-where\">pinned · mac-mini</span><span class=\"ticker ny-when\" data-since=\"1794420480000\"></span></div><div class=\"ny-name\">Tidy the README</div><fieldset class=\"ny-fields\"><div class=\"ny-actions\"><button type=\"button\" class=\"ny-primary\" data-ny=\"plan\">Approve plan</button><button type=\"button\" class=\"ny-link\" data-ny=\"open\">Open</button></div></fieldset></article>");
+});
+
+/** An approval of `command` with Approve and Decline, as pendingAsk reads a menu. */
+const asking = (command) => ({ kind: "approval", text: null, command, choices: [approve, decline], typed: true });
+const heroAsk = { kind: "question", text: "Which hero image should the launch page use?", command: null, typed: true, choices: [
+  { label: "The product screenshot", about: null, choice: { option: 1 } },
+  { label: "The team photo", about: null, choice: { option: 2 } },
+] };
+/** Stubs answerAsk to note each send as [thread, choice, ask] and refuse the threads titled in
+ * `refused`; answers what was sent so far. */
+function sends(run, refused = []) {
+  run("globalThis.shellPage = () => null; globalThis.asked = []; globalThis.refused = args.refused; globalThis.answerAsk = async (tab, choice, seen) => (asked.push([tab.title, choice, seen]), !refused.includes(tab.title))", { refused });
+  return () => JSON.parse(JSON.stringify(run("asked")));
+}
+/** Runs the act a click or the typed form runs on the card or group drawn last under `key`. */
+const act = (run, name, key, from) => run("NEEDS_YOU_ACTS[args.name](needsYouShown.get(args.key), args.from)", { name, key, from });
+const groupedHtml = (run, key) => run("needsYouGroupedHtml(needsYouShown.get(args.key))", { key });
+/** Each answer button's act and whether it reads as pressed, in order. */
+const pressed = (html) => [...html.matchAll(/<button[^>]*data-ny="([^"]+)"[^>]*aria-pressed="(true|false)"/g)].map(([, a, p]) => `${a} ${p}`);
+const pickLine = (html) => text(html.match(/<div class="ny-pick">([\s\S]*?)<\/div>/)?.[1] ?? "") || null;
+const sendButton = (html) => html.match(/<button[^>]*data-ny="send"[^>]*>[^<]*<\/button>/g);
+
+test("a project's decisions draw as one group at its newest one's place, and every other card keeps its place outside", () => {
+  const push = tab("Tidy the README", { updated: S - 60 }, { machine: "book", project: "site" });
+  const migrate = tab("Apply the migration", { updated: S - 200 }, { project: "site" });
+  const hero = tab("Hero image", { updated: S - 100 }, { machine: "vps", project: "api" });
+  const rate = tab("Rate limit the webhook", { updated: S - 10 }, { project: "site" });
+  const run = page({
+    items: [
+      item(rate, "limit", { limit: { resumesAt: NOW + 3_600_000, account: "Claude Code", held: false, switchTo: [] } }),
+      item(push, "approval", { ask: asking("git push") }),
+      item(hero, "question", { ask: { kind: "question", text: "Which?", command: null, choices: null, typed: false } }),
+      item(migrate, "approval", { ask: asking("psql -f orders.sql") }),
+    ],
+    agents: [{ id: "c1", action: "pair_code", args: {}, machine: "mini", machine_name: "mac-mini", role: "worker", title: "Tidy the README.", at: S - 150 }],
+  });
+  assert.deepEqual([...run("needsYouCards().map((c) => c.key)")], [`thread:${push.key}`, `thread:${hero.key}`, "agent:c1", `thread:${migrate.key}`, `thread:${rate.key}`], "the cards keep today's order");
+  assert.equal(run("needsYouSummary(needsYouCards())"), "4 threads on 3 machines · 1 agent request", "the count line reads as before");
+  const layout = run("needsYouLayout(needsYouCards())");
+  assert.deepEqual([...layout.map((e) => e.key)], ["group:site", `thread:${hero.key}`, "agent:c1", `thread:${rate.key}`]);
+  assert.deepEqual([...layout[0].cards.map((c) => c.key)], [`thread:${push.key}`, `thread:${migrate.key}`]);
+  const html = run("needsYouGroupHtml(needsYouShown.get('group:site'))");
+  assert.match(html, /^<div class="ny-group" role="group" data-key="group:site" aria-label="site">/);
+  assert.equal(text(html.match(/<div class="ny-group-head">([\s\S]*?)<\/div>/)[1]), "site 2 decisions");
+  assert.deepEqual([...html.matchAll(/<div class="ny-head">([\s\S]*?)<\/div>/g)].map((m) => text(m[1])), ["Approval site · macbook", "Approval site · mac-mini"], "each card still names its machine");
+  assert.deepEqual([...html.matchAll(/<pre>([\s\S]*?)<\/pre>/g)].map((m) => m[1]), ["git push", "psql -f orders.sql"]);
+  assert.equal(sendButton(html).length, 1, "the group has one button");
+});
+
+test("a project with one decision draws its card alone, as before, and Approve answers it at once", async () => {
+  const push = tab("Tidy the README", { updated: S - 60 }, { project: "site" });
+  const hero = tab("Hero image", { updated: S - 100 }, { project: "api" });
+  const drawn = asking("git push");
+  const run = page({ items: [item(push, "approval", { ask: drawn }), item(hero, "question", { ask: heroAsk })] });
+  const asked = sends(run);
+  const key = `thread:${push.key}`;
+  assert.deepEqual([...run("needsYouLayout(needsYouCards()).map((e) => e.key)")], [key, `thread:${hero.key}`]);
+  const html = run("needsYouCardHtml(needsYouShown.get(args.key))", { key });
+  assert.doesNotMatch(html, /aria-pressed|ny-pick|Picked/);
+  assert.match(run("needsYouCardHtml(needsYouShown.get(args.key))", { key: `thread:${hero.key}` }), /<button type="submit" class="ny-send">Send<\/button>/);
+  const sent = act(run, "approve", key);
+  assert.deepEqual(asked(), [["Tidy the README", "approve", drawn]], "it went out on the tap");
+  await sent;
+  assert.equal(run("needsYouAnswers.get(args.key).state", { key }), "sent");
+  assert.equal(run("needsYouPicks.size"), 0);
+});
+
+test("in a group a tap picks an answer and sends nothing; another answer replaces the pick, and Clear takes it back", () => {
+  const push = tab("Tidy the README", { updated: S - 60 }, { project: "site" });
+  const hero = tab("Hero image", { updated: S - 100 }, { machine: "book", project: "site" });
+  const run = page({ items: [item(push, "approval", { ask: asking("git push") }), item(hero, "question", { ask: heroAsk })] });
+  const asked = sends(run);
+  run("needsYouLayout(needsYouCards())");
+  const [pushKey, heroKey] = [`thread:${push.key}`, `thread:${hero.key}`];
+  assert.deepEqual(pressed(groupedHtml(run, pushKey)), ["decline false", "approve false"]);
+  assert.equal(pickLine(groupedHtml(run, pushKey)), null);
+
+  act(run, "approve", pushKey);
+  assert.deepEqual(asked(), []);
+  assert.deepEqual(JSON.parse(JSON.stringify(run("needsYouPicks.get(args.key)", { key: pushKey }))), { choice: "approve", label: "Approve", sig: `approval:${(S - 60) * 1000}`, ask: asking("git push") });
+  let html = groupedHtml(run, pushKey);
+  assert.match(html, /data-ny="approve" aria-pressed="true"/);
+  assert.deepEqual(pressed(html), ["decline false", "approve true"]);
+  assert.equal(pickLine(html), "Picked: Approve Clear");
+  assert.match(html, /<button type="button" class="ny-quiet" data-ny="clear">Clear<\/button>/);
+
+  act(run, "decline", pushKey);
+  html = groupedHtml(run, pushKey);
+  assert.deepEqual([pressed(html), pickLine(html)], [["decline true", "approve false"], "Picked: Decline Clear"]);
+  act(run, "clear", pushKey);
+  html = groupedHtml(run, pushKey);
+  assert.deepEqual([pressed(html), pickLine(html), run("needsYouPicks.has(args.key)", { key: pushKey })], [["decline false", "approve false"], null, false]);
+
+  assert.match(groupedHtml(run, heroKey), /<button type="submit" class="ny-send">Pick<\/button>/, "the typed answer is picked in a group, not sent");
+  act(run, "option", heroKey, { dataset: { option: "2" } });
+  html = groupedHtml(run, heroKey);
+  assert.deepEqual([pressed(html), pickLine(html)], [["option false", "option true"], "Picked: The team photo Clear"]);
+  act(run, "typed", heroKey, { answer: { value: "  Use the logo  " } });
+  html = groupedHtml(run, heroKey);
+  assert.deepEqual([pressed(html), pickLine(html)], [["option false", "option false"], "Picked: “Use the logo” Clear"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(run("needsYouPicks.get(args.key).choice", { key: heroKey }))), { text: "Use the logo" });
+  assert.deepEqual(asked(), [], "no pick sent anything");
+});
+
+test("a group's one button counts the picks it would send, and a card answered only by Open counts on the head alone", () => {
+  const push = tab("Tidy the README", { updated: S - 60 }, { project: "site" });
+  const migrate = tab("Apply the migration", { updated: S - 70 }, { project: "site" });
+  const keys = tab("Rotate the keys", { updated: S - 80 }, { project: "site" });
+  const run = page({
+    items: [
+      item(push, "approval", { ask: asking("git push") }),
+      item(migrate, "approval", { ask: asking("psql -f orders.sql") }),
+      item(keys, "approval", { ask: { kind: "approval", text: null, command: "vault rotate", choices: null, typed: false } }),
+    ],
+  });
+  sends(run);
+  const group = () => run("needsYouGroupHtml(needsYouLayout(needsYouCards())[0])");
+  let html = group();
+  assert.equal(text(html.match(/<div class="ny-group-head">([\s\S]*?)<\/div>/)[1]), "site 3 decisions");
+  assert.deepEqual(sendButton(html), ['<button type="button" class="ny-primary ny-group-send" data-ny="send" disabled>Send answers</button>']);
+  assert.deepEqual(shown(run, `thread:${keys.key}`).buttons, ["open Open"]);
+  assert.doesNotMatch(groupedHtml(run, `thread:${keys.key}`), /aria-pressed/);
+  act(run, "approve", `thread:${push.key}`);
+  assert.deepEqual(sendButton(group()), ['<button type="button" class="ny-primary ny-group-send" data-ny="send">Send 1 answer</button>']);
+  act(run, "decline", `thread:${migrate.key}`);
+  html = group();
+  assert.deepEqual(sendButton(html), ['<button type="button" class="ny-primary ny-group-send" data-ny="send">Send 2 answers</button>']);
+  assert.equal(text(html.match(/<div class="ny-group-head">([\s\S]*?)<\/div>/)[1]), "site 3 decisions");
+});
+
+test("a pick survives a repaint, and goes when its thread asks anew, its ask changes, or its group shrinks to one card", () => {
+  const push = tab("Tidy the README", { updated: S - 60 }, { project: "site" });
+  const migrate = tab("Apply the migration", { updated: S - 70 }, { project: "site" });
+  const hero = tab("Hero image", { updated: S - 80 }, { project: "site" });
+  const items = [item(push, "approval", { ask: asking("git push") }), item(migrate, "approval", { ask: asking("psql -f orders.sql") }), item(hero, "question", { ask: heroAsk })];
+  const run = page({ items });
+  sends(run);
+  const [pushKey, migrateKey, heroKey] = [push, migrate, hero].map((t) => `thread:${t.key}`);
+  const layout = () => [...run("needsYouLayout(needsYouCards())").map((e) => e.key)];
+  const picked = () => [...run("[...needsYouPicks.keys()]")];
+  layout();
+  act(run, "approve", pushKey);
+  act(run, "decline", migrateKey);
+  act(run, "option", heroKey, { dataset: { option: "1" } });
+  layout();
+  assert.deepEqual(picked(), [pushKey, migrateKey, heroKey], "a repaint with the same asks keeps every pick");
+  items[0] = item(push, "approval", { ask: asking("git push"), since: NOW - 5_000 });
+  layout();
+  assert.deepEqual(picked(), [migrateKey, heroKey], "the thread asked anew");
+  items[1] = item(migrate, "approval", { ask: asking("psql -f refunds.sql") });
+  layout();
+  assert.deepEqual(picked(), [heroKey], "the command changed at the same time");
+  items[2] = item(hero, "question", { ask: { ...heroAsk, text: "Which hero image should the blog use?" } });
+  layout();
+  assert.deepEqual(picked(), [], "the question's text changed at the same time");
+  act(run, "approve", pushKey);
+  assert.deepEqual(picked(), [pushKey]);
+  items.splice(1, 2);
+  assert.deepEqual(layout(), [pushKey]);
+  assert.deepEqual(picked(), [], "a lone card holds no pick");
+});
+
+test("the group's button sends every pick at once, each to its own thread, and a card that misses stays to be picked again", async () => {
+  const titles = ["Tidy the README", "Apply the migration", "Rotate the keys", "Clean the build"];
+  const commands = ["git push", "psql -f orders.sql", "vault rotate", "rm -rf build"];
+  const tabs = titles.map((title, i) => tab(title, { updated: S - 60 - i }, { project: "site" }));
+  const run = page({ items: tabs.map((t, i) => item(t, "approval", { ask: asking(commands[i]) })) });
+  const asked = sends(run, ["Apply the migration"]);
+  const keys = tabs.map((t) => `thread:${t.key}`);
+  run("needsYouLayout(needsYouCards())");
+  act(run, "approve", keys[0]);
+  act(run, "decline", keys[1]);
+  act(run, "approve", keys[2]);
+  const sending = act(run, "send", "group:site");
+  assert.equal(asked().length, 3, "every pick went out before any came back");
+  assert.equal(run("needsYouPicks.size"), 0, "the picks went as their sends started");
+  await sending;
+  assert.deepEqual(asked(), [["Tidy the README", "approve", asking("git push")], ["Apply the migration", "decline", asking("psql -f orders.sql")], ["Rotate the keys", "approve", asking("vault rotate")]]);
+  assert.deepEqual(keys.map((key) => run("needsYouAnswers.get(args.key)?.state ?? null", { key })), ["sent", "missed", "sent", null]);
+  assert.deepEqual([...run("needsYouLayout(needsYouCards())[0].cards.map((c) => c.key)")], keys, "the missed card is still in its group");
+  const missed = groupedHtml(run, keys[1]);
+  assert.deepEqual([pressed(missed), pickLine(missed)], [["decline false", "approve false"], null]);
+  assert.match(missed, /The question changed on its screen/);
+  assert.deepEqual(sendButton(run("needsYouGroupHtml(needsYouShown.get('group:site'))")), ['<button type="button" class="ny-primary ny-group-send" data-ny="send" disabled>Send answers</button>']);
+  await act(run, "send", "group:site");
+  assert.equal(asked().length, 3, "a second press sends nothing again");
+  act(run, "approve", keys[1]);
+  await act(run, "send", "group:site");
+  assert.deepEqual(asked().at(-1), ["Apply the migration", "approve", asking("psql -f orders.sql")], "the missed card can be picked and sent again");
 });
 
 /** The heading's title, evaluated with `teamsNow` as the team the page reads. */
