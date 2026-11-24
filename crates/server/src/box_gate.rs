@@ -51,6 +51,7 @@ pub fn box_may_send(call: &HubCall) -> Result<(), String> {
         | HubCall::SyncPull { .. }
         | HubCall::ListSchedules
         | HubCall::ScheduleRuns { .. }
+        | HubCall::WorkflowRuns { .. }
         | HubCall::BoxStatus { .. }
         | HubCall::Machines
         | HubCall::MachineStates
@@ -224,6 +225,12 @@ mod tests {
         assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "sync_pull", "project": "pinned:plugins", "paths": ["user-skills/ship/SKILL.md"] }))), Ok(()));
         assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "save_idea", "title": "An iPad app" }))), Err("a box may not change the account's ideas and reports".to_owned()));
         assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "set_taste", "scope": { "kind": "orchestrator" }, "patch": {} }))), Err("a box may not change the account's way of working".to_owned()));
+    }
+
+    #[test]
+    fn a_box_may_read_the_accounts_workflow_runs() {
+        assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "workflow_runs" }))), Ok(()));
+        assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "workflow_runs", "workflow": "c1", "limit": 5 }))), Ok(()));
     }
 
     #[test]
