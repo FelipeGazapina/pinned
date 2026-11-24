@@ -1250,6 +1250,8 @@ pub struct Machine {
     plans: Mutex<crate::plan_store::PlanStore>,
     /// Shared threads. The lock is taken before `tabs`, and never across a start, a delivery or an emit.
     rooms: Mutex<crate::room::Store>,
+    /// The reviews that hold a task's end now, by task.
+    reviews: Mutex<HashMap<String, reviewer::LiveReview>>,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
@@ -1455,6 +1457,7 @@ impl Machine {
             questions: Mutex::new(crate::questions::Questions::load(dir.as_deref())),
             plans: Mutex::new(crate::plan_store::PlanStore::load(dir.as_deref())),
             rooms: Mutex::new(crate::room::Store::load(dir.as_deref())),
+            reviews: Mutex::default(),
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
             next_listener: AtomicU64::new(1),
@@ -5385,6 +5388,11 @@ impl Machine {
                 t.title = Some(info.title.clone());
                 t.origin = origin;
             });
+            // The review that held its end is gone with the process that ran it.
+            if info.reviewing {
+                self.review_did_not_run(&task, "pinned restarted during it");
+                self.finish_review(&task, &tab);
+            }
         }
         self.delegates.end_unresumed();
     }
@@ -6621,6 +6629,9 @@ impl Machine {
             }
         });
         self.delegates.link_thread(child.task, crate::delegate::Thread { tab: id.clone(), runs: true });
+        // The commit the task starts from, which its review diffs against.
+        let base = workspace::run(child.cwd, self.launch.path_env.as_deref(), "git", &["rev-parse", "HEAD"]).ok().map(|head| head.trim().to_owned());
+        self.delegates.set_base(child.task, base);
         self.note_room_env(&id, child.task);
         if let Err(error) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
             self.delegates.fail(child.task, error.clone(), self.launch.path_env.as_deref());
@@ -6701,9 +6712,15 @@ impl Machine {
         if error.is_none() && self.review_turn_end(&task, tab) {
             return true;
         }
-        let parent = self.delegates.settle_thread(&task, reply, error, event.resume_at, self.thread_steps(tab), self.launch.path_env.as_deref());
-        self.board_write(&task, crate::board::BoardEvent::Settled { task: task.clone() });
-        self.chain_settled(&task);
+        self.finish_thread_task(&task, tab, reply, error, event.resume_at)
+    }
+
+    /// Ends task `task` of the worker thread in `tab` with its reply or its error, and tells the
+    /// spawner. Returns false when the news is the worker's to report.
+    fn finish_thread_task(&self, task: &str, tab: &str, reply: Option<String>, error: Option<String>, resume_at: Option<u64>) -> bool {
+        let parent = self.delegates.settle_thread(task, reply, error, resume_at, self.thread_steps(tab), self.launch.path_env.as_deref());
+        self.board_write(task, crate::board::BoardEvent::Settled { task: task.to_owned() });
+        self.chain_settled(task);
         // A thread for another machine's tab sends its end back through the hub on the next pass.
         if self.tab(tab, |t| t.origin.is_some()).unwrap_or(false) {
             self.arm_delegate_pass();
@@ -7033,6 +7050,7 @@ impl Machine {
                 let stopped = machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
                 machine.clear_answered_asks(Instant::now());
                 machine.end_questions_of_ended_tasks();
+                machine.end_reviews_of_ended_tasks();
                 machine.note_user_waits(Instant::now());
                 machine.settle_plans();
                 machine.look_after_remotes(stopped);
@@ -7298,6 +7316,7 @@ impl Machine {
                     }
                 }
                 Some((Role::Orchestrator, project)) if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) => self.captain_turn_ended(tab, &project, &event),
+                Some((Role::Reviewer, _)) if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) => self.reviewer_turn_ended(tab, &event),
                 None if held => {}
                 // A workflow's Run now is a task with no worker role: its turn ends it like a worker's.
                 None => {
@@ -9056,7 +9075,7 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    fn temp(name: &str) -> PathBuf {
+    pub(super) fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pinned-machine-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -9096,7 +9115,7 @@ pub(crate) mod tests {
         String::from_utf8_lossy(&seen.lock().unwrap()).into_owned()
     }
 
-    fn wait_for(what: &str, done: impl Fn() -> bool) {
+    pub(super) fn wait_for(what: &str, done: impl Fn() -> bool) {
         let start = Instant::now();
         while !done() {
             assert!(start.elapsed() < Duration::from_secs(15), "timed out waiting for {what}");
@@ -9104,7 +9123,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn git(dir: &Path, args: &[&str]) {
+    pub(super) fn git(dir: &Path, args: &[&str]) {
         assert!(process::command("git").arg("-C").arg(dir).args(args).status().unwrap().success(), "git {args:?}");
     }
 
@@ -15419,7 +15438,7 @@ Have another model review a risky change before it goes ahead.";
     }
 
     #[cfg(unix)]
-    fn delegate_task(m: &Machine, from: &str, args: Value) -> Value {
+    pub(super) fn delegate_task(m: &Machine, from: &str, args: Value) -> Value {
         let request = crate::delegate::parse_request(&args).unwrap();
         serde_json::from_str(&m.start_delegate(Some(from.to_owned()), None, None, request).unwrap()).unwrap()
     }
@@ -15427,7 +15446,7 @@ Have another model review a risky change before it goes ahead.";
     /// A Captain of the project `app` on a machine whose Captains have `limits`, with the `work`
     /// account. Returns the machine, its folder and the Captain's tab.
     #[cfg(unix)]
-    fn limited_captain(name: &str, limits: TastePatch) -> (Arc<Machine>, PathBuf, String) {
+    pub(super) fn limited_captain(name: &str, limits: TastePatch) -> (Arc<Machine>, PathBuf, String) {
         limited_captain_on(name, limits, None)
     }
 
@@ -15568,7 +15587,7 @@ Have another model review a risky change before it goes ahead.";
     }
 
     #[cfg(unix)]
-    fn work(model: Option<&str>, effort: Option<&str>) -> Value {
+    pub(super) fn work(model: Option<&str>, effort: Option<&str>) -> Value {
         json!({ "task": "Fix the parser.", "title": "Parser", "target": { "providerInstanceId": "work", "model": model, "options": { "effort": effort } } })
     }
 

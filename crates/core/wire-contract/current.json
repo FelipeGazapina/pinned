@@ -27947,7 +27947,7 @@
                 "const": "worker"
               },
               {
-                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\n`Machine::review_turn_end` starts one, read-only, when a worker thread's turn would end its\ntask in a project whose review switch is on.",
                 "type": "string",
                 "const": "reviewer"
               }
@@ -38461,7 +38461,7 @@
                 "const": "worker"
               },
               {
-                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\n`Machine::review_turn_end` starts one, read-only, when a worker thread's turn would end its\ntask in a project whose review switch is on.",
                 "type": "string",
                 "const": "reviewer"
               }
@@ -65995,7 +65995,7 @@
                 "const": "worker"
               },
               {
-                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\n`Machine::review_turn_end` starts one, read-only, when a worker thread's turn would end its\ntask in a project whose review switch is on.",
                 "type": "string",
                 "const": "reviewer"
               }
@@ -66626,7 +66626,7 @@
                 "const": "worker"
               },
               {
-                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\n`Machine::review_turn_end` starts one, read-only, when a worker thread's turn would end its\ntask in a project whose review switch is on.",
                 "type": "string",
                 "const": "reviewer"
               }
@@ -71248,7 +71248,7 @@
                 "const": "worker"
               },
               {
-                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\n`Machine::review_turn_end` starts one, read-only, when a worker thread's turn would end its\ntask in a project whose review switch is on.",
                 "type": "string",
                 "const": "reviewer"
               }
@@ -76145,7 +76145,7 @@
                 "const": "worker"
               },
               {
-                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\n`Machine::review_turn_end` starts one, read-only, when a worker thread's turn would end its\ntask in a project whose review switch is on.",
                 "type": "string",
                 "const": "reviewer"
               }
