@@ -2560,8 +2560,9 @@ impl Machine {
         let project = history::project_of(&cwd);
         let tastes = self.tastes();
         let limits = caller.map_or_else(|| tastes.resolve(&captain_scope(&project)).limits(), |caller| self.limits_from(&tastes, caller, &project));
-        // A run that names no model or effort starts on the project's defaults, which the limits see.
-        let (default_model, default_effort) = self.session_defaults(&tastes, &account, &cwd);
+        // A fresh run that names no model or effort starts on the project's defaults, which the
+        // limits see. A resume starts on neither, so they are not its model or effort.
+        let (default_model, default_effort) = if run.args.iter().any(|a| a == "--resume") { (None, None) } else { self.session_defaults(&tastes, &account, &cwd) };
         let model = model.or(default_model);
         let effort = match limits.admit(&account, model.as_deref(), flag("--effort").or(default_effort).as_deref(), &self.claude_models()) {
             Ok(effort) => effort,
@@ -4409,12 +4410,13 @@ impl Machine {
         if tab == caller {
             return Err("enqueue hands a message to a Captain; your own session is the one reading this".into());
         }
-        let (running, model, account, cwd) = self.tab(&tab, |t| (t.live() || t.starting, t.model.clone(), t.account.clone(), t.cwd.clone()))?;
+        let (running, model, account, cwd, resumes) = self.tab(&tab, |t| (t.live() || t.starting, t.model.clone(), t.account.clone(), t.cwd.clone(), t.claude_session.is_some()))?;
         if !running {
             let tastes = self.tastes();
             let limits = self.limits_from(&tastes, caller, &project);
-            // A Captain with no model of its own starts on the project's defaults, which the limits see.
-            let (default_model, default_effort) = self.session_defaults(&tastes, &account, &cwd);
+            // A Captain with no conversation starts a fresh one on the project's defaults, which the
+            // limits see. One with a conversation resumes it on neither.
+            let (default_model, default_effort) = if resumes { (None, None) } else { self.session_defaults(&tastes, &account, &cwd) };
             limits.admit(&account, model.or(default_model).as_deref(), default_effort.as_deref(), &self.claude_models())?;
             let working = self.delegates.working_in(&project);
             if working >= limits.parallel as usize {
@@ -4450,9 +4452,9 @@ impl Machine {
     fn start_for(&self, caller: &str, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
         use crate::delegate::{Access, Caller, Claim, Mode, NewTask, Parent, Thread};
         let (home, global, ceiling) = self.tab(caller, |t| (history::project_of(&t.cwd), global::is_global(&t.env), t.child_access()))?;
-        let (running, ruled, cwd, account, model, title, access) = self.tab(tab, |t| {
+        let (running, ruled, cwd, account, model, title, access, resumes) = self.tab(tab, |t| {
             let reads_only = t.reads_only();
-            (t.live() || t.starting, matches!(role_of(&t.env), Some((Role::Orchestrator, _))) || global::is_global(&t.env) || taste::is_chat(&t.env), t.cwd.clone(), t.account.clone(), t.model.clone(), t.title.clone(), Access::derive(t.bypass, reads_only))
+            (t.live() || t.starting, matches!(role_of(&t.env), Some((Role::Orchestrator, _))) || global::is_global(&t.env) || taste::is_chat(&t.env), t.cwd.clone(), t.account.clone(), t.model.clone(), t.title.clone(), Access::derive(t.bypass, reads_only), t.launch.iter().any(|a| a == "--resume"))
         })?;
         if running || self.thread_task(tab, false).is_some() {
             return self.start_claude(tab, cols, rows);
@@ -4471,8 +4473,9 @@ impl Machine {
         }
         let tastes = self.tastes();
         let limits = self.caller_limits_from(&tastes, caller)?;
-        // A tab with no model of its own starts on the project's default, which the limits see.
-        let model = model.or_else(|| self.session_defaults(&tastes, &account, &cwd).0);
+        // A tab with no model of its own starts a fresh conversation on the project's default, which
+        // the limits see. A resume starts on no default, so it has no model to check.
+        let model = if resumes { model } else { model.or_else(|| self.session_defaults(&tastes, &account, &cwd).0) };
         let effort = limits.admit(&account, model.as_deref(), None, &self.claude_models())?;
         self.require_priced(&limits, model.as_deref())?;
         let caller_ref = Caller { tab: Some(caller.to_owned()), task: None };
@@ -16094,6 +16097,34 @@ Have another model review a risky change before it goes ahead.";
         assert!(has(&started(&dir.join("claude"), &tab), ["--model", "claude-sonnet-5-5"]));
         let task = m.tab(&tab, |t| t.task.clone()).unwrap().expect("the started tab runs a task");
         assert_eq!(m.delegates.get(&task).unwrap().model.as_deref(), Some("claude-sonnet-5-5"), "the task records the model it runs on");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_resume_is_held_to_the_tier_without_the_default_model_it_does_not_start_on() {
+        let (m, dir, captain) = limited_captain("default-model-resume", TastePatch { tier: Some(taste::Tier::Mid), default_model: Some(named("claude-sonnet-5-5")), ..TastePatch::default() });
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let no_model = "name a model: this project allows models up to the mid tier, and a worker without one runs on its account's default. Pick a mid model from orchestrator_capabilities, or raise Tier in Settings › Way of working";
+
+        let resumed = work_tab(&m, &path);
+        m.tab(&resumed, |t| t.launch = vec!["--resume".into(), "s1".into()]).unwrap();
+        assert_eq!(act_as(&m, &captain, "start_claude", json!({ "tab": resumed, "cols": 80, "rows": 24 })), Err(no_model.into()));
+        assert!(!m.view(&resumed).unwrap().running, "a refused start starts nothing");
+
+        let mut run = run_now_spec(&path, "none", "auto");
+        run.args.splice(..2, ["--resume".to_owned(), "conv-1".to_owned()]);
+        let before = m.tabs().len();
+        assert_eq!(m.call(Call::RunNow { run, title: "Nightly · Run now".into() }), Err(no_model.into()));
+        assert_eq!(m.tabs().len(), before, "a run the limits refuse leaves no tab");
+
+        let session = m.open_tab(Some(path.clone()), false).unwrap();
+        let enqueue = |request: &str| act_as(&m, &session, "enqueue", json!({ "path": path, "text": "Ship it.", "request_id": request, "sender": "Orchestrator" }));
+        m.tab(&captain, |t| t.claude_session = Some("s1".into())).unwrap();
+        assert_eq!(enqueue("r-1"), Err(no_model.into()), "a Captain with a conversation resumes it, on no default");
+        m.tab(&captain, |t| t.claude_session = None).unwrap();
+        assert!(enqueue("r-2").is_ok());
+        assert!(has(&started(&dir.join("claude"), &captain), ["--model", "claude-sonnet-5-5"]), "a Captain with none starts a fresh one on the default");
         let _ = std::fs::remove_dir_all(dir);
     }
 
