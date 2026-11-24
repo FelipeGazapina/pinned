@@ -538,6 +538,10 @@ pub struct Task {
     pub profile: Option<String>,
     /// Where it stands in a handoff chain.
     pub chain: Option<crate::chain::ChainLink>,
+    /// The commit its thread started from, which its review diffs against.
+    pub base: Option<String>,
+    /// A review holds its end.
+    pub reviewing: bool,
 }
 
 /// A task that a usage limit moved: what the request asked for, and why it ran elsewhere.
