@@ -1268,6 +1268,9 @@ pub struct Machine {
     session_costs: Mutex<session_costs::Store>,
     /// Shared threads. The lock is taken before `tabs`, and never across a start, a delivery or an emit.
     rooms: Mutex<crate::room::Store>,
+    /// The notes, hand-offs and blocks written to each Captain's board, in memory only. Takes no
+    /// other lock while held.
+    boards: Mutex<crate::board::Boards>,
     /// The reviews that hold a task's end now, by task.
     reviews: Mutex<HashMap<String, reviewer::LiveReview>>,
     events: Box<dyn Fn(Event) + Send + Sync>,
@@ -1476,6 +1479,7 @@ impl Machine {
             plans: Mutex::new(crate::plan_store::PlanStore::load(dir.as_deref())),
             session_costs: Mutex::new(session_costs::Store::load(dir.as_deref())),
             rooms: Mutex::new(crate::room::Store::load(dir.as_deref())),
+            boards: Mutex::default(),
             reviews: Mutex::default(),
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
