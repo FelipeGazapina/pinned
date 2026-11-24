@@ -7,6 +7,7 @@ pub mod board;
 pub mod boot;
 pub mod branches;
 pub mod chain;
+pub mod classify;
 pub mod claude_models;
 pub mod cli;
 pub mod commands;

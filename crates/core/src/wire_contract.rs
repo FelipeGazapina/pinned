@@ -96,6 +96,7 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("GithubRepo".into(), schemas::<github::Repo>());
     outbound.insert("VercelAccount".into(), schemas::<vercel::Account>());
     outbound.insert("VercelModel".into(), schemas::<vercel::Model>());
+    outbound.insert("ClassifyAnswer".into(), schemas::<crate::classify::Answer>());
     outbound.insert("UpstashAccount".into(), schemas::<upstash::Account>());
     outbound.insert("ConvexConnection".into(), schemas::<crate::convex::Connection>());
     outbound.insert("ExternalAgents".into(), schemas::<ExternalAgents>());

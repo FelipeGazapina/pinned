@@ -7,7 +7,7 @@ use crate::graph::project::project;
 use crate::graph::runner::{self, Drive, Effect, Session, Status, Supplied, Wake};
 use crate::graph::{Answers, ChosenOn, Gate, Graph, NodeKind, SessionSetup, Watch};
 use crate::wire::{MachineId, RunSpec, TabId, TabView};
-use crate::{convex, github, linear, pinned_lines, posthog, schedule, slack, upstash, vercel};
+use crate::{classify, convex, github, linear, pinned_lines, posthog, schedule, slack, upstash, vercel};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
@@ -6809,6 +6809,23 @@ impl Connectors {
         vercel::models().await
     }
 
+    /// An agent's `classify`: which of its categories, or yes or no to its question, a decision
+    /// model finds fits its text, asked with the account's key. One billed gateway call, after a
+    /// keyless lookup of the `model` it names, if any, to refuse a chat model.
+    pub async fn agent_classify(&self, ask: classify::Ask) -> Result<classify::Answer, String> {
+        let checked = classify::check(&ask)?;
+        let key = self.key(VERCEL_KEY).ok_or_else(|| "Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".to_owned())?;
+        if let Some(model) = &checked.model {
+            if vercel::kind_of(model).await? == vercel::Kind::Chat {
+                return Err(format!("classify: {model} is a chat model: give a decision model, or leave model out for {}", classify::DEFAULT_MODEL));
+            }
+        }
+        let model = checked.model.as_deref().unwrap_or(classify::DEFAULT_MODEL);
+        let choices: Vec<(&str, &str)> = checked.categories.iter().map(|category| (category.name.as_str(), category.description.as_str())).collect();
+        let chosen = vercel::choose(&key, model, &checked.instructions, &choices, &checked.state).await?;
+        Ok(classify::answer(&checked, &chosen))
+    }
+
     pub async fn github_repos(&self) -> Result<Vec<github::Repo>, String> {
         github::repos(&self.github_token().ok_or("GitHub is not connected")?).await
     }
@@ -8077,6 +8094,135 @@ mod tests {
             Ok("BLO-1 https://linear.example/BLO-1".into())
         );
         assert!(seen.lock().unwrap().iter().any(|request| request.contains("issueCreate")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A stand-in for the gateway, for classify tests: `/models/<id>` answers that model typed
+    /// `model_type`, and `/evaluate` answers `evaluation`. Each request's line, head and body is
+    /// kept, in order.
+    fn serve_gateway(model_type: &'static str, evaluation: Value) -> (String, std::sync::Arc<Mutex<Vec<(String, String, String)>>>) {
+        install_rustls();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let kept = seen.clone();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while started.elapsed() < std::time::Duration::from_secs(60) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(accepted) => accepted,
+                    Err(_) => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 65536];
+                let complete = |buf: &[u8]| {
+                    let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { return false };
+                    let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                    let length = head.lines().find_map(|line| line.strip_prefix("content-length:")).and_then(|n| n.trim().parse::<usize>().ok()).unwrap_or(0);
+                    buf.len() >= end + 4 + length
+                };
+                while !complete(&buf) {
+                    match std::io::Read::read(&mut stream, &mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let request = String::from_utf8_lossy(&buf).to_string();
+                let (head, body) = request.split_once("\r\n\r\n").unwrap_or((&request, ""));
+                let line = head.lines().next().unwrap_or_default().rsplit_once(' ').map(|(line, _)| line.to_owned()).unwrap_or_default();
+                let answer = match line.split_once(' ') {
+                    Some((_, path)) if path.starts_with("/models/") => json!({ "id": &path["/models/".len()..], "type": model_type }).to_string(),
+                    _ => evaluation.to_string(),
+                };
+                kept.lock().unwrap().push((line, head.to_owned(), body.to_owned()));
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len());
+                let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            }
+        });
+        (format!("http://{address}/"), seen)
+    }
+
+    fn classify_ask(categories: &[(&str, &str)], question: Option<&str>, model: Option<&str>) -> classify::Ask {
+        classify::Ask {
+            text: "The export button 500s".into(),
+            categories: categories.iter().map(|(name, description)| classify::Category { name: (*name).into(), description: (*description).into() }).collect(),
+            question: question.map(str::to_owned),
+            instructions: String::new(),
+            model: model.map(str::to_owned),
+            unsure_below: None,
+            sure_at: None,
+        }
+    }
+
+    #[test]
+    fn classify_asks_the_default_decision_model_once_with_the_text_framed() {
+        let _api = slack::lock_api();
+        let _restore = RestoreVercelRoot;
+        let evaluation = json!({ "answers": { "category": { "type": "choice", "choice": "bug", "probabilities": { "bug": 0.91, "question": 0.06, "other": 0.03 } } } });
+        let (root, seen) = serve_gateway("evaluation", evaluation);
+        std::env::set_var(crate::vercel::API_ROOT_ENV, root.trim_end_matches('/'));
+        let (connectors, dir) = stored("classify-default", vec![]);
+        std::fs::write(dir.join("vercel-key"), "vck_testa1b2").unwrap();
+        let categories = [("bug", "something broke"), ("question", "someone asks how"), ("other", "")];
+        let answer = block_on(connectors.agent_classify(classify_ask(&categories, None, None))).unwrap();
+        assert_eq!(
+            serde_json::to_value(&answer).unwrap(),
+            json!({
+                "pick": "bug",
+                "probability": 0.91,
+                "probabilities": [{ "name": "bug", "probability": 0.91 }, { "name": "question", "probability": 0.06 }, { "name": "other", "probability": 0.03 }],
+                "confidence": "sure",
+            })
+        );
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1, "one gateway call, and no model lookup: {requests:?}");
+        let (line, head, body) = &requests[0];
+        assert_eq!(line, "POST /evaluate");
+        assert!(head.to_ascii_lowercase().contains("authorization: bearer vck_testa1b2"), "asked with the account's key: {head}");
+        let body: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["model"], "typesafe-ai/jev");
+        let framed = body["state"]["text"].as_str().unwrap();
+        assert_eq!(framed, crate::untrusted::frame("an agent's classify call", "The export button 500s"));
+        assert!(framed.contains("=====pinned-untrusted-text=====\nThe export button 500s\n=====pinned-untrusted-text====="), "{framed}");
+        assert_eq!(body["questions"]["category"]["criteria"], json!({ "bug": "something broke", "question": "someone asks how", "other": "" }));
+        assert_eq!(body["questions"]["category"]["instructions"], "Choose the category that best fits the text.");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn classify_refuses_a_chat_model_before_it_asks_anything() {
+        let _api = slack::lock_api();
+        let _restore = RestoreVercelRoot;
+        let (root, seen) = serve_gateway("language", json!({ "answers": { "category": { "choice": "yes", "probabilities": { "yes": 1.0 } } } }));
+        std::env::set_var(crate::vercel::API_ROOT_ENV, root.trim_end_matches('/'));
+        let (connectors, dir) = stored("classify-chat-model", vec![]);
+        std::fs::write(dir.join("vercel-key"), "vck_testa1b2").unwrap();
+        let asked = block_on(connectors.agent_classify(classify_ask(&[], Some("Is this a bug report?"), Some("openai/gpt-6"))));
+        assert_eq!(asked, Err("classify: openai/gpt-6 is a chat model: give a decision model, or leave model out for typesafe-ai/jev".into()));
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.iter().map(|(line, _, _)| line.as_str()).collect::<Vec<_>>(), ["GET /models/openai/gpt-6"], "the keyless lookup only");
+        assert!(!requests[0].1.to_ascii_lowercase().contains("authorization"), "the lookup sends no key: {}", requests[0].1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn classify_without_a_vercel_key_answers_not_connected() {
+        let (connectors, dir) = stored("classify-no-key", vec![]);
+        assert_eq!(
+            block_on(connectors.agent_classify(classify_ask(&[("bug", ""), ("other", "")], None, None))),
+            Err("Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".into())
+        );
+        assert_eq!(
+            block_on(connectors.agent_classify(classify_ask(&[("bug", "")], None, None))),
+            Err("classify: one category leaves nothing to choose: give two or more, or a yes/no question".into()),
+            "bad input is refused before the key is read"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
