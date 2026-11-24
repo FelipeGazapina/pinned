@@ -10624,7 +10624,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -10859,6 +10871,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -11072,6 +11085,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -11114,6 +11128,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -11271,8 +11286,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -11367,6 +11394,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -24231,7 +24259,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -24461,6 +24501,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -24669,6 +24710,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -24711,6 +24753,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -24858,8 +24901,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -34268,7 +34323,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort2"
@@ -34534,6 +34601,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -34747,6 +34815,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -34789,6 +34858,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -34946,8 +35016,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort2"
@@ -35042,6 +35124,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -44771,7 +44854,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort2"
@@ -45032,6 +45127,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -45240,6 +45336,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -45282,6 +45379,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -45429,8 +45527,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort2"
@@ -67531,6 +67641,7 @@
               "skills": [],
               "context": [],
               "tier": "high",
+              "default_model": null,
               "default_effort": null,
               "max_effort": "max",
               "budget_cents": 0,
@@ -67573,6 +67684,7 @@
               "skills": [],
               "context": [],
               "tier": "high",
+              "default_model": null,
               "default_effort": null,
               "max_effort": "max",
               "budget_cents": 0,
@@ -67730,8 +67842,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -67826,6 +67950,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -68032,7 +68157,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -68449,6 +68586,7 @@
               "skills": [],
               "context": [],
               "tier": "high",
+              "default_model": null,
               "default_effort": null,
               "max_effort": "max",
               "budget_cents": 0,
@@ -68491,6 +68629,7 @@
               "skills": [],
               "context": [],
               "tier": "high",
+              "default_model": null,
               "default_effort": null,
               "max_effort": "max",
               "budget_cents": 0,
@@ -68638,8 +68777,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -68917,7 +69068,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
