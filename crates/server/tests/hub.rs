@@ -14191,11 +14191,11 @@ fn act_cannot_set_the_reviewer_or_worker_profiles_for_any_role_and_the_user_can(
     let before = ana.hub(json!({ "cmd": "get_tastes" })).unwrap();
     assert_eq!(before["worker_profiles"]["proposed"], json!([]));
     let mut proposed = propose("tab-captain", json!({ "name": "  tester ", "access": "read_only", "by": "user" })).unwrap();
-    assert_eq!(proposed["worker_profiles"]["proposed"], json!([{ "name": "tester", "skills": [], "tools": [], "access": "read_only", "delivers": "", "by": "orchestrator" }]), "the hub writes who proposed it");
+    assert_eq!(proposed["worker_profiles"]["proposed"], json!([{ "name": "tester", "skills": [], "tools": [], "access": "read_only", "delivers": "", "by": "orchestrator", "prompt": "" }]), "the hub writes who proposed it");
     proposed["worker_profiles"]["proposed"] = json!([]);
     assert_eq!(proposed, before, "nothing outside proposed changed");
     let replaced = propose("tab-global", json!({ "name": "Tester", "delivers": "A list." })).unwrap();
-    assert_eq!(replaced["worker_profiles"]["proposed"], json!([{ "name": "Tester", "skills": [], "tools": [], "access": "edit", "delivers": "A list.", "by": "orchestrator" }]), "a proposal of the same name is replaced");
+    assert_eq!(replaced["worker_profiles"]["proposed"], json!([{ "name": "Tester", "skills": [], "tools": [], "access": "edit", "delivers": "A list.", "by": "orchestrator", "prompt": "" }]), "a proposal of the same name is replaced");
     assert_eq!(propose("tab-captain", json!({ "name": "x", "delivers": "a\nb" })), Err("what x delivers fits one line".into()));
     for n in 2..=20 {
         propose("tab-captain", json!({ "name": format!("p{n}") })).unwrap();
