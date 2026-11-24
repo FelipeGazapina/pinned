@@ -125,6 +125,12 @@ body[data-page="usage"] #page-view .page-head { flex-wrap: nowrap; height: var(-
 .usage td.model i { display: block; width: 0; max-width: 192px; height: 2px; margin-top: 6px; border-radius: 999px; background: #d97757; }
 .usage tr.empty td { padding: 24px 0; text-align: center; color: var(--g-muted); }
 @media (max-width: 639px) { .usage .share-col { display: none; } }
+/* The Threads table cuts a long title short, and a phone leaves out the project and machine, so the figures stay in view. */
+.usage table.threads .clip { display: block; max-width: min(20rem, 30vw); overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 639px) {
+  .usage table.threads .opt { display: none; }
+  .usage table.threads :is(th, td):not(:first-child) { padding-left: 10px; }
+}
 .usage tr[data-model] { position: relative; cursor: pointer; }
 .usage tr[data-model]:is(:hover, :has(:focus-visible)) td { background: color-mix(in srgb, var(--g-fg) 2.4%, transparent); }
 .usage table.by-time tbody tr:hover td { background: color-mix(in srgb, var(--g-fg) 2.4%, transparent); }

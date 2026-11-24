@@ -2165,6 +2165,25 @@
                 ]
               },
               {
+                "description": "`Vec<session_costs::Record>`: the cost, turns and active time the machine saved for each\nClaude session whose last message is at or after unix time `since`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "session_costs"
+                  },
+                  "since": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "since"
+                ]
+              },
+              {
                 "description": "`usage::PriceBook`: the prices and model mappings the user set on the machine.",
                 "type": "object",
                 "properties": {
@@ -15817,6 +15836,25 @@
                   "cmd": {
                     "type": "string",
                     "const": "token_usage"
+                  },
+                  "since": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "since"
+                ]
+              },
+              {
+                "description": "`Vec<session_costs::Record>`: the cost, turns and active time the machine saved for each\nClaude session whose last message is at or after unix time `since`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "session_costs"
                   },
                   "since": {
                     "type": "integer",
@@ -82563,6 +82601,25 @@
                 ]
               },
               {
+                "description": "`Vec<session_costs::Record>`: the cost, turns and active time the machine saved for each\nClaude session whose last message is at or after unix time `since`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "session_costs"
+                  },
+                  "since": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "since"
+                ]
+              },
+              {
                 "description": "`usage::PriceBook`: the prices and model mappings the user set on the machine.",
                 "type": "object",
                 "properties": {
@@ -88206,6 +88263,25 @@
                   "cmd": {
                     "type": "string",
                     "const": "token_usage"
+                  },
+                  "since": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "since"
+                ]
+              },
+              {
+                "description": "`Vec<session_costs::Record>`: the cost, turns and active time the machine saved for each\nClaude session whose last message is at or after unix time `since`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "session_costs"
                   },
                   "since": {
                     "type": "integer",

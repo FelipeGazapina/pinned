@@ -546,7 +546,7 @@ Since 0.17.23 a box follows only its access setting and the Box budget, never th
 | Projects | `create_project`, `make_folder`, `publish_project`, `set_project_account`, `save_project_scripts` (write, on a machine); `clone` (write, the hub's: it adds the account's own GitHub token, the node's `node_clone` stays excluded), `share_project` (write). The reads `list_projects`, `project_history`, `shared_projects`, `project_scripts` were already wired. |
 | Sessions | `open_scratch`, `open_orchestrator`, `open_global_orchestrator` (the global orchestrator's own session only), `prompt`, `enqueue` (`starts_work`, 13.6). `search_threads` (read) was already wired. |
 | Settings | `set_usage_prices`, `save_skill` (write). `set_taste` and `reset_taste_field` stay confirm, since they carry the delegation limits. `set_global_orchestrator_settings` is confirm since `auto_merge`: an agent could otherwise turn auto-merge on or rewrite its own approval profile with no approval. Renaming the orchestrator through `act` waits for the owner too, and a locked web login unlocks to save the section, as with `set_taste`. |
-| Memory, usage | Already wired by P1: `memory_status`, `memory_search`, `memory_save`, `memory_forget`, `token_usage`, `usage_limits`, `delegation_stats`. |
+| Memory, usage | Already wired by P1: `memory_status`, `memory_search`, `memory_save`, `memory_forget`, `token_usage`, `usage_limits`, `delegation_stats`. `session_costs` (read) lists each Claude session's saved cost, turns and active time. |
 
 The `Run` and `Deliver` calls are how the hub opens a workflow's session and types into it, and stay excluded. 0.17.23 adds a manual run, for the app and for agents (13.12).
 
