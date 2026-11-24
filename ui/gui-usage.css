@@ -131,8 +131,16 @@ body[data-page="usage"] #page-view .page-head { flex-wrap: nowrap; height: var(-
   .usage table.threads .opt { display: none; }
   .usage table.threads :is(th, td):not(:first-child) { padding-left: 10px; }
 }
-.usage tr[data-model] { position: relative; cursor: pointer; }
-.usage tr[data-model]:is(:hover, :has(:focus-visible)) td { background: color-mix(in srgb, var(--g-fg) 2.4%, transparent); }
+.usage :is(tr[data-model], tr:has([data-usage-thread])) { position: relative; cursor: pointer; }
+.usage :is(tr[data-model], tr:has([data-usage-thread])):is(:hover, :has(:focus-visible)) td { background: color-mix(in srgb, var(--g-fg) 2.4%, transparent); }
+/* A session is named by its open thread's button, else by its id's head, with its machine and whether its thread is open below. */
+.usage table.by-session td.model button { padding: 0; }
+.usage table.by-session td.model .id { color: var(--g-fg); }
+.usage table.by-session td.model small { display: block; margin-top: 2px; font-size: 12px; }
+/* A Threads row naming an open thread opens it: its button covers the cell, as a Model row's does. */
+.usage table.threads td:has(> [data-usage-thread]) { position: relative; }
+.usage table.threads [data-usage-thread] { display: block; max-width: 100%; padding: 0; color: var(--g-fg); text-align: left; white-space: nowrap; outline: none; }
+.usage table.threads [data-usage-thread]::after { content: ""; position: absolute; inset: 0; }
 .usage table.by-time tbody tr:hover td { background: color-mix(in srgb, var(--g-fg) 2.4%, transparent); }
 .usage .ghost { display: block; border-radius: 4px; background: color-mix(in srgb, var(--g-muted) 15%, transparent); animation: ghost 1.2s ease-in-out infinite alternate; }
 .usage .ghost.pill { border-radius: 999px; flex: none; }

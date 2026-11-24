@@ -50,6 +50,9 @@ pub struct Row {
     pub model: String,
     /// Tells the report's sessions apart, which the page counts.
     pub session: u32,
+    /// Claude Code's id of that session, left out when its lines had none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub session_id: String,
     pub speed: Speed,
     pub input: u64,
     pub cached: u64,
@@ -180,6 +183,8 @@ pub fn read(projects: &[PathBuf], since: u64, rates: &RateTable, book: &PriceBoo
     files.sort();
     let mut seen = HashMap::new();
     let mut sessions: HashMap<String, u32> = HashMap::new();
+    // Each index's session id, so a row names the session it counts.
+    let mut ids: Vec<String> = vec![];
     let mut sums: HashMap<(u64, String, u32, Speed), [u64; 5]> = HashMap::new();
     for file in files {
         let Ok(f) = std::fs::File::open(&file) else { continue };
@@ -192,7 +197,10 @@ pub fn read(projects: &[PathBuf], since: u64, rates: &RateTable, book: &PriceBoo
             let (Some(tokens), Some(model)) = (message.usage, message.model.filter(|m| !m.is_empty() && m != "<synthetic>")) else { continue };
             let Some(at) = line.timestamp.as_deref().and_then(unix_of).filter(|at| *at >= since) else { continue };
             let next = sessions.len() as u32;
-            let session = *sessions.entry(line.session).or_insert(next);
+            let session = *sessions.entry(line.session).or_insert_with_key(|id| {
+                ids.push(id.clone());
+                next
+            });
             let speed = if tokens.speed.as_deref() == Some("fast") { Speed::Fast } else { Speed::Standard };
             let model = targets.get(model.as_str()).map_or(model, |&target| target.to_owned());
             add_line(&mut seen, &mut sums, (message.id, line.request), (at - at % SLICE, model, session, speed), tokens.counts());
@@ -201,7 +209,7 @@ pub fn read(projects: &[PathBuf], since: u64, rates: &RateTable, book: &PriceBoo
     let mut rows: Vec<Row> = sums
         .into_iter()
         .map(|((at, model, session, speed), [input, cached, five, hour, output])| {
-            let mut row = Row { at, model, session, speed, input, cached, cache_write: five + hour, output, cache_write_1h: hour, cost: None, premium: 0.0, savings: 0.0 };
+            let mut row = Row { at, model, session, session_id: ids[session as usize].clone(), speed, input, cached, cache_write: five + hour, output, cache_write_1h: hour, cost: None, premium: 0.0, savings: 0.0 };
             price(&mut row, rates, &book.prices);
             row
         })
@@ -322,7 +330,7 @@ impl Meter {
         let targets = book.targets();
         self.sums.iter().map(move |((model, speed), &[input, cached, five, hour, output])| {
             let model = targets.get(model.as_str()).map_or(model.clone(), |&target| target.to_owned());
-            Row { at: 0, model, session: 0, speed: *speed, input, cached, cache_write: five + hour, output, cache_write_1h: hour, cost: None, premium: 0.0, savings: 0.0 }
+            Row { at: 0, model, session: 0, session_id: String::new(), speed: *speed, input, cached, cache_write: five + hour, output, cache_write_1h: hour, cost: None, premium: 0.0, savings: 0.0 }
         })
     }
 }
@@ -760,7 +768,7 @@ mod tests {
         for model in ["claude-opus-5-5", "anthropic/claude-haiku-5", "claude-haiku-5", "half-priced", "my-own-model", "My-Own-Model ", "my-alias", "claude-opus-5-5[1m]", "opus", "glm-5.3", "", "my-dead-alias"] {
             let targets = book.targets();
             let target = targets.get(model.trim()).map_or(model.trim(), |&target| target).to_owned();
-            let mut row = Row { at: 0, model: target, session: 0, speed: Speed::Standard, input: 1, cached: 0, cache_write: 0, output: 1, cache_write_1h: 0, cost: None, premium: 0.0, savings: 0.0 };
+            let mut row = Row { at: 0, model: target, session: 0, session_id: String::new(), speed: Speed::Standard, input: 1, cached: 0, cache_write: 0, output: 1, cache_write_1h: 0, cost: None, premium: 0.0, savings: 0.0 };
             price(&mut row, &table, &book.prices);
             assert_eq!(row.cost.is_some(), priced(model, &book, &table), "{model}: the guard and price() disagree");
         }
@@ -994,10 +1002,32 @@ mod tests {
     }
 
     #[test]
+    fn each_row_carries_the_claude_session_id_of_its_lines_and_none_when_they_had_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let usage = |input: u64| json!({ "input_tokens": input, "output_tokens": 1 });
+        let lines = [
+            assistant("m1", "r1", "s1", "2026-10-24T10:01:00Z", "claude-opus-5-5", usage(1)),
+            assistant("m2", "r2", "s1", "2026-10-24T10:02:00Z", "claude-opus-5-5", usage(2)),
+            assistant("m3", "r3", "s2", "2026-10-24T10:03:00Z", "claude-opus-5-5", usage(10)),
+            json!({ "type": "assistant", "timestamp": "2026-10-24T10:04:00Z", "requestId": "r4", "message": { "id": "m4", "model": "claude-opus-5-5", "role": "assistant", "content": [], "usage": usage(100) } }).to_string(),
+        ];
+        std::fs::write(dir.path().join("s.jsonl"), lines.join("\n")).unwrap();
+        let rows = read(&[dir.path().to_owned()], 0, &table(), &PriceBook::default());
+        let ids: Vec<_> = rows.iter().map(|r| (r.at, r.input, r.session_id.as_str())).collect();
+        let at = unix_of("2026-10-24T10:00:00Z").unwrap();
+        assert_eq!(ids, [(at, 3, "s1"), (at, 10, "s2"), (at, 100, "")], "one quarter hour and model, a row per session, each named by its lines' id");
+        let (s1, s2, none) = (&rows[0], &rows[1], &rows[2]);
+        assert_ne!(s1.session, s2.session);
+        assert_ne!(s1.session_id, s2.session_id);
+        assert_eq!(serde_json::to_value(s1).unwrap()["session_id"], "s1");
+        assert!(serde_json::to_value(none).unwrap().get("session_id").is_none(), "a row with no id sends no session_id");
+    }
+
+    #[test]
     fn prices_fast_mode_and_leaves_unknown_models_unpriced() {
         let rates = table();
         let priced = |model: &str, speed| {
-            let mut row = Row { at: 0, model: model.into(), session: 0, speed, input: 1_000_000, cached: 0, cache_write: 0, output: 0, cache_write_1h: 0, cost: None, premium: 0.0, savings: 0.0 };
+            let mut row = Row { at: 0, model: model.into(), session: 0, session_id: String::new(), speed, input: 1_000_000, cached: 0, cache_write: 0, output: 0, cache_write_1h: 0, cost: None, premium: 0.0, savings: 0.0 };
             price(&mut row, &rates, &HashMap::from([("opus".to_owned(), Price { input: 2.0, output: 10.0, cache_read: None, cache_write: Some(4.0) })]));
             row
         };

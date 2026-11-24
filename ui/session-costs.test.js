@@ -27,9 +27,10 @@ const NOW = 1793491210;
 const DAY = 86400;
 const saved = (session, fields = {}) => ({ session, title: `Thread ${session}`, project: "/w/site", account: "claude", turns: 2, active_ms: 150000, cost_usd: 1, first_at: NOW - 7200, last_at: NOW - 3600, ...fields });
 
-/** The Threads section as the Cost view draws it, over each machine's `threads` and the `selected` machines. */
-function page({ threads, selected = null, days = 30 }) {
+/** The Threads section as the Cost view draws it, over each machine's `threads`, the `selected` machines and the open `tabs`. */
+function page({ threads, selected = null, days = 30, tabs = [] }) {
   const context = {
+    tabs,
     machineName: (m) => (m === "macbook" ? "MacBook" : m === "macmini" ? "Mac mini" : m),
     machines: new Map(Object.keys(threads).map((m) => [m, {}])),
     usageState: { days, now: NOW, selected, envs: new Map(Object.entries(threads).map(([m, list]) => [m, { rows: [], loaded: true, loading: false, error: "", threads: list.map((r) => ({ ...r, machine: m })) }])) },
@@ -43,6 +44,7 @@ function page({ threads, selected = null, days = 30 }) {
     line(usageSrc, "const bucketOf = "),
     line(usageSrc, "const usageEnvs = "),
     line(usageSrc, "const usageSelected = "),
+    line(usageSrc, "const sessionThread = "),
     fn(usageSrc, "threadsHtml"),
     "this.draw = () => threadsHtml(usageBuckets(usageState.days, usageState.now));",
   ].join("\n"), context);
@@ -112,6 +114,18 @@ test("a long title is cut short with the whole of it on hover, and a phone leave
   const css = read("gui-usage.css");
   assert.match(css, /\.usage table\.threads \.clip \{[^}]*max-width: [^;]+; overflow: hidden; text-overflow: ellipsis;/);
   assert.match(css, /@media \(max-width: 639px\) \{\n  \.usage table\.threads \.opt \{ display: none; \}/);
+});
+
+test("a record whose session is open in a thread on its machine opens it, and the others keep their markup", () => {
+  const threads = { macbook: [saved("open", { cost_usd: 3 }), saved("shut", { cost_usd: 2 })], macmini: [saved("elsewhere")] };
+  const before = page({ threads });
+  const tabs = [{ key: "macbook:t1", machine: "macbook", view: { session: "open" } }, { key: "macbook:t2", machine: "macbook", view: { session: "elsewhere" } }];
+  const html = page({ threads, tabs });
+  assert.match(html, /<td title="Thread open"><button type="button" data-usage-thread="macbook:t1"><span class="clip">Thread open<\/span><\/button><\/td>/);
+  assert.equal((html.match(/data-usage-thread/g) ?? []).length, 1, "a session open on another machine opens nothing");
+  const rows = (markup) => [...markup.matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map(([row]) => row);
+  assert.deepEqual(rows(html).slice(2), rows(before).slice(2), "the other records render as before");
+  assert.deepEqual(rowsOf(html), rowsOf(before), "the row's text is unchanged");
 });
 
 test("the Cost view alone adds the Threads section", () => {
