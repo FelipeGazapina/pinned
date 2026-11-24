@@ -157,7 +157,11 @@ fn hub(args: &[String]) -> Result<(), String> {
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
-        let pinned_server::Running { hub, server, .. } = pinned_server::start(config).await?;
+        let pinned_server::Running { hub, server, addr } = pinned_server::start(config).await?;
+        let watchdog = pinned_server::watchdog::start(&tokio::runtime::Handle::current(), addr, pinned_server::watchdog::Timing::HUB, |why| {
+            eprintln!("pinned-server: watchdog: {why}; exiting so the hub is restarted");
+            std::process::exit(1);
+        });
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|e| e.to_string())?;
         let mut server = server;
         let ended = tokio::select! {
@@ -165,6 +169,8 @@ fn hub(args: &[String]) -> Result<(), String> {
             _ = terminate.recv() => { eprintln!("pinned-server: SIGTERM, closing every socket before stopping"); None }
             _ = tokio::signal::ctrl_c() => { eprintln!("pinned-server: interrupted, closing every socket before stopping"); None }
         };
+        // A stop closes the sockets on purpose; past here an unanswered request is not a freeze.
+        watchdog.disarm();
         let ended = match ended {
             Some(ended) => ended,
             None => {

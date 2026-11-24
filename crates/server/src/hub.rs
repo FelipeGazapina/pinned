@@ -2333,7 +2333,8 @@ impl Storage for PgStorage {
 
     /// The calls of the store that wait on Postgres: the claim must be the database's, so two
     /// hubs on it see one winner. The hub's runtime has many threads, and this one hands its
-    /// other tasks to them while it waits.
+    /// other tasks to them while it waits. `Connectors` makes none of them with its store locked,
+    /// and each waits `CLAIM_WAIT` at most.
     fn claim_fire(&self, workflow: &str, key: &str, claimer: &str, retry: bool) -> Result<bool, String> {
         let Some(fires) = &self.0.fires else { return Err("no database to claim the fire in".into()) };
         let claim = async {
@@ -2357,7 +2358,11 @@ impl Storage for PgStorage {
     fn fires(&self) -> Vec<pinned_core::account_copy::Fire> {
         let Some(fires) = &self.0.fires else { return Vec::new() };
         let within = pinned_core::connectors::CATCH_UP + pinned_core::account_copy::COPY_EVERY;
-        let read = fires.db.recent_fires(fires.account, within);
+        let read = async {
+            tokio::time::timeout(CLAIM_WAIT, fires.db.recent_fires(fires.account, within))
+                .await
+                .map_err(|_| "the database did not answer".to_owned())?
+        };
         match wait_on_fires(fires, read) {
             Ok(fires) => fires,
             Err(e) => {
@@ -2371,10 +2376,13 @@ impl Storage for PgStorage {
         let Some(fires) = &self.0.fires else { return Err("no database to keep the fires in".into()) };
         let incoming = incoming.to_vec();
         let write = async {
-            for fire in &incoming {
-                fires.db.keep_fire(fires.account, &fire.workflow, &fire.key, fire.at).await?;
-            }
-            Ok(())
+            let keep = async {
+                for fire in &incoming {
+                    fires.db.keep_fire(fires.account, &fire.workflow, &fire.key, fire.at).await?;
+                }
+                Ok(())
+            };
+            tokio::time::timeout(CLAIM_WAIT, keep).await.map_err(|_| "could not keep the fires: the database did not answer".to_owned())?
         };
         wait_on_fires(fires, write)
     }

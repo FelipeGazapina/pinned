@@ -119,6 +119,21 @@ struct Claims {
     calls: Arc<Mutex<Vec<String>>>,
     released: Arc<Mutex<Vec<String>>>,
     fail_save: Arc<AtomicBool>,
+    /// The connectors whose store a fires call must find unlocked, once a test names them.
+    watched: Arc<std::sync::OnceLock<std::sync::Weak<Connectors>>>,
+    /// The fires calls made while the watched store was locked.
+    under_lock: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl Claims {
+    /// A hub's fires calls wait on its database, so none may run while the store is locked: every
+    /// other call on the store would wait behind it (the hub froze that way on 2026-11-24).
+    fn note_lock(&self, call: &'static str) {
+        let Some(connectors) = self.watched.get().and_then(std::sync::Weak::upgrade) else { return };
+        if matches!(connectors.store.try_lock(), Err(std::sync::TryLockError::WouldBlock)) {
+            self.under_lock.lock().unwrap().push(call);
+        }
+    }
 }
 
 impl Storage for Claims {
@@ -147,6 +162,7 @@ impl Storage for Claims {
         Ok(())
     }
     fn claim_fire(&self, workflow: &str, key: &str, claimer: &str, retry: bool) -> Result<bool, String> {
+        self.note_lock("claim_fire");
         self.calls.lock().unwrap().push(key.to_owned());
         std::thread::sleep(*self.wait.lock().unwrap());
         let fail = {
@@ -174,11 +190,20 @@ impl Storage for Claims {
         }
     }
     fn release_fire(&self, workflow: &str, key: &str, claimer: &str) -> Result<(), String> {
+        self.note_lock("release_fire");
         self.released.lock().unwrap().push(key.to_owned());
         let mut rows = self.rows.lock().unwrap();
         if rows.get(&(workflow.to_owned(), key.to_owned())).is_some_and(|c| c == claimer) {
             rows.remove(&(workflow.to_owned(), key.to_owned()));
         }
+        Ok(())
+    }
+    fn fires(&self) -> Vec<crate::account_copy::Fire> {
+        self.note_lock("fires");
+        Vec::new()
+    }
+    fn replace_fires(&self, _: &[crate::account_copy::Fire]) -> Result<(), String> {
+        self.note_lock("replace_fires");
         Ok(())
     }
 }
@@ -1220,5 +1245,31 @@ fn a_move_step_keeps_its_move_so_the_change_it_makes_starts_nothing() {
     assert_eq!((runs.len(), error), (0, None), "the move step's own move starts nothing");
     assert_eq!(connectors.change_counts()["w1"].echoes, 1);
     assert_eq!(updates(&fake, "i-1"), 1, "and moves nothing again");
+    no_unlisted(&fake);
+}
+
+/// Every call that waits on a hub's database (claims, releases, the fires a copy reads and
+/// keeps) runs with the store unlocked: a check that claims and gives a claim back, a mirror's
+/// copy, a copy taken, and a handback.
+#[test]
+fn no_fires_call_runs_while_the_store_is_locked() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let at = ago(2);
+    let fake = fake_with(vec![issue(1, at, vec![moved("h-1", at, "Backlog", "Ready to Dev")])]);
+    let claims = Claims::default();
+    let connectors = Arc::new(on(&claims, vec![ready_to_dev("w1", ago(10))], "lin-e1-unlocked"));
+    claims.watched.set(Arc::downgrade(&connectors)).unwrap();
+
+    let (runs, _) = check_answering(&connectors, Err("the machine refused the run".into()));
+    assert_eq!(runs.len(), 1, "the start was tried");
+    assert_eq!(*claims.released.lock().unwrap(), ["linear:i-1#h-1:state"], "the claim was given back");
+    let (items, progress, fixed) = connectors.copy_parts();
+    connectors.take_copy(&crate::account_copy::Copy { items, progress, fixed, runner: None }).unwrap();
+    let changes = crate::account_copy::Changes::default();
+    let from = crate::account_copy::Author { id: "m-1".into(), name: "desk".into() };
+    connectors.take_back(&changes, &mut BTreeMap::new(), &from).unwrap();
+
+    assert_eq!(*claims.under_lock.lock().unwrap(), Vec::<&str>::new(), "fires calls made with the store locked");
     no_unlisted(&fake);
 }
