@@ -435,6 +435,12 @@ pub enum Call {
     AutoArchiveSettings,
     /// The `auto_archive::Settings` saved, answered as saved.
     SetAutoArchiveSettings { settings: crate::auto_archive::Settings },
+    /// `compaction::Settings` of this machine: from what context size the app offers to compact a
+    /// session.
+    CompactionSettings,
+    /// The `compaction::Settings` saved, answered as saved. A threshold under
+    /// `compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.
+    SetCompactionSettings { settings: crate::compaction::Settings },
     /// `on`, as saved. Whether the desktop app on this machine runs in the background, with no
     /// window, which it applies at once: on closes the window, off opens it. A machine without the
     /// app refuses it.
