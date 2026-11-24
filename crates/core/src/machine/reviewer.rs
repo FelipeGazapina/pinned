@@ -86,8 +86,8 @@ impl Machine {
         let git = |args: &[&str]| workspace::run(cwd, self.launch.path_env.as_deref(), "git", args).map_err(|_| ());
         let base = base.unwrap_or("HEAD");
         Ok(Change {
-            stat: git(&["diff", "--stat", base, "--"])?,
-            diff: git(&["diff", base, "--"])?,
+            stat: git(&["diff", "--no-color", "--no-ext-diff", "--stat", base, "--"])?,
+            diff: git(&["diff", "--no-color", "--no-ext-diff", base, "--"])?,
             untracked: git(&["ls-files", "--others", "--exclude-standard"])?.lines().map(str::to_owned).collect(),
         })
     }
