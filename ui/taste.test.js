@@ -138,6 +138,67 @@ test("a Captains change sends only the fields it changed and touches no project"
   assert.deepEqual(here(tasteSaveCalls(saved, undone)), [], "an undone toggle saves nothing");
 });
 
+/** Rust's default escalation settings, which the fixture's presets leave out. */
+const escalation = { escalate_breaking_change: true, escalate_process_failure: true, escalate_over_lines: 500, escalate_areas: ["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"] };
+const escalating = (projects = {}) => ({ ...defaults(projects), orchestrator: { ...fixture.presets.balanced, ...escalation }, captains: { ...fixture.presets.balanced, ...escalation } });
+
+test("a changed escalation setting saves with the Captains, and only what changed", () => {
+  const { tasteSaveCalls, tasteSetField } = taste();
+  const saved = escalating();
+  let draft = tasteSetField(saved, captains, "escalate_over_lines", 750);
+  draft = tasteSetField(draft, captains, "escalate_areas", []);
+  draft = tasteSetField(tasteSetField(draft, captains, "escalate_breaking_change", false), captains, "escalate_breaking_change", true);
+  assert.deepEqual(here(tasteSaveCalls(saved, draft)), [{ cmd: "set_taste", scope: { kind: "captains" }, patch: { escalate_over_lines: 750, escalate_areas: [] } }]);
+});
+
+test("a project overrides an escalation setting, and Reset makes it inherit again", () => {
+  const { tasteSaveCalls, tasteSetField, tasteResetField, tasteResolve } = taste();
+  const saved = escalating();
+  const draft = tasteSetField(saved, site, "escalate_process_failure", false);
+  assert.deepEqual(here(draft.projects), { [SITE]: { escalate_process_failure: false } });
+  assert.equal(tasteResolve(draft, site).escalate_process_failure, false);
+  assert.deepEqual(here(tasteSaveCalls(saved, draft)), [{ cmd: "set_taste", scope: site, patch: { escalate_process_failure: false } }]);
+  const back = tasteResetField(draft, site, "escalate_process_failure");
+  assert.deepEqual(here(back.projects), {});
+  assert.equal(tasteResolve(back, site).escalate_process_failure, true);
+  const stored = escalating({ [SITE]: { escalate_over_lines: 90 } });
+  assert.deepEqual(here(tasteSaveCalls(stored, tasteResetField(stored, site, "escalate_over_lines"))), [{ cmd: "reset_taste_field", scope: site, field: "escalate_over_lines" }]);
+});
+
+test("the escalation settings leave the profile as it was, and a profile leaves them alone", () => {
+  const { tasteProfile, tasteApplyProfile } = taste();
+  const changed = { ...fixture.presets.economical, ...escalation, escalate_breaking_change: false, escalate_over_lines: 42, escalate_areas: [] };
+  assert.equal(tasteProfile(changed), "economical");
+  const applied = tasteApplyProfile({ ...escalating(), captains: changed }, captains, "aggressive");
+  assert.deepEqual([applied.captains.escalate_breaking_change, applied.captains.escalate_over_lines, here(applied.captains.escalate_areas)], [false, 42, []]);
+});
+
+/** Rust's default Manage only, which the fixture's presets leave out. */
+const managing = (projects = {}) => ({ ...defaults(projects), orchestrator: { ...fixture.presets.balanced, manage_only: false }, captains: { ...fixture.presets.balanced, manage_only: false } });
+
+test("manage_only saves with the Captains or a project, and a project's Reset makes it inherit again", () => {
+  const { tasteSaveCalls, tasteSetField, tasteResetField, tasteResolve } = taste();
+  const saved = managing();
+  assert.deepEqual(here(tasteSaveCalls(saved, tasteSetField(saved, captains, "manage_only", true))), [{ cmd: "set_taste", scope: { kind: "captains" }, patch: { manage_only: true } }]);
+  const draft = tasteSetField(saved, site, "manage_only", true);
+  assert.deepEqual(here(draft.projects), { [SITE]: { manage_only: true } });
+  assert.equal(tasteResolve(draft, site).manage_only, true);
+  assert.deepEqual(here(tasteSaveCalls(saved, draft)), [{ cmd: "set_taste", scope: site, patch: { manage_only: true } }]);
+  const stored = managing({ [SITE]: { manage_only: true } });
+  const back = tasteResetField(stored, site, "manage_only");
+  assert.equal(tasteResolve(back, site).manage_only, false);
+  assert.deepEqual(here(tasteSaveCalls(stored, back)), [{ cmd: "reset_taste_field", scope: site, field: "manage_only" }]);
+});
+
+test("manage_only leaves the profile as it was, and a profile leaves it alone", () => {
+  const { tasteProfile, tasteApplyProfile } = taste();
+  for (const id of ["economical", "balanced", "aggressive"]) assert.equal(tasteProfile({ ...fixture.presets[id], manage_only: true }), id);
+  const applied = tasteApplyProfile({ ...managing(), captains: { ...fixture.presets.economical, manage_only: true } }, captains, "aggressive");
+  assert.deepEqual([tasteProfile(applied.captains), applied.captains.manage_only], ["aggressive", true]);
+  const project = tasteApplyProfile(managing({ [SITE]: { manage_only: true } }), site, "aggressive");
+  assert.equal(project.projects[SITE].manage_only, true, "a project's own stays");
+});
+
 test("a rebase makes unsaved edits again over the tastes another device saved", () => {
   const { tasteRebase, tasteSetField, tasteResetField } = taste();
   const saved = defaults({ [SITE]: { parallel: 4, review_diffs: false } });
@@ -299,4 +360,29 @@ test("the box size is the project's, else the account's, else small; the account
   assert.deepEqual(here(tasteBoxSize(tasteSetField(account, site, "box_size", "medium"), site)), { size: "medium", from: "account" }, "a project set to the account's size inherits it");
   assert.deepEqual(here(tasteSaveCalls(tastes, account)), [{ cmd: "set_taste", scope: captains, patch: { box_size: "medium" } }]);
   assert.deepEqual(here(tasteSaveCalls(account, tasteResetField(account, captains, "box_size"))), [{ cmd: "reset_taste_field", scope: captains, field: "box_size" }]);
+});
+
+/** Tastes from a hub that has the default model, unset everywhere. */
+const modelled = (projects = {}) => ({ ...defaults(projects), orchestrator: { ...fixture.presets.balanced, default_model: null }, captains: { ...fixture.presets.balanced, default_model: null } });
+
+test("a default model saves with the Captains, clears with a reset, and a project inherits it unless it sets its own", () => {
+  const { tasteSaveCalls, tasteSetField, tasteResetField, tasteResolve, tasteProfile } = taste();
+  const sonnet = { model: "claude-sonnet-5-5" };
+  const haiku = { model: "claude-haiku-5-5" };
+  const saved = modelled();
+  const set = tasteSetField(saved, captains, "default_model", sonnet);
+  assert.deepEqual(here(tasteSaveCalls(saved, set)), [{ cmd: "set_taste", scope: { kind: "captains" }, patch: { default_model: { model: "claude-sonnet-5-5" } } }]);
+  assert.equal(tasteProfile(set.captains), "balanced", "no profile sets or compares it");
+  for (const cleared of [tasteResetField(set, captains, "default_model"), tasteSetField(set, captains, "default_model", null)]) {
+    assert.equal(cleared.captains.default_model, null);
+    assert.deepEqual(here(tasteSaveCalls(set, cleared)), [{ cmd: "reset_taste_field", scope: { kind: "captains" }, field: "default_model" }]);
+  }
+
+  assert.deepEqual(here(tasteSetField(set, site, "default_model", sonnet).projects), {}, "a project set to the Captains' model inherits it");
+  const own = tasteSetField(set, site, "default_model", haiku);
+  assert.deepEqual(here(own.projects), { [SITE]: { default_model: haiku } });
+  assert.deepEqual(here(tasteResolve(own, site).default_model), haiku);
+  assert.deepEqual(here(tasteResolve(own, { kind: "project", repo: "github.com/acme/api" }).default_model), sonnet, "another project keeps the Captains'");
+  assert.deepEqual(here(tasteSetField(own, site, "default_model", null).projects), {}, "null on a project inherits");
+  assert.deepEqual(here(tasteSaveCalls(own, tasteResetField(own, site, "default_model"))), [{ cmd: "reset_taste_field", scope: site, field: "default_model" }]);
 });

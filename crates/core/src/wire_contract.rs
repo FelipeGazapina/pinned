@@ -96,13 +96,16 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("GithubRepo".into(), schemas::<github::Repo>());
     outbound.insert("VercelAccount".into(), schemas::<vercel::Account>());
     outbound.insert("VercelModel".into(), schemas::<vercel::Model>());
+    outbound.insert("ClassifyAnswer".into(), schemas::<crate::classify::Answer>());
     outbound.insert("UpstashAccount".into(), schemas::<upstash::Account>());
     outbound.insert("ConvexConnection".into(), schemas::<crate::convex::Connection>());
     outbound.insert("ExternalAgents".into(), schemas::<ExternalAgents>());
     outbound.insert("AgentRequest".into(), schemas::<AgentRequest>());
     outbound.insert("AgentRedirect".into(), schemas::<AgentRedirect>());
     outbound.insert("GlobalOrchestratorSettings".into(), schemas::<crate::global_orchestrator::Settings>());
+    outbound.insert("GlobalOrchestratorSave".into(), schemas::<crate::global_orchestrator::AccountSave>());
     outbound.insert("AutoArchiveSettings".into(), schemas::<crate::auto_archive::Settings>());
+    outbound.insert("CompactionSettings".into(), schemas::<crate::compaction::Settings>());
     outbound.insert("Handoff".into(), schemas::<crate::global_orchestrator::Handoff>());
     outbound.insert("Overview".into(), schemas::<crate::global_orchestrator::Overview>());
     outbound.insert("Tastes".into(), schemas::<crate::taste::Tastes>());
@@ -119,6 +122,7 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("McpServer".into(), schemas::<crate::mcp::Entry>());
     outbound.insert("McpLoad".into(), schemas::<crate::mcp::Load>());
     outbound.insert("RunStarted".into(), schemas::<crate::wire::RunStarted>());
+    outbound.insert("WorkflowRun".into(), schemas::<crate::wire::WorkflowRun>());
     outbound.insert("Team".into(), schemas::<crate::teams::Team>());
     outbound.insert("TeamMember".into(), schemas::<crate::teams::Member>());
     outbound.insert("TeamInvite".into(), schemas::<crate::teams::TeamInvite>());

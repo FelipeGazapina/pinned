@@ -84,6 +84,7 @@ pub enum SignedOut {
         title: String,
         description: String,
         assignee: String,
+        subject: Option<String>,
     },
     LinearTake {
         connector: String,
@@ -123,6 +124,7 @@ pub fn signed_out(connectors: &Connectors, message: Message) -> SignedOut {
             title,
             description,
             assignee,
+            subject,
         } => SignedOut::LinearCreate {
             connector,
             channel,
@@ -130,6 +132,7 @@ pub fn signed_out(connectors: &Connectors, message: Message) -> SignedOut {
             title,
             description,
             assignee,
+            subject,
         },
         Message::LinearTake {
             connector,
@@ -205,7 +208,12 @@ impl LocalHub<'_> {
             HubCall::GithubRepos => done(self.connectors.github_repos().await),
             HubCall::ConnectVercel { key } => done(self.connectors.connect_vercel(&key).await),
             HubCall::DisconnectVercel => done(self.connectors.disconnect_vercel()),
+            HubCall::ConnectPosthog { key, project, host } => done(self.connectors.connect_posthog(&key, &project, &host).await),
+            HubCall::DisconnectPosthog => done(self.connectors.disconnect_posthog()),
             HubCall::VercelModels => done(self.connectors.vercel_models().await),
+            HubCall::Classify { text, categories, question, instructions, model, unsure_below, sure_at } => {
+                done(self.connectors.agent_classify(crate::classify::Ask { text, categories, question, instructions, model, unsure_below, sure_at }).await)
+            }
             HubCall::SaveConnector { connector } => done(self.connectors.save_connector(connector)),
             HubCall::DeleteConnector { id } => done(self.connectors.delete_connector(&id)),
             HubCall::SetRepoInsight { settings } => done(self.connectors.set_repo_insight(settings)),
@@ -241,8 +249,8 @@ impl LocalHub<'_> {
             }
             HubCall::Stage { connector, subject, stage } => done(self.connectors.stage(&connector, &subject, stage).await),
             HubCall::SlackReply { connector, channel, thread, text } => done(self.connectors.slack_reply(&connector, &channel, &thread, &text).await),
-            HubCall::LinearCreate { connector, channel, thread, title, description, assignee } => {
-                done(self.connectors.linear_create(&connector, &channel, &thread, &title, &description, &assignee).await)
+            HubCall::LinearCreate { connector, channel, thread, title, description, assignee, subject } => {
+                done(self.connectors.linear_create(&connector, &channel, &thread, subject.as_deref(), &title, &description, &assignee).await)
             }
             HubCall::LinearTake { connector, channel, thread, issue } => done(self.connectors.linear_take(&connector, &channel, &thread, &issue).await),
             HubCall::RunSet { connector, subject, name, value } => match self.account {
@@ -365,6 +373,7 @@ impl LocalHub<'_> {
                 Ok(days) => done(Ok(self.machine.local_delegation_stats(days))),
                 Err(error) => Answer::Done(Err(error)),
             },
+            HubCall::WorkflowRuns { workflow, limit } if self.account.is_none() => done(Ok(self.connectors.workflow_runs(workflow.as_deref(), limit))),
             HubCall::Mirror { .. }
             | HubCall::Handback { .. }
             | HubCall::SetOfflineRunner { .. }
@@ -408,6 +417,7 @@ impl LocalHub<'_> {
             | HubCall::RemoteAsked { .. }
             | HubCall::RecordTasks { .. }
             | HubCall::DelegationStats { .. }
+            | HubCall::WorkflowRuns { .. }
             | HubCall::UnclaimedEnds
             | HubCall::SessionMarks
             | HubCall::MarkSessions { .. }
@@ -425,6 +435,8 @@ impl LocalHub<'_> {
             | HubCall::DeleteIdea { .. }
             | HubCall::Reports { .. }
             | HubCall::ReportIssue { .. }
+            | HubCall::RecordGlobalOrchestratorSave { .. }
+            | HubCall::GlobalOrchestratorSave
             | HubCall::Team { .. } => Answer::HubOnly,
         }
     }
@@ -610,6 +622,12 @@ mod tests {
         live_run(&dir.join("store"), "wf", subject.clone());
         let connectors = Arc::new(Connectors::new(FileStorage::new(dir.join("store")), "/bin/pinned".into()));
         let signed_in = LocalHub { connectors: &connectors, machine: &machine, place_as: "macbook", taste_dir: Some(&taste), account: Some(&kept) };
+        let runs = HubCall::WorkflowRuns { workflow: None, limit: None };
+        let signed_out_runs = LocalHub { account: None, ..signed_in };
+        let Answer::Done(Ok(answered)) = drive(&signed_out_runs, runs.clone()) else { panic!("signed out, the app answers its own workflow runs") };
+        assert_eq!(answered, serde_json::to_value(connectors.workflow_runs(None, None)).unwrap());
+        assert_eq!((answered[0]["workflow"].as_str(), answered.as_array().map(Vec::len)), (Some("wf"), Some(1)), "{answered}");
+        assert_eq!(drive(&signed_in, runs), Answer::HubOnly, "a signed-in copy leaves the account's runs to the hub");
         let own = drive(
             &signed_in,
             HubCall::RunSet { connector: "wf".into(), subject: subject.clone(), name: "title".into(), value: "Export".into() },
@@ -663,6 +681,24 @@ mod tests {
         let signed_in_place = LocalHub { connectors: &connectors, machine: &machine, place_as: "macbook", taste_dir: None, account: Some(&Kept(std::sync::Mutex::new(vec![]))) };
         let refused = drive(&signed_in_place, HubCall::RunWorkflow { id: saved.id });
         assert_eq!(refused, Answer::Done(Err(BOX_OFF.into())));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_classify_without_a_vercel_key_answers_not_connected_here_and_is_not_left_to_the_hub() {
+        refuse_real_home();
+        let dir = scratch("classify");
+        let connectors = Arc::new(Connectors::new(FileStorage::new(dir.join("store")), "/bin/pinned".into()));
+        let machine = machine_in(&dir);
+        let classify = || -> HubCall {
+            serde_json::from_value(serde_json::json!({ "cmd": "classify", "text": "The export button 500s", "question": "Is this a bug report?" })).unwrap()
+        };
+        let not_connected = Answer::Done(Err("Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".into()));
+        let signed_out = LocalHub { connectors: &connectors, machine: &machine, place_as: "local", taste_dir: None, account: None };
+        assert_eq!(drive(&signed_out, classify()), not_connected);
+        let kept = Kept(std::sync::Mutex::new(vec![]));
+        let signed_in = LocalHub { connectors: &connectors, machine: &machine, place_as: "macbook", taste_dir: None, account: Some(&kept) };
+        assert_eq!(drive(&signed_in, classify()), not_connected);
         let _ = std::fs::remove_dir_all(dir);
     }
 

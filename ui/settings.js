@@ -27,6 +27,13 @@ const SLACK_FIX_INSTRUCTIONS = `Someone mentioned you in the Slack thread below.
 - If existing behavior or a known fix already solves it, reply with that solution.
 - If it reports a bug, reproduce it or trace it through the code before you decide whether to fix it.
 - When you fix a bug, create a branch named after the Linear issue identifier, run the project's existing tests and checks, then push and open a pull request with gh pr create. Put the issue identifier in the title and link the Slack thread in the body.`;
+const OBSERVABILITY_INSTRUCTIONS = `A new error showed up in PostHog. Judge it in this repository, without waiting for me.
+
+- Read the error and trace it through the code: is it a real, actionable bug in this project?
+- If it is, file one Linear ticket for it with pinned linear create: a short title, and a description with the cause, where it lives and how to fix it. File at most one ticket.
+- If it is noise (a browser extension, a flaky network, a bot, a known and harmless error), file nothing and stop.
+
+Never edit, commit or push code.`;
 /** How far a Slack connector's session goes with a bug, matching the backend's `Fix`. */
 const FIXES = {
   off: "Only analyze and reply",
@@ -153,6 +160,20 @@ const TRIGGERS = {
     instructions: (c) => routedText(TRIGGERS["slack-mention"].instructions(c)),
     sentence: (c, where, then) => `When ${orList(routesTo(c).map((r) => `“${r.router}”`)) || "another workflow"} routes a Slack thread here, ${who(c)} ${then}${where}.`,
   },
+  observability: {
+    text: "An error shows up in PostHog",
+    pitch: "Claude judges each new error PostHog tracks, and files a Linear ticket for the ones worth fixing.",
+    needs: "posthog",
+    step: "observability-trigger",
+    steps: () => [["ask", "new error"], ["agent", ""], ["ticket", ""]],
+    subject: "error",
+    name: "Triage PostHog errors",
+    defaults: { proof: false },
+    trigger: () => ({ kind: "observability", source: { kind: "posthog" } }),
+    instructions: () => OBSERVABILITY_INSTRUCTIONS,
+    sentence: (c, where) =>
+      `When a new error shows up in PostHog, ${who(c)} judges it${where}${c.team.trim() ? ` and files a ticket in ${c.team.trim()} when it is worth one` : ""}.`,
+  },
 };
 const orList = (names) => new Intl.ListFormat("en", { type: "disjunction" }).format(names);
 
@@ -161,6 +182,7 @@ const LINEAR_KEYS = "https://linear.app/settings/account/security";
 const GITHUB_TOKENS = "https://github.com/settings/tokens/new?scopes=repo&description=pinned";
 const UPSTASH_CONSOLE = "https://console.upstash.com/";
 const VERCEL_KEYS = "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys";
+const POSTHOG_HOSTS = { us: "US cloud", eu: "EU cloud", self: "Self-hosted" };
 /** The Run on choice that gives each issue or thread its own Upstash Box, as the backend's `RunsOn::FreshBox` stores it. */
 const BOX = "upstash-box";
 const BOX_SIZES = { small: "Small", medium: "Medium", large: "Large" };
@@ -171,7 +193,7 @@ let settings = { linear: null, slack: null, connectors: [], checked: null };
  * with `settingsSection({ page, label, icon, show, search })`: `show` draws the page into settingsPage,
  * and `search` lists the settings it holds as `{ title, terms, id }`. A result scrolls to the element
  * `id`, or else to the heading or label on the page that reads `title`. */
-const SETTINGS_ORDER = ["general", "appearance", "projects", "keybindings", "integrations", "accounts", "mcp-servers", "connectors", "account", "machines", "agent-activity", "archive"];
+const SETTINGS_ORDER = ["general", "appearance", "projects", "keybindings", "integrations", "accounts", "mcp-servers", "connectors", "workflow-runs", "account", "machines", "memory", "agent-activity", "archive"];
 const settingsSections = [];
 function settingsSection(section) {
   const rank = (p) => (SETTINGS_ORDER.includes(p) ? SETTINGS_ORDER.indexOf(p) : SETTINGS_ORDER.length - 1.5);
@@ -358,6 +380,7 @@ function integrationsHtml() {
     ${slackCardHtml()}
     ${githubCardHtml()}
     ${vercelCardHtml()}
+    ${posthogCardHtml()}
     ${upstashCardHtml()}
     ${convexCardHtml()}
     ${externalAgentsCardHtml()}`;
@@ -549,6 +572,35 @@ function vercelCardHtml() {
     </div>`;
 }
 
+/** The site a connected PostHog account reads, by the name the host choice gives it. */
+const posthogHostName = (host) => ({ "https://us.posthog.com": POSTHOG_HOSTS.us, "https://eu.posthog.com": POSTHOG_HOSTS.eu })[host] ?? host;
+
+/** The host choice the PostHog form shows; Self-hosted adds its address field. */
+let posthogHost = "us";
+
+function posthogCardHtml() {
+  const account = settings.posthog;
+  const body = account && !agentAsking("connect_posthog")
+    ? `<p class="connected">Project <b>${esc(account.project_name || account.project)}</b> (${esc(account.project)}) on ${esc(posthogHostName(account.host))}, <span class="key-hint">key <b>${esc(account.key_hint)}</b></span></p>
+       <div class="actions"><button class="secondary" data-action="disconnect-posthog">Disconnect</button></div>`
+    : `${agentAskingHtml("connect_posthog")}<ol class="steps">
+         <li>Create a personal API key in PostHog's account settings that can read the project and run queries.</li>
+         <li>Pick where your PostHog runs and the project id from the project's settings.
+           <div class="row posthog-host"><select id="posthog-host-choice" aria-label="Where PostHog runs">${options(Object.keys(POSTHOG_HOSTS), (h) => POSTHOG_HOSTS[h], posthogHost)}</select>
+           <input id="posthog-host" type="url" aria-label="PostHog host address" placeholder="https://posthog.example.com" autocomplete="off" spellcheck="false"${posthogHost === "self" ? "" : " hidden"}></div>
+           <div class="row"><input id="posthog-project" type="text" inputmode="numeric" aria-label="PostHog project id" placeholder="Project id, as 12345" autocomplete="off" spellcheck="false"></div></li>
+         <li>Paste the key here.
+           <div class="row"><input id="posthog-key" type="password" aria-label="PostHog personal API key" placeholder="phx_…" autocomplete="off">
+           <button class="primary" data-action="connect-posthog">Connect</button></div></li>
+       </ol>
+       <p class="error" id="posthog-error"></p>`;
+  return `<div class="card" id="posthog-card">
+      <div class="card-head"><span class="logo posthog" data-tone="posthog">◆</span><div><b>PostHog</b><div class="hint">Errors that start an observability workflow</div></div>
+        <span class="badge" data-on="${!!account}">${account ? "Connected" : "Not connected"}</span></div>
+      ${body}
+    </div>`;
+}
+
 /** Every connected Slack bot, the default first. An older hub only answers the one `slack`. */
 const slackBots = () => settings.slack_bots ?? (settings.slack ? [settings.slack] : []);
 const hasSlack = () => !!(settings.slack_bots?.length || settings.slack);
@@ -557,6 +609,7 @@ const hasSlack = () => !!(settings.slack_bots?.length || settings.slack);
 const NEEDS = {
   linear: { name: "Linear", connected: () => !!settings.linear },
   slack: { name: "Slack", connected: () => hasSlack() },
+  posthog: { name: "PostHog", connected: () => !!settings.posthog },
 };
 const triggerReady = (kind) => NEEDS[TRIGGERS[kind]?.needs]?.connected() ?? true;
 /** The workflow a missing connector sent the user away from, as `{ kind }`, until they connect it,
@@ -840,6 +893,32 @@ ${slackBotSelect(c)}
             : "No workflow routes threads here yet. In a Slack message workflow, choose this one as a category's route."
         }</p>`;
     },
+  },
+  "observability-trigger": {
+    tone: "posthog",
+    icon: "◆",
+    app: "PostHog",
+    title: "New error",
+    trigger: true,
+    summary: () => (settings.posthog ? `in ${settings.posthog.project_name || `project ${settings.posthog.project}`}` : "Connect PostHog"),
+    issues: () => [!settings.posthog && "Connect PostHog under Connectors."].filter(Boolean),
+    fields: (c) => `${kindHtml(c)}${connectForHtml("observability")}
+      ${settings.posthog ? `<p class="hint">Reads project <b>${esc(settings.posthog.project_name || settings.posthog.project)}</b> (${esc(settings.posthog.project)}) on ${esc(posthogHostName(settings.posthog.host))}.</p>` : ""}
+      <p class="hint">pinned checks PostHog every minute, only for errors first seen after the workflow is saved or turned on, and starts each error once. Resolved and suppressed errors start nothing.</p>`,
+  },
+  ticket: {
+    tone: "linear",
+    icon: "⚑",
+    app: "Linear",
+    title: "File a Linear ticket",
+    summary: (c) => (c.team.trim() ? `In ${c.team.trim()}${c.label.trim() ? `, label ${c.label.trim()}` : ""}` : "No team: files nothing"),
+    issues: (c) => [!settings.linear && "Connect Linear under Connectors."].filter(Boolean),
+    fields: (c) => `${settings.linear ? "" : `<p class="hint">Connect Linear under Connectors.</p>`}
+      <div class="grid">
+        <label>Team ${input("team", c.team, 'list="linear-teams" placeholder="Engineering"')}</label>
+        <label>Label ${input("label", c.label, 'list="linear-labels" placeholder="none"')}</label>
+      </div>
+      <p class="hint">When the session judges an error worth fixing, it files at most one ticket per error with <code>pinned linear create</code>, in this team with this label, linking back to PostHog. With no team, it files nothing.</p>`,
   },
   picked: moveStep("picked"),
   agent: {
@@ -1137,8 +1216,8 @@ function connectorsHtml() {
   const intro = `<h2>Workflows</h2>
     <p class="hint">A workflow watches a connector and opens a Claude Code tab on its own when something happens, so the agent starts before you ask.</p>
     ${workflowNotice()}`;
-  if (!settings.linear && !hasSlack()) {
-    return `${intro}<div class="card"><p>Connect Linear or Slack first.</p>
+  if (!settings.linear && !hasSlack() && !settings.posthog) {
+    return `${intro}<div class="card"><p>Connect Linear, Slack or PostHog first.</p>
       <div class="actions"><button class="primary" data-action="go-integrations">Go to Connectors</button></div></div>`;
   }
   return `${intro}
@@ -1265,6 +1344,7 @@ const WATCH_STEP = {
   "slack-mention": "slack-trigger",
   "slack-message": "message-trigger",
   called: "called-trigger",
+  observability: "observability-trigger",
 };
 const LINEAR_TRIGGER = new Set(["linear-label", "linear-status", "linear-assigned"]);
 
@@ -1357,10 +1437,12 @@ function graphNodeSummary(node, c) {
 /** Whether the draft's graph watches a Slack subject. A Linear trigger has an issue, not a thread.
  * A called workflow may be called with either subject. */
 function slackRun(c) {
-  const watch = c.graph?.nodes?.find((n) => graphNodeKind(n) === "trigger")?.watch;
-  const kind = watch?.kind ?? c.trigger?.kind ?? "called";
-  return !LINEAR_TRIGGER.has(kind);
+  const kind = runKind(c);
+  return !LINEAR_TRIGGER.has(kind) && kind !== "observability";
 }
+const runKind = (c) => c.graph?.nodes?.find((n) => graphNodeKind(n) === "trigger")?.watch?.kind ?? c.trigger?.kind ?? "called";
+/** What a step that acts on the run's thread or issue says under an observability trigger, which gives it neither. */
+const noSubject = (c) => runKind(c) === "observability" && "This step needs a Slack thread or a Linear issue, which an observability trigger does not give it.";
 /** A session step's one-line summary: its prompt, or where and how it opens. Empty fields read
  * as the connector's own session settings, so the summary falls back to those. */
 function sessionNodeSummary(node, c) {
@@ -1396,11 +1478,12 @@ function graphNodeIssues(node, c) {
   }
   if (type === "talk") return [];
   if (type === "session") return sessionNodeIssues(node, c);
-  if (type === "page") return [!node.group?.trim() && "Name the Slack user group to page."].filter(Boolean);
-  if (type === "reply") return [!slackRun(c) && "A reply step needs a Slack trigger.", !(node.text ?? "").trim() && "Write the reply text."].filter(Boolean);
-  if (type === "file-issue") return [!slackRun(c) && "A file-issue step needs a Slack trigger.", !(node.team ?? "").trim() && "Name the Linear team.", !(node.title ?? "").trim() && "Name the issue title."].filter(Boolean);
-  if (type === "take-issue") return [!slackRun(c) && "A take-issue step needs a Slack trigger."].filter(Boolean);
-  if (type === "move-column") return [!(node.column ?? "").trim() && "Name the column."].filter(Boolean);
+  if (type === "page") return [noSubject(c), !node.group?.trim() && "Name the Slack user group to page."].filter(Boolean);
+  if (type === "reply") return [noSubject(c) || (!slackRun(c) && "A reply step needs a Slack trigger."), !(node.text ?? "").trim() && "Write the reply text."].filter(Boolean);
+  if (type === "file-issue") return [noSubject(c) || (!slackRun(c) && "A file-issue step needs a Slack trigger."), !(node.team ?? "").trim() && "Name the Linear team.", !(node.title ?? "").trim() && "Name the issue title."].filter(Boolean);
+  if (type === "take-issue") return [noSubject(c) || (!slackRun(c) && "A take-issue step needs a Slack trigger.")].filter(Boolean);
+  if (type === "move-column") return [noSubject(c), !(node.column ?? "").trim() && "Name the column."].filter(Boolean);
+  if (type === "stage-picked") return [noSubject(c)].filter(Boolean);
   if (type === "proof") return [];
   if (type === "convex-data") return convexStepIssues(node);
   if (type === "call") {
@@ -1675,6 +1758,8 @@ function choiceEnders(node) {
 }
 
 function sessionFields(c) {
+  if (c.trigger?.kind === "observability") return `${STEPS.agent.fields(c)}
+    <h2 class="looks-title">File a Linear ticket</h2>${STEPS.ticket.fields(c)}`;
   return `${STEPS.agent.fields(c)}
     <h2 class="looks-title">If it reports a bug</h2>${STEPS.bug.fields(c)}
     <h2 class="looks-title">Issue columns</h2>
@@ -1959,6 +2044,7 @@ function tidyTrigger(trigger) {
   if (label !== undefined) out.label = trimmed(label);
   if (channel !== undefined) out.channel = trimmed(channel);
   if (kind === "slack-message" && apps) out.apps = true;
+  if (kind === "observability") out.source = { kind: trigger.source?.kind ?? "posthog" };
   if (decide) {
     out.decide = {
       model: trimmed(decide.model),
@@ -2231,6 +2317,33 @@ const actions = {
     settings.vercel = null;
     showPage("integrations");
   },
+  async "connect-posthog"() {
+    const key = document.getElementById("posthog-key").value;
+    const project = document.getElementById("posthog-project").value.trim();
+    const host = posthogHost === "self" ? document.getElementById("posthog-host").value.trim() : posthogHost;
+    // The first field left empty, in the form's order, is named and focused.
+    const missing = [
+      [!host, "posthog-host", "Enter the self-hosted address."],
+      [!project, "posthog-project", "Enter the project id."],
+      [!key.trim(), "posthog-key", "Paste the key."],
+    ].find(([empty]) => empty);
+    if (missing) {
+      document.getElementById("posthog-error").textContent = missing[2];
+      return document.getElementById(missing[1]).focus();
+    }
+    try {
+      settings.posthog = await connectorCall("connect_posthog", { key, project, host });
+      if (pendingWorkflow && triggerReady(pendingWorkflow.kind)) return await resumeWorkflow();
+      showPage("integrations");
+    } catch (e) {
+      document.getElementById("posthog-error").textContent = e;
+    }
+  },
+  async "disconnect-posthog"() {
+    await connectorCall("disconnect_posthog");
+    settings.posthog = null;
+    showPage("integrations");
+  },
   "add-question"() {
     view.draft.ask.questions.push({ name: "", ask: "", choices: [], stopOn: [] });
     redraw();
@@ -2263,6 +2376,8 @@ const actions = {
   "connect-for-trigger"(button) {
     pendingWorkflow = { kind: button.dataset.kind };
     showPage("integrations");
+    // The PostHog card sits below the fold, under the note that sent the user here.
+    if (TRIGGERS[pendingWorkflow.kind].needs === "posthog") document.getElementById("posthog-card")?.scrollIntoView({ block: "center" });
   },
   "resume-workflow": () => resumeWorkflow(),
   "forget-pending-workflow"() {
@@ -2583,6 +2698,7 @@ settingsPage.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && e.target.id === "linear-key") runAction("connect-linear");
   if (e.key === "Enter" && e.target.id === "slack-token") runAction("connect-slack");
   if (e.key === "Enter" && e.target.id === "vercel-key") runAction("connect-vercel");
+  if (e.key === "Enter" && e.target.id === "posthog-key") runAction("connect-posthog");
   if (e.key === "Enter" && e.target.id === "claude-token") runAction("connect-upstash");
   if (e.key === "Enter" && e.target.id === "box-token") runAction("add-box-token");
   if (e.key === "Enter" && e.target.id === "convex-key") runAction("connect-convex");
@@ -2652,6 +2768,11 @@ settingsPage.addEventListener("input", (e) => {
 });
 
 settingsPage.addEventListener("change", async (e) => {
+  if (e.target.id === "posthog-host-choice") {
+    posthogHost = e.target.value;
+    document.getElementById("posthog-host").hidden = posthogHost !== "self";
+    return;
+  }
   if (e.target.id === "offline-runner-pick") {
     const machine = e.target.value;
     if (!machine) return;
@@ -2691,11 +2812,12 @@ settingsSection({ page: "general", label: "General", icon: "settings", show: () 
   { title: "Keep this Mac awake", terms: ["sleep display power"] },
   { title: "Captain and workers", terms: ["orchestration max workers orchestrator captain capitao capitão"] },
   { title: "Way of working", terms: ["taste profile economical balanced aggressive custom strategy model ladder hard work parallel workers pace autonomy review diff second opinion context notes orchestrator captain capitao capitão"] },
-  { title: "Global orchestrator", terms: ["global orchestrator orquestrador orchestrator admiral commander host machine busy queue refuse reports memory name"] },
+  { title: "Global orchestrator", terms: ["global orchestrator orquestrador orchestrator admiral commander host machine busy queue refuse reports memory name auto-merge auto merge automerge approval profile pull request review"] },
   { title: "Always on top", terms: ["optional features always on top pin window acima topo funcionalidades opcionais"] },
   { title: "Run in the background", terms: ["no window background memory ram web app dock hidden segundo plano"] },
   { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },
   { title: "Send shortcut", terms: ["enter new line multiline cmd ctrl composer"] },
+  { title: "Compaction", terms: ["compact context tokens threshold summarize history cache composer never"] },
 ] });
 settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = readOnlyWithoutHub("Connectors", integrationsHtml())), loadExternalAgents(), loadBoxLogins(), loadConvexProjects()), search: [
   { title: "External agents (MCP)", terms: ["mcp oauth grok external agent remote connector orchestrator captain capitao capitão token revoke"], id: "external-agents" },
@@ -2703,6 +2825,7 @@ settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show:
   { title: "Slack", terms: ["bot token channels mentions connector"] },
   { title: "GitHub", terms: ["token repositories clone connector"] },
   { title: "Vercel AI Gateway", terms: ["api key models classify connector"] },
+  { title: "PostHog", terms: ["errors error tracking observability project api key connector"] },
   { title: "Upstash Box", terms: ["sandbox cloud box claude setup-token subscription connector permission fresh fixed ask"] },
   { title: "Convex", terms: ["database tables documents deploy key logs query connector"], id: "convex" },
 ] });
@@ -2712,7 +2835,7 @@ settingsSection({ page: "connectors", label: "Workflows", icon: "workflow", show
   refreshCopy().then(() => {
     if (page === "connectors") redraw();
   });
-}, search: [{ title: "Workflows", terms: ["linear label status assigned column slack mention automation trigger"] }] });
+}, search: [{ title: "Workflows", terms: ["linear label status assigned column slack mention automation trigger posthog error errors observability"] }] });
 settingsSection({ page: "account", label: "Account", icon: "circle-user", show: () => showAccount(), search: [{ title: "Password", terms: ["account change sign in out email"] }] });
 settingsSection({ page: "machines", label: "Machines", icon: "server", show: () => showMachinesAndRecheckSync(), search: [{ title: "Machines", terms: ["pair rename remove server node computer run in the background window"] }] });
 settingsSection({ page: "archive", label: "Archive", icon: "archive", show: () => showArchive(), search: [{ title: "Archive", terms: ["archived threads unarchive delete restore"] }] });

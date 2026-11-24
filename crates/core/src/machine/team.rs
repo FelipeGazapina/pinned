@@ -68,19 +68,22 @@ mod tests {
     fn every_team_tool_answers_that_it_is_not_available_yet() {
         let m = Machine::new(launch(), None, None, |_| {});
         for name in crate::team_tools::NAMES {
-            if name.starts_with("room_") {
+            if name.starts_with("room_") || name.starts_with("board_") {
                 continue;
             }
             let args = match name {
-                "task_fix" | "board_read" => json!({ "taskId": "t1" }),
+                "task_fix" => json!({ "taskId": "t1" }),
                 "feature_map_set" => json!({ "feature": "login", "files": [] }),
                 "profile_propose" => json!({ "profile": { "name": "scout" } }),
-                "board_note" => json!({ "file": "a.rs", "text": "x" }),
                 "ask_worker" => json!({ "taskId": "t1", "question": "x" }),
                 _ => json!({}),
             };
             let tool = crate::team_tools::request(name, &args).unwrap();
             assert_eq!(m.team_tool(Some("tab-1"), None, tool), Err(format!("{name} is not available in this build")));
+        }
+        for (name, args) in [("board_note", json!({ "file": "a.rs", "text": "x" })), ("board_read", json!({ "taskId": "t1" }))] {
+            let err = m.team_tool(Some("tab-1"), None, crate::team_tools::request(name, &args).unwrap()).unwrap_err();
+            assert!(!err.contains("not available") && err.contains("Captain"), "{name}: {err}");
         }
         let opened = crate::team_tools::request("room_open", &json!({ "brief": "Fix it.", "seats": [{ "name": "Ana" }, { "name": "Beto" }] })).unwrap();
         let err = m.team_tool(Some("tab-1"), None, opened).unwrap_err();

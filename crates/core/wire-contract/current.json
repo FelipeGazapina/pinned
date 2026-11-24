@@ -1266,6 +1266,36 @@
                 ]
               },
               {
+                "description": "`compaction::Settings` of this machine: from what context size the app offers to compact a\nsession.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "compaction_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `compaction::Settings` saved, answered as saved. A threshold under\n`compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_compaction_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/CompactionSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`on`, as saved. Whether the desktop app on this machine runs in the background, with no\nwindow, which it applies at once: on closes the window, off opens it. A machine without the\napp refuses it.",
                 "type": "object",
                 "properties": {
@@ -2152,6 +2182,25 @@
                   "cmd": {
                     "type": "string",
                     "const": "token_usage"
+                  },
+                  "since": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "since"
+                ]
+              },
+              {
+                "description": "`Vec<session_costs::Record>`: the cost, turns and active time the machine saved for each\nClaude session whose last message is at or after unix time `since`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "session_costs"
                   },
                   "since": {
                     "type": "integer",
@@ -4281,6 +4330,16 @@
                 "description": "The phone reads the orchestrator's summaries aloud.",
                 "type": "boolean",
                 "default": false
+              },
+              "auto_merge": {
+                "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+                "type": "boolean",
+                "default": false
+              },
+              "approval_profile": {
+                "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -4289,7 +4348,9 @@
               "busy",
               "reports",
               "group_reports",
-              "read_aloud"
+              "read_aloud",
+              "auto_merge",
+              "approval_profile"
             ]
           },
           "ReportPolicy": {
@@ -4335,6 +4396,25 @@
             "required": [
               "workers",
               "sessions"
+            ]
+          },
+          "CompactionSettings": {
+            "description": "When this machine's sessions are offered a compaction.",
+            "type": "object",
+            "properties": {
+              "offer_tokens": {
+                "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 200000
+              }
+            },
+            "required": [
+              "offer_tokens"
             ]
           },
           "RepoLook": {
@@ -5506,6 +5586,43 @@
                 ]
               },
               {
+                "description": "`posthog::Account`, once PostHog let the key read `project` on `host` (`us`, `eu` or an\n`https://` site).",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "connect_posthog"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "host": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "key",
+                  "project",
+                  "host"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "disconnect_posthog"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`Vec<vercel::Model>`: chat models tagged `structured-output`, and every decision model. The list needs no key.",
                 "type": "object",
                 "properties": {
@@ -5945,6 +6062,33 @@
                 ]
               },
               {
+                "description": "`Vec<WorkflowRun>`: the account's workflow runs, newest first, only those `workflow`'s\ntrigger started when it names one. No `limit` answers 50; at most 200.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "workflow_runs"
+                  },
+                  "workflow": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.",
                 "type": "object",
                 "properties": {
@@ -6349,6 +6493,13 @@
                   "assignee": {
                     "type": "string",
                     "default": ""
+                  },
+                  "subject": {
+                    "description": "An observability run's subject key, which files for its PostHog error instead of a\nSlack thread; `channel` and `thread` are then empty. Older apps never send it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -7861,6 +8012,114 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "From the settings page, once it wrote `settings` to each machine: `global_orchestrator::AccountSave`.\nThe hub keeps it as the account's last save, pending on every machine but a box and those in\n`took`, and sends it to each pending machine when it connects, keeping that machine's `host`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "record_global_orchestrator_save"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/GlobalOrchestratorSettings"
+                  },
+                  "took": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings",
+                  "took"
+                ]
+              },
+              {
+                "description": "The account's last `global_orchestrator::AccountSave`, or `null` when it has none.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "global_orchestrator_save"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`classify::Answer`: which of `categories`, or `yes` or `no` to `question`, a decision model on\nthe account's Vercel AI Gateway finds fits `text`, asked with the account's key. One gateway call.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "classify"
+                  },
+                  "text": {
+                    "description": "What to classify, at most 8,000 characters. The model reads it as data, never as instructions.",
+                    "type": "string"
+                  },
+                  "categories": {
+                    "description": "Two to 20 categories to choose from, each a `name` and an optional `description` the model\nreads to tell them apart. Leave it out to ask `question` instead.",
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Category2"
+                    },
+                    "default": []
+                  },
+                  "question": {
+                    "description": "A yes/no question about the text, answered as the categories `yes` and `no`. Leave it out to\ngive `categories` instead.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "instructions": {
+                    "description": "Extra guidance for the model. With the question and the categories, at most 4,000 characters.",
+                    "type": "string",
+                    "default": ""
+                  },
+                  "model": {
+                    "description": "The decision model's gateway id, as `provider/name`. `typesafe-ai/jev` when left out.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "unsure_below": {
+                    "description": "The pick is `unsure` below this probability, from 0 to 1. 0.6 when left out.",
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  },
+                  "sure_at": {
+                    "description": "The pick is `sure` at or above this probability, from 0 to 1. 0.85 when left out.",
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "text",
+                  "categories",
+                  "question",
+                  "instructions",
+                  "model",
+                  "unsure_below",
+                  "sure_at"
+                ]
               }
             ]
           },
@@ -8413,6 +8672,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -8615,6 +8891,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -9334,6 +9628,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -10362,7 +10673,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -10436,6 +10759,41 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "escalate_breaking_change": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_process_failure": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_over_lines": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "escalate_areas": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -10562,6 +10920,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -10569,7 +10928,12 @@
               "box_budget_cents",
               "placement",
               "box_size",
-              "boxes_at_once"
+              "boxes_at_once",
+              "escalate_breaking_change",
+              "escalate_process_failure",
+              "escalate_over_lines",
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "ReviewerPatch": {
@@ -10770,12 +11134,22 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
                   "time_limit_min": 480,
                   "box_budget_cents": 0,
-                  "box_size": null
+                  "box_size": null,
+                  "escalate_breaking_change": true,
+                  "escalate_process_failure": true,
+                  "escalate_over_lines": 500,
+                  "escalate_areas": [
+                    "Release and version bumps",
+                    "CI and deploy config",
+                    "Sign-in, tokens and secrets"
+                  ],
+                  "manage_only": false
                 }
               },
               "captains": {
@@ -10803,12 +11177,22 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
                   "time_limit_min": 480,
                   "box_budget_cents": 0,
-                  "box_size": null
+                  "box_size": null,
+                  "escalate_breaking_change": true,
+                  "escalate_process_failure": true,
+                  "escalate_over_lines": 500,
+                  "escalate_areas": [
+                    "Release and version bumps",
+                    "CI and deploy config",
+                    "Sign-in, tokens and secrets"
+                  ],
+                  "manage_only": false
                 }
               },
               "projects": {
@@ -10951,8 +11335,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -11000,6 +11396,40 @@
                   }
                 ],
                 "default": null
+              },
+              "escalate_breaking_change": {
+                "description": "Escalate to the user a change that breaks an older version.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_process_failure": {
+                "description": "Escalate to the user a run whose process did not work as designed.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_over_lines": {
+                "description": "Escalate to the user a change past this many changed lines, not counting tests, docs and\ngenerated files. 1 to 100000.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 500
+              },
+              "escalate_areas": {
+                "description": "Areas whose changes always go to the user, as free text.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [
+                  "Release and version bumps",
+                  "CI and deploy config",
+                  "Sign-in, tokens and secrets"
+                ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -11013,12 +11443,18 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
               "time_limit_min",
               "box_budget_cents",
-              "box_size"
+              "box_size",
+              "escalate_breaking_change",
+              "escalate_process_failure",
+              "escalate_over_lines",
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "Reviewer": {
@@ -13434,6 +13870,25 @@
               }
             ]
           },
+          "Category2": {
+            "description": "One category the model may pick.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "What the answer's `pick` says when the text fits this category.",
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this category from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "name",
+              "description"
+            ]
+          },
           "Target4": {
             "type": "object",
             "properties": {
@@ -14685,6 +15140,36 @@
                 ]
               },
               {
+                "description": "`compaction::Settings` of this machine: from what context size the app offers to compact a\nsession.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "compaction_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `compaction::Settings` saved, answered as saved. A threshold under\n`compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_compaction_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/CompactionSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`on`, as saved. Whether the desktop app on this machine runs in the background, with no\nwindow, which it applies at once: on closes the window, off opens it. A machine without the\napp refuses it.",
                 "type": "object",
                 "properties": {
@@ -15563,6 +16048,25 @@
                   "cmd": {
                     "type": "string",
                     "const": "token_usage"
+                  },
+                  "since": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "since"
+                ]
+              },
+              {
+                "description": "`Vec<session_costs::Record>`: the cost, turns and active time the machine saved for each\nClaude session whose last message is at or after unix time `since`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "session_costs"
                   },
                   "since": {
                     "type": "integer",
@@ -17665,6 +18169,16 @@
                 "description": "The phone reads the orchestrator's summaries aloud.",
                 "type": "boolean",
                 "default": false
+              },
+              "auto_merge": {
+                "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+                "type": "boolean",
+                "default": false
+              },
+              "approval_profile": {
+                "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+                "type": "string",
+                "default": ""
               }
             }
           },
@@ -17706,6 +18220,22 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": null
+              }
+            }
+          },
+          "CompactionSettings": {
+            "description": "When this machine's sessions are offered a compaction.",
+            "type": "object",
+            "properties": {
+              "offer_tokens": {
+                "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 200000
               }
             }
           },
@@ -18855,6 +19385,43 @@
                 ]
               },
               {
+                "description": "`posthog::Account`, once PostHog let the key read `project` on `host` (`us`, `eu` or an\n`https://` site).",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "connect_posthog"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "host": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "key",
+                  "project",
+                  "host"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "disconnect_posthog"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`Vec<vercel::Model>`: chat models tagged `structured-output`, and every decision model. The list needs no key.",
                 "type": "object",
                 "properties": {
@@ -19292,6 +19859,33 @@
                 ]
               },
               {
+                "description": "`Vec<WorkflowRun>`: the account's workflow runs, newest first, only those `workflow`'s\ntrigger started when it names one. No `limit` answers 50; at most 200.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "workflow_runs"
+                  },
+                  "workflow": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.",
                 "type": "object",
                 "properties": {
@@ -19689,6 +20283,13 @@
                   "assignee": {
                     "type": "string",
                     "default": ""
+                  },
+                  "subject": {
+                    "description": "An observability run's subject key, which files for its PostHog error instead of a\nSlack thread; `channel` and `thread` are then empty. Older apps never send it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -21191,6 +21792,108 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "From the settings page, once it wrote `settings` to each machine: `global_orchestrator::AccountSave`.\nThe hub keeps it as the account's last save, pending on every machine but a box and those in\n`took`, and sends it to each pending machine when it connects, keeping that machine's `host`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "record_global_orchestrator_save"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/GlobalOrchestratorSettings"
+                  },
+                  "took": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings",
+                  "took"
+                ]
+              },
+              {
+                "description": "The account's last `global_orchestrator::AccountSave`, or `null` when it has none.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "global_orchestrator_save"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`classify::Answer`: which of `categories`, or `yes` or `no` to `question`, a decision model on\nthe account's Vercel AI Gateway finds fits `text`, asked with the account's key. One gateway call.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "classify"
+                  },
+                  "text": {
+                    "description": "What to classify, at most 8,000 characters. The model reads it as data, never as instructions.",
+                    "type": "string"
+                  },
+                  "categories": {
+                    "description": "Two to 20 categories to choose from, each a `name` and an optional `description` the model\nreads to tell them apart. Leave it out to ask `question` instead.",
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Category2"
+                    },
+                    "default": []
+                  },
+                  "question": {
+                    "description": "A yes/no question about the text, answered as the categories `yes` and `no`. Leave it out to\ngive `categories` instead.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "instructions": {
+                    "description": "Extra guidance for the model. With the question and the categories, at most 4,000 characters.",
+                    "type": "string",
+                    "default": ""
+                  },
+                  "model": {
+                    "description": "The decision model's gateway id, as `provider/name`. `typesafe-ai/jev` when left out.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "unsure_below": {
+                    "description": "The pick is `unsure` below this probability, from 0 to 1. 0.6 when left out.",
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  },
+                  "sure_at": {
+                    "description": "The pick is `sure` at or above this probability, from 0 to 1. 0.85 when left out.",
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "text"
+                ]
               }
             ]
           },
@@ -21711,6 +22414,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -21906,6 +22626,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -22605,6 +23343,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -23599,7 +24354,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -23673,6 +24440,41 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "escalate_breaking_change": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_process_failure": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_over_lines": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "escalate_areas": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -23794,6 +24596,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -23801,7 +24604,12 @@
               "box_budget_cents",
               "placement",
               "box_size",
-              "boxes_at_once"
+              "boxes_at_once",
+              "escalate_breaking_change",
+              "escalate_process_failure",
+              "escalate_over_lines",
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "ReviewerPatch": {
@@ -23997,12 +24805,22 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
                   "time_limit_min": 480,
                   "box_budget_cents": 0,
-                  "box_size": null
+                  "box_size": null,
+                  "escalate_breaking_change": true,
+                  "escalate_process_failure": true,
+                  "escalate_over_lines": 500,
+                  "escalate_areas": [
+                    "Release and version bumps",
+                    "CI and deploy config",
+                    "Sign-in, tokens and secrets"
+                  ],
+                  "manage_only": false
                 }
               },
               "captains": {
@@ -24030,12 +24848,22 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
                   "time_limit_min": 480,
                   "box_budget_cents": 0,
-                  "box_size": null
+                  "box_size": null,
+                  "escalate_breaking_change": true,
+                  "escalate_process_failure": true,
+                  "escalate_over_lines": 500,
+                  "escalate_areas": [
+                    "Release and version bumps",
+                    "CI and deploy config",
+                    "Sign-in, tokens and secrets"
+                  ],
+                  "manage_only": false
                 }
               },
               "projects": {
@@ -24168,8 +24996,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -24217,6 +25057,40 @@
                   }
                 ],
                 "default": null
+              },
+              "escalate_breaking_change": {
+                "description": "Escalate to the user a change that breaks an older version.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_process_failure": {
+                "description": "Escalate to the user a run whose process did not work as designed.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_over_lines": {
+                "description": "Escalate to the user a change past this many changed lines, not counting tests, docs and\ngenerated files. 1 to 100000.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 500
+              },
+              "escalate_areas": {
+                "description": "Areas whose changes always go to the user, as free text.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [
+                  "Release and version bumps",
+                  "CI and deploy config",
+                  "Sign-in, tokens and secrets"
+                ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             }
           },
@@ -26547,6 +27421,24 @@
               }
             ]
           },
+          "Category2": {
+            "description": "One category the model may pick.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "What the answer's `pick` says when the text fits this category.",
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this category from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "name"
+            ]
+          },
           "Target4": {
             "type": "object",
             "properties": {
@@ -27499,7 +28391,7 @@
                 "const": "worker"
               },
               {
-                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\n`Machine::review_turn_end` starts one, read-only, when a worker thread's turn would end its\ntask in a project whose review switch is on.",
                 "type": "string",
                 "const": "reviewer"
               }
@@ -28323,6 +29215,43 @@
                 ]
               },
               {
+                "description": "`posthog::Account`, once PostHog let the key read `project` on `host` (`us`, `eu` or an\n`https://` site).",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "connect_posthog"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "host": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "key",
+                  "project",
+                  "host"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "disconnect_posthog"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`Vec<vercel::Model>`: chat models tagged `structured-output`, and every decision model. The list needs no key.",
                 "type": "object",
                 "properties": {
@@ -28762,6 +29691,33 @@
                 ]
               },
               {
+                "description": "`Vec<WorkflowRun>`: the account's workflow runs, newest first, only those `workflow`'s\ntrigger started when it names one. No `limit` answers 50; at most 200.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "workflow_runs"
+                  },
+                  "workflow": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.",
                 "type": "object",
                 "properties": {
@@ -29166,6 +30122,13 @@
                   "assignee": {
                     "type": "string",
                     "default": ""
+                  },
+                  "subject": {
+                    "description": "An observability run's subject key, which files for its PostHog error instead of a\nSlack thread; `channel` and `thread` are then empty. Older apps never send it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -30678,6 +31641,114 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "From the settings page, once it wrote `settings` to each machine: `global_orchestrator::AccountSave`.\nThe hub keeps it as the account's last save, pending on every machine but a box and those in\n`took`, and sends it to each pending machine when it connects, keeping that machine's `host`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "record_global_orchestrator_save"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/GlobalOrchestratorSettings"
+                  },
+                  "took": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings",
+                  "took"
+                ]
+              },
+              {
+                "description": "The account's last `global_orchestrator::AccountSave`, or `null` when it has none.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "global_orchestrator_save"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`classify::Answer`: which of `categories`, or `yes` or `no` to `question`, a decision model on\nthe account's Vercel AI Gateway finds fits `text`, asked with the account's key. One gateway call.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "classify"
+                  },
+                  "text": {
+                    "description": "What to classify, at most 8,000 characters. The model reads it as data, never as instructions.",
+                    "type": "string"
+                  },
+                  "categories": {
+                    "description": "Two to 20 categories to choose from, each a `name` and an optional `description` the model\nreads to tell them apart. Leave it out to ask `question` instead.",
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Category2"
+                    },
+                    "default": []
+                  },
+                  "question": {
+                    "description": "A yes/no question about the text, answered as the categories `yes` and `no`. Leave it out to\ngive `categories` instead.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "instructions": {
+                    "description": "Extra guidance for the model. With the question and the categories, at most 4,000 characters.",
+                    "type": "string",
+                    "default": ""
+                  },
+                  "model": {
+                    "description": "The decision model's gateway id, as `provider/name`. `typesafe-ai/jev` when left out.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "unsure_below": {
+                    "description": "The pick is `unsure` below this probability, from 0 to 1. 0.6 when left out.",
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  },
+                  "sure_at": {
+                    "description": "The pick is `sure` at or above this probability, from 0 to 1. 0.85 when left out.",
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "text",
+                  "categories",
+                  "question",
+                  "instructions",
+                  "model",
+                  "unsure_below",
+                  "sure_at"
+                ]
               }
             ]
           },
@@ -31230,6 +32301,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -31432,6 +32520,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -32160,6 +33266,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -33295,7 +34418,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort2"
@@ -33369,6 +34504,41 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "escalate_breaking_change": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_process_failure": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_over_lines": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "escalate_areas": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -33526,6 +34696,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -33533,7 +34704,12 @@
               "box_budget_cents",
               "placement",
               "box_size",
-              "boxes_at_once"
+              "boxes_at_once",
+              "escalate_breaking_change",
+              "escalate_process_failure",
+              "escalate_over_lines",
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "ReviewerPatch": {
@@ -33734,12 +34910,22 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
                   "time_limit_min": 480,
                   "box_budget_cents": 0,
-                  "box_size": null
+                  "box_size": null,
+                  "escalate_breaking_change": true,
+                  "escalate_process_failure": true,
+                  "escalate_over_lines": 500,
+                  "escalate_areas": [
+                    "Release and version bumps",
+                    "CI and deploy config",
+                    "Sign-in, tokens and secrets"
+                  ],
+                  "manage_only": false
                 }
               },
               "captains": {
@@ -33767,12 +34953,22 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
                   "time_limit_min": 480,
                   "box_budget_cents": 0,
-                  "box_size": null
+                  "box_size": null,
+                  "escalate_breaking_change": true,
+                  "escalate_process_failure": true,
+                  "escalate_over_lines": 500,
+                  "escalate_areas": [
+                    "Release and version bumps",
+                    "CI and deploy config",
+                    "Sign-in, tokens and secrets"
+                  ],
+                  "manage_only": false
                 }
               },
               "projects": {
@@ -33915,8 +35111,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort2"
@@ -33964,6 +35172,40 @@
                   }
                 ],
                 "default": null
+              },
+              "escalate_breaking_change": {
+                "description": "Escalate to the user a change that breaks an older version.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_process_failure": {
+                "description": "Escalate to the user a run whose process did not work as designed.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_over_lines": {
+                "description": "Escalate to the user a change past this many changed lines, not counting tests, docs and\ngenerated files. 1 to 100000.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 500
+              },
+              "escalate_areas": {
+                "description": "Areas whose changes always go to the user, as free text.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [
+                  "Release and version bumps",
+                  "CI and deploy config",
+                  "Sign-in, tokens and secrets"
+                ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -33977,12 +35219,18 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
               "time_limit_min",
               "box_budget_cents",
-              "box_size"
+              "box_size",
+              "escalate_breaking_change",
+              "escalate_process_failure",
+              "escalate_over_lines",
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "Reviewer": {
@@ -36939,6 +38187,94 @@
                 ]
               }
             ]
+          },
+          "GlobalOrchestratorSettings": {
+            "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
+                "type": "string",
+                "default": "Orchestrator"
+              },
+              "host": {
+                "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
+                "type": "boolean",
+                "default": false
+              },
+              "busy": {
+                "$ref": "#/$defs/BusyPolicy",
+                "default": "queue"
+              },
+              "reports": {
+                "$ref": "#/$defs/ReportPolicy",
+                "default": "auto"
+              },
+              "group_reports": {
+                "description": "The chat folds consecutive reports into one row.",
+                "type": "boolean",
+                "default": true
+              },
+              "read_aloud": {
+                "description": "The phone reads the orchestrator's summaries aloud.",
+                "type": "boolean",
+                "default": false
+              },
+              "auto_merge": {
+                "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+                "type": "boolean",
+                "default": false
+              },
+              "approval_profile": {
+                "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "name",
+              "host",
+              "busy",
+              "reports",
+              "group_reports",
+              "read_aloud",
+              "auto_merge",
+              "approval_profile"
+            ]
+          },
+          "ReportPolicy": {
+            "description": "When a Capitão reports to the global orchestrator.",
+            "oneOf": [
+              {
+                "description": "At the end of every turn that a message from the orchestrator started, and with `tell_orchestrator`.",
+                "type": "string",
+                "const": "auto"
+              },
+              {
+                "description": "Only with `tell_orchestrator`.",
+                "type": "string",
+                "const": "tool_only"
+              }
+            ]
+          },
+          "Category2": {
+            "description": "One category the model may pick.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "What the answer's `pick` says when the text fits this category.",
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this category from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "name",
+              "description"
+            ]
           }
         }
       },
@@ -37729,7 +39065,7 @@
                 "const": "worker"
               },
               {
-                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\n`Machine::review_turn_end` starts one, read-only, when a worker thread's turn would end its\ntask in a project whose review switch is on.",
                 "type": "string",
                 "const": "reviewer"
               }
@@ -38530,6 +39866,43 @@
                 ]
               },
               {
+                "description": "`posthog::Account`, once PostHog let the key read `project` on `host` (`us`, `eu` or an\n`https://` site).",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "connect_posthog"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "host": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "key",
+                  "project",
+                  "host"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "disconnect_posthog"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`Vec<vercel::Model>`: chat models tagged `structured-output`, and every decision model. The list needs no key.",
                 "type": "object",
                 "properties": {
@@ -38967,6 +40340,33 @@
                 ]
               },
               {
+                "description": "`Vec<WorkflowRun>`: the account's workflow runs, newest first, only those `workflow`'s\ntrigger started when it names one. No `limit` answers 50; at most 200.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "workflow_runs"
+                  },
+                  "workflow": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.",
                 "type": "object",
                 "properties": {
@@ -39364,6 +40764,13 @@
                   "assignee": {
                     "type": "string",
                     "default": ""
+                  },
+                  "subject": {
+                    "description": "An observability run's subject key, which files for its PostHog error instead of a\nSlack thread; `channel` and `thread` are then empty. Older apps never send it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -40866,6 +42273,108 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "From the settings page, once it wrote `settings` to each machine: `global_orchestrator::AccountSave`.\nThe hub keeps it as the account's last save, pending on every machine but a box and those in\n`took`, and sends it to each pending machine when it connects, keeping that machine's `host`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "record_global_orchestrator_save"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/GlobalOrchestratorSettings"
+                  },
+                  "took": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings",
+                  "took"
+                ]
+              },
+              {
+                "description": "The account's last `global_orchestrator::AccountSave`, or `null` when it has none.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "global_orchestrator_save"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`classify::Answer`: which of `categories`, or `yes` or `no` to `question`, a decision model on\nthe account's Vercel AI Gateway finds fits `text`, asked with the account's key. One gateway call.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "classify"
+                  },
+                  "text": {
+                    "description": "What to classify, at most 8,000 characters. The model reads it as data, never as instructions.",
+                    "type": "string"
+                  },
+                  "categories": {
+                    "description": "Two to 20 categories to choose from, each a `name` and an optional `description` the model\nreads to tell them apart. Leave it out to ask `question` instead.",
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Category2"
+                    },
+                    "default": []
+                  },
+                  "question": {
+                    "description": "A yes/no question about the text, answered as the categories `yes` and `no`. Leave it out to\ngive `categories` instead.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "instructions": {
+                    "description": "Extra guidance for the model. With the question and the categories, at most 4,000 characters.",
+                    "type": "string",
+                    "default": ""
+                  },
+                  "model": {
+                    "description": "The decision model's gateway id, as `provider/name`. `typesafe-ai/jev` when left out.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "unsure_below": {
+                    "description": "The pick is `unsure` below this probability, from 0 to 1. 0.6 when left out.",
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  },
+                  "sure_at": {
+                    "description": "The pick is `sure` at or above this probability, from 0 to 1. 0.85 when left out.",
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "text"
+                ]
               }
             ]
           },
@@ -41386,6 +42895,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -41581,6 +43107,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -42289,6 +43833,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -43388,7 +44949,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort2"
@@ -43462,6 +45035,41 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "escalate_breaking_change": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_process_failure": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_over_lines": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "escalate_areas": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -43614,6 +45222,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -43621,7 +45230,12 @@
               "box_budget_cents",
               "placement",
               "box_size",
-              "boxes_at_once"
+              "boxes_at_once",
+              "escalate_breaking_change",
+              "escalate_process_failure",
+              "escalate_over_lines",
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "ReviewerPatch": {
@@ -43817,12 +45431,22 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
                   "time_limit_min": 480,
                   "box_budget_cents": 0,
-                  "box_size": null
+                  "box_size": null,
+                  "escalate_breaking_change": true,
+                  "escalate_process_failure": true,
+                  "escalate_over_lines": 500,
+                  "escalate_areas": [
+                    "Release and version bumps",
+                    "CI and deploy config",
+                    "Sign-in, tokens and secrets"
+                  ],
+                  "manage_only": false
                 }
               },
               "captains": {
@@ -43850,12 +45474,22 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
                   "time_limit_min": 480,
                   "box_budget_cents": 0,
-                  "box_size": null
+                  "box_size": null,
+                  "escalate_breaking_change": true,
+                  "escalate_process_failure": true,
+                  "escalate_over_lines": 500,
+                  "escalate_areas": [
+                    "Release and version bumps",
+                    "CI and deploy config",
+                    "Sign-in, tokens and secrets"
+                  ],
+                  "manage_only": false
                 }
               },
               "projects": {
@@ -43988,8 +45622,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort2"
@@ -44037,6 +45683,40 @@
                   }
                 ],
                 "default": null
+              },
+              "escalate_breaking_change": {
+                "description": "Escalate to the user a change that breaks an older version.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_process_failure": {
+                "description": "Escalate to the user a run whose process did not work as designed.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_over_lines": {
+                "description": "Escalate to the user a change past this many changed lines, not counting tests, docs and\ngenerated files. 1 to 100000.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 500
+              },
+              "escalate_areas": {
+                "description": "Areas whose changes always go to the user, as free text.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [
+                  "Release and version bumps",
+                  "CI and deploy config",
+                  "Sign-in, tokens and secrets"
+                ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             }
           },
@@ -46898,6 +48578,83 @@
                 ]
               }
             ]
+          },
+          "GlobalOrchestratorSettings": {
+            "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
+                "type": "string",
+                "default": "Orchestrator"
+              },
+              "host": {
+                "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
+                "type": "boolean",
+                "default": false
+              },
+              "busy": {
+                "$ref": "#/$defs/BusyPolicy",
+                "default": "queue"
+              },
+              "reports": {
+                "$ref": "#/$defs/ReportPolicy",
+                "default": "auto"
+              },
+              "group_reports": {
+                "description": "The chat folds consecutive reports into one row.",
+                "type": "boolean",
+                "default": true
+              },
+              "read_aloud": {
+                "description": "The phone reads the orchestrator's summaries aloud.",
+                "type": "boolean",
+                "default": false
+              },
+              "auto_merge": {
+                "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+                "type": "boolean",
+                "default": false
+              },
+              "approval_profile": {
+                "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+                "type": "string",
+                "default": ""
+              }
+            }
+          },
+          "ReportPolicy": {
+            "description": "When a Capitão reports to the global orchestrator.",
+            "oneOf": [
+              {
+                "description": "At the end of every turn that a message from the orchestrator started, and with `tell_orchestrator`.",
+                "type": "string",
+                "const": "auto"
+              },
+              {
+                "description": "Only with `tell_orchestrator`.",
+                "type": "string",
+                "const": "tool_only"
+              }
+            ]
+          },
+          "Category2": {
+            "description": "One category the model may pick.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "What the answer's `pick` says when the text fits this category.",
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this category from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "name"
+            ]
           }
         }
       }
@@ -48198,6 +49955,171 @@
         }
       }
     },
+    "ClassifyAnswer": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Answer",
+        "description": "What `classify` answers.",
+        "type": "object",
+        "properties": {
+          "pick": {
+            "description": "The category the model picked: `yes` or `no` for a question.",
+            "type": "string"
+          },
+          "probability": {
+            "description": "How likely the model found the pick, from 0 to 1.",
+            "type": "number",
+            "format": "double"
+          },
+          "probabilities": {
+            "description": "Every category in the order given, `yes` then `no` for a question. A category the model\ngave no probability has 0.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Scored"
+            }
+          },
+          "confidence": {
+            "$ref": "#/$defs/Confidence"
+          }
+        },
+        "required": [
+          "pick",
+          "probability",
+          "probabilities",
+          "confidence"
+        ],
+        "$defs": {
+          "Scored": {
+            "description": "One category and how likely the model found it.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "probability": {
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "name",
+              "probability"
+            ]
+          },
+          "Confidence": {
+            "description": "How sure the model was of its pick: `sure` at or above `sure_at`, `unsure` below\n`unsure_below`, `likely` between.",
+            "type": "string",
+            "enum": [
+              "sure",
+              "likely",
+              "unsure"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Answer",
+        "description": "What `classify` answers.",
+        "type": "object",
+        "properties": {
+          "pick": {
+            "description": "The category the model picked: `yes` or `no` for a question.",
+            "type": "string"
+          },
+          "probability": {
+            "description": "How likely the model found the pick, from 0 to 1.",
+            "type": "number",
+            "format": "double"
+          },
+          "probabilities": {
+            "description": "Every category in the order given, `yes` then `no` for a question. A category the model\ngave no probability has 0.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Scored"
+            }
+          },
+          "confidence": {
+            "$ref": "#/$defs/Confidence"
+          }
+        },
+        "required": [
+          "pick",
+          "probability",
+          "probabilities",
+          "confidence"
+        ],
+        "$defs": {
+          "Scored": {
+            "description": "One category and how likely the model found it.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "probability": {
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "name",
+              "probability"
+            ]
+          },
+          "Confidence": {
+            "description": "How sure the model was of its pick: `sure` at or above `sure_at`, `unsure` below\n`unsure_below`, `likely` between.",
+            "type": "string",
+            "enum": [
+              "sure",
+              "likely",
+              "unsure"
+            ]
+          }
+        }
+      }
+    },
+    "CompactionSettings": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "CompactionSettings",
+        "description": "When this machine's sessions are offered a compaction.",
+        "type": "object",
+        "properties": {
+          "offer_tokens": {
+            "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "default": 200000
+          }
+        },
+        "required": [
+          "offer_tokens"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "CompactionSettings",
+        "description": "When this machine's sessions are offered a compaction.",
+        "type": "object",
+        "properties": {
+          "offer_tokens": {
+            "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "default": 200000
+          }
+        }
+      }
+    },
     "Confirmation": {
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -48772,6 +50694,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -48974,6 +50913,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -49703,6 +51660,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -50333,6 +52307,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -50528,6 +52519,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -51236,6 +53245,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -52635,6 +54661,224 @@
         ]
       }
     },
+    "GlobalOrchestratorSave": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "GlobalOrchestratorSave",
+        "description": "The last save of the account's settings page, which the hub keeps and sends to each machine in\n`pending` once it connects, keeping that machine's own `host`.\n\n`{\"id\":\"6f1c…\",\"settings\":{\"name\":\"Orchestrator\",\"host\":false,…,\"auto_merge\":false},\"pending\":[\"9a2e…\"]}`",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "settings": {
+            "description": "The shared fields as the page saved them, cleaned, with `host` false.",
+            "$ref": "#/$defs/GlobalOrchestratorSettings"
+          },
+          "pending": {
+            "description": "The machines that have not taken it yet.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "settings",
+          "pending"
+        ],
+        "$defs": {
+          "GlobalOrchestratorSettings": {
+            "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
+                "type": "string",
+                "default": "Orchestrator"
+              },
+              "host": {
+                "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
+                "type": "boolean",
+                "default": false
+              },
+              "busy": {
+                "$ref": "#/$defs/BusyPolicy",
+                "default": "queue"
+              },
+              "reports": {
+                "$ref": "#/$defs/ReportPolicy",
+                "default": "auto"
+              },
+              "group_reports": {
+                "description": "The chat folds consecutive reports into one row.",
+                "type": "boolean",
+                "default": true
+              },
+              "read_aloud": {
+                "description": "The phone reads the orchestrator's summaries aloud.",
+                "type": "boolean",
+                "default": false
+              },
+              "auto_merge": {
+                "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+                "type": "boolean",
+                "default": false
+              },
+              "approval_profile": {
+                "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "name",
+              "host",
+              "busy",
+              "reports",
+              "group_reports",
+              "read_aloud",
+              "auto_merge",
+              "approval_profile"
+            ]
+          },
+          "BusyPolicy": {
+            "description": "What happens to a message for a Capitão that is busy.",
+            "oneOf": [
+              {
+                "description": "It waits in the Capitão's queue and is typed once the Capitão is idle.",
+                "type": "string",
+                "const": "queue"
+              },
+              {
+                "description": "It is refused with `ocupado`, and the orchestrator tries again later.",
+                "type": "string",
+                "const": "refuse"
+              }
+            ]
+          },
+          "ReportPolicy": {
+            "description": "When a Capitão reports to the global orchestrator.",
+            "oneOf": [
+              {
+                "description": "At the end of every turn that a message from the orchestrator started, and with `tell_orchestrator`.",
+                "type": "string",
+                "const": "auto"
+              },
+              {
+                "description": "Only with `tell_orchestrator`.",
+                "type": "string",
+                "const": "tool_only"
+              }
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "GlobalOrchestratorSave",
+        "description": "The last save of the account's settings page, which the hub keeps and sends to each machine in\n`pending` once it connects, keeping that machine's own `host`.\n\n`{\"id\":\"6f1c…\",\"settings\":{\"name\":\"Orchestrator\",\"host\":false,…,\"auto_merge\":false},\"pending\":[\"9a2e…\"]}`",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "settings": {
+            "description": "The shared fields as the page saved them, cleaned, with `host` false.",
+            "$ref": "#/$defs/GlobalOrchestratorSettings"
+          },
+          "pending": {
+            "description": "The machines that have not taken it yet.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "settings",
+          "pending"
+        ],
+        "$defs": {
+          "GlobalOrchestratorSettings": {
+            "description": "How this machine's global orchestrator works. One file in the machine's config folder.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "The chat's name, and the prefix of every message it hands a Capitão, as in `[Orchestrator] `.",
+                "type": "string",
+                "default": "Orchestrator"
+              },
+              "host": {
+                "description": "This machine hosts the account's global orchestrator. One machine of the account does.",
+                "type": "boolean",
+                "default": false
+              },
+              "busy": {
+                "$ref": "#/$defs/BusyPolicy",
+                "default": "queue"
+              },
+              "reports": {
+                "$ref": "#/$defs/ReportPolicy",
+                "default": "auto"
+              },
+              "group_reports": {
+                "description": "The chat folds consecutive reports into one row.",
+                "type": "boolean",
+                "default": true
+              },
+              "read_aloud": {
+                "description": "The phone reads the orchestrator's summaries aloud.",
+                "type": "boolean",
+                "default": false
+              },
+              "auto_merge": {
+                "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+                "type": "boolean",
+                "default": false
+              },
+              "approval_profile": {
+                "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+                "type": "string",
+                "default": ""
+              }
+            }
+          },
+          "BusyPolicy": {
+            "description": "What happens to a message for a Capitão that is busy.",
+            "oneOf": [
+              {
+                "description": "It waits in the Capitão's queue and is typed once the Capitão is idle.",
+                "type": "string",
+                "const": "queue"
+              },
+              {
+                "description": "It is refused with `ocupado`, and the orchestrator tries again later.",
+                "type": "string",
+                "const": "refuse"
+              }
+            ]
+          },
+          "ReportPolicy": {
+            "description": "When a Capitão reports to the global orchestrator.",
+            "oneOf": [
+              {
+                "description": "At the end of every turn that a message from the orchestrator started, and with `tell_orchestrator`.",
+                "type": "string",
+                "const": "auto"
+              },
+              {
+                "description": "Only with `tell_orchestrator`.",
+                "type": "string",
+                "const": "tool_only"
+              }
+            ]
+          }
+        }
+      }
+    },
     "GlobalOrchestratorSettings": {
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -52669,6 +54913,16 @@
             "description": "The phone reads the orchestrator's summaries aloud.",
             "type": "boolean",
             "default": false
+          },
+          "auto_merge": {
+            "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+            "type": "boolean",
+            "default": false
+          },
+          "approval_profile": {
+            "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+            "type": "string",
+            "default": ""
           }
         },
         "required": [
@@ -52677,7 +54931,9 @@
           "busy",
           "reports",
           "group_reports",
-          "read_aloud"
+          "read_aloud",
+          "auto_merge",
+          "approval_profile"
         ],
         "$defs": {
           "BusyPolicy": {
@@ -52745,6 +55001,16 @@
             "description": "The phone reads the orchestrator's summaries aloud.",
             "type": "boolean",
             "default": false
+          },
+          "auto_merge": {
+            "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+            "type": "boolean",
+            "default": false
+          },
+          "approval_profile": {
+            "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+            "type": "string",
+            "default": ""
           }
         },
         "$defs": {
@@ -58058,10 +60324,21 @@
             ],
             "default": null
           },
-          "upstash": {
+          "posthog": {
+            "description": "The connected PostHog project, with its key's last characters only.",
             "anyOf": [
               {
                 "$ref": "#/$defs/Account5"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "upstash": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Account6"
               },
               {
                 "type": "null"
@@ -58262,6 +60539,33 @@
             ]
           },
           "Account5": {
+            "description": "What the Connectors card shows of the PostHog project pinned reads. The key is kept apart.",
+            "type": "object",
+            "properties": {
+              "host": {
+                "description": "The site requests go to, as `https://us.posthog.com`.",
+                "type": "string"
+              },
+              "project": {
+                "description": "The project id, as PostHog's project settings show it.",
+                "type": "string"
+              },
+              "project_name": {
+                "type": "string"
+              },
+              "key_hint": {
+                "description": "The key's last characters, as `…a1b2`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "host",
+              "project",
+              "project_name",
+              "key_hint"
+            ]
+          },
+          "Account6": {
             "description": "What the Connectors card shows of the keys pinned keeps.",
             "type": "object",
             "properties": {
@@ -58620,6 +60924,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -58822,6 +61143,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -59550,6 +61889,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -60673,10 +63029,21 @@
             ],
             "default": null
           },
-          "upstash": {
+          "posthog": {
+            "description": "The connected PostHog project, with its key's last characters only.",
             "anyOf": [
               {
                 "$ref": "#/$defs/Account5"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "upstash": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Account6"
               },
               {
                 "type": "null"
@@ -60868,6 +63235,33 @@
             ]
           },
           "Account5": {
+            "description": "What the Connectors card shows of the PostHog project pinned reads. The key is kept apart.",
+            "type": "object",
+            "properties": {
+              "host": {
+                "description": "The site requests go to, as `https://us.posthog.com`.",
+                "type": "string"
+              },
+              "project": {
+                "description": "The project id, as PostHog's project settings show it.",
+                "type": "string"
+              },
+              "project_name": {
+                "type": "string"
+              },
+              "key_hint": {
+                "description": "The key's last characters, as `…a1b2`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "host",
+              "project",
+              "project_name",
+              "key_hint"
+            ]
+          },
+          "Account6": {
             "description": "What the Connectors card shows of the keys pinned keeps.",
             "type": "object",
             "properties": {
@@ -61204,6 +63598,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -61399,6 +63810,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -62107,6 +64536,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -64469,7 +66915,7 @@
                 "const": "worker"
               },
               {
-                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\n`Machine::review_turn_end` starts one, read-only, when a worker thread's turn would end its\ntask in a project whose review switch is on.",
                 "type": "string",
                 "const": "reviewer"
               }
@@ -65100,7 +67546,7 @@
                 "const": "worker"
               },
               {
-                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\n`Machine::review_turn_end` starts one, read-only, when a worker thread's turn would end its\ntask in a project whose review switch is on.",
                 "type": "string",
                 "const": "reviewer"
               }
@@ -65331,12 +67777,22 @@
               "skills": [],
               "context": [],
               "tier": "high",
+              "default_model": null,
               "default_effort": null,
               "max_effort": "max",
               "budget_cents": 0,
               "time_limit_min": 480,
               "box_budget_cents": 0,
-              "box_size": null
+              "box_size": null,
+              "escalate_breaking_change": true,
+              "escalate_process_failure": true,
+              "escalate_over_lines": 500,
+              "escalate_areas": [
+                "Release and version bumps",
+                "CI and deploy config",
+                "Sign-in, tokens and secrets"
+              ],
+              "manage_only": false
             }
           },
           "captains": {
@@ -65364,12 +67820,22 @@
               "skills": [],
               "context": [],
               "tier": "high",
+              "default_model": null,
               "default_effort": null,
               "max_effort": "max",
               "budget_cents": 0,
               "time_limit_min": 480,
               "box_budget_cents": 0,
-              "box_size": null
+              "box_size": null,
+              "escalate_breaking_change": true,
+              "escalate_process_failure": true,
+              "escalate_over_lines": 500,
+              "escalate_areas": [
+                "Release and version bumps",
+                "CI and deploy config",
+                "Sign-in, tokens and secrets"
+              ],
+              "manage_only": false
             }
           },
           "projects": {
@@ -65512,8 +67978,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -65561,6 +68039,40 @@
                   }
                 ],
                 "default": null
+              },
+              "escalate_breaking_change": {
+                "description": "Escalate to the user a change that breaks an older version.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_process_failure": {
+                "description": "Escalate to the user a run whose process did not work as designed.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_over_lines": {
+                "description": "Escalate to the user a change past this many changed lines, not counting tests, docs and\ngenerated files. 1 to 100000.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 500
+              },
+              "escalate_areas": {
+                "description": "Areas whose changes always go to the user, as free text.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [
+                  "Release and version bumps",
+                  "CI and deploy config",
+                  "Sign-in, tokens and secrets"
+                ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -65574,12 +68086,18 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
               "time_limit_min",
               "box_budget_cents",
-              "box_size"
+              "box_size",
+              "escalate_breaking_change",
+              "escalate_process_failure",
+              "escalate_over_lines",
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "Strategy": {
@@ -65775,7 +68293,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -65849,6 +68379,41 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "escalate_breaking_change": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_process_failure": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_over_lines": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "escalate_areas": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -66157,12 +68722,22 @@
               "skills": [],
               "context": [],
               "tier": "high",
+              "default_model": null,
               "default_effort": null,
               "max_effort": "max",
               "budget_cents": 0,
               "time_limit_min": 480,
               "box_budget_cents": 0,
-              "box_size": null
+              "box_size": null,
+              "escalate_breaking_change": true,
+              "escalate_process_failure": true,
+              "escalate_over_lines": 500,
+              "escalate_areas": [
+                "Release and version bumps",
+                "CI and deploy config",
+                "Sign-in, tokens and secrets"
+              ],
+              "manage_only": false
             }
           },
           "captains": {
@@ -66190,12 +68765,22 @@
               "skills": [],
               "context": [],
               "tier": "high",
+              "default_model": null,
               "default_effort": null,
               "max_effort": "max",
               "budget_cents": 0,
               "time_limit_min": 480,
               "box_budget_cents": 0,
-              "box_size": null
+              "box_size": null,
+              "escalate_breaking_change": true,
+              "escalate_process_failure": true,
+              "escalate_over_lines": 500,
+              "escalate_areas": [
+                "Release and version bumps",
+                "CI and deploy config",
+                "Sign-in, tokens and secrets"
+              ],
+              "manage_only": false
             }
           },
           "projects": {
@@ -66328,8 +68913,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -66377,6 +68974,40 @@
                   }
                 ],
                 "default": null
+              },
+              "escalate_breaking_change": {
+                "description": "Escalate to the user a change that breaks an older version.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_process_failure": {
+                "description": "Escalate to the user a run whose process did not work as designed.",
+                "type": "boolean",
+                "default": true
+              },
+              "escalate_over_lines": {
+                "description": "Escalate to the user a change past this many changed lines, not counting tests, docs and\ngenerated files. 1 to 100000.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 500
+              },
+              "escalate_areas": {
+                "description": "Areas whose changes always go to the user, as free text.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [
+                  "Release and version bumps",
+                  "CI and deploy config",
+                  "Sign-in, tokens and secrets"
+                ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             }
           },
@@ -66573,7 +69204,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -66647,6 +69290,41 @@
                 ],
                 "format": "uint32",
                 "minimum": 0
+              },
+              "escalate_breaking_change": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_process_failure": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "escalate_over_lines": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "escalate_areas": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -69570,7 +72248,7 @@
                 "const": "worker"
               },
               {
-                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\n`Machine::review_turn_end` starts one, read-only, when a worker thread's turn would end its\ntask in a project whose review switch is on.",
                 "type": "string",
                 "const": "reviewer"
               }
@@ -70271,10 +72949,21 @@
                 ],
                 "default": null
               },
-              "upstash": {
+              "posthog": {
+                "description": "The connected PostHog project, with its key's last characters only.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Account5"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "upstash": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Account6"
                   },
                   {
                     "type": "null"
@@ -70475,6 +73164,33 @@
             ]
           },
           "Account5": {
+            "description": "What the Connectors card shows of the PostHog project pinned reads. The key is kept apart.",
+            "type": "object",
+            "properties": {
+              "host": {
+                "description": "The site requests go to, as `https://us.posthog.com`.",
+                "type": "string"
+              },
+              "project": {
+                "description": "The project id, as PostHog's project settings show it.",
+                "type": "string"
+              },
+              "project_name": {
+                "type": "string"
+              },
+              "key_hint": {
+                "description": "The key's last characters, as `…a1b2`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "host",
+              "project",
+              "project_name",
+              "key_hint"
+            ]
+          },
+          "Account6": {
             "description": "What the Connectors card shows of the keys pinned keeps.",
             "type": "object",
             "properties": {
@@ -70833,6 +73549,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -71035,6 +73768,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -71763,6 +74514,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -74377,7 +77145,7 @@
                 "const": "worker"
               },
               {
-                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\nNothing starts one yet: U8 does, from `Machine::review_turn_end`.",
+                "description": "Reads a worker's change against the review rules and reports findings, changing nothing.\n`Machine::review_turn_end` starts one, read-only, when a worker thread's turn would end its\ntask in a project whose review switch is on.",
                 "type": "string",
                 "const": "reviewer"
               }
@@ -75066,10 +77834,21 @@
                 ],
                 "default": null
               },
-              "upstash": {
+              "posthog": {
+                "description": "The connected PostHog project, with its key's last characters only.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Account5"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "upstash": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Account6"
                   },
                   {
                     "type": "null"
@@ -75261,6 +78040,33 @@
             ]
           },
           "Account5": {
+            "description": "What the Connectors card shows of the PostHog project pinned reads. The key is kept apart.",
+            "type": "object",
+            "properties": {
+              "host": {
+                "description": "The site requests go to, as `https://us.posthog.com`.",
+                "type": "string"
+              },
+              "project": {
+                "description": "The project id, as PostHog's project settings show it.",
+                "type": "string"
+              },
+              "project_name": {
+                "type": "string"
+              },
+              "key_hint": {
+                "description": "The key's last characters, as `…a1b2`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "host",
+              "project",
+              "project_name",
+              "key_hint"
+            ]
+          },
+          "Account6": {
             "description": "What the Connectors card shows of the keys pinned keeps.",
             "type": "object",
             "properties": {
@@ -75597,6 +78403,23 @@
                   "schedule",
                   "tz"
                 ]
+              },
+              {
+                "description": "Each new error `source` reports, once. Errors that already existed when the workflow was\nsaved or turned on start nothing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
+                ]
               }
             ]
           },
@@ -75792,6 +78615,24 @@
                 "required": [
                   "kind",
                   "expr"
+                ]
+              }
+            ]
+          },
+          "ObservabilitySource": {
+            "description": "Where an observability trigger reads its errors.",
+            "oneOf": [
+              {
+                "description": "The error-tracking issues of the PostHog project connected under Connectors.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "posthog"
+                  }
+                },
+                "required": [
+                  "kind"
                 ]
               }
             ]
@@ -76500,6 +79341,23 @@
                   "kind",
                   "schedule",
                   "tz"
+                ]
+              },
+              {
+                "description": "`Trigger::Observability`: each new error `source` reports.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "observability"
+                  },
+                  "source": {
+                    "$ref": "#/$defs/ObservabilitySource"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "source"
                 ]
               }
             ]
@@ -79698,6 +82556,36 @@
                 ]
               },
               {
+                "description": "`compaction::Settings` of this machine: from what context size the app offers to compact a\nsession.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "compaction_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `compaction::Settings` saved, answered as saved. A threshold under\n`compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_compaction_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/CompactionSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`on`, as saved. Whether the desktop app on this machine runs in the background, with no\nwindow, which it applies at once: on closes the window, off opens it. A machine without the\napp refuses it.",
                 "type": "object",
                 "properties": {
@@ -80584,6 +83472,25 @@
                   "cmd": {
                     "type": "string",
                     "const": "token_usage"
+                  },
+                  "since": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "since"
+                ]
+              },
+              {
+                "description": "`Vec<session_costs::Record>`: the cost, turns and active time the machine saved for each\nClaude session whose last message is at or after unix time `since`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "session_costs"
                   },
                   "since": {
                     "type": "integer",
@@ -82713,6 +85620,16 @@
                 "description": "The phone reads the orchestrator's summaries aloud.",
                 "type": "boolean",
                 "default": false
+              },
+              "auto_merge": {
+                "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+                "type": "boolean",
+                "default": false
+              },
+              "approval_profile": {
+                "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -82721,7 +85638,9 @@
               "busy",
               "reports",
               "group_reports",
-              "read_aloud"
+              "read_aloud",
+              "auto_merge",
+              "approval_profile"
             ]
           },
           "ReportPolicy": {
@@ -82767,6 +85686,25 @@
             "required": [
               "workers",
               "sessions"
+            ]
+          },
+          "CompactionSettings": {
+            "description": "When this machine's sessions are offered a compaction.",
+            "type": "object",
+            "properties": {
+              "offer_tokens": {
+                "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 200000
+              }
+            },
+            "required": [
+              "offer_tokens"
             ]
           },
           "RepoLook": {
@@ -85350,6 +88288,36 @@
                 ]
               },
               {
+                "description": "`compaction::Settings` of this machine: from what context size the app offers to compact a\nsession.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "compaction_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `compaction::Settings` saved, answered as saved. A threshold under\n`compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_compaction_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/CompactionSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`on`, as saved. Whether the desktop app on this machine runs in the background, with no\nwindow, which it applies at once: on closes the window, off opens it. A machine without the\napp refuses it.",
                 "type": "object",
                 "properties": {
@@ -86228,6 +89196,25 @@
                   "cmd": {
                     "type": "string",
                     "const": "token_usage"
+                  },
+                  "since": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "since"
+                ]
+              },
+              {
+                "description": "`Vec<session_costs::Record>`: the cost, turns and active time the machine saved for each\nClaude session whose last message is at or after unix time `since`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "session_costs"
                   },
                   "since": {
                     "type": "integer",
@@ -88330,6 +91317,16 @@
                 "description": "The phone reads the orchestrator's summaries aloud.",
                 "type": "boolean",
                 "default": false
+              },
+              "auto_merge": {
+                "description": "Captains and the orchestrator decide by the approval profile whether a finished pull\nrequest merges or waits for a human review.",
+                "type": "boolean",
+                "default": false
+              },
+              "approval_profile": {
+                "description": "The user's approval profile; empty means `DEFAULT_APPROVAL_PROFILE`.",
+                "type": "string",
+                "default": ""
               }
             }
           },
@@ -88371,6 +91368,22 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": null
+              }
+            }
+          },
+          "CompactionSettings": {
+            "description": "When this machine's sessions are offered a compaction.",
+            "type": "object",
+            "properties": {
+              "offer_tokens": {
+                "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 200000
               }
             }
           },
@@ -89816,6 +92829,575 @@
             "enum": [
               "chat",
               "decision"
+            ]
+          }
+        }
+      }
+    },
+    "WorkflowRun": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "WorkflowRun",
+        "description": "One workflow run as `workflow_runs` answers it, built from `graph::runner::Run` by\n`runner::view`. The stored run and its walk state never reach an app.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "workflow": {
+            "description": "The workflow whose trigger started the run.",
+            "type": "string"
+          },
+          "workflow_name": {
+            "description": "That workflow's name now, or its id when the account no longer has it.",
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/$defs/Subject"
+          },
+          "status": {
+            "$ref": "#/$defs/WorkflowRunStatus"
+          },
+          "why": {
+            "description": "Why it failed. Only on a failed run.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "description": "RFC 3339 of the first and the last step. None while the log is empty.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_step_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trigger": {
+            "description": "The trigger's payload as the run got it: the Linear issue, Slack message or error. Text\nfrom outside pinned.",
+            "default": null
+          },
+          "classified": {
+            "description": "Each classify step that answered, by node id.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/WorkflowRunClassified"
+            }
+          },
+          "session": {
+            "$ref": "#/$defs/WorkflowRunSession"
+          },
+          "steps": {
+            "description": "Every log entry, in order.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/WorkflowRunStep"
+            }
+          },
+          "waiting_on": {
+            "description": "The step a running or waiting run is on.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkflowRunNode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "workflow",
+          "workflow_name",
+          "subject",
+          "status",
+          "trigger",
+          "classified",
+          "session",
+          "steps"
+        ],
+        "$defs": {
+          "Subject": {
+            "description": "What a connector's session works on, which its callbacks into pinned report against.\nUntagged, so a stage message from a Linear session reads `\"issue\": \"<id>\"` as it always has.",
+            "anyOf": [
+              {
+                "title": "LinearIssue",
+                "description": "Linear's id for the issue, which `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "issue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issue"
+                ]
+              },
+              {
+                "title": "SlackThread",
+                "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "thread": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "channel",
+                  "thread"
+                ]
+              }
+            ]
+          },
+          "WorkflowRunStatus": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "running",
+                  "done",
+                  "failed"
+                ]
+              },
+              {
+                "description": "Waiting for its session to end its turn.",
+                "type": "string",
+                "const": "waiting"
+              }
+            ]
+          },
+          "WorkflowRunClassified": {
+            "description": "What a classify step answered: (question, answer) pairs in question order.",
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "answers": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ],
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              }
+            },
+            "required": [
+              "node",
+              "name",
+              "answers"
+            ]
+          },
+          "WorkflowRunSession": {
+            "description": "A run's session, without the runner's wait bookkeeping.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "live"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "claude": {
+                    "description": "Claude Code's session id, once a hook reported it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "state",
+                  "machine",
+                  "tab"
+                ]
+              },
+              {
+                "description": "The tab is gone.",
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "detached"
+                  },
+                  "claude": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              }
+            ]
+          },
+          "WorkflowRunStep": {
+            "description": "One log entry: when, which step, and what happened there, as the runner logged it.",
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "workflow": {
+                "type": "string"
+              },
+              "node": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "what": true
+            },
+            "required": [
+              "at",
+              "workflow",
+              "node",
+              "name",
+              "what"
+            ]
+          },
+          "WorkflowRunNode": {
+            "description": "A step of a workflow. `name` is the node's name in the workflow's graph now, `\"\"` when the\nworkflow or the node is gone.",
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "type": "string"
+              },
+              "node": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "workflow",
+              "node",
+              "name"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "WorkflowRun",
+        "description": "One workflow run as `workflow_runs` answers it, built from `graph::runner::Run` by\n`runner::view`. The stored run and its walk state never reach an app.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "workflow": {
+            "description": "The workflow whose trigger started the run.",
+            "type": "string"
+          },
+          "workflow_name": {
+            "description": "That workflow's name now, or its id when the account no longer has it.",
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/$defs/Subject"
+          },
+          "status": {
+            "$ref": "#/$defs/WorkflowRunStatus"
+          },
+          "why": {
+            "description": "Why it failed. Only on a failed run.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "description": "RFC 3339 of the first and the last step. None while the log is empty.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_step_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trigger": {
+            "description": "The trigger's payload as the run got it: the Linear issue, Slack message or error. Text\nfrom outside pinned.",
+            "default": null
+          },
+          "classified": {
+            "description": "Each classify step that answered, by node id.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/WorkflowRunClassified"
+            }
+          },
+          "session": {
+            "$ref": "#/$defs/WorkflowRunSession"
+          },
+          "steps": {
+            "description": "Every log entry, in order.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/WorkflowRunStep"
+            }
+          },
+          "waiting_on": {
+            "description": "The step a running or waiting run is on.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkflowRunNode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "workflow",
+          "workflow_name",
+          "subject",
+          "status",
+          "classified",
+          "session",
+          "steps"
+        ],
+        "$defs": {
+          "Subject": {
+            "description": "What a connector's session works on, which its callbacks into pinned report against.\nUntagged, so a stage message from a Linear session reads `\"issue\": \"<id>\"` as it always has.",
+            "anyOf": [
+              {
+                "title": "LinearIssue",
+                "description": "Linear's id for the issue, which `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "issue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issue"
+                ]
+              },
+              {
+                "title": "SlackThread",
+                "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "thread": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "channel",
+                  "thread"
+                ]
+              }
+            ]
+          },
+          "WorkflowRunStatus": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "running",
+                  "done",
+                  "failed"
+                ]
+              },
+              {
+                "description": "Waiting for its session to end its turn.",
+                "type": "string",
+                "const": "waiting"
+              }
+            ]
+          },
+          "WorkflowRunClassified": {
+            "description": "What a classify step answered: (question, answer) pairs in question order.",
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "answers": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ],
+                  "minItems": 2,
+                  "maxItems": 2
+                }
+              }
+            },
+            "required": [
+              "node",
+              "name",
+              "answers"
+            ]
+          },
+          "WorkflowRunSession": {
+            "description": "A run's session, without the runner's wait bookkeeping.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "live"
+                  },
+                  "machine": {
+                    "type": "string"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "claude": {
+                    "description": "Claude Code's session id, once a hook reported it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "state",
+                  "machine",
+                  "tab"
+                ]
+              },
+              {
+                "description": "The tab is gone.",
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "detached"
+                  },
+                  "claude": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              }
+            ]
+          },
+          "WorkflowRunStep": {
+            "description": "One log entry: when, which step, and what happened there, as the runner logged it.",
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "workflow": {
+                "type": "string"
+              },
+              "node": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "what": true
+            },
+            "required": [
+              "at",
+              "workflow",
+              "node",
+              "name",
+              "what"
+            ]
+          },
+          "WorkflowRunNode": {
+            "description": "A step of a workflow. `name` is the node's name in the workflow's graph now, `\"\"` when the\nworkflow or the node is gone.",
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "type": "string"
+              },
+              "node": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "workflow",
+              "node",
+              "name"
             ]
           }
         }

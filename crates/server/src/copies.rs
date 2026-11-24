@@ -168,10 +168,11 @@ pub async fn handback(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, cha
     let mut notes = connectors.take_back(changes, &mut recorded, &author)?;
     let taste_edits: BTreeMap<Item, _> = changes.edits.iter().filter(|(item, _)| item.is_taste()).map(|(item, edit)| (item.clone(), edit.clone())).collect();
     if !taste_edits.is_empty() {
-        let mut current = hub.db.tastes(account.id).await?.unwrap_or_default().copy_items();
+        let stored = hub.db.tastes(account.id).await?.unwrap_or_default();
+        let mut current = stored.copy_items();
         let norm = |item: &Item, version: account_copy::Version| Tastes::normalize_copy_item(item, &version);
         notes.extend(account_copy::merge(&mut current, &mut recorded, &taste_edits, &author, &norm));
-        hub.db.save_tastes(account.id, &Tastes::from_copy_items(&current)?).await?;
+        hub.db.save_tastes(account.id, &stored.with_copy_items(&current)?).await?;
     }
     hub.db.keep_offline_edits(account.id, &recorded).await?;
     release_if_held(hub, account, machine).await?;

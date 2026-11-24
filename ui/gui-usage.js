@@ -138,6 +138,12 @@ async function fetchUsage() {
     } catch (e) {
       env = { rows: [], error: String(e?.message ?? e) };
     }
+    // A machine too old to save its sessions lists no threads, and keeps its rows and status.
+    try {
+      env.threads = (await callOn(m, { cmd: "session_costs", since })).map((r) => ({ ...r, machine: m }));
+    } catch {
+      env.threads = [];
+    }
     if (seq !== usageState.seq) return;
     usageState.envs.set(m, { ...env, loaded: true, loading: false });
     if (shellPage() === "usage") renderUsagePage();
@@ -333,7 +339,9 @@ function spendHtml(s) {
   const empty = (cols) => `<tr class="empty"><td colspan="${cols}">No activity in this window.</td></tr>`;
   const table = usageState.breakdown === "model"
     ? `<table class="by-model"><thead><tr><th class="n">#</th><th class="model">Model</th><th class="num">Cost</th><th class="num share-col">Share</th><th class="num">Tokens</th></tr></thead><tbody>${modelRows || empty(5)}</tbody></table>`
-    : `<div class="table-region" role="region" aria-label="Usage breakdown by time" tabindex="0"><table class="by-time"><colgroup><col class="when"></colgroup><thead><tr><th>${days === 1 ? "Hour" : "Day"}</th>${active ? `<th class="num">Claude Code</th>` : ""}<th class="num">Total</th><th class="num">Tokens</th></tr></thead><tbody>${dayRows || empty(providerCols + 3)}</tbody></table></div>`;
+    : usageState.breakdown === "session"
+      ? `<table class="by-model by-session"><thead><tr><th class="n">#</th><th class="model">Session</th><th class="num">Cost</th><th class="num share-col">Share</th><th class="num">Tokens</th></tr></thead><tbody>${sessionRowsHtml(s) || empty(5)}</tbody></table>`
+      : `<div class="table-region" role="region" aria-label="Usage breakdown by time" tabindex="0"><table class="by-time"><colgroup><col class="when"></colgroup><thead><tr><th>${days === 1 ? "Hour" : "Day"}</th>${active ? `<th class="num">Claude Code</th>` : ""}<th class="num">Total</th><th class="num">Tokens</th></tr></thead><tbody>${dayRows || empty(providerCols + 3)}</tbody></table></div>`;
   const premium = `<span class="aside">Premium <b>${usd(s.premium)}</b></span>`;
   return `<section class="overview">
       <div class="lead"><div class="headline"><div class="total fig">${total}</div>
@@ -346,8 +354,65 @@ function spendHtml(s) {
       <div><dt>Uncached input</dt><dd class="fig">${tokensText(s.input)}</dd></div><div><dt>Output</dt><dd class="fig">${tokensText(s.output)}</dd></div>
       <div><dt>Cache savings</dt><dd class="fig">${usd(s.savings)}</dd></div></dl></section>
     ${s.tokens > 0 ? `<section class="shares fig">${cost ? sharesHtml("Cost by type", costByType(s), usd) + (s.fast > 0 ? sharesHtml("Cost by speed", speedParts(s), usd, premium) : "") : sharesHtml("Tokens by type", tokensByType(s), tokensText)}</section>` : ""}
-    <section class="breakdown"><div class="breakdown-head"><h2>Breakdown</h2>${segmented("breakdown", [["model", "Model"], ["day", days === 1 ? "Hour" : "Day"]], usageState.breakdown, "Usage breakdown")}</div>
-      ${table}</section>`;
+    <section class="breakdown"><div class="breakdown-head"><h2>Breakdown</h2>${segmented("breakdown", [["model", "Model"], ["day", days === 1 ? "Hour" : "Day"], ["session", "Session"]], usageState.breakdown, "Usage breakdown")}</div>
+      ${table}</section>${cost ? threadsHtml(s.buckets) : ""}`;
+}
+
+/** The open thread showing `machine`'s Claude session `id`, if there is one. */
+const sessionThread = (machine, id) => (id ? tabs.find((t) => t.machine === machine && t.view.session === id) : undefined);
+
+/** The Session breakdown's rows: `s`'s rows summed per machine and Claude session, ordered as the Model table orders
+ * models, the first 50 and then how many it left out. A session is named by its open thread, else by its id's first
+ * characters; a machine's rows with no id, as one too old to send it sends, make one "No session id" row. */
+function sessionRowsHtml(s) {
+  const cost = usageState.metric === "cost";
+  const many = usageSelected().length > 1;
+  const groups = new Map();
+  for (const r of s.rows) {
+    const id = r.session_id ?? "";
+    const key = `${r.machine}:${id}`;
+    const g = groups.get(key) ?? { machine: r.machine, id, cost: 0, tokens: 0, records: 0, unpriced: 0 };
+    Object.assign(g, { cost: g.cost + rowCost(r), tokens: g.tokens + rowTokens(r), records: g.records + 1, unpriced: g.unpriced + (r.cost ? 0 : 1) });
+    groups.set(key, g);
+  }
+  const sessions = [...groups.values()].sort((a, b) => (cost ? b.cost - a.cost || b.tokens - a.tokens : b.tokens - a.tokens || b.cost - a.cost));
+  const left = sessions.length - 50;
+  const rows = sessions.slice(0, 50).map((g, i) => {
+    const tab = sessionThread(g.machine, g.id);
+    const name = tab
+      ? `<button type="button" data-usage-thread="${esc(tab.key)}"><span>${esc(threadTitle(tab))}</span></button>`
+      : g.id
+        ? `<span class="id" title="${esc(g.id)}">${esc(g.id.slice(0, 8))}</span>`
+        : `<span class="muted">No session id</span>`;
+    const note = [many && esc(machineName(g.machine)), !tab && g.id && "Thread not open"].filter(Boolean).join(" · ");
+    const share = cost ? (costUnknown(g) ? "" : percentText(s.cost ? g.cost / s.cost : 0)) : percentText(s.tokens ? g.tokens / s.tokens : 0);
+    return `<tr><td class="n">${i + 1}</td><td class="model">${name}${note ? `<small class="muted">${note}</small>` : ""}</td>
+      <td class="num fig strong">${costUnknown(g) ? `<span class="muted">Unpriced</span>` : usd(g.cost)}</td><td class="num fig share-col">${share}</td><td class="num fig">${tokensText(g.tokens)}</td></tr>`;
+  }).join("");
+  return rows + (left > 0 ? `<tr class="more"><td class="muted" colspan="5">${left.toLocaleString("en-US")} more session${left === 1 ? "" : "s"} not shown</td></tr>` : "");
+}
+
+/** The sessions the selected machines saved whose last message falls in the window's `buckets`, costliest first,
+ * with their figures as the tab showed them. */
+function threadsHtml(buckets) {
+  const { days } = usageState;
+  const inWindow = new Set(buckets);
+  const selected = usageSelected();
+  const many = selected.length > 1;
+  const records = selected.flatMap((m) => usageState.envs.get(m)?.threads ?? []).filter((r) => inWindow.has(bucketOf(days, r.last_at)))
+    .sort((a, b) => (a.cost_usd == null) - (b.cost_usd == null) || (b.cost_usd ?? 0) - (a.cost_usd ?? 0) || b.last_at - a.last_at);
+  const rows = records.map((r) => {
+    const title = r.title || "New thread";
+    const clip = `<span class="clip">${esc(title)}</span>`;
+    const tab = sessionThread(r.machine, r.session);
+    return `<tr><td title="${esc(title)}">${tab ? `<button type="button" data-usage-thread="${esc(tab.key)}">${clip}</button>` : clip}</td><td class="opt" title="${esc(r.project)}">${esc(String(r.project).split(/[\\/]/).filter(Boolean).pop() || "/")}</td>${
+      many ? `<td class="opt">${esc(machineName(r.machine))}</td>` : ""}<td class="num fig">${esc(r.turns)}</td>${r.active_ms == null ? `<td class="num fig muted">—</td>` : `<td class="num fig">${esc(durationLabel(r.active_ms / 1000))}</td>`}
+      ${r.cost_usd == null ? `<td class="num fig muted">Unknown</td>` : `<td class="num fig strong">${esc(costLabel(r.cost_usd))}</td>`}</tr>`;
+  }).join("");
+  const cols = [["Thread", ""], ["Project", "opt"], ...(many ? [["Machine", "opt"]] : []), ["Turns", "num"], ["Active time", "num"], ["Cost", "num"]];
+  return `<section class="breakdown"><h2>Threads</h2><div class="table-region" role="region" aria-label="Cost by thread" tabindex="0"><table class="by-time threads"><thead><tr>${
+    cols.map(([name, cls]) => `<th${cls ? ` class="${cls}"` : ""}>${name}</th>`).join("")}</tr></thead>
+    <tbody>${rows || `<tr class="empty"><td colspan="${cols.length}">No saved threads in this window.</td></tr>`}</tbody></table></div></section>`;
 }
 
 /** T3 Code's share-bar colors: the text color mixed into the background. */
@@ -894,9 +959,17 @@ pageView.addEventListener("click", (e) => {
   }
   if (e.target.closest(".refresh")) return refreshUsage();
   if (e.target.closest(".env-filter")) return usageMenu.hidden ? envFilterMenu() : closeUsageMenu();
+  const thread = e.target.closest("tr")?.querySelector("[data-usage-thread]");
+  if (thread) return openUsageThread(thread.dataset.usageThread);
   const model = e.target.closest("tr[data-model]");
   if (model) openModel(model.dataset.model);
 });
+/** Shows the thread a usage row names, which leaves the page; one closed since the page drew redraws the page instead. */
+function openUsageThread(key) {
+  const tab = tabByKey(key);
+  if (tab) activate(tab);
+  else renderUsagePage();
+}
 /** T3 Code's page keys: C, T and L pick the metric and ⌘⇧1-4 the period, except in a field, a dialog or a popup. */
 window.addEventListener("keydown", (e) => {
   if (!guiOn() || shellPage() !== "usage" || e.defaultPrevented || e.repeat || e.isComposing || !paletteEl.hidden || dialogOpen() || !usageMenu.hidden || !sideMenu.hidden || settingsOpen()) return;

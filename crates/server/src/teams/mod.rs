@@ -273,6 +273,7 @@ pub fn hub_rule(call: &HubCall) -> Rule {
         HubCall::GetSettings { .. }
         | HubCall::ListSchedules { .. }
         | HubCall::ScheduleRuns { .. }
+        | HubCall::WorkflowRuns { .. }
         | HubCall::RunWorkflow { .. }
         | HubCall::SaveConnector { .. }
         | HubCall::DeleteConnector { .. }
@@ -287,7 +288,10 @@ pub fn hub_rule(call: &HubCall) -> Rule {
         | HubCall::GithubRepos { .. }
         | HubCall::ConnectVercel { .. }
         | HubCall::DisconnectVercel { .. }
+        | HubCall::ConnectPosthog { .. }
+        | HubCall::DisconnectPosthog { .. }
         | HubCall::VercelModels { .. }
+        | HubCall::Classify { .. }
         | HubCall::ConnectConvex { .. }
         | HubCall::SetConvexRepos { .. }
         | HubCall::DisconnectConvex { .. }
@@ -387,7 +391,9 @@ pub fn hub_rule(call: &HubCall) -> Rule {
         | HubCall::Mirror { .. }
         | HubCall::Handback { .. }
         | HubCall::SetOfflineRunner { .. }
-        | HubCall::ReleaseWorkflows => (Gate::Never, false),
+        | HubCall::ReleaseWorkflows
+        | HubCall::RecordGlobalOrchestratorSave { .. }
+        | HubCall::GlobalOrchestratorSave => (Gate::Never, false),
     };
     Rule { gate, unlock }
 }
@@ -469,6 +475,7 @@ mod tests {
             json!({ "cmd": "delete_schedule", "id": "t1" }),
             json!({ "cmd": "schedule_runs", "id": "t1" }),
             json!({ "cmd": "run_workflow", "id": "c1" }),
+            json!({ "cmd": "workflow_runs" }),
         ];
         for call in workflows {
             let cmd = call["cmd"].as_str().unwrap().to_owned();
@@ -511,12 +518,22 @@ mod tests {
             json!({ "cmd": "handback", "changes": {}, "login": "user-token" }),
             json!({ "cmd": "set_offline_runner" }),
             json!({ "cmd": "release_workflows" }),
+            json!({ "cmd": "record_global_orchestrator_save", "settings": {}, "took": [] }),
+            json!({ "cmd": "global_orchestrator_save" }),
         ];
         for call in never {
             for role in [Role::Owner, Role::Member] {
                 let refused = hub_call_allowed(&hub_call(call.clone()), role).unwrap_err();
                 assert!(refused.contains("does not run on a team"), "{call}: {refused}");
             }
+        }
+    }
+
+    #[test]
+    fn classify_does_not_run_on_a_team() {
+        let classify = hub_call(json!({ "cmd": "classify", "text": "The export button 500s", "question": "Is this a bug report?" }));
+        for role in [Role::Owner, Role::Member] {
+            assert_eq!(hub_call_allowed(&classify, role), Err("classify does not run on a team".to_owned()));
         }
     }
 

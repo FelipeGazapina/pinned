@@ -3,6 +3,7 @@ pub mod box_gate;
 pub mod boxes;
 pub mod db;
 pub mod dev;
+pub mod global_settings;
 pub mod heap;
 pub mod http;
 pub mod hub;

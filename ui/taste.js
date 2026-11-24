@@ -7,7 +7,15 @@
 const TASTE_KNOBS = ["strategy", "ladder", "hard_model", "parallel", "autonomy", "review_diffs", "second_opinion"];
 /** The delegation limits besides `parallel`, which pinned enforces and no profile sets. */
 const TASTE_LIMITS = ["tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"];
-const TASTE_FIELDS = [...TASTE_KNOBS, "skills", "context", ...TASTE_LIMITS];
+/** What the agents escalate to the user. Only the user sets these, and no profile does. */
+const TASTE_ESCALATION = ["escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas"];
+/** `manage_only` starts the Captain without the file-editing tools. Only the user sets it, and no profile does.
+ * `default_model` is the model a new session starts on when it names none; no profile sets it. */
+const TASTE_FIELDS = [...TASTE_KNOBS, "skills", "context", ...TASTE_LIMITS, ...TASTE_ESCALATION, "manage_only", "default_model"];
+/** The Captains' fields a save clears with a reset, since a null in a patch means "not set". */
+const TASTE_CAPTAINS_CLEARED = ["box_size", "default_model"];
+/** The most changed lines the escalation limit may be, as Rust's `MAX_ESCALATE_OVER_LINES`. */
+const TASTE_MAX_ESCALATE_LINES = 100000;
 const TASTE_MAX_PARALLEL = 100;
 const TASTE_TIERS = ["low", "mid", "high"];
 /** The sizes an Upstash Box opens at, smallest first. A box with none chosen opens small. */
@@ -192,9 +200,10 @@ function tasteBoxSizeText(tastes, scope) {
 }
 
 /** A project inherits the field again. The orchestrator has nothing to inherit, and the Captains
- * have only the box size to clear: the account goes back to the built-in small. */
+ * have only the box size and the default model to clear: the account goes back to the built-in
+ * small and to the CLI's own model. */
 function tasteResetField(tastes, scope, field) {
-  if (scope.kind === "captains" && field === "box_size") return tasteSetField(tastes, scope, field, null);
+  if (scope.kind === "captains" && TASTE_CAPTAINS_CLEARED.includes(field)) return tasteSetField(tastes, scope, field, null);
   if (scope.kind !== "project") return tastes;
   const { [field]: _, ...patch } = tastes.projects?.[scope.repo] ?? {};
   return tasteWithPatch(tastes, scope.repo, patch);
@@ -219,7 +228,7 @@ function tasteSaveCalls(saved, draft) {
     const patch = tasteChanged(saved[kind], draft[kind]);
     if (kind === "captains" && draft.placement != null && !tasteSame(saved.placement, draft.placement)) patch.placement = draft.placement;
     if (kind === "captains" && draft.boxes_at_once != null && draft.boxes_at_once !== saved.boxes_at_once) patch.boxes_at_once = draft.boxes_at_once;
-    if (kind === "captains" && saved.captains.box_size != null && draft.captains.box_size == null) calls.push({ cmd: "reset_taste_field", scope: { kind }, field: "box_size" });
+    if (kind === "captains") for (const field of TASTE_CAPTAINS_CLEARED) if (saved.captains[field] != null && draft.captains[field] == null) calls.push({ cmd: "reset_taste_field", scope: { kind }, field });
     if (Object.keys(patch).length) calls.push({ cmd: "set_taste", scope: { kind }, patch });
   }
   const repos = [...new Set([...Object.keys(saved.projects ?? {}), ...Object.keys(draft.projects ?? {})])].sort();

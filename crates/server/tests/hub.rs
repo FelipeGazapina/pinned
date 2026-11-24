@@ -1013,7 +1013,8 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
         "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 4, "autonomy": "report_at_end",
         "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
         "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
-        "box_size": null,
+        "box_size": null, "escalate_breaking_change": true, "escalate_process_failure": true, "escalate_over_lines": 500,
+        "escalate_areas": ["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"],
     });
     assert_eq!(client.hub(get()).unwrap()["captains"], aggressive, "the old style's preset, with workers at once lowered to the old cap of 4");
 
@@ -1126,6 +1127,10 @@ fn a_taste_chat_cannot_change_the_review_settings_through_the_hub() {
     assert_eq!(session_tool(&dir, &tab, set(json!({ "parallel": 2, "review_diffs": false }))), Err(one.into()), "a mixed patch is refused whole");
     assert_eq!(session_tool(&dir, &tab, set(json!({ "second_opinion": true }))), Err(other.into()));
     assert_eq!(session_tool(&dir, &tab, json!({ "name": "taste_reset", "scope": "project:github.com/acme/site", "field": "review_diffs" })), Err(one.into()));
+    let lines = "escalate_over_lines is changed only by the user, on the Way of working page; nothing changed";
+    let areas = "escalate_areas is changed only by the user, on the Way of working page; nothing changed";
+    assert_eq!(session_tool(&dir, &tab, set(json!({ "parallel": 2, "escalate_over_lines": 750 }))), Err(lines.into()), "a mixed patch with an escalation setting is refused whole");
+    assert_eq!(session_tool(&dir, &tab, json!({ "name": "taste_reset", "scope": "project:github.com/acme/site", "field": "escalate_areas" })), Err(areas.into()));
     assert_eq!(session_tool(&dir, &tab, read), Ok(before), "a refused call changed the taste the session reads");
     assert_eq!(ana.hub(json!({ "cmd": "get_tastes" })).unwrap()["projects"], json!({}), "the hub stored a refused change");
 }
@@ -1154,6 +1159,9 @@ fn a_machine_forwarding_a_taste_chat_cannot_change_the_review_settings_at_the_hu
     assert_eq!(raw.ask(json!({ "cmd": "reset_taste_field", "scope": site, "field": "review_diffs" })), Err(one.into()), "a forwarded reset of review_diffs is refused");
     assert_eq!(raw.ask(json!({ "cmd": "reset_taste_field", "scope": site, "field": "second_opinion" })), Err(other.into()), "a forwarded reset of second_opinion is refused");
     assert_eq!(raw.ask(set(json!({ "parallel": 2, "review_diffs": false }))), Err(one.into()), "a forwarded mixed patch is refused whole");
+    let breaking = "escalate_breaking_change is changed only by the user, on the Way of working page; nothing changed";
+    assert_eq!(raw.ask(set(json!({ "escalate_breaking_change": false }))), Err(breaking.into()), "a forwarded set of an escalation setting is refused");
+    assert_eq!(raw.ask(json!({ "cmd": "reset_taste_field", "scope": site, "field": "escalate_breaking_change" })), Err(breaking.into()), "a forwarded reset of an escalation setting is refused");
     assert_eq!(stored(&mut ana), json!({}), "a refused forward changed the way of working");
 
     assert!(raw.ask(set(json!({ "parallel": 2 }))).is_ok(), "a forwarded allowed field alone still works");
@@ -1176,12 +1184,15 @@ fn an_agents_act_refuses_a_review_setting_before_any_ask_is_held() {
     assert_eq!(act(&ana.dir, &ana.tab, "set_taste", json!({ "scope": site, "patch": { "second_opinion": true } })), Err(other.into()), "an agent's set_taste of second_opinion is refused");
     assert_eq!(act(&ana.dir, &ana.tab, "reset_taste_field", json!({ "scope": site, "field": "review_diffs" })), Err(one.into()), "an agent's reset of review_diffs is refused");
     assert_eq!(act(&ana.dir, &ana.tab, "reset_taste_field", json!({ "scope": site, "field": "second_opinion" })), Err(other.into()), "an agent's reset of second_opinion is refused");
+    let process = "escalate_process_failure is changed only by the user, on the Way of working page; nothing changed";
+    assert_eq!(act(&ana.dir, &ana.tab, "set_taste", json!({ "scope": site, "patch": { "escalate_process_failure": false } })), Err(process.into()), "an agent's set_taste of an escalation setting is refused");
+    assert_eq!(act(&ana.dir, &ana.tab, "reset_taste_field", json!({ "scope": site, "field": "escalate_process_failure" })), Err(process.into()), "an agent's reset of an escalation setting is refused");
     assert_eq!(stored(&mut ana.client), json!({}), "a refused act changed the way of working");
     assert_eq!(asks(&mut ana.client), json!([]), "a refused act held an ask for the owner");
 
     let trail = ana.client.hub(json!({ "cmd": "agent_audit" })).unwrap();
     let rows: Vec<(&str, &str, &str)> = trail.as_array().unwrap().iter().map(|r| (r["action"].as_str().unwrap(), r["outcome"].as_str().unwrap(), r["detail"].as_str().unwrap())).collect();
-    for expected in [("set_taste", "refused", one), ("set_taste", "refused", other), ("reset_taste_field", "refused", one), ("reset_taste_field", "refused", other)] {
+    for expected in [("set_taste", "refused", one), ("set_taste", "refused", other), ("reset_taste_field", "refused", one), ("reset_taste_field", "refused", other), ("set_taste", "refused", process), ("reset_taste_field", "refused", process)] {
         assert!(rows.contains(&expected), "{expected:?} in {rows:?}");
     }
 }
@@ -1198,6 +1209,8 @@ fn an_agents_act_with_a_review_setting_changes_nothing_and_an_allowed_field_alon
     let one = "review_diffs is changed only by the user, on the Way of working page; nothing changed";
 
     assert_eq!(act(&ana.dir, &ana.tab, "set_taste", json!({ "scope": site, "patch": { "parallel": 2, "review_diffs": false } })), Err(one.into()), "the allowed field in the same patch waits too");
+    let areas = "escalate_areas is changed only by the user, on the Way of working page; nothing changed";
+    assert_eq!(act(&ana.dir, &ana.tab, "set_taste", json!({ "scope": site, "patch": { "parallel": 2, "escalate_areas": [] } })), Err(areas.into()), "the allowed field beside an escalation setting waits too");
     assert_eq!(stored(&mut ana.client), json!({}), "a mixed patch changed the way of working");
     assert_eq!(asks(&mut ana.client), json!([]), "a mixed patch held an ask");
 
@@ -1231,6 +1244,7 @@ fn a_review_setting_held_before_the_refusal_fails_when_the_owner_approves_it() {
     let reset = hold("held-reset", "reset_taste_field", json!({ "scope": site, "field": "second_opinion" }));
     let denied = hold("held-denied", "set_taste", json!({ "scope": site, "patch": { "second_opinion": true } }));
     let lands = hold("held-lands", "set_taste", json!({ "scope": site, "patch": { "parallel": 2 } }));
+    let lines = hold("held-lines", "set_taste", json!({ "scope": site, "patch": { "escalate_over_lines": 750 } }));
     ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
     let decide = |client: &mut Client, id: &str, approve: bool| client.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": approve })).unwrap();
 
@@ -1238,6 +1252,8 @@ fn a_review_setting_held_before_the_refusal_fails_when_the_owner_approves_it() {
     assert_eq!(refused["outcome"], format!("failed: {one}"), "an approved held review_diffs fails with the refusal: {refused}");
     let refused = decide(&mut ana.client, &reset, true);
     assert_eq!(refused["outcome"], format!("failed: {other}"), "an approved held reset of second_opinion fails with the refusal: {refused}");
+    let refused = decide(&mut ana.client, &lines, true);
+    assert_eq!(refused["outcome"], "failed: escalate_over_lines is changed only by the user, on the Way of working page; nothing changed", "an approved held escalation setting fails with the refusal: {refused}");
     assert_eq!(stored(&mut ana.client), json!({}), "an approved held review setting changed the way of working");
     let no = decide(&mut ana.client, &denied, false);
     assert_eq!((&no["decision"], &no["outcome"]), (&json!("denied"), &json!("denied")), "a denied held review setting still ends as denied: {no}");
@@ -1258,6 +1274,10 @@ fn the_way_of_working_page_still_changes_both_review_settings_through_the_hub() 
     assert_eq!(set["projects"]["github.com/acme/site"], json!({ "review_diffs": false, "second_opinion": true }), "the page's own set changes both");
     let reset = ana.client.hub(json!({ "cmd": "reset_taste_field", "scope": site, "field": "review_diffs" })).unwrap();
     assert_eq!(reset["projects"]["github.com/acme/site"], json!({ "second_opinion": true }), "the page's own reset changes review_diffs");
+    let set = ana.client.hub(json!({ "cmd": "set_taste", "scope": site, "patch": { "escalate_over_lines": 750, "escalate_areas": ["Billing"] } })).unwrap();
+    assert_eq!(set["projects"]["github.com/acme/site"], json!({ "second_opinion": true, "escalate_over_lines": 750, "escalate_areas": ["Billing"] }), "the page's own set changes the escalation settings");
+    let reset = ana.client.hub(json!({ "cmd": "reset_taste_field", "scope": site, "field": "escalate_over_lines" })).unwrap();
+    assert_eq!(reset["projects"]["github.com/acme/site"], json!({ "second_opinion": true, "escalate_areas": ["Billing"] }), "the page's own reset changes the line limit");
 }
 
 struct Through<'a>(&'a Link);
@@ -8410,10 +8430,28 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
     // Memory, settings, usage and skills: Ana's own machine answers, Bob reaches none of it.
     assert_eq!(ran(act(&ana.dir, &ana.tab, "memory_save", json!({ "path": docs, "title": "Deploys", "text": "Docs deploy from tags." })))["title"], "Deploys");
     assert_eq!(ran(act(&ana.dir, &ana.tab, "memory_status", json!({ "path": docs })))["count"], 1);
-    let almirante = ran(act(&ana.dir, &ana.tab, "set_global_orchestrator_settings", json!({ "settings": { "name": "Almirante", "host": true } })));
-    assert_eq!(almirante["name"], "Almirante");
-    assert_eq!(ran(act(&ana.dir, &ana.tab, "global_orchestrator_settings", json!({}))), almirante);
-    assert_ne!(ran(act(&bob.dir, &bob.tab, "global_orchestrator_settings", json!({})))["name"], "Almirante", "Bob's machine keeps its own settings");
+    // Auto-merge lives in the global orchestrator's settings, so every change waits for the owner, a rename too.
+    let orchestrator = |agent: &Agent| ran(act(&agent.dir, &agent.tab, "global_orchestrator_settings", json!({})));
+    let before = orchestrator(&ana);
+    let renamed = act(&ana.dir, &ana.tab, "set_global_orchestrator_settings", json!({ "settings": { "name": "Comodoro" } })).unwrap();
+    assert_eq!(renamed["outcome"], "pending", "a change to the name alone waits for the owner: {renamed}");
+    let renamed_id = renamed["id"].as_str().unwrap().to_owned();
+    assert!(!renamed_id.is_empty() && renamed.get("result").is_none(), "a held change answers no settings: {renamed}");
+    assert_eq!(orchestrator(&ana), before, "nothing changes while it waits");
+    assert_eq!(bob.client.hub(json!({ "cmd": "decide_confirmation", "id": renamed_id, "approve": true })), Err(format!("no confirmation {renamed_id} waits")));
+    assert_eq!(orchestrator(&ana), before, "Bob's approval reached nothing");
+    let denied = ana.client.hub(json!({ "cmd": "decide_confirmation", "id": renamed_id, "approve": false })).unwrap();
+    assert_eq!(denied["outcome"], "denied", "{denied}");
+    assert_eq!(orchestrator(&ana), before, "a denied change leaves the settings as they were");
+    let held = act(&ana.dir, &ana.tab, "set_global_orchestrator_settings", json!({ "settings": { "name": "Almirante", "host": true } })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert_eq!(orchestrator(&ana), before, "nothing changes before she approves");
+    let decided = ana.client.hub(json!({ "cmd": "decide_confirmation", "id": held["id"], "approve": true })).unwrap();
+    assert_eq!(decided["outcome"], "done", "{decided}");
+    let almirante = decided["result"].clone();
+    assert_eq!((&almirante["name"], &almirante["host"]), (&json!("Almirante"), &json!(true)), "{almirante}");
+    assert_eq!(orchestrator(&ana), almirante);
+    assert_ne!(orchestrator(&bob)["name"], "Almirante", "Bob's machine keeps its own settings");
     let prices = ran(act(&ana.dir, &ana.tab, "set_usage_prices", json!({ "prices": { "glm-5.3": { "input": 1.0, "output": 2.0 } }, "aliases": {} })));
     assert_eq!(prices["prices"]["glm-5.3"]["output"], 2.0);
     assert_eq!(ran(act(&bob.dir, &bob.tab, "usage_prices", json!({}))), json!({ "prices": {}, "aliases": {} }));
@@ -9292,6 +9330,19 @@ fn the_reads_of_linear_slack_github_and_vercel_answer_from_the_callers_account_o
         assert_eq!(asked_of(gateway), before + 1);
     }
 
+    // A classify spends the caller's own gateway key: ana's asks the gateway once, and bob has none to spend.
+    let classify = json!({ "text": "The export button 500s", "question": "Is this a bug report?" });
+    let asked = asked_of(gateway);
+    let hers = seen.log(act(&ana.dir, &ana.tab, "classify", classify.clone())).unwrap_err();
+    assert!(hers.starts_with("Vercel AI Gateway: unreachable"), "ana's classify goes to the gateway: {hers}");
+    assert_eq!(asked_of(gateway), asked + 1, "one gateway call");
+    assert_eq!(
+        seen.log(act(&bob.dir, &bob.tab, "classify", classify)),
+        Err("Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".into()),
+        "bob has no key, and never takes ana's"
+    );
+    assert_eq!(asked_of(gateway), asked + 1, "bob's refused classify reaches nobody");
+
     // Once bob keeps a connection of his own, his reads use it.
     let bobs_keys = seed(&mut bob.client, "bob");
     assert!(seen.log(act(&bob.dir, &bob.tab, "slack_suggestions", json!({}))).unwrap_err().starts_with("Slack unreachable"));
@@ -9305,7 +9356,7 @@ fn the_reads_of_linear_slack_github_and_vercel_answer_from_the_callers_account_o
         holds_none_of(&all, &format!("{who}'s audit trail"), &format!("{:?}", trail_of(client)));
     }
     let bobs_reads: std::collections::BTreeSet<String> = trail_of(&mut bob.client).into_iter().map(|r| r.0).collect();
-    assert_eq!(bobs_reads.into_iter().collect::<Vec<_>>(), ["github_repos", "linear_suggestions", "machines", "slack_suggestions", "vercel_models"], "bob's trail holds his reads only");
+    assert_eq!(bobs_reads.into_iter().collect::<Vec<_>>(), ["classify", "github_repos", "linear_suggestions", "machines", "slack_suggestions", "vercel_models"], "bob's trail holds his reads only");
 }
 
 #[test]
@@ -13417,6 +13468,7 @@ mod teams_hardening;
 #[path = "hub/trigger_fires.rs"] mod trigger_fires;
 #[path = "hub/account_mirror.rs"] mod account_mirror;
 #[path = "hub/store_lock_freeze.rs"] mod store_lock_freeze;
+#[path = "hub/global_settings.rs"] mod global_settings;
 #[path = "hub/reports.rs"]
 mod reports;
 #[path = "hub/reports_poller.rs"]

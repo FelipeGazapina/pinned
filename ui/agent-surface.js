@@ -31,6 +31,7 @@ const AGENT_FORMS = {
   connect_slack: { page: "integrations", focus: "slack-token", entered: ["token"], noun: "token" },
   connect_github: { page: "integrations", focus: "github-token", entered: ["token"], noun: "token" },
   connect_vercel: { page: "integrations", focus: "vercel-key", entered: ["key"], noun: "key" },
+  connect_posthog: { page: "integrations", focus: "posthog-key", entered: ["key"], noun: "key", same: ["project", "host"] },
   connect_upstash: { page: "integrations", focus: "upstash-key", entered: ["key", "claude_token"], noun: "key and token" },
   set_box_claude_token: { page: "integrations", focus: "box-token", entered: ["token"], noun: "token" },
   connect_convex: { page: "integrations", focus: "convex-key", entered: ["key"], noun: "deploy key" },
@@ -73,7 +74,7 @@ const AGENT_BOX_COPY = {
 /** Actions whose title says everything the card shows of their arguments, so the card lists none. */
 const AGENT_TITLE_ONLY = new Set(Object.keys(AGENT_BOX_COPY));
 const agentMcpName = (id) => (typeof mcpUi !== "undefined" && mcpUi.list.find((entry) => entry.id === id)?.server.name) || id;
-const AGENT_NAMES = { linear: "Linear", slack: "Slack", github: "GitHub", vercel: "Vercel", upstash: "Upstash", convex: "Convex" };
+const AGENT_NAMES = { linear: "Linear", slack: "Slack", github: "GitHub", vercel: "Vercel", posthog: "PostHog", upstash: "Upstash", convex: "Convex" };
 /** `remove_machine` as "Remove machine", `connect_github` as "Connect GitHub". */
 function agentWords(name) {
   if (AGENT_LABELS[name]) return AGENT_LABELS[name];

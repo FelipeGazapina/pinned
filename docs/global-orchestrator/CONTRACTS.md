@@ -32,13 +32,15 @@ Paths are relative to the repo root. Line numbers are as of the foundation PR he
 - The global folder's memory store is the global memory. `project_of_tab(global tab)` answers the folder, so `memory_*` tools and automatic recall use it. `known_project(folder)` accepts it, so `Call::MemorySearch/Save/Forget/Status { path: <folder> }` work. `Call::ListProjects` never lists it.
 - In tests the folder is `<config dir>/home/.pinned/orquestrador` (`test_binary()`), so tests never touch the real home.
 - `launch_tab` appends `global::prompt(<name>, <hostname>)` to the global tab's `--append-system-prompt`, after the device agent prompt. `role_of` is `None` for it, so it gets no role prompt and no disallowed tools.
+- With `auto_merge` on (§2), `launch_tab` appends `global::orchestrator_approval_prompt(settings)` right after `global::prompt`, and a Capitão's `global::captain_approval_prompt(settings)` right after `global::captain_prompt`. Each is one instruction line, decide "merge automatically" or "needs human review" for every finished pull request, act on it and say which one, then the approval profile through `pinned_lines::guard`. With it off both are `None`, and the prompts are what they were before the setting existed.
+- A save that changes the setting also reaches sessions already running. `set_global_settings` compares the settings before and after the save with `global::approval_notice(before, after, captain)` and, when it answers a line, queues it through `Machine::notice` (id `approval-<save time in ms>`) for every running Captain and running global tab on that machine (`session.is_some()`). A sleeping or stopped tab is skipped, so it is not woken, and hears the setting at its next launch. Workers, plain threads and chat tabs are never told. Turned off, a Capitão hears `[pinned] Auto-merge is now off`, then not to merge any pull request or turn on `gh pr merge --auto` itself and to leave every finished pull request for the user's review; the global orchestrator hears not to ask a Capitão to merge and to tell the user every finished pull request needs their review. Turned on, each hears `[pinned] ` and its own approval prompt above. With it on and the profile in effect edited, each hears `[pinned] The approval profile changed`, that the profile below replaces the earlier one, a blank line and its approval prompt. Any other save, the profile edited while off included, sends nothing. A failed save sends nothing.
 
 ## 2. Settings
 
 `global_orchestrator::Settings`, schema name `GlobalOrchestratorSettings`. One file per machine, `<config dir>/global-orchestrator.json`, like `orchestration.json`.
 
 ```json
-{ "name": "Orchestrator", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false }
+{ "name": "Orchestrator", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false, "auto_merge": false, "approval_profile": "" }
 ```
 
 | Field | Type | Default | Meaning |
@@ -49,8 +51,12 @@ Paths are relative to the repo root. Line numbers are as of the foundation PR he
 | `reports` | `"auto"` \| `"tool_only"` | `"auto"` | `ReportPolicy`. Auto reports at the end of every turn that an orchestrator message started, plus `tell_orchestrator`. |
 | `group_reports` | bool | `true` | The chat folds consecutive reports into one row. UI only. |
 | `read_aloud` | bool | `false` | The phone reads summaries aloud. UI only. |
+| `auto_merge` | bool | `false` | Captains and the global orchestrator decide by the approval profile whether a finished pull request merges by itself or waits for a human review. It only changes the two prompts (§1); pinned merges nothing itself, and the never list and team guard are unchanged. A change reaches running Captains and the global orchestrator on that machine at their next idle turn (`approval_notice`, §1); sleeping or stopped sessions pick it up at launch. It stays an instruction: pinned still enforces nothing. |
+| `approval_profile` | string | `""` | The approval profile. `""` means `DEFAULT_APPROVAL_PROFILE`, which lives in code (`ui/global-orchestrator.js` keeps a copy as `GO_DEFAULT_APPROVAL_PROFILE`, held equal by a Rust test), so a later default reaches every user who never edited it. `cleaned()` turns `\r\n` and `\r` into `\n`, drops control characters but `\n` and `\t`, trims it, caps it at 4000 characters (`APPROVAL_PROFILE_MAX`), and stores `""` when the result is blank or equals the default. `effective_approval_profile()` answers the text in effect. With `auto_merge` on, an edit to the text in effect reaches running Captains and the global orchestrator on that machine at their next idle turn (§1); sleeping or stopped sessions pick it up at launch, and pinned still enforces nothing. |
 
-Every field has a serde default, so a partial object reads. `Machine::global_settings()` reads and `Machine::set_global_settings(s)` cleans, saves and returns.
+Every field has a serde default, so a partial object reads. `Machine::global_settings()` reads and `Machine::set_global_settings(s)` cleans, saves, tells running sessions of an auto-merge or approval profile change (§1) and returns.
+
+The settings page writes every online machine, then records the save with the hub (`record_global_orchestrator_save`, §4). The hub replays that last page save to each machine that missed it, when the machine connects, and keeps the machine's own `host`.
 
 ## 3. Node calls (`Call`, `crates/core/src/wire.rs`)
 
@@ -77,6 +83,17 @@ Every field has a serde default, so a partial object reads. `Machine::global_set
 
 | `RecordTasks` | `{"cmd":"record_tasks","records":[TaskRecord]}`, at most 500 | `null`. Only from a machine: a client gets `only a machine records the tasks it ran`. The hub stamps `machine` and `machine_name` from the socket and upserts by (account, machine, task id). |
 | `DelegationStats` | `{"cmd":"delegation_stats","days":7}` (1, 7 or 30) | `delegate::DelegationStats` of the account's records that ended in that period, from a client or a machine |
+| `WorkflowRuns` | `{"cmd":"workflow_runs"}`, with optional `"workflow":"<workflow id>"` and `"limit":50` | `Vec<WorkflowRun>` (outbound root `WorkflowRun`): the account's workflow runs, newest first, only those the named workflow's trigger started (an unknown id answers `[]`). `limit` is 50 when left out, at most 200. Each run has `id`, `workflow`, `workflow_name`, `subject`, `status` (`running`, `waiting`, `done` or `failed`), `why` (a failed run only), `started_at` and `last_step_at` (absent for an empty log), `trigger`, `classified` (`[{"node","name","answers":[[question, answer]]}]`), `session` (`{"state":"none"}`, `{"state":"live","machine","tab","claude"?}` or `{"state":"detached","claude"?}`), `steps` (`[{"at","workflow","node","name","what"}]`) and `waiting_on` (`{"workflow","node","name"}`, a running or waiting run only). A signed-out app answers from its own runs, and a signed-in copy leaves it to the hub. A team refuses it. |
+| `RecordGlobalOrchestratorSave` | `{"cmd":"record_global_orchestrator_save","settings":{Settings},"took":["<machine id>"]}`. `settings` holds the shared fields as the page wrote them; `took` lists the machines whose write succeeded. | `AccountSave` (schema `GlobalOrchestratorSave`): `{"id":"<save id>","settings":{Settings},"pending":["<machine id>"]}`. The hub stores `settings` cleaned with `host: false`, and `pending` is every machine of the account that is no box (`MachineView.upstash_box`), minus `took`. It replaces any earlier save of the account. Only from a signed-in client: a machine gets `a machine may only forward a workflow session's callbacks`, and a box `a box may not change the account's settings`. |
+| `GlobalOrchestratorSave` | `{"cmd":"global_orchestrator_save"}` | the account's `AccountSave`, or `null` when it has none. Only from a signed-in client, as above. |
+
+**The last page save, delivered on connect** (`crates/server/src/global_settings.rs`). The settings page (`ui/gui-global-orchestrator.js`) writes `SetGlobalOrchestratorSettings` to each online machine itself. Once the host took its write, a signed-in page sends `record_global_orchestrator_save` and ignores a failure, as an older hub refuses it. The page reads `global_orchestrator_save` too: a pending machine leaves the drift warning, and its note says the hub sends the save when it connects.
+
+- The hub keeps one save per account in Postgres (`global_settings_saves`: account, save id, settings, pending machine ids, `saved_at`), so a pending save survives a hub restart.
+- `serve_machine` spawns `global_settings::deliver` for every machine that connects, beside `deliver_notices` and `deliver_held`. Recording a save also spawns it for each pending machine that is online at that moment.
+- `deliver` does nothing when the account has no save or the machine is not pending. Otherwise it reads the machine's `GlobalOrchestratorSettings`, writes `SetGlobalOrchestratorSettings` with the save's shared fields (`name`, `busy`, `reports`, `group_reports`, `read_aloud`, `auto_merge`, `approval_profile`) and the `host` the machine answered, and only then takes the machine off `pending`. That last update matches the save id it delivered, so a delivery of an older save never clears a machine from a newer one. When a newer save landed meanwhile, `deliver` sends that one too, since its own write may have replaced what the machine took from the page.
+- A read or write that fails, times out (30 s), or that a machine too old for it refuses (`unknown variant`) leaves the machine pending, and the hub tries again on its next connect. The hub never moves `host`.
+- Log lines name the account, machine and save ids only, never a setting or the approval profile.
 
 `RelayTo` is tagged by `kind`:
 
@@ -361,6 +378,7 @@ All in `crates/core/src/machine.rs` unless noted. Every seam is built.
 - Every `projects` and `waiting`, and every `send_to_captain` or `read_captain` for another machine, runs one overview: `ListProjects` and `GlobalOrchestratorSettings` to each online machine, plus `Call::Tabs` for one that has not reported tabs. A `send_to_captain` or `read_captain` then asks each online machine's settings once more for the host check. Calls queue behind a machine's other calls, so a busy machine may show its last project list with `não respondeu`.
 - The hub refuses a non-host machine's `Overview` only after the overview's calls, since it reads the host from their settings answers. The refused machine gets no projects, but every machine answered the calls.
 - A machine computes its tab views and sends them in two steps (`emit_tabs`), so two threads that emit at once may deliver the older views last. The hub then holds a stale `orchestrator_turn` or `status` until the machine's next emit, for example the Capitão's next hook. `hand_to` decides from the machine's own tabs, so routing is unaffected. This predates the global orchestrator.
+- An auto-merge or approval profile change reaches only the sessions of machines online at save time: a machine offline then does not tell its running sessions when it comes back (#487). And the change is typed only once a session is idle, so a turn already in progress can still finish a merge.
 - A report delivered on the host carries the host's hostname as `machine_name`, and a relayed one the hub's name for the machine. They differ when the machine was renamed on the hub.
 
 ## 13. Agent capability surface (0.17.22)
@@ -524,11 +542,11 @@ Since 0.17.23 a box follows only its access setting and the Box budget, never th
 
 | Area | Actions (class) |
 |---|---|
-| Workflows | `save_connector` (write; a new workflow with no `id`, an edit with one), `delete_connector` (confirm). `get_settings` (read, P1) lists the account's workflows. |
+| Workflows | `save_connector` (write; a new workflow with no `id`, an edit with one), `delete_connector` (confirm). `get_settings` (read, P1) lists the account's workflows. `workflow_runs` (read) lists their runs, newest first. |
 | Projects | `create_project`, `make_folder`, `publish_project`, `set_project_account`, `save_project_scripts` (write, on a machine); `clone` (write, the hub's: it adds the account's own GitHub token, the node's `node_clone` stays excluded), `share_project` (write). The reads `list_projects`, `project_history`, `shared_projects`, `project_scripts` were already wired. |
 | Sessions | `open_scratch`, `open_orchestrator`, `open_global_orchestrator` (the global orchestrator's own session only), `prompt`, `enqueue` (`starts_work`, 13.6). `search_threads` (read) was already wired. |
-| Settings | `set_global_orchestrator_settings`, `set_usage_prices`, `save_skill` (write). `set_taste` and `reset_taste_field` stay confirm, since they carry the delegation limits. |
-| Memory, usage | Already wired by P1: `memory_status`, `memory_search`, `memory_save`, `memory_forget`, `token_usage`, `usage_limits`, `delegation_stats`. |
+| Settings | `set_usage_prices`, `save_skill` (write). `set_taste` and `reset_taste_field` stay confirm, since they carry the delegation limits. `set_global_orchestrator_settings` is confirm since `auto_merge`: an agent could otherwise turn auto-merge on or rewrite its own approval profile with no approval. Renaming the orchestrator through `act` waits for the owner too, and a locked web login unlocks to save the section, as with `set_taste`. |
+| Memory, usage | Already wired by P1: `memory_status`, `memory_search`, `memory_save`, `memory_forget`, `token_usage`, `usage_limits`, `delegation_stats`. `session_costs` (read) lists each Claude session's saved cost, turns and active time. |
 
 The `Run` and `Deliver` calls are how the hub opens a workflow's session and types into it, and stay excluded. 0.17.23 adds a manual run, for the app and for agents (13.12).
 
@@ -561,6 +579,7 @@ The web app keeps its login in `localStorage`, and a desktop app older than 0.17
 - `surface::owner_only(side, cmd, locked)`. `decide_confirmation` always needs an unlocked connection, and so does every `confirm` action on a locked login. Without one the hub answers `surface::LOCKED`: `unlock with your password in the app to do this`. `answer_box` and `extend_box` are not `confirm` (13.8), so a box question and a box's budget need no password; `set_box_access`, `connect_upstash`, `disconnect_upstash`, `set_box_claude_token` and `remove_box_claude_token` still do.
 - `HubCall::Unlock { password }` comes from a signed-in client only. The manifest excludes it, and a machine is refused. The hub checks the password, at most 10 tries per login and 100 per account in 15 minutes, and answers `Unlocked { token, until }`. The connection counts as the owner until `until`, 12 hours later. The app keeps `token` in memory and sends it in `Auth.unlock` after a reconnect. The token works only with the login it was taken on. A hub restart forgets it, and the app asks for the password again.
 - `ui/hub.js` asks for the password when a call answers `LOCKED`, once for every call waiting on it, and then sends the call again.
+- `record_global_orchestrator_save` and `global_orchestrator_save` are `Excluded`: only the settings page records or reads the account's last save (§4). An agent changes one machine's settings with the `confirm` `set_global_orchestrator_settings`, and that records no save. On a locked login, `record_global_orchestrator_save` needs the unlock, as the hub then writes `auto_merge` to other machines unattended; `global_orchestrator_save` needs none.
 - `POST /api/machines` refuses a locked login. An app adds its machine before it locks the login.
 - A node keeps only its machine token. `pinned-server login` ends the login after it adds the machine. A node that finds a login an older pinned kept in `account.json` removes it from the file and ends it at the hub.
 - A hub that stopped between a decision and its outcome leaves the confirmation decided with no outcome. When a hub starts, and again 5 minutes later, it gives every such confirmation decided more than 5 minutes earlier an outcome: `denied`, or `failed: the hub restarted before it could tell whether this ran; check before asking again` with a `failed` audit row. A younger one may still be running on the hub that a deploy replaces, so the hub leaves it alone. The session gets its notice at once, or when its machine connects.
@@ -673,3 +692,45 @@ Issue #127. A saved workflow runs now, from Settings › Workflows or from an ag
 **App.** Each card in Settings › Workflows has a Run now button between its text and its switch. While the call runs it reads `Starting…`, disabled. Then a line under the card says `Started on <machine>. Open session` (which reveals the tab), or `Didn't start: <the refusal>`. A `slack-message` or `called` workflow, or one with an unknown trigger, shows the button disabled with the reason as its tooltip.
 
 **Not like a triggered run.** A Run now opens the first session only. Graph steps after it (more talks, replies, issue moves) need the trigger's subject and are not walked, and `{{trigger.*}}` spans in its text stay as written. Triggered runs themselves still open with `Call::Run`, outside the delegation limits and metrics, as before.
+
+### 13.14 Classify (#523)
+
+An agent asks a decision model on the account's Vercel AI Gateway which of its categories, or yes or no to its question, fits a text. It is the call the Slack router, a graph Classify step and the Linear duplicate check already make (`vercel::choose`), offered through `actions` and `act`. The workflow Classify step already runs under any trigger and is unchanged.
+
+| Wire | From | Answer |
+|---|---|---|
+| `HubCall::Classify { text, categories?, question?, instructions?, model?, unsure_below?, sure_at? }` | an agent through `act` (read); the hub and a signed-out desktop's local hub answer it | `classify::Answer` (outbound root `ClassifyAnswer`), or the refusal |
+
+```json
+{"cmd":"classify","text":"The export button 500s","categories":[{"name":"bug","description":"something broke"},{"name":"question"}],"instructions":"Support tickets."}
+{"cmd":"classify","text":"The export button 500s","question":"Is this a bug report?"}
+```
+
+**Answer.** `{"pick":"bug","probability":0.91,"probabilities":[{"name":"bug","probability":0.91},{"name":"question","probability":0.09}],"confidence":"sure"}`. `probabilities` lists every category in the order given, and a question's as `yes` then `no`. A category the model gave no probability has 0. `confidence` is `sure` when the pick's probability is at or above `sure_at`, `unsure` below `unsure_below`, and `likely` between.
+
+**Defaults and limits** (`crates/core/src/classify.rs`). The model is `typesafe-ai/jev` (`classify::DEFAULT_MODEL`, a copy of the UI's `DECISION_MODEL`). `unsure_below` is 0.6 and `sure_at` is 0.85, the router's `UNSURE_BELOW` and `MIN_CONFIDENCE_TO_PAGE`. A call takes at most 8,000 characters of text, 20 categories, and 4,000 characters of guidance: the instructions, the question, and every category's name and description together. A question is sent as the categories `yes` and `no`, each described as that answer to the question.
+
+**Refusals.** The checks run before anything else, with no key and no network, and each error starts with `classify: ` and says what to fix:
+
+- a blank `text`, or one over 8,000 characters (`classify: text is <n> characters, over the limit of 8000: send a shorter text`);
+- both `categories` and a non-blank `question` (`classify: give categories or a question, not both`), or neither (`classify: give two or more categories, or a yes/no question`);
+- one category, or more than 20 (`classify: <n> categories is over the limit of 20: give fewer`);
+- a category with a blank name, or two names equal once trimmed, ignoring case (`classify: two categories are named "bug": give each a different name`);
+- guidance over 4,000 characters;
+- `unsure_below` or `sure_at` outside 0 to 1, or `unsure_below` above `sure_at` once the defaults fill in (equal is allowed, and then nothing is `likely`);
+- a `model` that is not `<provider>/<name>`, each part of ASCII letters, digits, `.`, `_` and `-`. A blank `model` is left out.
+
+Then, without a Vercel key, `Vercel AI Gateway is not connected: connect it in pinned's Connectors settings`.
+
+**One billed call.** `Connectors::agent_classify` (the graph step already owns the name `classify`) asks `vercel::choose` once: `POST /evaluate` with the account's key. It never retries. When the call names a `model`, a keyless `GET /models/<id>` (`vercel::kind_of`) comes first, which costs nothing and sends no key: a chat model is refused with `classify: <model> is a chat model: give a decision model, or leave model out for typesafe-ai/jev`, and the lookup's own errors, `not_a_model` among them, pass through unchanged. With `model` left out, an act makes exactly one gateway request. The key never appears in an answer or an error.
+
+**Framing.** The model's `state` is `{"text": untrusted::frame("an agent's classify call", text)}`: the fixed header that says it is data, and a fence the text cannot close. The instructions are `Choose the category that best fits the text.`, then the question, then the caller's `instructions`. The text never reaches the instructions or the category descriptions.
+
+**Access.**
+
+- Agents: `classify` is a `read`, so it runs at once with no confirmation, and `act` writes its audit row as for any act.
+- Boxes: `box_gate::box_may_send` refuses it with `a box may not spend the account's Vercel AI Gateway key`, as a box's act through `box_may_act`. This is stricter than `vercel_models`, which needs no key: a box reads the most injected content, and this call has no spend limit. It blocks a Captain running in a box too.
+- Teams: `teams::hub_rule` puts it under `Gate::Never` with the other reads made with a key: `classify does not run on a team`.
+- Machines: `http::forward` refuses it, as any direct `HubCall` that is not a workflow callback: `a machine may only forward a workflow session's callbacks`.
+- External agents: the `/mcp` tools have no `act` (`docs/external-mcp.md`), so they can't reach it.
+- The local hub: a signed-out desktop, and a signed-in copy while the hub is off, answer it from their own connectors, as `vercel_models`.

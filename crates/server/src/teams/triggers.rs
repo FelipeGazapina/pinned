@@ -39,6 +39,8 @@ fn kind(trigger: &Trigger) -> &'static str {
         Trigger::LinearStatus { .. } => "linear_status",
         Trigger::LinearAssigned { .. } => "linear_assigned",
         Trigger::Schedule { .. } => "schedule",
+        // Refused before a start: a team bot can't have it yet.
+        Trigger::Observability { .. } => "observability",
     }
 }
 

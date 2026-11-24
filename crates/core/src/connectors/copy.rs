@@ -223,6 +223,8 @@ fn project(store: &super::Store, storage: &dyn Storage, fires: Vec<Fire>) -> (BT
         slack_threads,
         github,
         vercel,
+        // The PostHog key does not travel with an account copy.
+        posthog: _,
         upstash,
         box_claude_tokens,
         boxes,

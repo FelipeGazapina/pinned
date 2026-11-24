@@ -5,6 +5,8 @@ import vm from "node:vm";
 import * as PinnedGraph from "./graph.js";
 
 const settingsSrc = readFileSync(new URL("./settings.js", import.meta.url), "utf8");
+const styleCss = readFileSync(new URL("./style.css", import.meta.url), "utf8");
+const guiSettingsCss = readFileSync(new URL("./gui-settings.css", import.meta.url), "utf8");
 
 const element = (id) => ({
   id,
@@ -78,7 +80,7 @@ function load({ linear = null, bots = [], reply = () => ({}) } = {}) {
   };
   context.globalThis = context;
   vm.runInNewContext(
-    `${settingsSrc}\nglobalThis.__actions = actions; globalThis.__tidy = tidy; globalThis.__state = () => ({ page, view }); globalThis.__setSettings = (next) => { settings = next; }; globalThis.__settings = () => settings;`,
+    `${settingsSrc}\nglobalThis.__actions = actions; globalThis.__steps = STEPS; globalThis.__tidy = tidy; globalThis.__state = () => ({ page, view }); globalThis.__setSettings = (next) => { settings = next; }; globalThis.__settings = () => settings; globalThis.__sections = settingsSections;`,
     context,
   );
   context.__setSettings({ linear, slack: bots[0] ?? null, slack_bots: bots, connectors: [], checked: null });
@@ -257,4 +259,163 @@ test("Back to the workflow while Linear is still missing returns to the picker, 
   assert.equal(env.state().page, "connectors");
   assert.equal(env.state().view.name, "pick");
   assert.match(env.option("linear-label").text, /Connect Linear under Connectors first/);
+});
+
+const POSTHOG = { host: "https://us.posthog.com", project: "12345", project_name: "Web app", key_hint: "…k3y9" };
+
+test("the picker lists the PostHog errors workflow, and without PostHog its detour names PostHog and comes back", async () => {
+  let posthog = null;
+  const env = load({
+    linear: LINEAR,
+    reply: (call) => {
+      if (call.cmd === "connect_posthog") return (posthog = POSTHOG);
+      if (call.cmd === "get_settings") return { linear: LINEAR, slack: null, slack_bots: [], posthog, connectors: [], checked: null };
+      return {};
+    },
+  });
+  await openPicker(env);
+  assert.match(env.option("observability").text, /An error shows up in PostHog/);
+  assert.equal(env.option("observability").action, "connect-for-trigger");
+  assert.match(env.option("observability").text, /Connect PostHog under Connectors first/);
+  await env.click("observability");
+  assert.equal(env.state().page, "integrations");
+  assert.match(env.html(), /An error shows up in PostHog/);
+  assert.match(env.html(), /Connect PostHog below/);
+  const byId = env.context.document.getElementById;
+  byId("posthog-key").value = "phx_fake";
+  byId("posthog-project").value = "12345";
+  await env.context.__actions["connect-posthog"]();
+  const sent = env.calls.find((call) => call.cmd === "connect_posthog");
+  assert.deepEqual({ ...sent }, { cmd: "connect_posthog", key: "phx_fake", project: "12345", host: "us" });
+  assert.equal(env.state().page, "connectors");
+  assert.equal(env.state().view.name, "edit");
+  assert.equal(env.state().view.draft.trigger.kind, "observability");
+});
+
+test("with PostHog connected, the new workflow watches PostHog errors, and its panels show the once-per-error hint and the ticket's team and label", async () => {
+  const env = load({ linear: LINEAR });
+  env.context.__setSettings({ ...env.context.__settings(), posthog: POSTHOG });
+  await openPicker(env);
+  assert.equal(env.option("observability").action, "pick-trigger");
+  await env.click("observability");
+  const draft = env.state().view.draft;
+  const plain = (value) => JSON.parse(JSON.stringify(value));
+  assert.deepEqual(plain(draft.trigger), { kind: "observability", source: { kind: "posthog" } });
+  assert.deepEqual(plain(draft.graph.nodes[0].watch), { kind: "observability", source: { kind: "posthog" } });
+  assert.match(draft.instructions, /pinned linear create/);
+  draft.team = " ENG ";
+  const saved = env.context.__tidy(draft);
+  assert.deepEqual(plain(saved.trigger), { kind: "observability", source: { kind: "posthog" } }, "the source is saved");
+  assert.equal(saved.team, "ENG");
+  const trigger = env.context.__steps["observability-trigger"].fields(draft);
+  assert.match(trigger, /every minute, only for errors first seen after the workflow is saved or turned on, and starts each error once/);
+  assert.match(trigger, /Web app/);
+  const ticket = env.context.__steps.ticket.fields(draft);
+  assert.match(ticket, /Team <input data-bind="team"/);
+  assert.match(ticket, /Label <input data-bind="label"/);
+  assert.match(ticket, /at most one ticket per error with <code>pinned linear create<\/code>/);
+  Object.assign(env.context, { machineName: () => "this Mac", accountOf: () => null, onlineMachines: () => [] });
+  const session = env.context.sessionFields(draft);
+  assert.match(session, /File a Linear ticket/);
+  assert.doesNotMatch(session, /If it reports a bug|Issue columns/);
+});
+
+test("the ticket step says to connect Linear when Linear is missing", () => {
+  const env = load({});
+  const draft = env.context.blank("observability");
+  assert.match(env.context.__steps.ticket.fields(draft), /Connect Linear under Connectors\./);
+});
+
+test("under an observability trigger, steps that need a thread or an issue say so", () => {
+  const env = load({});
+  const draft = env.context.blank("observability");
+  draft.graph = env.context.PinnedGraph.startingGraph(draft);
+  for (const type of ["reply", "page", "file-issue", "take-issue", "move-column", "stage-picked"]) {
+    const issues = env.context.graphNodeIssues({ id: "n", type }, draft);
+    assert.ok(issues.includes("This step needs a Slack thread or a Linear issue, which an observability trigger does not give it."), `${type}: ${issues}`);
+  }
+});
+
+test("the PostHog card: not connected it asks for host, project and key; connected it shows the project and key hint, never the key", () => {
+  const env = load({});
+  const empty = env.context.posthogCardHtml();
+  for (const want of [/US cloud/, /EU cloud/, /Self-hosted/, /id="posthog-host"/, /id="posthog-project"/, /id="posthog-key" type="password"/, /data-action="connect-posthog"/, /id="posthog-error"/]) {
+    assert.match(empty, want);
+  }
+  assert.match(empty, /Not connected/);
+  env.context.__setSettings({ ...env.context.__settings(), posthog: POSTHOG });
+  const connected = env.context.posthogCardHtml();
+  assert.match(connected, /Web app/);
+  assert.match(connected, /12345/);
+  assert.match(connected, /US cloud/);
+  assert.match(connected, /…k3y9/);
+  assert.match(connected, /data-action="disconnect-posthog"/);
+  assert.doesNotMatch(connected, /posthog-key|phx_/, "no key field and no key");
+});
+
+test("Connect on the PostHog card names the first empty field and sends nothing", async () => {
+  const env = load({});
+  const byId = env.context.document.getElementById;
+  const focused = [];
+  for (const id of ["posthog-host", "posthog-project", "posthog-key"]) byId(id).focus = () => focused.push(id);
+  await env.context.__actions["connect-posthog"]();
+  assert.equal(byId("posthog-error").textContent, "Enter the project id.");
+  byId("posthog-project").value = "12345";
+  await env.context.__actions["connect-posthog"]();
+  assert.equal(byId("posthog-error").textContent, "Paste the key.");
+  assert.deepEqual(focused, ["posthog-project", "posthog-key"]);
+  assert.ok(!env.calls.some((call) => call.cmd === "connect_posthog"), "nothing reaches the hub");
+  const card = env.context.posthogCardHtml();
+  for (const label of ["PostHog host address", "PostHog project id", "PostHog personal API key"]) assert.match(card, new RegExp(`aria-label="${label}"`));
+});
+
+test("with PostHog as the only connector, Workflows offers a new workflow, and with none connected it names PostHog", () => {
+  const env = load({});
+  assert.match(env.context.connectorsHtml(), /Connect Linear, Slack or PostHog first\./);
+  assert.doesNotMatch(env.context.connectorsHtml(), /data-action="new-connector"/);
+  env.context.__setSettings({ ...env.context.__settings(), posthog: POSTHOG });
+  const list = env.context.connectorsHtml();
+  assert.match(list, /data-action="new-connector">＋ New workflow/);
+  assert.doesNotMatch(list, /Connect Linear, Slack or PostHog first/);
+});
+
+test("the detour to connect PostHog brings its card into view; a Linear detour leaves the page at the top", async () => {
+  const env = load({ linear: LINEAR });
+  const scrolled = [];
+  env.context.document.getElementById("posthog-card").scrollIntoView = (how) => scrolled.push({ ...how });
+  await openPicker(env);
+  await env.click("observability");
+  assert.equal(env.state().page, "integrations");
+  assert.match(env.html(), /<div class="card" id="posthog-card">/);
+  assert.deepEqual(scrolled, [{ block: "center" }]);
+
+  const bare = load({});
+  const none = [];
+  bare.context.document.getElementById("posthog-card").scrollIntoView = (how) => none.push(how);
+  await openPicker(bare);
+  await bare.click("linear-label");
+  assert.equal(bare.state().page, "integrations");
+  assert.deepEqual(none, []);
+});
+
+test("the connected PostHog card keeps the key hint on one line", () => {
+  const env = load({});
+  env.context.__setSettings({ ...env.context.__settings(), posthog: POSTHOG });
+  assert.match(env.context.posthogCardHtml(), /<span class="key-hint">key <b>…k3y9<\/b><\/span>/);
+  assert.match(styleCss, /\n\.key-hint \{ white-space: nowrap; \}/);
+});
+
+test("the PostHog host choice keeps room for its arrow, past the field rule that pads every settings input", () => {
+  // The field rule's `:is(input:not([type="checkbox"]), ...)` outweighs `#settings select`, so the select's own 32px is lost.
+  assert.match(guiSettingsCss, /body\[data-mode="gui"\] #settings :is\(input:not\(\[type="checkbox"\]\), select, textarea\) \{ min-height: 32px; padding: 6px 10px;/);
+  const rule = /body\[data-mode="gui"\] #settings #posthog-host-choice \{([^}]*)\}/.exec(guiSettingsCss);
+  assert.ok(rule, "a rule with an id outweighs the field rule");
+  assert.match(rule[1], /padding-right: 32px/);
+  assert.ok(guiSettingsCss.indexOf(rule[0]) > guiSettingsCss.indexOf("background-position: right 10px center"), "it follows the select rule it restores");
+});
+
+test("Settings search finds Workflows by posthog, error and observability", () => {
+  const env = load({});
+  const workflows = env.context.__sections.find((s) => s.page === "connectors").search.find((item) => item.title === "Workflows");
+  for (const word of ["posthog", "error", "observability"]) assert.ok(workflows.terms.join(" ").split(" ").includes(word), word);
 });

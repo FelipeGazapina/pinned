@@ -1618,6 +1618,11 @@ function connectHub(signedIn) {
   });
 }
 
+// Coming back to the window, or the network coming back, tries the hub at once instead of after the wait.
+addEventListener("online", () => hub?.retryNow());
+addEventListener("focus", () => hub?.retryNow());
+document.addEventListener("visibilitychange", () => document.hidden || hub?.retryNow());
+
 function showMachines(list, tabsByMachine) {
   for (const view of list) {
     if (view.id === account.machine_id) {
@@ -1635,6 +1640,8 @@ function showMachines(list, tabsByMachine) {
     else if (!wasOnline) refreshTabs(view.id).catch(console.warn);
     if (view.online && !wasOnline) retryUploadImages();
     if (view.online && !wasOnline) refreshSyncStopped(view.id);
+    // A machine back online is asked its compaction settings again: they may have changed meanwhile.
+    if (view.online && !wasOnline) delete machines.get(view.id).compaction;
   }
   for (const id of [...machines.keys()]) {
     if (id === LOCAL || list.some((v) => v.id === id)) continue;

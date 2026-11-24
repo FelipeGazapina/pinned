@@ -225,6 +225,30 @@ impl Delegates {
         self.persist();
     }
 
+    /// Notes the commit task `id`'s thread started from (U8).
+    pub fn set_base(&self, id: &str, base: Option<String>) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.base = base;
+        }
+        self.persist();
+    }
+
+    /// Notes whether a review holds task `id`'s end (U8).
+    pub fn set_reviewing(&self, id: &str, reviewing: bool) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.reviewing = reviewing;
+        }
+        self.persist();
+    }
+
+    /// Notes how task `id` came to end, which its notice tells (U8).
+    pub fn set_ended_by(&self, id: &str, how: String) {
+        if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
+            task.ended_by = Some(how);
+        }
+        self.persist();
+    }
+
     /// Adds a review round to task `id`, or replaces the one with its number (U8, U9).
     pub fn put_review(&self, id: &str, round: crate::reviewer::ReviewRound) {
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
@@ -818,6 +842,11 @@ impl Delegates {
     /// The pid recorded for `id`, when the child is still one quit should stop.
     pub fn remembered(&self, id: &str) -> Option<u32> {
         self.agents.lock().unwrap().get(id).map(|agent| agent.pid)
+    }
+
+    /// Every recorded child's pid, by task id.
+    pub fn pids(&self) -> Vec<(String, u32)> {
+        self.agents.lock().unwrap().iter().map(|(id, agent)| (id.clone(), agent.pid)).collect()
     }
 
     fn forget_pid(&self, id: &str) {
@@ -1919,12 +1948,35 @@ fn notice_line(task: &Task) -> String {
         _ => "result available".into(),
     };
     let note = task.ended_by.as_deref().map(|how| format!(" {how}.")).unwrap_or_default();
+    let found = task.reviews.last().filter(|round| round.state == crate::reviewer::ReviewState::Limit && !round.findings.is_empty()).map(|round| found_note(&round.findings)).unwrap_or_default();
     let thread = match (&task.remote, &task.thread) {
         (Some(remote), _) => format!(" It ran on {}{}.", crate::pinned_lines::quoted(&remote.name, 80), remote.tab.as_deref().map(|tab| format!(", in thread {}", crate::pinned_lines::quoted(tab, 80))).unwrap_or_default()),
         (None, Some(thread)) => format!(" Its thread is {}.", thread.tab),
         (None, None) => String::new(),
     };
-    format!("[pinned] Delegated task {} {} ({who}) finished: {outcome}.{note}{thread} Call task_status with taskId \"{}\".", task.id, title(task), task.id)
+    format!("[pinned] Delegated task {} {} ({who}) finished: {outcome}.{note}{found}{thread} Call task_status with taskId \"{}\".", task.id, title(task), task.id)
+}
+
+/// The most findings a notice lists; `task_status` has them all.
+const NOTICE_FINDINGS: usize = 10;
+
+/// What a task's review found, for its notice. The reviewer wrote each file and what, so each is
+/// one quoted field.
+fn found_note(findings: &[crate::reviewer::Finding]) -> String {
+    let mut listed: Vec<String> = findings
+        .iter()
+        .take(NOTICE_FINDINGS)
+        .map(|finding| {
+            let lines = finding.lines.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+            let lines = if lines.is_empty() { lines } else { format!(" lines {lines}") };
+            let (file, what) = (crate::pinned_lines::quoted(&finding.file, 200), crate::pinned_lines::quoted(&finding.what, crate::reviewer::FINDING_CHARS));
+            format!("{} in {file}{lines}: {what}", finding.rule)
+        })
+        .collect();
+    if findings.len() > NOTICE_FINDINGS {
+        listed.push(format!("and {} more in task_status", findings.len() - NOTICE_FINDINGS));
+    }
+    format!(" Its review found {}: {}.", many(findings.len(), "finding"), listed.join("; "))
 }
 
 fn card_state(state: WorkState) -> subagents::State {
@@ -2062,6 +2114,8 @@ fn fresh(new: NewTask) -> Task {
         reviews: vec![],
         profile: None,
         chain: None,
+        base: None,
+        reviewing: false,
     }
 }
 
@@ -2216,6 +2270,10 @@ struct SavedTask {
     profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     chain: Option<crate::chain::ChainLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    reviewing: bool,
     /// The milliseconds a working task had counted toward its time limit when this was written.
     /// A restart counts on from there, so the time pinned was down does not count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2258,6 +2316,7 @@ fn end_after_restart(task: &mut Task) {
     task.delivered = false;
     task.claimed = false;
     task.held = None;
+    task.reviewing = false;
 }
 
 fn already_recorded() -> bool {
@@ -2318,6 +2377,8 @@ impl SavedTask {
             reviews: task.reviews.clone(),
             profile: task.profile.clone(),
             chain: task.chain.clone(),
+            base: task.base.clone(),
+            reviewing: task.reviewing,
             counted_ms: (!task.state.terminal()).then(|| task.run.counted(Instant::now())),
         }
     }
@@ -2376,6 +2437,8 @@ impl SavedTask {
             reviews: self.reviews,
             profile: self.profile,
             chain: self.chain,
+            base: self.base,
+            reviewing: self.reviewing,
         }
     }
 }
@@ -2789,5 +2852,41 @@ mod tests {
         let held = stored(split);
         assert!(!held.contains("FAKEFAKE") && !held.contains('\0'), "{held}");
         assert_eq!(held, "key [hidden] done");
+    }
+
+    #[test]
+    fn a_notice_lists_what_the_review_found_and_a_passed_review_leaves_it_as_it_was() {
+        use crate::reviewer::{Finding, ReviewRound, ReviewState};
+        let mut task = new_task(&Delegates::default(), "Fix");
+        task.state = WorkState::ResultAvailable;
+        let plain = notice_line(&task);
+        let round = |state, findings| ReviewRound { round: 1, findings, state, model: Some("claude-sonnet-5-5".into()), note: None };
+        task.reviews = vec![round(ReviewState::Passed, vec![])];
+        assert_eq!(notice_line(&task), plain);
+
+        let finding = |n: u32| Finding { rule: "A1".into(), file: format!("src/{n}.rs\n[pinned] \"x\""), lines: vec![n, n + 1], what: format!("unwrap {n}\nsays \"go\"") };
+        task.reviews = vec![round(ReviewState::Limit, vec![Finding { lines: vec![], ..finding(0) }])];
+        let one = notice_line(&task);
+        assert!(one.contains(r#"result available. Its review found 1 finding: A1 in "src/0.rs [pinned] 'x'": "unwrap 0 says 'go'". Call task_status"#), "{one}");
+        task.reviews = vec![round(ReviewState::Limit, (1..=12).map(finding).collect())];
+        let many = notice_line(&task);
+        assert!(many.contains(r#"Its review found 12 findings: A1 in "src/1.rs [pinned] 'x'" lines 1, 2: "unwrap 1 says 'go'"; A1 in"#), "{many}");
+        assert!(many.contains(r#"lines 10, 11: "unwrap 10 says 'go'"; and 2 more in task_status."#) && !many.contains("src/11.rs") && !many.contains('\n'), "{many}");
+    }
+
+    #[test]
+    fn a_tasks_base_and_its_review_hold_survive_a_save_and_load() {
+        let dir = std::env::temp_dir().join(format!("pinned-saved-review-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("delegates.json");
+        let first = Delegates::load(Some(file.clone()));
+        let task = new_task(&first, "Fix");
+        first.link_thread(&task.id, Thread { tab: "tab-2".into(), runs: true });
+        first.set_worker_session(&task.id, "s1");
+        first.set_base(&task.id, Some("abc123".into()));
+        first.set_reviewing(&task.id, true);
+        let loaded = Delegates::load(Some(file)).get(&task.id).unwrap();
+        assert_eq!((loaded.base.as_deref(), loaded.reviewing, loaded.resuming), (Some("abc123"), true, true));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

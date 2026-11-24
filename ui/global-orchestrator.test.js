@@ -13,7 +13,7 @@ const here = (value) => JSON.parse(JSON.stringify(value));
 const pure = () => {
   const context = {};
   vm.createContext(context);
-  vm.runInContext(`${read("global-orchestrator.js")}\nthis.api = { mergeGlobalSettings, globalSettingsWrites, globalSettingsNotes, isOlderPinned };`, context);
+  vm.runInContext(`${read("global-orchestrator.js")}\nthis.api = { mergeGlobalSettings, globalSettingsWrites, globalSettingsNotes, globalSettingsDrift, isOlderPinned, approvalChangeTold, GO_DEFAULT_APPROVAL_PROFILE };`, context);
   return context.api;
 };
 
@@ -25,7 +25,15 @@ test("the account's view takes the host's fields and names the host machine", ()
     macMini({ settings: { name: "Admiral", host: true, busy: "refuse", reports: "tool_only", group_reports: false, read_aloud: true } }),
     { id: "mb", name: "MacBook", online: true, settings: { name: "Orchestrator", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false }, update: false, error: null },
   ]));
-  assert.deepEqual(view, { name: "Admiral", host: "mm", busy: "refuse", reports: "tool_only", group_reports: false, read_aloud: true });
+  assert.deepEqual(view, { name: "Admiral", host: "mm", busy: "refuse", reports: "tool_only", group_reports: false, read_aloud: true, auto_merge: false, approval_profile: "" });
+});
+
+test("the account's view carries the host's auto-merge and profile, and an older machine's answer reads as off", () => {
+  const { mergeGlobalSettings } = pure();
+  const on = here(mergeGlobalSettings([macMini({ settings: { name: "Admiral", host: true, auto_merge: true, approval_profile: "Merge docs only." } })]));
+  assert.deepEqual(on, { name: "Admiral", host: "mm", busy: "queue", reports: "auto", group_reports: true, read_aloud: false, auto_merge: true, approval_profile: "Merge docs only." });
+  const older = here(mergeGlobalSettings([macMini({ settings: { name: "Admiral", host: true, busy: "queue", reports: "auto", group_reports: true, read_aloud: false } })]));
+  assert.deepEqual([older.auto_merge, older.approval_profile], [false, ""]);
 });
 
 test("with no host the first machine that answered speaks for the account", () => {
@@ -34,13 +42,13 @@ test("with no host the first machine that answered speaks for the account", () =
     { id: "mb", name: "MacBook", online: true, settings: { name: "Comandante", host: false }, update: false, error: null },
     macMini({ settings: { name: "Admiral", host: false } }),
   ]));
-  assert.deepEqual(view, { name: "Comandante", host: null, busy: "queue", reports: "auto", group_reports: true, read_aloud: false });
+  assert.deepEqual(view, { name: "Comandante", host: null, busy: "queue", reports: "auto", group_reports: true, read_aloud: false, auto_merge: false, approval_profile: "" });
 });
 
 test("machines that never answered leave the defaults standing", () => {
   const { mergeGlobalSettings } = pure();
   const view = here(mergeGlobalSettings([macMini({ online: false }), { id: "mb", name: "MacBook", online: true, update: true }]));
-  assert.deepEqual(view, { name: "Orchestrator", host: null, busy: "queue", reports: "auto", group_reports: true, read_aloud: false });
+  assert.deepEqual(view, { name: "Orchestrator", host: null, busy: "queue", reports: "auto", group_reports: true, read_aloud: false, auto_merge: false, approval_profile: "" });
 });
 
 test("a save writes every online machine, the host flag only to the chosen one", () => {
@@ -55,9 +63,21 @@ test("a save writes every online machine, the host flag only to the chosen one",
     ],
   ));
   assert.deepEqual(writes, [
-    { machine: "mm", settings: { name: "Admiral", host: true, busy: "refuse", reports: "auto", group_reports: false, read_aloud: true } },
-    { machine: "mb", settings: { name: "Admiral", host: false, busy: "refuse", reports: "auto", group_reports: false, read_aloud: true } },
+    { machine: "mm", settings: { name: "Admiral", host: true, busy: "refuse", reports: "auto", group_reports: false, read_aloud: true, auto_merge: false, approval_profile: "" } },
+    { machine: "mb", settings: { name: "Admiral", host: false, busy: "refuse", reports: "auto", group_reports: false, read_aloud: true, auto_merge: false, approval_profile: "" } },
   ]);
+});
+
+test("a save sends auto-merge and the profile, and the default profile as empty", () => {
+  const { globalSettingsWrites, GO_DEFAULT_APPROVAL_PROFILE } = pure();
+  const view = { name: "Admiral", host: "mm", busy: "queue", reports: "auto", group_reports: true, read_aloud: false };
+  const sent = (over) => {
+    const { auto_merge, approval_profile } = here(globalSettingsWrites({ ...view, ...over }, [macMini()]))[0].settings;
+    return [auto_merge, approval_profile];
+  };
+  assert.deepEqual(sent({ auto_merge: true, approval_profile: "Merge docs only." }), [true, "Merge docs only."]);
+  assert.deepEqual(sent({ auto_merge: 1, approval_profile: `\n${GO_DEFAULT_APPROVAL_PROFILE}  ` }), [true, ""], "the default, whitespace around it");
+  assert.deepEqual(sent({}), [false, ""], "a view without the fields sends them off and empty");
 });
 
 test("the notes name every machine the save could not reach, each in its own words", () => {
@@ -68,7 +88,46 @@ test("the notes name every machine the save could not reach, each in its own wor
     { id: "vps", name: "Linux VPS", online: false, update: false, error: null },
     { id: "mb", name: "MacBook", online: true, update: false, error: "timed out" },
   ]));
-  assert.deepEqual(notes, ["Old Mac needs to update pinned", "Linux VPS is offline; it updates when it reconnects", "MacBook: timed out"]);
+  assert.deepEqual(notes, ["Old Mac needs to update pinned", "Linux VPS is offline; once it is back, this page shows whether it matches", "MacBook: timed out"]);
+});
+
+test("a machine pending on the hub's last save is worded by whether it is online, and a too-old one still needs to update", () => {
+  const { globalSettingsNotes } = pure();
+  const notes = here(globalSettingsNotes([
+    macMini(),
+    { id: "old", name: "Old Mac", online: true, update: true, error: null, pending: true },
+    { id: "vps", name: "Linux VPS", online: false, update: false, error: null, pending: true },
+    { id: "mb", name: "MacBook", online: true, update: false, error: null, pending: true },
+  ]));
+  assert.deepEqual(notes, [
+    "Old Mac needs to update pinned",
+    "Linux VPS is offline; it gets the saved settings when it reconnects",
+    "MacBook has not taken the last save yet; the hub sends it again each time MacBook connects",
+  ]);
+});
+
+test("a pending machine is neither the drift's base nor compared with it", () => {
+  const { globalSettingsDrift } = pure();
+  const host = macMini({ settings: { name: "Admiral", host: true, auto_merge: false } });
+  const differs = { id: "mb", name: "MacBook", online: true, settings: { name: "Admiral", host: false, auto_merge: true }, update: false, error: null };
+  assert.deepEqual(here(globalSettingsDrift([host, { ...differs, pending: true }])), []);
+  const oldHost = { id: "vps", name: "Linux VPS", online: true, settings: { name: "Orchestrator", host: true, auto_merge: true }, update: false, error: null, pending: true };
+  assert.deepEqual(here(globalSettingsDrift([oldHost, host, differs])).map((d) => [d.name, d.base]), [["MacBook", "Mac mini"]], "a pending host is not the base");
+});
+
+test("the drift names each machine whose own values differ from the host's, in the section's words", () => {
+  const { globalSettingsDrift } = pure();
+  const host = macMini({ settings: { name: "Admiral", host: true, busy: "queue", reports: "auto", group_reports: true, read_aloud: false, auto_merge: false, approval_profile: "" } });
+  const drift = here(globalSettingsDrift([
+    host,
+    { id: "mb", name: "MacBook", online: true, settings: { ...host.settings, host: false, auto_merge: true, reports: "tool_only", approval_profile: "Merge everything." }, update: false, error: null },
+    { id: "old", name: "Old Mac", online: true, settings: { name: "Admiral", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false }, update: false, error: null },
+    { id: "vps", name: "Linux VPS", online: false, settings: null, update: false, error: null },
+  ]));
+  assert.deepEqual(drift, [{ id: "mb", name: "MacBook", base: "Mac mini", values: ['reports "Only when the Captain calls"', "Auto-merge on", "a different approval profile"] }]);
+  assert.deepEqual(here(globalSettingsDrift([host, { ...host, id: "mb", name: "MacBook", settings: { ...host.settings, host: false } }])), [], "matching machines are no drift");
+  const switches = here(globalSettingsDrift([host, { ...host, id: "mb", name: "MacBook", settings: { ...host.settings, host: false, group_reports: false, read_aloud: true } }]));
+  assert.deepEqual(switches[0].values, ["Group consecutive reports off", "Read summaries aloud on"], "the switches by the names their rows show");
 });
 
 test("an older node's unknown command and an older hub's refusal both read as needing an update", () => {
@@ -80,7 +139,7 @@ test("an older node's unknown command and an older hub's refusal both read as ne
 });
 
 // The page half: a small document whose elements the section binds to, and the calls it makes.
-function page({ settings = {}, older = false, offline = false } = {}) {
+function page({ settings = {}, older = false, offline = false, refuse = {}, hub } = {}) {
   const elements = {};
   const element = (id, extra = {}) => (elements[id] ??= {
     id,
@@ -117,7 +176,11 @@ function page({ settings = {}, older = false, offline = false } = {}) {
         if (machine === "mb" && older) throw new Error("this machine runs pinned 0.8.0, which can't answer that: unknown variant GlobalOrchestratorSettings");
         return { name: "Orchestrator", host: false, busy: "queue", reports: "auto", group_reports: true, read_aloud: false, ...settings[machine] };
       }
-      if (call.cmd === "set_global_orchestrator_settings") return { ...call.settings };
+      if (call.cmd === "set_global_orchestrator_settings") {
+        if (refuse[machine]) throw new Error(refuse[machine]);
+        settings[machine] = { ...call.settings };
+        return { ...call.settings };
+      }
       if (call.cmd === "open_global_orchestrator") return "g-1";
       return null;
     },
@@ -156,9 +219,32 @@ function page({ settings = {}, older = false, offline = false } = {}) {
     addSurface: (tab, surface) => surfaces.push([tab, surface]),
     tell: (message) => told.push(message),
   };
+  // A signed-in app's hub, only when a test passes one; its calls land in `calls` as ["hub", call].
+  if (hub) context.hub = { hub: (call) => (calls.push(["hub", call]), hub(call)) };
   vm.createContext(context);
   vm.runInContext(`${read("global-orchestrator.js")}\n${read("composer-tags.js")}\n${read("gui-global-orchestrator.js")}`, context);
   return { context, element, elements, calls, events, activated, surfaces, told, pages, click: (e) => listeners.click(e) };
+}
+
+/** A hub that keeps the account's last save as the real one does: pending on every machine but those that took it. */
+function savingHub(save = null) {
+  return async (call) => {
+    if (call.cmd === "global_orchestrator_save") return save;
+    if (call.cmd === "record_global_orchestrator_save") {
+      save = { id: "s-1", settings: call.settings, pending: ["mm", "mb", "vps"].filter((id) => !call.took.includes(id)) };
+      return save;
+    }
+    throw new Error(`unexpected ${call.cmd}`);
+  };
+}
+
+/** Fills the form as a save from the section sends it. */
+function fillForm(element, autoMerge) {
+  element("go-name").value = "Orchestrator";
+  element("go-busy").value = "queue";
+  element("go-reports").value = "auto";
+  element("go-group-reports").checked = true;
+  element("go-auto-merge").checked = autoMerge;
 }
 
 test("the section renders one account-wide setting and the machines that cannot take it", async () => {
@@ -175,7 +261,7 @@ test("the section renders one account-wide setting and the machines that cannot 
   assert.doesNotMatch(html, /id="go-group-reports" checked/);
   assert.match(html, /Admiral's memory/);
   assert.match(html, /MacBook needs to update pinned/);
-  assert.match(html, /Linux VPS is offline; it updates when it reconnects/);
+  assert.match(html, /Linux VPS is offline; once it is back, this page shows whether it matches/);
 });
 
 test("saving writes the shared fields everywhere and tells the page through the event", async () => {
@@ -194,14 +280,260 @@ test("saving writes the shared fields everywhere and tells the page through the 
   await element("go-save").onclick();
   const writes = here(calls.filter(([, call]) => call.cmd === "set_global_orchestrator_settings"));
   assert.deepEqual(writes, [
-    ["mm", { cmd: "set_global_orchestrator_settings", settings: { name: "Comandante", host: true, busy: "queue", reports: "tool_only", group_reports: false, read_aloud: true } }],
-    ["mb", { cmd: "set_global_orchestrator_settings", settings: { name: "Comandante", host: false, busy: "queue", reports: "tool_only", group_reports: false, read_aloud: true } }],
+    ["mm", { cmd: "set_global_orchestrator_settings", settings: { name: "Comandante", host: true, busy: "queue", reports: "tool_only", group_reports: false, read_aloud: true, auto_merge: false, approval_profile: "" } }],
+    ["mb", { cmd: "set_global_orchestrator_settings", settings: { name: "Comandante", host: false, busy: "queue", reports: "tool_only", group_reports: false, read_aloud: true, auto_merge: false, approval_profile: "" } }],
   ]);
   assert.equal(events.length, 1);
   assert.equal(events[0].type, "global-orchestrator-settings");
-  assert.deepEqual(here(events[0].detail), { name: "Comandante", host: true, busy: "queue", reports: "tool_only", group_reports: false, read_aloud: true });
+  assert.deepEqual(here(events[0].detail), { name: "Comandante", host: true, busy: "queue", reports: "tool_only", group_reports: false, read_aloud: true, auto_merge: false, approval_profile: "" });
   assert.equal(element("go-status").textContent, "Saved");
   assert.equal(element("go-error").textContent, "");
+});
+
+test("the section shows the auto-merge switch and the approval profile behind a click", async () => {
+  const { context } = page({ settings: { mm: { host: true, auto_merge: true } } });
+  const profile = pure().GO_DEFAULT_APPROVAL_PROFILE;
+  const html = await context.globalOrchestratorSettingsHtml();
+  assert.match(html, /id="go-auto-merge" checked/);
+  assert.match(html, /data-setting="approval-profile"[\s\S]*<details[^>]*><summary>[^<]+<\/summary>/);
+  assert.ok(html.includes(`<textarea id="go-approval-profile" maxlength="4000" aria-label="Approval profile" aria-describedby="go-approval-count">${context.esc(profile)}</textarea>`), "the default profile fills an empty one");
+  assert.ok(html.includes(`<span class="meta" id="go-approval-count">${profile.length} / 4000 characters</span>`), "the cap shows under the profile");
+  assert.match(html, /<button type="button" class="secondary" id="go-approval-reset">Reset to default<\/button>/);
+  assert.ok(html.indexOf('id="go-read-aloud"') < html.indexOf('id="go-auto-merge"') && html.indexOf('id="go-approval-profile"') < html.indexOf('data-setting="memory"'), "after Read aloud, before Global memory");
+
+  const reaches = "A change reaches running Captains and the orchestrator at their next turn; a turn already in progress can still merge.";
+  assert.ok(html.includes(`decide by the approval profile whether a finished pull request merges or waits for your review. ${reaches}</p>`), "the switch says when a change lands");
+  assert.ok(html.includes("Used when Auto-merge is on. With Auto-merge on, an edit reaches running Captains and the orchestrator at their next turn; a turn already in progress can still merge.</p>"), "the profile says when an edit lands");
+  assert.doesNotMatch(html, /immediate/i);
+
+  const off = page({ settings: { mm: { host: true, approval_profile: "Merge <docs> only." } } });
+  const custom = await off.context.globalOrchestratorSettingsHtml();
+  assert.doesNotMatch(custom, /id="go-auto-merge" checked/);
+  assert.ok(custom.includes(">Merge &#60;docs&#62; only.</textarea>"), "a saved profile shows escaped");
+});
+
+test("a save tells the running sessions when auto-merge changes, or the profile in effect while it is on", () => {
+  const { approvalChangeTold, GO_DEFAULT_APPROVAL_PROFILE } = pure();
+  const on = { name: "Orchestrator", auto_merge: true, approval_profile: "" };
+  const off = { ...on, auto_merge: false };
+  assert.equal(approvalChangeTold(on, off), true, "turned off");
+  assert.equal(approvalChangeTold(off, on), true, "turned on");
+  assert.equal(approvalChangeTold(on, { ...on, approval_profile: "Merge docs only." }), true, "profile edited while on");
+  assert.equal(approvalChangeTold(off, { ...off, approval_profile: "Merge docs only." }), false, "profile edited while off");
+  assert.equal(approvalChangeTold(on, { ...on, approval_profile: GO_DEFAULT_APPROVAL_PROFILE }), false, "the default spelled out is the empty one");
+  assert.equal(approvalChangeTold(on, { ...on, name: "Admiral" }), false, "another field");
+  assert.equal(approvalChangeTold({ name: "Orchestrator" }, off), false, "an older node's answer reads as off");
+});
+
+test("a save that turns auto-merge off says the running sessions were told", async () => {
+  const { context, element } = page({ settings: { mm: { host: true, auto_merge: true }, mb: { auto_merge: true } } });
+  await context.globalOrchestratorSettingsHtml();
+  context.bindGlobalOrchestratorSettings();
+  element("go-name").value = "Orchestrator";
+  element("go-busy").value = "queue";
+  element("go-reports").value = "auto";
+  element("go-group-reports").checked = true;
+  element("go-auto-merge").checked = false;
+  await element("go-save").onclick();
+  assert.equal(element("go-status").textContent, "Saved. Running Captains and the orchestrator were told.");
+  assert.equal(element("go-error").textContent, "");
+
+  await element("go-save").onclick();
+  assert.equal(element("go-status").textContent, "Saved", "saving the same values again tells no one");
+});
+
+test("Reset to default puts the default profile back in the text", async () => {
+  const { context, element } = page({ settings: { mm: { host: true, approval_profile: "Merge docs only." } } });
+  await context.globalOrchestratorSettingsHtml();
+  context.bindGlobalOrchestratorSettings();
+  element("go-approval-profile").value = "Merge everything.";
+  element("go-approval-reset").onclick();
+  assert.equal(element("go-approval-profile").value, pure().GO_DEFAULT_APPROVAL_PROFILE);
+});
+
+test("the profile's count follows typing and Reset, against the 4000 cap", async () => {
+  const { context, element } = page({ settings: { mm: { host: true, approval_profile: "Merge docs only." } } });
+  const html = await context.globalOrchestratorSettingsHtml();
+  assert.match(html, /id="go-approval-count">16 \/ 4000 characters</);
+  context.bindGlobalOrchestratorSettings();
+  element("go-approval-profile").value = "x".repeat(4000);
+  element("go-approval-profile").oninput();
+  assert.equal(element("go-approval-count").textContent, "4000 / 4000 characters");
+  element("go-approval-reset").onclick();
+  assert.equal(element("go-approval-count").textContent, `${pure().GO_DEFAULT_APPROVAL_PROFILE.length} / 4000 characters`);
+});
+
+test("a save the host took but another machine refused says Saved on the host and names the machine left behind", async () => {
+  const { context, element, events } = page({ settings: { mm: { host: true } }, refuse: { mb: "the machine went away." } });
+  await context.globalOrchestratorSettingsHtml();
+  context.bindGlobalOrchestratorSettings();
+  element("go-name").value = "Orchestrator";
+  element("go-busy").value = "queue";
+  element("go-reports").value = "auto";
+  element("go-auto-merge").checked = true;
+  await element("go-save").onclick();
+  assert.equal(element("go-status").textContent, "Saved on Mac mini. Running Captains and the orchestrator were told.");
+  assert.equal(element("go-error").textContent, "Not saved on MacBook: the machine went away. It keeps its old settings.");
+  assert.equal(events.length, 1, "the host's save still tells the page");
+  assert.equal(events[0].detail.auto_merge, true);
+});
+
+test("a machine that missed turning auto-merge off is still named after a reload, until Apply reaches it", async () => {
+  const settings = { mm: { host: true, auto_merge: true }, mb: { auto_merge: true } };
+  const refuse = { mb: "connection refused" };
+  const { context, element, calls } = page({ settings, refuse });
+  assert.doesNotMatch(await context.globalOrchestratorSettingsHtml(), /go-drift/, "both machines match before the save");
+  context.bindGlobalOrchestratorSettings();
+  element("go-name").value = "Orchestrator";
+  element("go-busy").value = "queue";
+  element("go-reports").value = "auto";
+  element("go-group-reports").checked = true;
+  element("go-auto-merge").checked = false;
+  await element("go-save").onclick();
+  assert.equal(element("go-error").textContent, "Not saved on MacBook: connection refused. It keeps its old settings.");
+
+  // A reload reads every machine again: the host is off, MacBook still on, and the page says so.
+  const reloaded = await context.globalOrchestratorSettingsHtml();
+  assert.match(reloaded, /<div class="go-drift" id="go-drift" role="alert"><p>MacBook does not match Mac mini: it has Auto-merge on\.<\/p>/);
+  assert.match(reloaded, /<button type="button" class="secondary" id="go-reapply">Apply Mac mini's settings to every machine<\/button>/);
+  assert.match(reloaded, /id="go-auto-merge">/, "the switch shows the host's off");
+
+  // Once MacBook takes writes again, Apply sends the host's saved values everywhere and the warning goes.
+  delete refuse.mb;
+  calls.length = 0;
+  context.bindGlobalOrchestratorSettings();
+  element("go-auto-merge").checked = true;
+  await element("go-reapply").onclick();
+  const writes = here(calls.filter(([, call]) => call.cmd === "set_global_orchestrator_settings").map(([machine, call]) => [machine, call.settings.host, call.settings.auto_merge]));
+  assert.deepEqual(writes, [["mm", true, false], ["mb", false, false]], "the host's saved values, not the form's unsaved switch");
+  assert.doesNotMatch(element("global-orchestrator-settings").outerHTML, /go-drift/);
+  assert.equal(element("go-error").textContent, "");
+});
+
+test("a signed-in save records the shared values with the hub after the writes, with only the machines that took it", async () => {
+  const { context, element, calls } = page({ settings: { mm: { host: true, auto_merge: true }, mb: { auto_merge: true } }, refuse: { mb: "connection refused" }, hub: savingHub() });
+  await context.globalOrchestratorSettingsHtml();
+  context.bindGlobalOrchestratorSettings();
+  fillForm(element, false);
+  calls.length = 0;
+  await element("go-save").onclick();
+  const records = here(calls.filter(([on, call]) => on === "hub" && call.cmd === "record_global_orchestrator_save"));
+  assert.deepEqual(records, [["hub", { cmd: "record_global_orchestrator_save", settings: { name: "Orchestrator", busy: "queue", reports: "auto", group_reports: true, read_aloud: false, auto_merge: false, approval_profile: "" }, took: ["mm"] }]], "neither the offline VPS nor MacBook, whose write failed");
+  const at = (pred) => calls.findIndex(pred);
+  const recorded = at(([, call]) => call.cmd === "record_global_orchestrator_save");
+  assert.ok(at(([, call]) => call.cmd === "set_global_orchestrator_settings") < recorded, "after the writes");
+  assert.ok(recorded < at(([on, call]) => on === "mm" && call.cmd === "global_orchestrator_settings"), "before the section reads again");
+  assert.equal(element("go-status").textContent, "Saved on Mac mini. Running Captains and the orchestrator were told.");
+  const section = element("global-orchestrator-settings").outerHTML;
+  assert.match(section, /Linux VPS is offline; it gets the saved settings when it reconnects/);
+  assert.match(section, /MacBook has not taken the last save yet; the hub sends it again each time MacBook connects/);
+  assert.doesNotMatch(section, /go-drift/, "the machine the hub still sends the save to is not drift");
+});
+
+test("a failed record leaves the save and its status as they were", async () => {
+  const { context, element, events } = page({ settings: { mm: { host: true } }, hub: async (call) => {
+    if (call.cmd === "record_global_orchestrator_save") throw "unknown variant `record_global_orchestrator_save`";
+    return null;
+  } });
+  await context.globalOrchestratorSettingsHtml();
+  context.bindGlobalOrchestratorSettings();
+  fillForm(element, true);
+  await element("go-save").onclick();
+  assert.equal(element("go-status").textContent, "Saved. Running Captains and the orchestrator were told.");
+  assert.equal(element("go-error").textContent, "");
+  assert.equal(events.length, 1);
+});
+
+test("a machine pending on the hub's last save is left out of the drift and gets a note of its own", async () => {
+  const { context } = page({ settings: { mm: { host: true }, mb: { auto_merge: true } }, hub: savingHub({ id: "s-1", settings: {}, pending: ["mb"] }) });
+  const html = await context.globalOrchestratorSettingsHtml();
+  assert.doesNotMatch(html, /go-drift/);
+  assert.match(html, /MacBook has not taken the last save yet; the hub sends it again each time MacBook connects/);
+  assert.match(html, /Linux VPS is offline; once it is back, this page shows whether it matches/, "an offline machine the save reached keeps today's words");
+});
+
+test("an offline machine pending on the hub's last save gets it when it reconnects", async () => {
+  const { context } = page({ settings: { mm: { host: true } }, hub: savingHub({ id: "s-1", settings: {}, pending: ["vps"] }) });
+  const html = await context.globalOrchestratorSettingsHtml();
+  assert.match(html, /Linux VPS is offline; it gets the saved settings when it reconnects/);
+  assert.doesNotMatch(html, /once it is back/);
+});
+
+test("a machine that differs and is not pending is still drift, with Apply", async () => {
+  const { context } = page({ settings: { mm: { host: true }, mb: { auto_merge: true } }, hub: savingHub({ id: "s-1", settings: {}, pending: ["vps"] }) });
+  const html = await context.globalOrchestratorSettingsHtml();
+  assert.match(html, /<div class="go-drift" id="go-drift" role="alert"><p>MacBook does not match Mac mini: it has Auto-merge on\.<\/p>/);
+  assert.match(html, /id="go-reapply">Apply Mac mini's settings to every machine</);
+});
+
+test("a hub that cannot read the last save leaves the section as it is without a hub", async () => {
+  const settings = { mm: { host: true }, mb: { auto_merge: true } };
+  const failing = page({ settings, hub: async () => Promise.reject("unknown variant `global_orchestrator_save`") });
+  const none = page({ settings });
+  const html = await failing.context.globalOrchestratorSettingsHtml();
+  assert.equal(html, await none.context.globalOrchestratorSettingsHtml());
+  assert.match(html, /MacBook does not match Mac mini/);
+  assert.match(html, /Linux VPS is offline; once it is back, this page shows whether it matches/);
+});
+
+test("the drift's Apply button, which names the host, wraps instead of running past a phone's width", () => {
+  const rule = read("gui-settings.css").split("\n").find((line) => line.startsWith("#settings-page #global-orchestrator-settings .go-drift button {"));
+  assert.ok(rule, "a rule for the drift's button");
+  for (const part of ["height: auto", "max-width: 100%", "white-space: normal", "overflow-wrap: anywhere"]) assert.ok(rule.includes(part), `${part} in ${rule}`);
+});
+
+test("a machine that was offline for the save is named once it is back with its old values", async () => {
+  const settings = { mm: { host: true, auto_merge: true }, mb: { auto_merge: true } };
+  const { context, element } = page({ settings });
+  await context.globalOrchestratorSettingsHtml();
+  context.bindGlobalOrchestratorSettings();
+  context.machines.get("mb").view.online = false;
+  element("go-name").value = "Orchestrator";
+  element("go-busy").value = "queue";
+  element("go-reports").value = "auto";
+  element("go-group-reports").checked = true;
+  element("go-auto-merge").checked = false;
+  await element("go-save").onclick();
+  assert.match(element("global-orchestrator-settings").outerHTML, /MacBook is offline; once it is back, this page shows whether it matches/);
+  context.machines.get("mb").view.online = true;
+  assert.match(await context.globalOrchestratorSettingsHtml(), /MacBook does not match Mac mini: it has Auto-merge on\./);
+});
+
+test("the settings search finds the Global orchestrator by auto-merge, approval profile and merge", () => {
+  const settings = read("settings.js");
+  const general = settings.slice(settings.indexOf('settingsSection({ page: "general"'));
+  const shell = read("gui-shell.js");
+  const normalize = shell.slice(shell.indexOf("const normalize ="), shell.indexOf("\n", shell.indexOf("const normalize =")));
+  const gui = read("gui-settings.js");
+  const from = gui.indexOf("function searchSettingsItems(");
+  const search = gui.slice(from, gui.indexOf("\n}\n", from) + 3);
+  const context = { settingsSections: [] };
+  vm.createContext(context);
+  vm.runInContext(`function settingsSection(s) { settingsSections.push(s); }\n${general.slice(0, general.indexOf("] });") + 5)}\n${normalize}\n${search}\nthis.find = (q) => searchSettingsItems(q).map((item) => item.title);`, context);
+  for (const query of ["auto-merge", "auto merge", "Auto-merge", "approval profile", "approval", "merge"]) {
+    assert.equal(context.find(query)[0], "Global orchestrator", `"${query}" finds ${JSON.stringify(here(context.find(query)))}`);
+  }
+});
+
+test("saving sends auto-merge and a custom profile to every online machine, and the default as empty", async () => {
+  const { context, element, calls } = page({ settings: { mm: { host: true } } });
+  await context.globalOrchestratorSettingsHtml();
+  context.bindGlobalOrchestratorSettings();
+  element("go-name").value = "Orchestrator";
+  element("go-busy").value = "queue";
+  element("go-reports").value = "auto";
+  element("go-group-reports").checked = true;
+  element("go-auto-merge").checked = true;
+  element("go-approval-profile").value = "Merge docs only.\nEverything else waits.";
+  await element("go-save").onclick();
+  const writes = () => here(calls.filter(([, call]) => call.cmd === "set_global_orchestrator_settings").map(([machine, call]) => [machine, call.settings.auto_merge, call.settings.approval_profile]));
+  assert.deepEqual(writes(), [["mm", true, "Merge docs only.\nEverything else waits."], ["mb", true, "Merge docs only.\nEverything else waits."]]);
+
+  calls.length = 0;
+  element("go-auto-merge").checked = false;
+  element("go-approval-reset").onclick();
+  await element("go-save").onclick();
+  assert.deepEqual(writes(), [["mm", false, ""], ["mb", false, ""]]);
 });
 
 test("saving refuses a host that cannot take the write, without sending any", async () => {

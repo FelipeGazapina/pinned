@@ -40,6 +40,8 @@ body[data-mode="gui"] #settings :is(input, select, textarea):focus { border-colo
 body[data-mode="gui"] #settings select { appearance: none; -webkit-appearance: none; padding-right: 32px; cursor: pointer;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23818181' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 15 5 5 5-5'/%3E%3Cpath d='m7 9 5-5 5 5'/%3E%3C/svg%3E");
   background-repeat: no-repeat; background-position: right 10px center; background-size: 14px; }
+/* The input rule above sets the padding of every field, so a select sized to its text needs its arrow room back. */
+body[data-mode="gui"] #settings #posthog-host-choice { padding-right: 32px; }
 body[data-mode="gui"] #settings select option { background: var(--g-raised); color: var(--g-fg); }
 body[data-mode="gui"] #settings textarea { font: 12px/1.55 var(--g-mono); }
 body[data-mode="gui"] #settings input[type="checkbox"] { accent-color: var(--g-primary); }
@@ -306,6 +308,19 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
 #settings-page #global-orchestrator-settings .chip { white-space: nowrap; }
 @media (min-width: 640px) { #settings-page #global-orchestrator-settings .go-name .chips { flex-wrap: nowrap; } }
 #settings-page #global-orchestrator-settings .side-setting select { width: 232px; }
+/* The approval profile opens under its label, its text the row's full width. */
+#settings-page #global-orchestrator-settings .side-setting[data-setting="approval-profile"] { flex-wrap: wrap; }
+#settings-page #global-orchestrator-settings .go-approval { flex: 1 1 100%; }
+#settings-page #global-orchestrator-settings .go-approval summary { cursor: pointer; }
+/* The column is a div inside the details: a details is no flex container in every engine. */
+#settings-page #global-orchestrator-settings .go-approval-body { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; margin-top: 8px; }
+#settings-page #global-orchestrator-settings .go-approval textarea { box-sizing: border-box; width: 100%; min-height: 400px; resize: vertical; }
+#settings-page #global-orchestrator-settings .go-approval-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; width: 100%; }
+/* A machine whose own settings differ from the host's: a warning above the fields until they match. */
+#settings-page #global-orchestrator-settings .go-drift { max-width: 520px; margin: 0 0 16px; padding: 12px; border-radius: 8px; color: var(--g-warning-fg); background: rgb(var(--g-warning-rgb) / 0.12); }
+#settings-page #global-orchestrator-settings .go-drift p { margin: 0 0 8px; }
+/* Its button names the host, so its label wraps, even inside a long name, rather than run past a narrow screen. */
+#settings-page #global-orchestrator-settings .go-drift button { height: auto; min-height: 32px; max-width: 100%; padding-block: 6px; white-space: normal; overflow-wrap: anywhere; }
 #settings-page #global-orchestrator-settings .actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; max-width: 520px; margin: 16px 0 0; }
 @media (max-width: 639px) {
   #settings-page #global-orchestrator-settings .side-setting:is([data-setting="name"], [data-setting="host"], [data-setting="busy"], [data-setting="reports"], [data-setting="memory"]) { flex-wrap: wrap; }
@@ -314,6 +329,7 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
   #settings-page #global-orchestrator-settings .side-setting:is([data-setting="name"], [data-setting="host"]) .chips { justify-content: flex-start; }
   #settings-page #global-orchestrator-settings .go-name input { width: 100%; }
   #settings-page #global-orchestrator-settings .side-setting select { width: 100%; flex: 1 1 100%; }
+  #settings-page #global-orchestrator-settings .go-approval textarea { min-height: 240px; }
 }
 #settings-page #global-orchestrator-settings #go-notes:empty { display: none; }
 
@@ -332,3 +348,21 @@ body[data-mode="gui"] #settings .switch input:focus-visible + span { outline: no
 #settings .mcp-found { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 #settings .mcp-found > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 600px) { #settings .mcp-fields { grid-template-columns: minmax(0, 1fr); } }
+/* Workflow runs: one card per run that opens to its detail; the trigger's JSON scrolls in its own box, and long step values wrap. */
+#settings .workflow-run summary { cursor: pointer; }
+#settings .workflow-run summary > span { margin-left: 6px; }
+#settings .workflow-run[data-status="failed"] .workflow-run-status { color: var(--g-error); }
+#settings .workflow-run h3 { margin: 14px 0 6px; font-size: 13px; font-weight: 600; }
+#settings .workflow-run pre { max-height: 240px; overflow: auto; margin: 0; padding: 6px 8px; border-radius: 6px; background: rgb(var(--g-ink-rgb) / 0.04);
+  font: 12px/1.5 var(--g-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+#settings .workflow-run :is(ul, ol) { margin: 0; padding-left: 18px; }
+#settings .workflow-run-steps code { overflow-wrap: anywhere; }
+#settings-page #memory .memory-row { margin: 8px 0 8px 20px; }
+#settings-page #memory .memory-size { flex: none; font-variant-numeric: tabular-nums; }
+#settings-page #memory button { display: inline-flex; align-items: center; gap: 6px; }
+#settings-page #memory .side-setting > div:first-child { min-width: 0; }
+#settings-page #memory .side-setting :is(label, .meta) { overflow-wrap: anywhere; }
+@media (max-width: 639px) {
+  #settings-page #memory .side-setting { flex-wrap: wrap; }
+  #settings-page #memory .memory-actions { flex: 1 1 100%; }
+}

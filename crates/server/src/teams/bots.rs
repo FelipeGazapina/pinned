@@ -42,11 +42,16 @@ pub const MORE_THAN_ONE_SESSION: &str =
 pub const SORTS_AT_THE_CHECK: &str =
     "a team bot can't use a routing trigger yet: edit its steps in the workflow editor first";
 
+/// What a workflow with an observability trigger is refused with as a bot: the team keeps no
+/// PostHog key, and its poller reads no PostHog project.
+pub const OBSERVABILITY_NOT_YET: &str = "a team bot can't use an observability trigger yet";
+
 /// Refuses a workflow whose trigger is not one a bot can have yet ("GitHub-event bots are not
-/// available yet"). Linear, Slack, manual and schedule triggers are fine, and today they are the
-/// only kinds. The matches name every kind on purpose: a GitHub-event trigger added later does not
-/// compile until it is refused here. Refuses a graph that holds more than one session or talk step,
-/// with those of the team's `workflows` it calls (`MORE_THAN_ONE_SESSION`).
+/// available yet"). Linear, Slack, called, manual and schedule triggers are fine; an
+/// observability trigger is not (`OBSERVABILITY_NOT_YET`). The matches name every kind on
+/// purpose: a GitHub-event trigger added later does not compile until it is refused here or
+/// let through. Refuses a graph that holds more than one session or talk step, with those of the
+/// team's `workflows` it calls (`MORE_THAN_ONE_SESSION`).
 fn available(workflow: &Connector, workflows: &[Connector]) -> Result<(), String> {
     match &workflow.trigger {
         Trigger::LinearLabel { .. }
@@ -57,6 +62,7 @@ fn available(workflow: &Connector, workflows: &[Connector]) -> Result<(), String
         | Trigger::LinearStatus { .. }
         | Trigger::LinearAssigned { .. }
         | Trigger::Schedule { .. } => {}
+        Trigger::Observability { .. } => return Err(OBSERVABILITY_NOT_YET.into()),
     }
     if workflow.sorts_messages_at_the_check() {
         return Err(SORTS_AT_THE_CHECK.into());
@@ -75,6 +81,7 @@ fn available(workflow: &Connector, workflows: &[Connector]) -> Result<(), String
             | Watch::LinearStatus { .. }
             | Watch::LinearAssigned { .. }
             | Watch::Schedule { .. } => {}
+            Watch::Observability { .. } => return Err(OBSERVABILITY_NOT_YET.into()),
         }
     }
     let library: Library = workflows.iter().map(|c| (c.id.clone(), c.graph.clone().unwrap_or_else(|| migrate(c)))).collect();
@@ -607,4 +614,39 @@ pub async fn run_ended(hub: &Hub, team: Uuid, run: &Run) -> Result<(), String> {
 /// change and run only as its bots (`save_bot`, `delete_bot`, `run_now`).
 pub async fn hub_call(hub: &Arc<Hub>, scope: &Scope, call: HubCall) -> Result<Value, String> {
     Box::pin(hub.hub_call(&scope.team, call)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pinned_core::connectors::ObservabilitySource;
+    use pinned_core::graph::{Edge, Graph, Node, NodeId, PortId};
+    use serde_json::json;
+
+    fn workflow(trigger: Value) -> Connector {
+        serde_json::from_value(json!({
+            "id": "c1", "name": "Errors", "enabled": true, "trigger": trigger, "folder": "/repo", "model": "",
+            "effort": "high", "permissionMode": "plan", "worktree": false, "instructions": "",
+        }))
+        .unwrap()
+    }
+
+    fn graph(watch: Watch) -> Graph {
+        let node = |id: &str, kind: NodeKind| Node { id: NodeId(id.into()), name: id.into(), position: [0, 0], group_name: None, kind };
+        Graph {
+            nodes: vec![node("trigger", NodeKind::Trigger { watch }), node("talk", NodeKind::Talk { prompt: String::new() })],
+            edges: vec![Edge { from: NodeId("trigger".into()), port: PortId("out".into()), to: NodeId("talk".into()) }],
+        }
+    }
+
+    #[test]
+    fn a_bot_refuses_an_observability_trigger() {
+        let observes = workflow(json!({ "kind": "observability", "source": { "kind": "posthog" } }));
+        assert_eq!(available(&observes, std::slice::from_ref(&observes)), Err(OBSERVABILITY_NOT_YET.into()));
+        let mut drawn = workflow(json!({ "kind": "manual" }));
+        drawn.graph = Some(graph(Watch::Observability { source: ObservabilitySource::Posthog }));
+        assert_eq!(available(&drawn, std::slice::from_ref(&drawn)), Err(OBSERVABILITY_NOT_YET.into()), "a graph's observability watch too");
+        let manual = workflow(json!({ "kind": "manual" }));
+        assert_eq!(available(&manual, std::slice::from_ref(&manual)), Ok(()));
+    }
 }

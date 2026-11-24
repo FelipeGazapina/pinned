@@ -1109,6 +1109,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
     hub.push_machines(&account).await;
     tokio::spawn(crate::surface::deliver_notices(hub.clone(), account.clone(), machine.clone()));
     tokio::spawn(crate::remote::deliver_held(hub.clone(), account.clone(), machine.clone()));
+    tokio::spawn(crate::global_settings::deliver(hub.clone(), account.clone(), machine.clone()));
     eprintln!("pinned-server: machine {machine} of account {} connected (pinned {version})", account.id);
 
     let (mut sink, mut stream) = socket.split();
@@ -1282,6 +1283,8 @@ async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String,
 pub(crate) fn run_work(call: &HubCall) -> Option<(String, Subject)> {
     match call {
         HubCall::Stage { connector, subject, .. } | HubCall::RunSet { connector, subject, .. } => Some((connector.clone(), subject.clone())),
+        // An observability run's filing acts for its own subject, which has no Slack thread.
+        HubCall::LinearCreate { connector, subject: Some(issue), .. } => Some((connector.clone(), Subject::LinearIssue { issue: issue.clone() })),
         HubCall::SlackReply { connector, channel, thread, .. }
         | HubCall::LinearCreate { connector, channel, thread, .. }
         | HubCall::LinearTake { connector, channel, thread, .. } => {

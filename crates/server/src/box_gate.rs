@@ -51,6 +51,7 @@ pub fn box_may_send(call: &HubCall) -> Result<(), String> {
         | HubCall::SyncPull { .. }
         | HubCall::ListSchedules
         | HubCall::ScheduleRuns { .. }
+        | HubCall::WorkflowRuns { .. }
         | HubCall::BoxStatus { .. }
         | HubCall::Machines
         | HubCall::MachineStates
@@ -90,6 +91,8 @@ pub fn box_may_send(call: &HubCall) -> Result<(), String> {
         | HubCall::AutoArchive { .. }
         | HubCall::Team { .. } => return Ok(()),
         HubCall::Mirror { .. } | HubCall::Handback { .. } => return Err("a box may not keep a copy of the account's keys".into()),
+        // A decision model asked with the account's key, with no spend limit, on text a box may have read anywhere.
+        HubCall::Classify { .. } => return Err("a box may not spend the account's Vercel AI Gateway key".into()),
         // A Capitão's report on its own work, and a worker it hands to another box, which is held
         // to this gate as this box is.
         HubCall::Relay { to: RelayTo::Orchestrator { .. }, .. } => return Ok(()),
@@ -135,6 +138,8 @@ pub fn box_may_send(call: &HubCall) -> Result<(), String> {
         | HubCall::DisconnectGithub
         | HubCall::ConnectVercel { .. }
         | HubCall::DisconnectVercel
+        | HubCall::ConnectPosthog { .. }
+        | HubCall::DisconnectPosthog
         | HubCall::ConnectUpstash { .. }
         | HubCall::DisconnectUpstash
         | HubCall::ConnectConvex { .. }
@@ -148,7 +153,10 @@ pub fn box_may_send(call: &HubCall) -> Result<(), String> {
         | HubCall::SetBoxClaudeToken { .. }
         | HubCall::RemoveBoxClaudeToken { .. }
         | HubCall::MintBoxClaudeToken { .. }
-        | HubCall::CancelBoxClaudeToken { .. } => SETTINGS,
+        | HubCall::CancelBoxClaudeToken { .. }
+        // The global orchestrator settings page's save, which the hub sends to the other machines.
+        | HubCall::RecordGlobalOrchestratorSave { .. }
+        | HubCall::GlobalOrchestratorSave => SETTINGS,
         // Its machines and boxes. A box's session asks to extend its own box through `box_may_act`.
         HubCall::OpenBox { .. } | HubCall::ExtendBox { .. } | HubCall::RenameMachine { .. } | HubCall::RemoveMachine { .. } | HubCall::PairCode => MACHINES,
         // Its people and agents.
@@ -222,6 +230,12 @@ mod tests {
     }
 
     #[test]
+    fn a_box_may_read_the_accounts_workflow_runs() {
+        assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "workflow_runs" }))), Ok(()));
+        assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "workflow_runs", "workflow": "c1", "limit": 5 }))), Ok(()));
+    }
+
+    #[test]
     fn a_box_may_not_set_the_reviewer_or_the_worker_profiles() {
         let refused = Err(refusal("way of working"));
         assert_eq!(refused, Err("a box may not change the account's way of working".to_owned()));
@@ -241,6 +255,9 @@ mod tests {
             box_may_send(&call(serde_json::json!({ "cmd": "release_workflows" }))),
             Err("a box may not change the account's workflows".to_owned())
         );
+        for save in [serde_json::json!({ "cmd": "record_global_orchestrator_save", "settings": { "auto_merge": true }, "took": [] }), serde_json::json!({ "cmd": "global_orchestrator_save" })] {
+            assert_eq!(box_may_send(&call(save)), Err("a box may not change the account's settings".to_owned()));
+        }
     }
 
     #[test]
@@ -286,6 +303,18 @@ mod tests {
             assert_eq!(box_may_act(BOX, &act, true, false), Err(refused.to_owned()), "on the box itself");
             assert_eq!(box_may_act(BOX, &act, false, false), Err(refused.to_owned()), "on another machine");
         }
+    }
+
+    #[test]
+    fn a_box_may_not_spend_the_accounts_gateway_key_on_classify() {
+        let refused = Err("a box may not spend the account's Vercel AI Gateway key".to_owned());
+        let args = serde_json::json!({ "text": "The export button 500s", "question": "Is this a bug report?" });
+        let mut sent = args.clone();
+        sent["cmd"] = serde_json::json!("classify");
+        assert_eq!(box_may_send(&call(sent)), refused);
+        assert_eq!(box_may_act(BOX, &acted("classify", args.clone()), true, true), refused, "on the box itself");
+        assert_eq!(box_may_act(BOX, &acted("classify", args), false, true), refused, "on another machine");
+        assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "vercel_models" }))), Ok(()), "the keyless model list stays a read");
     }
 
     #[test]
