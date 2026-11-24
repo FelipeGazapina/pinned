@@ -523,6 +523,8 @@ mod tests {
 
     #[cfg(unix)]
     fn thread_claude(dir: &Path) -> PathBuf {
+        // A turn's Done prices its tokens, and the price download needs the TLS provider `main` installs.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let claude = dir.join("claude");
         let script = "#!/bin/sh\nif [ \"$1 $2\" = \"auth status\" ]; then echo '{\"loggedIn\":true,\"email\":\"ana@acme.dev\"}'; exit 0; fi\nprintf '%s\\0' \"$(pwd -P)\" \"$PINNED_ROLE\" \"$PINNED_PROJECT\" \"$CLAUDE_CONFIG_DIR\" \"$@\" > \"$0.tmp.$PINNED_TAB\" && mv \"$0.tmp.$PINNED_TAB\" \"$0.$PINNED_TAB\"\nexec sleep 30\n";
         std::fs::write(&claude, script).unwrap();
