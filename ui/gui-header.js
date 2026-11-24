@@ -1,6 +1,6 @@
 /** The chat header's own parts: the Captain or Worker chip, the time and cost (without the worker
- * count, which the thread's Workers block carries), a worker's Open diff, the layout group's pressed
- * states, and how the header folds as it narrows. */
+ * count, which the thread's Workers block carries) with the thread's turns and tokens, a worker's Open
+ * diff, the layout group's pressed states, and how the header folds as it narrows. */
 
 const roleChipHtml = (tab) =>
   isOrchestrator(tab) && !isGlobalOrchestratorTab(tab) ? `<span class="role-chip">Captain</span>` : tab.view.role === "worker" ? `<span class="role-chip worker">Worker</span>` : "";
@@ -10,9 +10,18 @@ function headStatsLabel(tab) {
   const parts = statsLabel(tab).split(" · ").filter(Boolean);
   return (tab.view.work ? parts.slice(0, -1) : parts).join(" · ");
 }
-/** The header's time and cost. A phone shows the cost only, so the cost comes twice and the style shows one. */
+/** The thread's own turns and tokens, as `14 turns · 2.4M in · 52k out`, each left out while unknown. */
+function headCountsLabel(tab) {
+  const { turns, tokens_in, tokens_out } = tab.view;
+  return [turns == null ? "" : `${turns} turn${turns === 1 ? "" : "s"}`, tokens_in == null ? "" : `${delegationTokens(tokens_in)} in`, tokens_out == null ? "" : `${delegationTokens(tokens_out)} out`].filter(Boolean).join(" · ");
+}
+/** The header's time and cost, then its turns and tokens. */
+function headLongLabel(tab) {
+  return [headStatsLabel(tab), headCountsLabel(tab)].filter(Boolean).join(" · ");
+}
+/** The header's time, cost and counts. A phone shows the cost only, so the cost comes twice and the style shows one. */
 function headStatsHtml(tab) {
-  const label = headStatsLabel(tab);
+  const label = headLongLabel(tab);
   const work = tab.view.work;
   const title = work ? `Cost of this thread and the ${nWorkers(work.workers)} it started${work.unknown ? `. ${unknownTitle(work.unknown)}` : ""}` : "";
   return label ? `<span class="stats" data-head-stats="${esc(tab.key)}"${title ? ` title="${esc(title)}"` : ""}><span class="long">${esc(label)}</span><span class="usd">${esc(statsLabel(tab, true))}</span></span>` : "";
@@ -22,7 +31,7 @@ visibleInterval(() => {
   for (const el of crumbEl.querySelectorAll("[data-head-stats]")) {
     const tab = tabByKey(el.dataset.headStats);
     if (!tab) continue;
-    for (const [part, text] of [[".long", headStatsLabel(tab)], [".usd", statsLabel(tab, true)]]) {
+    for (const [part, text] of [[".long", headLongLabel(tab)], [".usd", statsLabel(tab, true)]]) {
       const at = el.querySelector(part);
       if (at && at.textContent !== text) at.textContent = text;
     }
