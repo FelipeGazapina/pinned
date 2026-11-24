@@ -7,7 +7,7 @@ use crate::wire::{CutBySleep, Call, HubCall, MachineEvent, Program, ProjectView,
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Handoff, Progress};
 use crate::taste::{self, TasteField, TastePatch, TasteScope, Tastes};
 use crate::panel::{DeviceHub, FileServer, Shells};
-use crate::{sleep, branches, commands, favicon, files, github, history, hooks, mcp, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, sessions, skills, subagents, surface, sync, thread, titles, uploads, usage, workspace};
+use crate::{sleep, branches, commands, favicon, files, github, history, hooks, mcp, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, session_costs, sessions, skills, subagents, surface, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -778,6 +778,15 @@ struct BackgroundWait {
     clear_since: Option<Instant>,
 }
 
+/// A session's tally as its tab dropped it, saved once its transcript is read to the end.
+struct Dropped {
+    session: String,
+    tally: Tally,
+    account: Account,
+    title: Option<String>,
+    cwd: PathBuf,
+}
+
 struct Tab {
     cwd: PathBuf,
     account: Account,
@@ -903,6 +912,12 @@ impl Tab {
     /// the time COMPACT_WAIT lapses.
     fn compacting(&self) -> bool {
         self.compacting_since.is_some_and(|at| at.elapsed() < COMPACT_WAIT)
+    }
+
+    /// Drops the tally, and returns what saves the figures of its session once the tabs lock is let go.
+    fn drop_tally(&mut self) -> Option<Dropped> {
+        let tally = std::mem::take(&mut self.tally);
+        Some(Dropped { session: self.claude_session.clone()?, tally, account: self.account.clone(), title: self.title.clone(), cwd: self.cwd.clone() })
     }
 
     /// What reopens the tab's conversation, once claude has reported one.
@@ -1248,6 +1263,9 @@ pub struct Machine {
     questions: Mutex<crate::questions::Questions>,
     /// Every Captain session's plans, by its Claude session id.
     plans: Mutex<crate::plan_store::PlanStore>,
+    /// Each Claude session's cost, turns and active time as last read. Taken before `tabs`, never
+    /// while holding it.
+    session_costs: Mutex<session_costs::Store>,
     /// Shared threads. The lock is taken before `tabs`, and never across a start, a delivery or an emit.
     rooms: Mutex<crate::room::Store>,
     /// The reviews that hold a task's end now, by task.
@@ -1456,6 +1474,7 @@ impl Machine {
             sent: Mutex::new(sent),
             questions: Mutex::new(crate::questions::Questions::load(dir.as_deref())),
             plans: Mutex::new(crate::plan_store::PlanStore::load(dir.as_deref())),
+            session_costs: Mutex::new(session_costs::Store::load(dir.as_deref())),
             rooms: Mutex::new(crate::room::Store::load(dir.as_deref())),
             reviews: Mutex::default(),
             events: Box::new(events),
@@ -1854,6 +1873,7 @@ impl Machine {
                 let homes: Vec<PathBuf> = self.accounts.list().iter().filter(|a| a.provider == Provider::Claude).map(|a| self.accounts.home(a).join("projects")).collect();
                 json(usage::read(&homes, since, &usage::rates(self.rates_file.as_deref()), &usage::PriceBook::load(self.prices_file().as_deref())))
             }
+            Call::SessionCosts { since } => json(self.session_costs.lock().unwrap().since(since)),
             Call::UsagePrices => json(usage::PriceBook::load(self.prices_file().as_deref())),
             Call::SetUsagePrices { prices, aliases } => {
                 let file = self.prices_file().ok_or("this machine keeps no settings")?;
@@ -2709,6 +2729,7 @@ impl Machine {
         if self.thread_task(tab, false).is_some_and(|task| self.delegates.get(&task).is_some_and(|t| t.thread.is_some_and(|thread| !thread.runs))) {
             return self.tab(tab, |t| t.cwd.display().to_string());
         }
+        let mut dropped = None;
         let prepared = self.tab(tab, |t| {
             if !replace && (t.session.is_some() || t.starting) && t.launch.is_empty() {
                 return None;
@@ -2724,8 +2745,8 @@ impl Machine {
             }
             // Without launch arguments this is a fresh conversation, not the one recorded before.
             if t.launch.is_empty() {
+                dropped = t.drop_tally();
                 t.left_session = t.claude_session.take().or(t.left_session.take());
-                t.tally = Tally::default();
             }
             let mut args = std::mem::take(&mut t.launch);
             t.owes_turn = t.claude_session.is_none() && !args.is_empty();
@@ -2743,6 +2764,7 @@ impl Machine {
             }
             Some((t.cwd.clone(), t.account.clone(), t.program, args, t.env.clone(), t.bypass, asked, slept))
         })?;
+        self.save_dropped(dropped);
         let Some((cwd, account, program, args, env, bypass, asked, slept)) = prepared else {
             return self.tab(tab, |t| t.cwd.display().to_string());
         };
@@ -7462,11 +7484,11 @@ impl Machine {
     /// Hooks report the session on every event, since /clear or /resume inside claude swaps it.
     /// True when the session is new to the tab.
     fn record_session(&self, tab: &str, session: String, reported_cwd: Option<&str>) -> bool {
-        let Ok((new, changed, task, old)) = self.tab(tab, |t| {
+        let Ok((new, changed, task, old, dropped)) = self.tab(tab, |t| {
             let new = t.claude_session.as_ref() != Some(&session);
-            let mut old = None;
+            let (mut old, mut dropped) = (None, None);
             if new {
-                t.tally = Tally::default();
+                dropped = t.drop_tally();
                 old = t.claude_session.take().or(t.left_session.take());
             }
             let mut changed = new;
@@ -7477,10 +7499,11 @@ impl Machine {
                 changed = true;
             }
             t.claude_session = Some(session.clone());
-            (new, changed, t.task.clone(), old)
+            (new, changed, t.task.clone(), old, dropped)
         }) else {
             return false;
         };
+        self.save_dropped(dropped);
         if new {
             self.carry_plans(tab, old, &session);
         }
@@ -7554,20 +7577,44 @@ impl Machine {
         });
     }
 
-    /// Reads what the tab's transcript gained since the last read, outside the tabs lock, and
-    /// returns the turns counted so far. `None` when the tab has no transcript to read.
+    /// Reads what the tab's transcript gained since the last read, outside the tabs lock, saves the
+    /// session's figures, and returns the turns counted so far. `None` when the tab has no
+    /// transcript to read.
     fn read_stats(&self, tab: &str) -> Option<u32> {
         let (session, mut tally, account) = self.tab(tab, |t| Some((t.claude_session.clone()?, t.tally.clone(), t.account.clone()))).ok()??;
         let file = self.find_transcript(&account, &session)?;
         tally.advance(&file).ok()?;
         let turns = tally.turns;
-        self.tab(tab, |t| {
-            if t.claude_session.as_ref() == Some(&session) {
+        // Held from before the session is checked, so a save before its drop lands after this one.
+        let mut costs = self.session_costs.lock().unwrap();
+        let record = self
+            .tab(tab, |t| {
+                if t.claude_session.as_ref() != Some(&session) {
+                    return None;
+                }
+                let record = session_costs::record(&session, &tally, t.title.clone(), &t.cwd, &t.account.id, unix_now());
                 t.tally = tally;
-            }
-        })
-        .ok()?;
+                record
+            })
+            .ok()?;
+        if let Some(record) = record {
+            costs.save(record, unix_now());
+        }
         Some(turns)
+    }
+
+    /// Saves the figures of a session its tab dropped, off the caller's thread. Its transcript is
+    /// read to the end first, since claude writes a process's cost only as the process exits.
+    fn save_dropped(&self, dropped: Option<Dropped>) {
+        let (Some(machine), Some(Dropped { session, mut tally, account, title, cwd })) = (self.me.upgrade(), dropped) else { return };
+        std::thread::spawn(move || {
+            if let Some(file) = machine.find_transcript(&account, &session) {
+                let _ = tally.advance(&file);
+            }
+            if let Some(record) = session_costs::record(&session, &tally, title, &cwd, &account.id, unix_now()) {
+                machine.session_costs.lock().unwrap().save(record, unix_now());
+            }
+        });
     }
 
     /// Marks the tab compacting from PreCompact and clears the mark at PostCompact. The mark lapses
@@ -7728,10 +7775,12 @@ impl Machine {
         }
         let _ = self.tab(tab, |t| (t.interrupted, t.resume_at) = (false, None));
         let ended = self.tab(tab, |t| {
-            t.tally = Tally::default();
-            t.claude_session.take()
+            let dropped = t.drop_tally();
+            t.claude_session = None;
+            dropped
         });
-        if ended.ok().flatten().is_some() {
+        if let Ok(Some(dropped)) = ended {
+            self.save_dropped(Some(dropped));
             self.save_sessions();
         }
     }
@@ -17996,6 +18045,66 @@ Have another model review a risky change before it goes ahead.";
         for line in lines {
             writeln!(f, "{line}").unwrap();
         }
+    }
+
+    /// A plain tab whose session `s-child` ended a turn of 150 s that cost US$ 3.00, once that
+    /// turn's end saved it.
+    #[cfg(unix)]
+    fn session_cost_tab(name: &str) -> (Arc<Machine>, PathBuf, TabId, PathBuf) {
+        let dir = temp(name);
+        let claude = dir.join("claude");
+        let m = Machine::new(Launch { claude_home: Some(claude.clone()), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let tab = m.add_tab(dir.join("app"), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let transcript = claude.join("projects/app/s-child.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, format!("{}\n", json!({ "type": "user", "timestamp": "2026-11-20T10:00:00Z", "message": { "role": "user", "content": "Fix the build" } }))).unwrap();
+        m.record_event(hook_event(&tab, "working", &transcript, Some("Fix the build")));
+        wait_for("the prompt's read", || m.view(&tab).unwrap().last_message_at.is_some());
+        assert_eq!(m.call(Call::SessionCosts { since: 0 }), Ok(json!([])), "a tab with no figures yet has no record");
+        append(&transcript, &[json!({ "type": "system", "subtype": "turn_duration", "durationMs": 150_000 }), json!({ "type": "cost-state", "startTime": 100, "totalCostUSD": 3.0 })]);
+        m.record_event(hook_event(&tab, "done", &transcript, None));
+        wait_for("the turn's save", || m.call(Call::SessionCosts { since: 0 }) != Ok(json!([])));
+        (m, dir, tab, transcript)
+    }
+
+    #[cfg(unix)]
+    fn saved_costs(m: &Machine, since: u64) -> Vec<session_costs::Record> {
+        serde_json::from_value(m.call(Call::SessionCosts { since }).unwrap()).unwrap()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_turn_end_saves_the_session_cost_the_tab_shows() {
+        let (m, dir, tab, _) = session_cost_tab("session-cost-turn");
+        let stats = m.view(&tab).unwrap().stats.unwrap();
+        let turns = m.tab(&tab, |t| t.tally.turns).unwrap();
+        let saved = saved_costs(&m, 0);
+        assert_eq!(saved.len(), 1);
+        assert_eq!((saved[0].cost_usd, saved[0].active_ms, saved[0].turns), (stats.cost_usd, stats.active_ms, turns), "the record matches the tab");
+        assert_eq!((stats.cost_usd, stats.active_ms, turns), (Some(3.0), Some(150_000), 1));
+        let at = 1_795_168_800;
+        assert_eq!(
+            (saved[0].session.as_str(), saved[0].title.as_deref(), saved[0].project.clone(), saved[0].account.as_str(), saved[0].first_at, saved[0].last_at),
+            ("s-child", Some("Fix the build"), dir.join("app").display().to_string(), "claude", at, at),
+            "the last message's time, not the save's"
+        );
+        assert_eq!(saved_costs(&m, at + 1), vec![], "since filters on the last message");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_new_session_id_saves_the_old_session_cost_read_to_the_end_of_its_transcript() {
+        let (m, dir, tab, transcript) = session_cost_tab("session-cost-drop");
+        // Claude Code writes a process's cost only as it exits, after the turn end's read.
+        append(&transcript, &[json!({ "type": "cost-state", "startTime": 200, "totalCostUSD": 1.5 })]);
+        m.record_event(AgentEvent { session: Some("s-next".into()), ..hook_event(&tab, "working", &transcript, Some("Start over")) });
+        let old = || saved_costs(&m, 0).into_iter().find(|r| r.session == "s-child").unwrap();
+        wait_for("the old session's save", || old().cost_usd == Some(4.5));
+        assert_eq!((old().turns, old().active_ms, old().first_at), (1, Some(150_000), 1_795_168_800));
+        let view = m.view(&tab).unwrap();
+        assert_eq!((view.session.as_deref(), view.stats), (Some("s-next"), None), "the tab shows the new session");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

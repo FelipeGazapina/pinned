@@ -68,6 +68,7 @@ pub mod room;
 pub mod scaffold;
 pub mod schedule;
 pub mod scripts;
+pub mod session_costs;
 pub mod sessions;
 pub mod sleep;
 #[cfg(unix)]

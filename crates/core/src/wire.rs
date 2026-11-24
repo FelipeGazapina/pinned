@@ -612,6 +612,9 @@ pub enum Call {
     /// `Vec<usage::Row>`: the tokens claude's transcripts on the machine record from unix time `since`
     /// on, priced with the machine's `usage::PriceBook` over LiteLLM's list.
     TokenUsage { since: u64 },
+    /// `Vec<session_costs::Record>`: the cost, turns and active time the machine saved for each
+    /// Claude session whose last message is at or after unix time `since`.
+    SessionCosts { since: u64 },
     /// `usage::PriceBook`: the prices and model mappings the user set on the machine.
     UsagePrices,
     /// The `usage::PriceBook` after setting each model's price and mapping, or clearing it with `null`.

@@ -138,6 +138,12 @@ async function fetchUsage() {
     } catch (e) {
       env = { rows: [], error: String(e?.message ?? e) };
     }
+    // A machine too old to save its sessions lists no threads, and keeps its rows and status.
+    try {
+      env.threads = (await callOn(m, { cmd: "session_costs", since })).map((r) => ({ ...r, machine: m }));
+    } catch {
+      env.threads = [];
+    }
     if (seq !== usageState.seq) return;
     usageState.envs.set(m, { ...env, loaded: true, loading: false });
     if (shellPage() === "usage") renderUsagePage();
@@ -347,7 +353,28 @@ function spendHtml(s) {
       <div><dt>Cache savings</dt><dd class="fig">${usd(s.savings)}</dd></div></dl></section>
     ${s.tokens > 0 ? `<section class="shares fig">${cost ? sharesHtml("Cost by type", costByType(s), usd) + (s.fast > 0 ? sharesHtml("Cost by speed", speedParts(s), usd, premium) : "") : sharesHtml("Tokens by type", tokensByType(s), tokensText)}</section>` : ""}
     <section class="breakdown"><div class="breakdown-head"><h2>Breakdown</h2>${segmented("breakdown", [["model", "Model"], ["day", days === 1 ? "Hour" : "Day"]], usageState.breakdown, "Usage breakdown")}</div>
-      ${table}</section>`;
+      ${table}</section>${cost ? threadsHtml(s.buckets) : ""}`;
+}
+
+/** The sessions the selected machines saved whose last message falls in the window's `buckets`, costliest first,
+ * with their figures as the tab showed them. */
+function threadsHtml(buckets) {
+  const { days } = usageState;
+  const inWindow = new Set(buckets);
+  const selected = usageSelected();
+  const many = selected.length > 1;
+  const records = selected.flatMap((m) => usageState.envs.get(m)?.threads ?? []).filter((r) => inWindow.has(bucketOf(days, r.last_at)))
+    .sort((a, b) => (a.cost_usd == null) - (b.cost_usd == null) || (b.cost_usd ?? 0) - (a.cost_usd ?? 0) || b.last_at - a.last_at);
+  const rows = records.map((r) => {
+    const title = r.title || "New thread";
+    return `<tr><td title="${esc(title)}"><span class="clip">${esc(title)}</span></td><td class="opt" title="${esc(r.project)}">${esc(String(r.project).split(/[\\/]/).filter(Boolean).pop() || "/")}</td>${
+      many ? `<td class="opt">${esc(machineName(r.machine))}</td>` : ""}<td class="num fig">${esc(r.turns)}</td>${r.active_ms == null ? `<td class="num fig muted">—</td>` : `<td class="num fig">${esc(durationLabel(r.active_ms / 1000))}</td>`}
+      ${r.cost_usd == null ? `<td class="num fig muted">Unknown</td>` : `<td class="num fig strong">${esc(costLabel(r.cost_usd))}</td>`}</tr>`;
+  }).join("");
+  const cols = [["Thread", ""], ["Project", "opt"], ...(many ? [["Machine", "opt"]] : []), ["Turns", "num"], ["Active time", "num"], ["Cost", "num"]];
+  return `<section class="breakdown"><h2>Threads</h2><div class="table-region" role="region" aria-label="Cost by thread" tabindex="0"><table class="by-time threads"><thead><tr>${
+    cols.map(([name, cls]) => `<th${cls ? ` class="${cls}"` : ""}>${name}</th>`).join("")}</tr></thead>
+    <tbody>${rows || `<tr class="empty"><td colspan="${cols.length}">No saved threads in this window.</td></tr>`}</tbody></table></div></section>`;
 }
 
 /** T3 Code's share-bar colors: the text color mixed into the background. */
