@@ -726,9 +726,10 @@ async fn waiting(hub: &Hub, account: &Account) -> Result<Vec<Confirmation>, Stri
 
 /// Why an agent's schedule act waits for the user although its action is a Write, or None when it
 /// runs at once. Every rule of when an agent's schedule act waits lives here:
-/// - a save that carries approvals (`schedule::save_needs_ok`), as a dry run never does;
+/// - a save that carries approvals, or whose action is a workflow (`schedule::save_needs_ok`), as a
+///   dry run never does;
 /// - an edit, a pause or a start again, or a delete of a task the user created;
-/// - starting a task that carries approvals again, whoever created it.
+/// - starting again a task that carries approvals or whose action is a workflow, whoever created it.
 ///
 /// It fails closed: a task id it cannot read, or a task the account does not hold, is an error that
 /// refuses the act, never a "no". It reads ids with `hub::task_key`, as `Hub::schedule_call` does.
