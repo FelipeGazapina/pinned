@@ -7,7 +7,11 @@
 const TASTE_KNOBS = ["strategy", "ladder", "hard_model", "parallel", "autonomy", "review_diffs", "second_opinion"];
 /** The delegation limits besides `parallel`, which pinned enforces and no profile sets. */
 const TASTE_LIMITS = ["tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"];
-const TASTE_FIELDS = [...TASTE_KNOBS, "skills", "context", ...TASTE_LIMITS];
+/** What the agents escalate to the user. Only the user sets these, and no profile does. */
+const TASTE_ESCALATION = ["escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas"];
+const TASTE_FIELDS = [...TASTE_KNOBS, "skills", "context", ...TASTE_LIMITS, ...TASTE_ESCALATION];
+/** The most changed lines the escalation limit may be, as Rust's `MAX_ESCALATE_OVER_LINES`. */
+const TASTE_MAX_ESCALATE_LINES = 100000;
 const TASTE_MAX_PARALLEL = 100;
 const TASTE_TIERS = ["low", "mid", "high"];
 /** The sizes an Upstash Box opens at, smallest first. A box with none chosen opens small. */
