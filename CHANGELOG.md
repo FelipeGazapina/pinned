@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.18.11 (Unreleased)
+## 0.18.11 (2026-11-24)
 
 ### Added
 
