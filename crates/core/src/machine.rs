@@ -9951,6 +9951,31 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn a_tick_that_moves_only_working_tabs_counts_writes_no_session_cost() {
+        let (root, m, _heard, tab, dir) = watching("live-counts-save");
+        let reply = |id: &str, at: &str| json!({ "type": "assistant", "timestamp": at, "requestId": format!("r-{id}"), "message": { "id": id, "model": "claude-opus-5-5", "content": [], "usage": { "input_tokens": 10, "output_tokens": 5 } } });
+        let transcript = dir.join("s1.jsonl");
+        let saved = root.join("config").join(session_costs::FILE);
+        std::fs::write(&transcript, format!("{}\n{}\n", reply("m1", "2026-11-20T10:00:00Z"), json!({ "type": "system", "subtype": "turn_duration", "durationMs": 60_000 }))).unwrap();
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Working)).unwrap();
+        m.count_working_tabs();
+        assert!(saved.exists(), "the first figures are saved");
+        std::fs::remove_file(&saved).unwrap();
+
+        append(&transcript, &[reply("m2", "2026-11-20T10:00:03Z")]);
+        m.count_working_tabs();
+        assert_eq!(m.view(&tab).unwrap().tokens_out, Some(10));
+        assert!(!saved.exists(), "new tokens and a newer last message alone write nothing");
+
+        append(&transcript, &[json!({ "type": "system", "subtype": "turn_duration", "durationMs": 30_000 })]);
+        m.count_working_tabs();
+        let records: Vec<session_costs::Record> = serde_json::from_slice(&std::fs::read(&saved).expect("a new turn writes")).unwrap();
+        assert_eq!((records[0].turns, records[0].active_ms, records[0].last_at), (2, Some(90_000), 1_795_168_803));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_cached_transcript_is_not_scanned_again() {
         let (root, m, heard, tab, _) = watching("thread-cache");
         let projects = root.join("config/accounts/work/projects");
