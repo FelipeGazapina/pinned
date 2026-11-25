@@ -212,6 +212,8 @@ body[data-jump-hints] .thread-row[data-jump]::after { display: block; }
 @media (max-width: 639px) {
   #settings-page #auto-archive-settings .side-setting { flex-wrap: wrap; }
   #settings-page #auto-archive-settings .side-setting select { flex: 1 1 100%; }
+  #settings-page #compaction-settings .side-setting { flex-wrap: wrap; }
+  #settings-page #compaction-settings .side-setting select { flex: 1 1 100%; }
 }
 #settings-page .side-setting select { width: 176px; flex: none; }
 @media (max-width: 639px) { #settings-page .side-setting select { width: 100%; flex: 1; } }

@@ -2537,20 +2537,22 @@ impl Db {
         Ok(rows.iter().map(|r| r.get(0)).collect())
     }
 
-    /// Writes the store, an object as JSON text, with `runs` under `runs` and `jobs` under `jobs`
-    /// (none removes them), unless the row holds this version or a newer one. True when it was
-    /// written. The text goes to Postgres as it is; the hub never builds the document.
-    pub async fn save_store(&self, account: Uuid, version: i64, store: Option<&str>, runs: Option<&str>, jobs: Option<&str>) -> Result<bool, WriteFailure> {
+    /// Writes the store, an object as JSON text, with `runs` under `runs`, `jobs` under `jobs` and
+    /// `lines` under `lines` (none removes them), unless the row holds this version or a newer one.
+    /// True when it was written. The text goes to Postgres as it is; the hub never builds the
+    /// document.
+    pub async fn save_store(&self, account: Uuid, version: i64, store: Option<&str>, runs: Option<&str>, jobs: Option<&str>, lines: Option<&str>) -> Result<bool, WriteFailure> {
         let store = store.unwrap_or("{}");
         let written = self
             .connection
             .write(
-                "update accounts set store = ($3::text::jsonb - 'runs' - 'jobs')
+                "update accounts set store = ($3::text::jsonb - 'runs' - 'jobs' - 'lines')
                    || (case when $4::text is null then '{}'::jsonb else jsonb_build_object('runs', $4::text::jsonb) end)
-                   || (case when $5::text is null then '{}'::jsonb else jsonb_build_object('jobs', $5::text::jsonb) end),
+                   || (case when $5::text is null then '{}'::jsonb else jsonb_build_object('jobs', $5::text::jsonb) end)
+                   || (case when $6::text is null then '{}'::jsonb else jsonb_build_object('lines', $6::text::jsonb) end),
                    store_version = $2
                  where id = $1 and store_version < $2",
-                &[&account, &version, &store, &runs, &jobs],
+                &[&account, &version, &store, &runs, &jobs, &lines],
             )
             .await?;
         Ok(written == 1)

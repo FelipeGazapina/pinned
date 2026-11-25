@@ -161,7 +161,7 @@ fn parse_kind(model: &str, type_name: Option<&str>) -> Result<Kind, String> {
     type_name.and_then(kind_of_type).ok_or_else(|| not_a_model(model))
 }
 
-async fn kind_of(model: &str) -> Result<Kind, String> {
+pub(crate) async fn kind_of(model: &str) -> Result<Kind, String> {
     let (status, body) = exchange(reqwest::Method::GET, &format!("/models/{model}"), None, None).await?;
     if status == reqwest::StatusCode::NOT_FOUND {
         return Err(not_a_model(model));

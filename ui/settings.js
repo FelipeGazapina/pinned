@@ -193,7 +193,7 @@ let settings = { linear: null, slack: null, connectors: [], checked: null };
  * with `settingsSection({ page, label, icon, show, search })`: `show` draws the page into settingsPage,
  * and `search` lists the settings it holds as `{ title, terms, id }`. A result scrolls to the element
  * `id`, or else to the heading or label on the page that reads `title`. */
-const SETTINGS_ORDER = ["general", "appearance", "projects", "keybindings", "integrations", "accounts", "mcp-servers", "connectors", "account", "machines", "memory", "agent-activity", "archive"];
+const SETTINGS_ORDER = ["general", "appearance", "projects", "keybindings", "integrations", "accounts", "mcp-servers", "connectors", "workflow-runs", "account", "machines", "memory", "agent-activity", "archive"];
 const settingsSections = [];
 function settingsSection(section) {
   const rank = (p) => (SETTINGS_ORDER.includes(p) ? SETTINGS_ORDER.indexOf(p) : SETTINGS_ORDER.length - 1.5);
@@ -2817,6 +2817,7 @@ settingsSection({ page: "general", label: "General", icon: "settings", show: () 
   { title: "Run in the background", terms: ["no window background memory ram web app dock hidden segundo plano"] },
   { title: "Organization", terms: ["sidebar working section auto settle merged inactive threads pull request"] },
   { title: "Send shortcut", terms: ["enter new line multiline cmd ctrl composer"] },
+  { title: "Compaction", terms: ["compact context tokens threshold summarize history cache composer never"] },
 ] });
 settingsSection({ page: "integrations", label: "Connectors", icon: "plug", show: () => ((settingsPage.innerHTML = readOnlyWithoutHub("Connectors", integrationsHtml())), loadExternalAgents(), loadBoxLogins(), loadConvexProjects()), search: [
   { title: "External agents (MCP)", terms: ["mcp oauth grok external agent remote connector orchestrator captain capitao capitão token revoke"], id: "external-agents" },

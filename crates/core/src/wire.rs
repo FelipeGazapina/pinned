@@ -435,6 +435,12 @@ pub enum Call {
     AutoArchiveSettings,
     /// The `auto_archive::Settings` saved, answered as saved.
     SetAutoArchiveSettings { settings: crate::auto_archive::Settings },
+    /// `compaction::Settings` of this machine: from what context size the app offers to compact a
+    /// session.
+    CompactionSettings,
+    /// The `compaction::Settings` saved, answered as saved. A threshold under
+    /// `compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.
+    SetCompactionSettings { settings: crate::compaction::Settings },
     /// `on`, as saved. Whether the desktop app on this machine runs in the background, with no
     /// window, which it applies at once: on closes the window, off opens it. A machine without the
     /// app refuses it.
@@ -612,6 +618,9 @@ pub enum Call {
     /// `Vec<usage::Row>`: the tokens claude's transcripts on the machine record from unix time `since`
     /// on, priced with the machine's `usage::PriceBook` over LiteLLM's list.
     TokenUsage { since: u64 },
+    /// `Vec<session_costs::Record>`: the cost, turns and active time the machine saved for each
+    /// Claude session whose last message is at or after unix time `since`.
+    SessionCosts { since: u64 },
     /// `usage::PriceBook`: the prices and model mappings the user set on the machine.
     UsagePrices,
     /// The `usage::PriceBook` after setting each model's price and mapping, or clearing it with `null`.
@@ -1048,6 +1057,95 @@ pub struct RunStarted {
     pub tab: TabId,
 }
 
+/// One workflow run as `workflow_runs` answers it, built from `graph::runner::Run` by
+/// `runner::view`. The stored run and its walk state never reach an app.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct WorkflowRun {
+    pub id: String,
+    /// The workflow whose trigger started the run.
+    pub workflow: String,
+    /// That workflow's name now, or its id when the account no longer has it.
+    pub workflow_name: String,
+    pub subject: Subject,
+    pub status: WorkflowRunStatus,
+    /// Why it failed. Only on a failed run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    /// RFC 3339 of the first and the last step. None while the log is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_step_at: Option<String>,
+    /// The trigger's payload as the run got it: the Linear issue, Slack message or error. Text
+    /// from outside pinned.
+    #[serde(default)]
+    pub trigger: Value,
+    /// Each classify step that answered, by node id.
+    pub classified: Vec<WorkflowRunClassified>,
+    pub session: WorkflowRunSession,
+    /// Every log entry, in order.
+    pub steps: Vec<WorkflowRunStep>,
+    /// The step a running or waiting run is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_on: Option<WorkflowRunNode>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkflowRunStatus {
+    Running,
+    /// Waiting for its session to end its turn.
+    Waiting,
+    Done,
+    Failed,
+}
+
+/// A run's session, without the runner's wait bookkeeping.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum WorkflowRunSession {
+    None,
+    Live {
+        machine: String,
+        tab: String,
+        /// Claude Code's session id, once a hook reported it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claude: Option<String>,
+    },
+    /// The tab is gone.
+    Detached {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claude: Option<String>,
+    },
+}
+
+/// A step of a workflow. `name` is the node's name in the workflow's graph now, `""` when the
+/// workflow or the node is gone.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct WorkflowRunNode {
+    pub workflow: String,
+    pub node: String,
+    pub name: String,
+}
+
+/// What a classify step answered: (question, answer) pairs in question order.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct WorkflowRunClassified {
+    pub node: String,
+    pub name: String,
+    pub answers: Vec<(String, String)>,
+}
+
+/// One log entry: when, which step, and what happened there, as the runner logged it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct WorkflowRunStep {
+    pub at: String,
+    pub workflow: String,
+    pub node: String,
+    pub name: String,
+    pub what: Value,
+}
+
 /// An interactive Upstash Box session: its phase, age and budget, for its cost display.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct BoxStatus {
@@ -1208,6 +1306,14 @@ pub enum HubCall {
     /// `RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,
     /// on the machine the workflow names and under the limits of its project there.
     RunWorkflow { id: String },
+    /// `Vec<WorkflowRun>`: the account's workflow runs, newest first, only those `workflow`'s
+    /// trigger started when it names one. No `limit` answers 50; at most 200.
+    WorkflowRuns {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workflow: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
     /// Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.
     GenerateWorkflow { model: String, description: String },
     /// Starts an interactive session on a new Upstash Box cloning `repo`. Returns `BoxStatus`.
@@ -1622,6 +1728,32 @@ pub enum HubCall {
     RecordGlobalOrchestratorSave { settings: global::Settings, took: Vec<MachineId> },
     /// The account's last `global_orchestrator::AccountSave`, or `null` when it has none.
     GlobalOrchestratorSave,
+    /// `classify::Answer`: which of `categories`, or `yes` or `no` to `question`, a decision model on
+    /// the account's Vercel AI Gateway finds fits `text`, asked with the account's key. One gateway call.
+    Classify {
+        /// What to classify, at most 8,000 characters. The model reads it as data, never as instructions.
+        text: String,
+        /// Two to 20 categories to choose from, each a `name` and an optional `description` the model
+        /// reads to tell them apart. Leave it out to ask `question` instead.
+        #[serde(default)]
+        categories: Vec<crate::classify::Category>,
+        /// A yes/no question about the text, answered as the categories `yes` and `no`. Leave it out to
+        /// give `categories` instead.
+        #[serde(default)]
+        question: Option<String>,
+        /// Extra guidance for the model. With the question and the categories, at most 4,000 characters.
+        #[serde(default)]
+        instructions: String,
+        /// The decision model's gateway id, as `provider/name`. `typesafe-ai/jev` when left out.
+        #[serde(default)]
+        model: Option<String>,
+        /// The pick is `unsure` below this probability, from 0 to 1. 0.6 when left out.
+        #[serde(default)]
+        unsure_below: Option<f64>,
+        /// The pick is `sure` at or above this probability, from 0 to 1. 0.85 when left out.
+        #[serde(default)]
+        sure_at: Option<f64>,
+    },
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -2408,6 +2540,38 @@ mod tests {
         round_trip(HubCall::DisconnectVercel, json!({ "cmd": "disconnect_vercel" }));
         round_trip(HubCall::VercelModels, json!({ "cmd": "vercel_models" }));
         round_trip(
+            HubCall::Classify {
+                text: "The export button 500s".into(),
+                categories: vec![
+                    crate::classify::Category { name: "bug".into(), description: "something broke".into() },
+                    crate::classify::Category { name: "other".into(), description: String::new() },
+                ],
+                question: None,
+                instructions: "Support tickets.".into(),
+                model: Some("typesafe-ai/jev".into()),
+                unsure_below: Some(0.5),
+                sure_at: Some(0.9),
+            },
+            json!({
+                "cmd": "classify",
+                "text": "The export button 500s",
+                "categories": [{ "name": "bug", "description": "something broke" }, { "name": "other", "description": "" }],
+                "question": null,
+                "instructions": "Support tickets.",
+                "model": "typesafe-ai/jev",
+                "unsure_below": 0.5,
+                "sure_at": 0.9,
+            }),
+        );
+        let asked: HubCall = serde_json::from_value(json!({ "cmd": "classify", "text": "The export button 500s", "question": "Is this a bug report?" })).unwrap();
+        assert!(
+            matches!(&asked, HubCall::Classify { text, categories, question: Some(question), instructions, model: None, unsure_below: None, sure_at: None }
+                if text == "The export button 500s" && categories.is_empty() && question == "Is this a bug report?" && instructions.is_empty()),
+            "a classify with only text and a question reads"
+        );
+        let bare: crate::classify::Category = serde_json::from_value(json!({ "name": "bug" })).unwrap();
+        assert_eq!(bare.description, "", "a category's description may be left out");
+        round_trip(
             HubCall::ConnectPosthog { key: "phx_1".into(), project: "12345".into(), host: "eu".into() },
             json!({ "cmd": "connect_posthog", "key": "phx_1", "project": "12345", "host": "eu" }),
         );
@@ -2463,6 +2627,8 @@ mod tests {
         round_trip(HubCall::StuckBoxes, json!({ "cmd": "stuck_boxes" }));
         round_trip(HubCall::UnclaimedEnds, json!({ "cmd": "unclaimed_ends" }));
         round_trip(HubCall::DelegationStats { days: 7 }, json!({ "cmd": "delegation_stats", "days": 7 }));
+        round_trip(HubCall::WorkflowRuns { workflow: None, limit: None }, json!({ "cmd": "workflow_runs" }));
+        round_trip(HubCall::WorkflowRuns { workflow: Some("c1".into()), limit: Some(5) }, json!({ "cmd": "workflow_runs", "workflow": "c1", "limit": 5 }));
         round_trip(
             HubCall::SetTaste { scope: TasteScope::Project { repo: "github.com/acme/site".into() }, patch: TastePatch { parallel: Some(5), ..TastePatch::default() } },
             json!({ "cmd": "set_taste", "scope": { "kind": "project", "repo": "github.com/acme/site" }, "patch": { "parallel": 5 } }),

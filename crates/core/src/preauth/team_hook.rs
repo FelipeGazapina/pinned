@@ -184,7 +184,7 @@ fn secret_name(name: &str) -> bool {
 }
 
 /// The folder holding `.git` at or above `start`.
-fn repo_top(start: &Path) -> Option<PathBuf> {
+pub(super) fn repo_top(start: &Path) -> Option<PathBuf> {
     start.ancestors().find(|dir| dir.join(".git").exists()).map(Path::to_owned)
 }
 

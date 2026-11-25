@@ -7,7 +7,7 @@ use crate::graph::project::project;
 use crate::graph::runner::{self, Drive, Effect, Session, Status, Supplied, Wake};
 use crate::graph::{Answers, ChosenOn, Gate, Graph, NodeKind, SessionSetup, Watch};
 use crate::wire::{MachineId, RunSpec, TabId, TabView};
-use crate::{convex, github, linear, pinned_lines, posthog, schedule, slack, upstash, vercel};
+use crate::{classify, convex, github, linear, pinned_lines, posthog, schedule, slack, upstash, vercel};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
@@ -2380,6 +2380,13 @@ pub trait Storage: Send + Sync {
     fn save_jobs(&self, _bytes: &[u8]) -> Result<(), String> {
         Ok(())
     }
+    /// Lines (`crate::jobs::Line`), kept beside the store and never sent to apps. The default keeps none.
+    fn load_lines(&self) -> Option<Vec<u8>> {
+        None
+    }
+    fn save_lines(&self, _bytes: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 pub struct FileStorage {
@@ -2472,6 +2479,14 @@ impl Storage for FileStorage {
 
     fn save_jobs(&self, bytes: &[u8]) -> Result<(), String> {
         replace_file(&self.dir, "jobs.json", bytes)
+    }
+
+    fn load_lines(&self) -> Option<Vec<u8>> {
+        std::fs::read(self.dir.join("lines.json")).ok()
+    }
+
+    fn save_lines(&self, bytes: &[u8]) -> Result<(), String> {
+        replace_file(&self.dir, "lines.json", bytes)
     }
 
     fn claim_fire(&self, workflow: &str, key: &str, claimer: &str, retry: bool) -> Result<bool, String> {
@@ -5733,6 +5748,20 @@ impl Connectors {
         self.runs.lock().unwrap().clone()
     }
 
+    /// `workflow_runs`: the runs `workflow`'s trigger started, or every run, newest first, at most
+    /// `limit` (50 when left out, 200 at most). Reads only.
+    pub fn workflow_runs(&self, workflow: Option<&str>, limit: Option<u32>) -> Vec<crate::wire::WorkflowRun> {
+        let (library, names) = (self.library(), self.names());
+        let limit = limit.unwrap_or(50).clamp(1, 200) as usize;
+        let runs = self.runs.lock().unwrap();
+        runs.iter()
+            .rev()
+            .filter(|run| workflow.is_none_or(|id| run.connector == id))
+            .take(limit)
+            .map(|run| runner::view(run, &library, &names))
+            .collect()
+    }
+
     /// Points the live session at `claude` and stores the run. The ignored live test uses a missing
     /// id so the next resume fails and the run opens a history-seeded session.
     #[doc(hidden)]
@@ -6792,6 +6821,23 @@ impl Connectors {
     /// Chat models tagged `structured-output`, and every decision model. The list needs no key.
     pub async fn vercel_models(&self) -> Result<Vec<vercel::Model>, String> {
         vercel::models().await
+    }
+
+    /// An agent's `classify`: which of its categories, or yes or no to its question, a decision
+    /// model finds fits its text, asked with the account's key. One billed gateway call, after a
+    /// keyless lookup of the `model` it names, if any, to refuse a chat model.
+    pub async fn agent_classify(&self, ask: classify::Ask) -> Result<classify::Answer, String> {
+        let checked = classify::check(&ask)?;
+        let key = self.key(VERCEL_KEY).ok_or_else(|| "Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".to_owned())?;
+        if let Some(model) = &checked.model {
+            if vercel::kind_of(model).await? == vercel::Kind::Chat {
+                return Err(format!("classify: {model} is a chat model: give a decision model, or leave model out for {}", classify::DEFAULT_MODEL));
+            }
+        }
+        let model = checked.model.as_deref().unwrap_or(classify::DEFAULT_MODEL);
+        let choices: Vec<(&str, &str)> = checked.categories.iter().map(|category| (category.name.as_str(), category.description.as_str())).collect();
+        let chosen = vercel::choose(&key, model, &checked.instructions, &choices, &checked.state).await?;
+        Ok(classify::answer(&checked, &chosen))
     }
 
     pub async fn github_repos(&self) -> Result<Vec<github::Repo>, String> {
@@ -8065,6 +8111,135 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A stand-in for the gateway, for classify tests: `/models/<id>` answers that model typed
+    /// `model_type`, and `/evaluate` answers `evaluation`. Each request's line, head and body is
+    /// kept, in order.
+    fn serve_gateway(model_type: &'static str, evaluation: Value) -> (String, std::sync::Arc<Mutex<Vec<(String, String, String)>>>) {
+        install_rustls();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let kept = seen.clone();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while started.elapsed() < std::time::Duration::from_secs(60) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(accepted) => accepted,
+                    Err(_) => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 65536];
+                let complete = |buf: &[u8]| {
+                    let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { return false };
+                    let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                    let length = head.lines().find_map(|line| line.strip_prefix("content-length:")).and_then(|n| n.trim().parse::<usize>().ok()).unwrap_or(0);
+                    buf.len() >= end + 4 + length
+                };
+                while !complete(&buf) {
+                    match std::io::Read::read(&mut stream, &mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                }
+                let request = String::from_utf8_lossy(&buf).to_string();
+                let (head, body) = request.split_once("\r\n\r\n").unwrap_or((&request, ""));
+                let line = head.lines().next().unwrap_or_default().rsplit_once(' ').map(|(line, _)| line.to_owned()).unwrap_or_default();
+                let answer = match line.split_once(' ') {
+                    Some((_, path)) if path.starts_with("/models/") => json!({ "id": &path["/models/".len()..], "type": model_type }).to_string(),
+                    _ => evaluation.to_string(),
+                };
+                kept.lock().unwrap().push((line, head.to_owned(), body.to_owned()));
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len());
+                let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            }
+        });
+        (format!("http://{address}/"), seen)
+    }
+
+    fn classify_ask(categories: &[(&str, &str)], question: Option<&str>, model: Option<&str>) -> classify::Ask {
+        classify::Ask {
+            text: "The export button 500s".into(),
+            categories: categories.iter().map(|(name, description)| classify::Category { name: (*name).into(), description: (*description).into() }).collect(),
+            question: question.map(str::to_owned),
+            instructions: String::new(),
+            model: model.map(str::to_owned),
+            unsure_below: None,
+            sure_at: None,
+        }
+    }
+
+    #[test]
+    fn classify_asks_the_default_decision_model_once_with_the_text_framed() {
+        let _api = slack::lock_api();
+        let _restore = RestoreVercelRoot;
+        let evaluation = json!({ "answers": { "category": { "type": "choice", "choice": "bug", "probabilities": { "bug": 0.91, "question": 0.06, "other": 0.03 } } } });
+        let (root, seen) = serve_gateway("evaluation", evaluation);
+        std::env::set_var(crate::vercel::API_ROOT_ENV, root.trim_end_matches('/'));
+        let (connectors, dir) = stored("classify-default", vec![]);
+        std::fs::write(dir.join("vercel-key"), "vck_testa1b2").unwrap();
+        let categories = [("bug", "something broke"), ("question", "someone asks how"), ("other", "")];
+        let answer = block_on(connectors.agent_classify(classify_ask(&categories, None, None))).unwrap();
+        assert_eq!(
+            serde_json::to_value(&answer).unwrap(),
+            json!({
+                "pick": "bug",
+                "probability": 0.91,
+                "probabilities": [{ "name": "bug", "probability": 0.91 }, { "name": "question", "probability": 0.06 }, { "name": "other", "probability": 0.03 }],
+                "confidence": "sure",
+            })
+        );
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1, "one gateway call, and no model lookup: {requests:?}");
+        let (line, head, body) = &requests[0];
+        assert_eq!(line, "POST /evaluate");
+        assert!(head.to_ascii_lowercase().contains("authorization: bearer vck_testa1b2"), "asked with the account's key: {head}");
+        let body: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["model"], "typesafe-ai/jev");
+        let framed = body["state"]["text"].as_str().unwrap();
+        assert_eq!(framed, crate::untrusted::frame("an agent's classify call", "The export button 500s"));
+        assert!(framed.contains("=====pinned-untrusted-text=====\nThe export button 500s\n=====pinned-untrusted-text====="), "{framed}");
+        assert_eq!(body["questions"]["category"]["criteria"], json!({ "bug": "something broke", "question": "someone asks how", "other": "" }));
+        assert_eq!(body["questions"]["category"]["instructions"], "Choose the category that best fits the text.");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn classify_refuses_a_chat_model_before_it_asks_anything() {
+        let _api = slack::lock_api();
+        let _restore = RestoreVercelRoot;
+        let (root, seen) = serve_gateway("language", json!({ "answers": { "category": { "choice": "yes", "probabilities": { "yes": 1.0 } } } }));
+        std::env::set_var(crate::vercel::API_ROOT_ENV, root.trim_end_matches('/'));
+        let (connectors, dir) = stored("classify-chat-model", vec![]);
+        std::fs::write(dir.join("vercel-key"), "vck_testa1b2").unwrap();
+        let asked = block_on(connectors.agent_classify(classify_ask(&[], Some("Is this a bug report?"), Some("openai/gpt-6"))));
+        assert_eq!(asked, Err("classify: openai/gpt-6 is a chat model: give a decision model, or leave model out for typesafe-ai/jev".into()));
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.iter().map(|(line, _, _)| line.as_str()).collect::<Vec<_>>(), ["GET /models/openai/gpt-6"], "the keyless lookup only");
+        assert!(!requests[0].1.to_ascii_lowercase().contains("authorization"), "the lookup sends no key: {}", requests[0].1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn classify_without_a_vercel_key_answers_not_connected() {
+        let (connectors, dir) = stored("classify-no-key", vec![]);
+        assert_eq!(
+            block_on(connectors.agent_classify(classify_ask(&[("bug", ""), ("other", "")], None, None))),
+            Err("Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".into())
+        );
+        assert_eq!(
+            block_on(connectors.agent_classify(classify_ask(&[("bug", "")], None, None))),
+            Err("classify: one category leaves nothing to choose: give two or more, or a yes/no question".into()),
+            "bad input is refused before the key is read"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_filing_connector_with_no_router_model_files_without_asking() {
         let _api = slack::lock_api();
@@ -8186,6 +8361,33 @@ mod tests {
         assert!(runs.iter().any(|run| run.id.0 == "run-mac"), "the waiting run stays");
         assert!(!runs.iter().any(|run| run.id.0 == "old-0"), "the oldest finished run is dropped");
         assert!(runs.iter().any(|run| run.id.0 == format!("old-{}", RUNS_FINISHED_KEPT + 49)), "the newest finished run stays");
+    }
+
+    #[test]
+    fn workflow_runs_answers_newest_first_filtered_by_workflow_and_held_to_the_limit() {
+        let (connectors, dir) = stored("workflow-runs", vec![linear_connector()]);
+        let of = |connector: &str, id: &str| {
+            let mut run = finished_run(id);
+            run.connector = connector.into();
+            run
+        };
+        connectors.runs.lock().unwrap().extend([of("c1", "a"), of("c2", "b"), of("c1", "c"), of("c2", "d"), of("c1", "e")]);
+        let ids = |runs: Vec<crate::wire::WorkflowRun>| runs.into_iter().map(|run| run.id).collect::<Vec<_>>();
+        assert_eq!(ids(connectors.workflow_runs(None, None)), ["e", "d", "c", "b", "a"], "newest first");
+        assert_eq!(ids(connectors.workflow_runs(Some("c2"), None)), ["d", "b"]);
+        assert_eq!(ids(connectors.workflow_runs(Some("gone"), None)), Vec::<String>::new(), "an unknown workflow has no runs");
+        assert_eq!(ids(connectors.workflow_runs(None, Some(2))), ["e", "d"]);
+        assert_eq!(ids(connectors.workflow_runs(None, Some(0))), ["e"], "at least one");
+        let runs = connectors.workflow_runs(None, None);
+        assert_eq!((runs[0].workflow_name.as_str(), runs[1].workflow_name.as_str()), ("Resolve", "c2"), "a workflow the account no longer has goes by its id");
+
+        connectors.runs.lock().unwrap().extend((0..300).map(|n| of("c1", &format!("old-{n}"))));
+        let runs = connectors.workflow_runs(None, None);
+        assert_eq!((runs.len(), runs[0].id.as_str()), (50, "old-299"), "50 when no limit is asked");
+        assert_eq!(connectors.workflow_runs(None, Some(1000)).len(), 200, "200 at most");
+        assert_eq!(connectors.runs.lock().unwrap().len(), 305, "a read prunes nothing");
+        assert!(!dir.join("runs.json").exists(), "a read saves nothing");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The subjects each workflow holds a release mark for, without their times.
