@@ -47,11 +47,23 @@ function element(id) {
   return { id, value: "", innerHTML: "", textContent: "", hidden: false, dataset: {}, addEventListener() {}, classList: { contains: () => false, add() {}, remove() {}, toggle() {} }, focus() {}, remove() {}, querySelector: () => null, querySelectorAll: () => [] };
 }
 
+/** The failed run's session on this Mac, in tab-4, which the app lists. */
+const failedHere = { ...failed, session: { state: "live", machine: "mac-1", tab: "tab-4" } };
+/** A thread whose last turn failed before it answered: Fork goes through L:2, Rewind takes u3. */
+const settled = () => ({
+  loaded: true,
+  error: null,
+  turns: [{ user: { id: "u1" }, answer: { id: "L:1" } }, { user: { id: "u2", steer: true }, answer: { id: "L:2" } }, { user: { id: "u3" }, answer: null }],
+});
+
 /** settings.js and gui-workflow-runs.js as the page runs them, Settings open, with the hub played by
- * `answer` and the app's tabs by `tabs`. This Mac is `mac-1` on the account. */
-function app({ answer = async () => [], tabs = [{ key: "local:tab-4" }], reveal = async () => {} } = {}) {
+ * `answer` and the app's tabs by `tabs`. This Mac is `mac-1` on the account. Every tab's conversation is
+ * `thread`, its turns kept on it, and `fetch` plays the read of one not loaded yet. */
+function app({ answer = async () => [], tabs = [{ key: "local:tab-4" }], reveal = async () => {}, thread = settled(), fetch = async () => {}, live = false, fork = async () => {} } = {}) {
   const calls = [];
   const revealed = [];
+  // The thread actions in the order they ran.
+  const did = [];
   const agos = [];
   const dom = {};
   const byId = (id) => (dom[id] ??= element(id));
@@ -76,7 +88,16 @@ function app({ answer = async () => [], tabs = [{ key: "local:tab-4" }], reveal 
     tabs,
     ago: (unix) => (agos.push(unix), "5m"),
     machineName: (id) => ({ local: "MacBook", mini: "Mini" })[id] ?? "machine",
-    revealTab: (machine, tab) => (revealed.push([machine, tab]), reveal(machine, tab)),
+    revealTab: (machine, tab) => (revealed.push([machine, tab]), did.push(["reveal", machine, tab]), reveal(machine, tab)),
+    threadOf: () => thread,
+    fetchThread: async (tab) => {
+      await fetch(thread);
+      did.push(["fetched", tab.key]);
+    },
+    turnsFor: (t) => t.turns,
+    turnLive: () => live,
+    forkTab: (tab, id) => (did.push(["fork", tab.key, id]), fork(tab, id)),
+    editFromHere: async (id) => did.push(["edit", id]),
     document: { body: { dataset: { page: "settings" } }, getElementById: byId, querySelector: () => element(), createElement: () => element() },
   };
   context.globalThis = context;
@@ -99,7 +120,18 @@ function app({ answer = async () => [], tabs = [{ key: "local:tab-4" }], reveal 
     context.showPage("workflow-runs");
     await flush();
   };
-  return { context, calls, revealed, agos, html, open, state };
+  return { context, calls, revealed, did, agos, html, open, state };
+}
+
+/** Opens the page on `runs` and clicks `action` on its first card that has it, with a fake session line. */
+async function press(action, runs, options) {
+  const page = app({ answer: async () => runs, ...options });
+  await page.open();
+  const [, machine, tab] = page.html().match(new RegExp(`data-action="${action}" data-machine="([^"]*)" data-tab="([^"]*)"`));
+  const sessionLine = { textContent: "MacBook · tab-4" };
+  const button = { dataset: { machine, tab }, closest: (selector) => (selector === ".workflow-run-session" ? sessionLine : null) };
+  await page.context.runAction(action, button);
+  return { ...page, sessionLine };
 }
 
 /** Each run's row, in the order drawn. */
@@ -180,6 +212,90 @@ test("Open thread reveals the local tab, and a failure says so on its line", asy
   assert.equal(sessionLine.textContent, "Couldn't open that session: the tab closed");
 });
 
+test("Fork from here and Rewind show after Open thread only on a failed live run whose tab the app has", async () => {
+  const detached = { ...failed, id: "c5:d", session: { state: "detached", claude: "ses_2" } };
+  const none = { ...failed, id: "c5:n", session: { state: "none" } };
+  const { html, open } = app({ answer: async () => [running, waiting, done, failedHere, failed, detached, none] });
+  await open();
+  const [first, second, third, fourth, fifth, sixth, seventh] = rows(html());
+  assert.match(
+    fourth,
+    /<p class="workflow-run-session">MacBook · tab-4 <button type="button" class="secondary" data-action="workflow-run-open" data-machine="local" data-tab="tab-4">Open thread<\/button> <button type="button" class="secondary" data-action="workflow-run-fork" data-machine="local" data-tab="tab-4">Fork from here<\/button> <button type="button" class="secondary" data-action="workflow-run-rewind" data-machine="local" data-tab="tab-4">Rewind<\/button><\/p>/,
+  );
+  assert.match(second, /Open thread/, "the waiting run's tab is listed too");
+  for (const [row, what] of [[first, "running"], [second, "waiting"], [third, "done"], [fifth, "failed, tab not listed"], [sixth, "failed, tab closed"], [seventh, "failed, no session"]]) {
+    assert.doesNotMatch(row, /workflow-run-fork|Fork from here|workflow-run-rewind|Rewind/, `${what} has neither`);
+  }
+  assert.doesNotMatch(fifth, /Open thread/, "a tab the app does not list has no button");
+});
+
+test("Fork from here forks the tab through the newest answer, and a thrown failure says so on its line", async () => {
+  const { did, revealed, sessionLine } = await press("workflow-run-fork", [failedHere]);
+  assert.deepEqual(did, [["fork", "local:tab-4", "L:2"]], "the newest settled answer, past the last turn that has none");
+  assert.deepEqual(revealed, [], "the fork opens its own new thread");
+  assert.equal(sessionLine.textContent, "MacBook · tab-4", "a fork that worked leaves the card as it was");
+
+  const failing = await press("workflow-run-fork", [failedHere], { fork: async () => Promise.reject(new Error("there is nothing to fork before this message")) });
+  assert.equal(failing.sessionLine.textContent, "Couldn't fork that session: there is nothing to fork before this message");
+});
+
+test("Rewind reveals the tab, then opens Edit from here on the newest prompt", async () => {
+  const { did, sessionLine } = await press("workflow-run-rewind", [failedHere]);
+  assert.deepEqual(did, [["reveal", "local", "tab-4"], ["edit", "u3"]]);
+  assert.equal(sessionLine.textContent, "MacBook · tab-4");
+
+  const gone = await press("workflow-run-rewind", [failedHere], { reveal: async () => Promise.reject(new Error("the tab closed")) });
+  assert.deepEqual(gone.did, [["reveal", "local", "tab-4"]], "no Edit from here once the thread didn't open");
+  assert.equal(gone.sessionLine.textContent, "Couldn't open that session: the tab closed");
+});
+
+test("a working session refuses both actions on the line, and nothing forks, opens or rewinds", async () => {
+  for (const action of ["workflow-run-fork", "workflow-run-rewind"]) {
+    const { did, sessionLine } = await press(action, [failedHere], { live: true });
+    assert.equal(sessionLine.textContent, "That session is working. Try again once it stops.", action);
+    assert.deepEqual(did, [], action);
+  }
+});
+
+test("a thread with no prompt refuses both actions as having no conversation yet", async () => {
+  for (const action of ["workflow-run-fork", "workflow-run-rewind"]) {
+    const { did, sessionLine } = await press(action, [failedHere], { thread: { loaded: true, error: null, turns: [{ user: null, answer: { id: "L:0" } }] } });
+    assert.equal(sessionLine.textContent, "That session has no conversation yet.", action);
+    assert.deepEqual(did, [], action);
+  }
+});
+
+test("Fork with no answered turn says there is nothing to fork", async () => {
+  const { did, sessionLine } = await press("workflow-run-fork", [failedHere], { thread: { loaded: true, error: null, turns: [{ user: { id: "u1" }, answer: null }] } });
+  assert.equal(sessionLine.textContent, "Nothing to fork yet: claude hasn't finished a response.");
+  assert.deepEqual(did, []);
+});
+
+test("an unloaded thread is read before deciding: a failed read refuses on the line, a good one goes on", async () => {
+  const unread = () => ({ loaded: false, error: null, turns: [] });
+  for (const action of ["workflow-run-fork", "workflow-run-rewind"]) {
+    const broken = await press(action, [failedHere], {
+      thread: unread(),
+      fetch: async (t) => {
+        await flush();
+        t.error = "Error: machine offline";
+      },
+    });
+    assert.deepEqual(broken.did, [["fetched", "local:tab-4"]], action);
+    assert.equal(broken.sessionLine.textContent, "Couldn't read that session: Error: machine offline", action);
+  }
+  const read = await press("workflow-run-fork", [failedHere], {
+    thread: unread(),
+    fetch: async (t) => {
+      await flush();
+      Object.assign(t, settled());
+    },
+  });
+  assert.deepEqual(read.did, [["fetched", "local:tab-4"], ["fork", "local:tab-4", "L:2"]]);
+  const loaded = await press("workflow-run-fork", [failedHere], { fetch: async () => assert.fail("a loaded thread is not read again") });
+  assert.deepEqual(loaded.did, [["fork", "local:tab-4", "L:2"]]);
+});
+
 test("every value of the answer is escaped, as text and inside attributes", async () => {
   const title = "<img src=x onerror=alert(1)>";
   const hostile = {
@@ -200,6 +316,9 @@ test("every value of the answer is escaped, as text and inside attributes", asyn
     assert.ok(drawn.includes(escaped), `${escaped} is in the page`);
   }
   assert.ok(drawn.includes('data-tab="&#34;&#62;&#60;u&#62;t&#60;/u&#62;"'), "an attribute holds the escaped tab");
+  for (const action of ["workflow-run-open", "workflow-run-fork", "workflow-run-rewind"]) {
+    assert.ok(drawn.includes(`data-action="${action}" data-machine="local" data-tab="&#34;&#62;&#60;u&#62;t&#60;/u&#62;"`), `${action} holds the escaped tab`);
+  }
 });
 
 test("an empty answer, a hub out of reach and a hub too old each say so", async () => {

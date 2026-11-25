@@ -40,15 +40,18 @@ function workflowRunClassifiedHtml(run) {
     .join("");
 }
 
-function workflowRunSessionHtml(session) {
+/** A failed run whose tab this app has can also be forked or rewound from its card. */
+function workflowRunSessionHtml(run) {
+  const session = run.session;
   const claude = session.claude ? ` · Claude ${esc(session.claude)}` : "";
   if (session.state === "detached") return `<p>Tab closed${claude}</p>`;
   if (session.state !== "live") return `<p>No session</p>`;
   const machine = localIdOf(session.machine);
-  const open = tabByKey(keyOf(machine, session.tab))
-    ? ` <button type="button" class="secondary" data-action="workflow-run-open" data-machine="${esc(machine)}" data-tab="${esc(session.tab)}">Open thread</button>`
-    : "";
-  return `<p class="workflow-run-session">${esc(machineName(machine))} · ${esc(session.tab)}${claude}${open}</p>`;
+  const button = (action, label) => ` <button type="button" class="secondary" data-action="${action}" data-machine="${esc(machine)}" data-tab="${esc(session.tab)}">${label}</button>`;
+  const here = tabByKey(keyOf(machine, session.tab));
+  const open = here ? button("workflow-run-open", "Open thread") : "";
+  const recover = here && run.status === "failed" ? button("workflow-run-fork", "Fork from here") + button("workflow-run-rewind", "Rewind") : "";
+  return `<p class="workflow-run-session">${esc(machineName(machine))} · ${esc(session.tab)}${claude}${open}${recover}</p>`;
 }
 
 function workflowRunStepsHtml(run) {
@@ -67,7 +70,7 @@ function workflowRunHtml(run) {
       ${workflowRunOutcomeHtml(run)}
       <h3>Trigger</h3><pre>${esc(JSON.stringify(run.trigger, null, 2))}</pre>
       <h3>Classification</h3>${workflowRunClassifiedHtml(run)}
-      <h3>Session</h3>${workflowRunSessionHtml(run.session)}
+      <h3>Session</h3>${workflowRunSessionHtml(run)}
       <h3>Steps</h3>${workflowRunStepsHtml(run)}
     </details>`;
 }
@@ -102,10 +105,53 @@ async function showWorkflowRuns() {
   drawWorkflowRuns();
 }
 
+/** Writes why a card action stopped on its session line, as text. */
+function workflowRunSay(button, text) {
+  const line = button.closest(".workflow-run-session");
+  if (line) line.textContent = text;
+}
+
 actions["workflow-run-open"] = (button) =>
-  revealTab(button.dataset.machine, button.dataset.tab).catch((err) => {
-    const line = button.closest(".workflow-run-session");
-    if (line) line.textContent = `Couldn't open that session: ${err?.message ?? err}`;
-  });
+  revealTab(button.dataset.machine, button.dataset.tab).catch((err) => workflowRunSay(button, `Couldn't open that session: ${err?.message ?? err}`));
+
+/** The run's tab and the turns of its conversation, read first when this app hasn't yet, or why the
+ * card can't fork or rewind it. */
+async function workflowRunTurns(button) {
+  const tab = tabByKey(keyOf(button.dataset.machine, button.dataset.tab));
+  if (!tab) return { why: "That session's tab is gone." };
+  if (!threadOf(tab).loaded) await fetchThread(tab);
+  const t = threadOf(tab);
+  if (t.error) return { why: `Couldn't read that session: ${t.error}` };
+  const turns = turnsFor(t);
+  if (!turns.some((turn) => turn.user)) return { why: "That session has no conversation yet." };
+  if (turnLive(tab)) return { why: "That session is working. Try again once it stops." };
+  return { tab, turns };
+}
+
+// Forks through the newest settled response, the one that carries "Fork from this response".
+actions["workflow-run-fork"] = async (button) => {
+  const { tab, turns, why } = await workflowRunTurns(button);
+  if (why) return workflowRunSay(button, why);
+  const answer = turns.findLast((turn) => turn.answer)?.answer;
+  if (!answer) return workflowRunSay(button, "Nothing to fork yet: claude hasn't finished a response.");
+  try {
+    await forkTab(tab, answer.id);
+  } catch (err) {
+    workflowRunSay(button, `Couldn't fork that session: ${err?.message ?? err}`);
+  }
+};
+
+// Opens the thread on "Edit from here" for its newest prompt; its own dialog asks before anything rewinds.
+actions["workflow-run-rewind"] = async (button) => {
+  const { turns, why } = await workflowRunTurns(button);
+  if (why) return workflowRunSay(button, why);
+  const user = turns.findLast((turn) => turn.user).user;
+  try {
+    await revealTab(button.dataset.machine, button.dataset.tab);
+  } catch (err) {
+    return workflowRunSay(button, `Couldn't open that session: ${err?.message ?? err}`);
+  }
+  await editFromHere(user.id);
+};
 
 settingsSection({ page: "workflow-runs", label: "Workflow runs", icon: "rows-3", show: () => showWorkflowRuns(), search: [{ title: "Workflow runs", terms: ["workflow runs history trigger classify steps failed stalled"] }] });
