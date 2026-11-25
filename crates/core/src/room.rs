@@ -2,6 +2,9 @@
 //! Speech, the brief and each seat's summary live here. A seat's tools, diffs and worktree stay
 //! on that seat's own tab. Wakes leave through the notice queue: this module only says who to tell.
 //!
+//! A room may debate in rounds. Each working seat posts once a round, and a seat that has posted
+//! sleeps until the next round's line. After the last round the synthesis seat posts once, and that closes the room.
+//!
 //! A room tab is not a Claude session. `PINNED_ROOM` on a tab with no role is that thread.
 
 use serde::{Deserialize, Serialize};
@@ -14,6 +17,7 @@ pub const CAPTAIN: &str = "captain";
 pub const DEFAULT_POST_CAP: u32 = 40;
 pub const MAX_POST_CAP: u32 = 200;
 pub const MAX_SEATS: usize = 12;
+pub const MAX_ROUNDS: u32 = 10;
 pub const MIN_SEATS: usize = 2;
 pub const TEXT_MAX: usize = 8_000;
 const NAME_MAX: usize = 40;
@@ -82,9 +86,28 @@ pub struct Room {
     #[serde(default)]
     pub owner_cursor: u64,
     pub opened: u64,
+    /// Set when the room debates in rounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rounds: Option<Rounds>,
     /// False until every seat has a task. Absent on disk, so a loaded room is published.
     #[serde(default = "published_yes", skip_serializing)]
     pub published: bool,
+}
+
+/// A debate in rounds, then the synthesis seat's one post.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Rounds {
+    pub total: u32,
+    /// From 1. It stays at `total` while the room waits for the synthesis.
+    pub round: u32,
+    /// The seats that have posted in `round`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub posted: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis: Option<String>,
+    /// The rounds are over, and only the synthesis seat posts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub synthesizing: bool,
 }
 
 fn default_cap() -> u32 {
@@ -124,6 +147,8 @@ pub struct Outcome {
     pub wakes: Vec<Wake>,
     pub closed: bool,
     pub seq: u64,
+    /// The rounds or the synthesis closed the room, so every seat task still running stops.
+    pub rounds_closed: bool,
 }
 
 /// What `room_post` says, before the room resolves who it wakes.
@@ -188,10 +213,14 @@ impl Store {
         self.rooms.iter().find(|room| room.tab == tab).map(|room| room.id.clone())
     }
 
-    /// Starts a room in memory and consumes its id. It is not on disk until `publish`.
-    pub fn open(&mut self, project: &str, owner_tab: &str, brief: &str, names: &[String], post_cap: Option<u32>, now: u64) -> Result<String, String> {
+    /// Starts a room in memory and consumes its id. It is not on disk until `publish`. With `rounds`
+    /// the seats debate in that many rounds, and `synthesis` names the seat that writes the synthesis.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open(&mut self, project: &str, owner_tab: &str, brief: &str, names: &[String], post_cap: Option<u32>, rounds: Option<u32>, synthesis: Option<&str>, now: u64) -> Result<String, String> {
         let brief = check_brief(brief)?;
         let names = check_names(names)?;
+        let post_cap = post_cap.map_or(DEFAULT_POST_CAP, |cap| cap.clamp(1, MAX_POST_CAP));
+        let rounds = check_rounds(rounds, synthesis, &names, post_cap)?;
         self.next += 1;
         let id = format!("room-{}", self.next);
         self.rooms.push(Room {
@@ -202,11 +231,12 @@ impl Store {
             brief,
             status: Status::Open,
             seq: 0,
-            post_cap: post_cap.map_or(DEFAULT_POST_CAP, |cap| cap.clamp(1, MAX_POST_CAP)),
+            post_cap,
             seats: names.into_iter().map(|name| Seat { name, task: String::new(), tab: String::new(), cursor: 0, done: false, summary: None }).collect(),
             posts: vec![],
             owner_cursor: 0,
             opened: now,
+            rounds,
             published: false,
         });
         self.write();
@@ -247,6 +277,7 @@ impl Store {
     }
 
     /// `post` under the author's own `post_id`. A repeat of that id appends nothing and answers the first post.
+    /// In a debate a seat posts once a round, and once the rounds are over only the synthesis seat posts.
     pub fn post_with(&mut self, id: &str, speech: Speech, post_id: Option<&str>, now: u64) -> Result<Outcome, String> {
         let index = self.index(id)?;
         let post_id = post_id.map(str::trim).filter(|post_id| !post_id.is_empty());
@@ -254,7 +285,7 @@ impl Store {
             let room = &self.rooms[index];
             let author = speech.author();
             if let Some(first) = room.posts.iter().find(|post| post.author == author && post.post_id.as_deref() == Some(post_id)) {
-                return Ok(Outcome { wakes: vec![], closed: room.status != Status::Open, seq: first.seq });
+                return Ok(Outcome { wakes: vec![], closed: room.status != Status::Open, seq: first.seq, rounds_closed: false });
             }
         }
         if self.rooms[index].status != Status::Open {
@@ -268,6 +299,9 @@ impl Store {
                         false => format!("no seat {name} in {id}"),
                     });
                 }
+                if let Some(rounds) = &self.rooms[index].rounds {
+                    check_turn(rounds, &name)?;
+                }
                 (Author::Seat { name: name.clone() }, check_text(&text)?, self.audience(index, Some(&name), &to, false)?)
             }
             Speech::Card { text, to } => (Author::Card, check_text(&text)?, self.audience(index, None, &to, false)?),
@@ -277,15 +311,20 @@ impl Store {
         if let Some(post) = self.rooms[index].posts.last_mut() {
             post.post_id = post_id.map(str::to_owned);
         }
-        let closed = self.close_if_full(index, now);
+        let rounds_closed = match &author {
+            Author::Seat { name } => self.seat_spoke(index, name, now),
+            _ => false,
+        };
+        let closed = rounds_closed || self.close_if_full(index, now);
         let wakes = self.wakes(index);
         self.quiet_author(index, &author);
         if self.rooms[index].published {
             self.write();
         }
-        Ok(Outcome { seq: self.rooms[index].seq, closed, wakes })
+        Ok(Outcome { seq: self.rooms[index].seq, closed, wakes, rounds_closed })
     }
 
+    /// A seat's `room_done`. The round no longer waits on it.
     pub fn finish(&mut self, id: &str, name: &str, summary: &str, now: u64) -> Result<Outcome, String> {
         let summary = check_text(summary).map_err(|_| "room_done needs a summary".to_owned())?;
         let index = self.index(id)?;
@@ -300,55 +339,60 @@ impl Store {
         seat.summary = Some(summary.clone());
         let audience = self.audience(index, Some(name), &[], true)?;
         self.push(index, Author::System, format!("{name} finished: {summary}"), audience, now);
-        let closed = self.settle_if_all_done(index, now) || self.close_if_full(index, now);
+        let settled = self.settle_if_all_done(index, now);
+        let rounds_closed = self.end_round_if_due(index, now);
+        let closed = settled || rounds_closed || self.close_if_full(index, now);
         let wakes = self.wakes(index);
         if self.rooms[index].published {
             self.write();
         }
-        Ok(Outcome { seq: self.rooms[index].seq, closed, wakes })
+        Ok(Outcome { seq: self.rooms[index].seq, closed, wakes, rounds_closed })
     }
 
-    /// A seat whose task died. Marks it done so the room can still finish.
+    /// A seat whose task died. Marks it done so the room can still finish, and the round no longer waits on it.
     pub fn fail_seat(&mut self, id: &str, name: &str, error: &str, now: u64) -> Result<Outcome, String> {
         let index = self.index(id)?;
         if self.rooms[index].status != Status::Open {
-            return Ok(Outcome { wakes: vec![], closed: true, seq: self.rooms[index].seq });
+            return Ok(Outcome { wakes: vec![], closed: true, seq: self.rooms[index].seq, rounds_closed: false });
         }
         let Some(seat) = self.rooms[index].seats.iter_mut().find(|seat| seat.name == name) else {
-            return Ok(Outcome { wakes: vec![], closed: false, seq: self.rooms[index].seq });
+            return Ok(Outcome { wakes: vec![], closed: false, seq: self.rooms[index].seq, rounds_closed: false });
         };
         if seat.done {
-            return Ok(Outcome { wakes: vec![], closed: false, seq: self.rooms[index].seq });
+            return Ok(Outcome { wakes: vec![], closed: false, seq: self.rooms[index].seq, rounds_closed: false });
         }
         let error = one_line(error);
         seat.done = true;
         seat.summary = Some(error.clone());
         let audience = self.audience(index, Some(name), &[], true)?;
         self.push(index, Author::System, format!("{name} failed: {error}"), audience, now);
-        let closed = self.settle_if_all_done(index, now);
+        let settled = self.settle_if_all_done(index, now);
+        let rounds_closed = self.end_round_if_due(index, now);
         let wakes = self.wakes(index);
         if self.rooms[index].published {
             self.write();
         }
-        Ok(Outcome { seq: self.rooms[index].seq, closed, wakes })
+        Ok(Outcome { seq: self.rooms[index].seq, closed: settled || rounds_closed, wakes, rounds_closed })
     }
 
     /// The seat's task is already over, so the room must not wait on it. No finish line: the task's
-    /// own report already said why. When that was the last open seat, the room closes.
+    /// own report already said why. When that was the last open seat, the room closes. When the
+    /// round waited only on it, the round ends.
     pub fn seat_gone(&mut self, id: &str, name: &str, now: u64) -> Result<Outcome, String> {
         let index = self.index(id)?;
         if self.rooms[index].status != Status::Open {
-            return Ok(Outcome { wakes: vec![], closed: true, seq: self.rooms[index].seq });
+            return Ok(Outcome { wakes: vec![], closed: true, seq: self.rooms[index].seq, rounds_closed: false });
         }
         if let Some(seat) = self.rooms[index].seats.iter_mut().find(|seat| seat.name == name) {
             seat.done = true;
         }
-        let closed = self.settle_if_all_done(index, now);
+        let settled = self.settle_if_all_done(index, now);
+        let rounds_closed = self.end_round_if_due(index, now);
         let wakes = self.wakes(index);
         if self.rooms[index].published {
             self.write();
         }
-        Ok(Outcome { seq: self.rooms[index].seq, closed, wakes })
+        Ok(Outcome { seq: self.rooms[index].seq, closed: settled || rounds_closed, wakes, rounds_closed })
     }
 
     pub fn close(&mut self, id: &str, reason: &str, now: u64) -> Result<Outcome, String> {
@@ -363,9 +407,10 @@ impl Store {
         if self.rooms[index].published {
             self.write();
         }
-        Ok(Outcome { seq: self.rooms[index].seq, closed: true, wakes })
+        Ok(Outcome { seq: self.rooms[index].seq, closed: true, wakes, rounds_closed: false })
     }
 
+    /// The room's page. A debate adds its `round`, `rounds` and `synthesis` seat.
     pub fn read(&self, id: &str, since: u64) -> Result<Value, String> {
         let room = self.get(id).ok_or_else(|| format!("no room {id}"))?;
         let posts: Vec<Value> = room
@@ -375,7 +420,13 @@ impl Store {
             .map(|post| json!({ "seq": post.seq, "author": label(&post.author), "text": post.text, "at": post.at }))
             .collect();
         let seats: Vec<Value> = room.seats.iter().map(|seat| json!({ "name": seat.name, "done": seat.done, "summary": seat.summary })).collect();
-        Ok(json!({ "id": room.id, "status": match room.status { Status::Open => "open", Status::Settled => "settled" }, "seq": room.seq, "brief": room.brief, "seats": seats, "posts": posts }))
+        let mut page = json!({ "id": room.id, "status": match room.status { Status::Open => "open", Status::Settled => "settled" }, "seq": room.seq, "brief": room.brief, "seats": seats, "posts": posts });
+        if let Some(rounds) = &room.rounds {
+            page["round"] = json!(rounds.round);
+            page["rounds"] = json!(rounds.total);
+            page["synthesis"] = json!(rounds.synthesis);
+        }
+        Ok(page)
     }
 
     pub fn ack(&mut self, id: &str, who: &Who, through: u64) {
@@ -451,10 +502,12 @@ impl Store {
         Ok(&mut self.rooms[index])
     }
 
+    /// Who a line wakes. In a debate it skips the seats that owe no post now, so they sleep until the next round.
     fn audience(&self, index: usize, speaker: Option<&str>, to: &[String], captain: bool) -> Result<Vec<String>, String> {
         let room = &self.rooms[index];
         if to.is_empty() {
             let mut names = open_seats(room, speaker);
+            names.retain(|name| owes_post(room, name));
             if captain {
                 names.push(CAPTAIN.to_owned());
             }
@@ -475,7 +528,7 @@ impl Store {
             if !room.seats.iter().any(|seat| seat.name == name) {
                 return Err(format!("no seat {name} in {}", room.id));
             }
-            if speaker == Some(name) || room.seats.iter().any(|seat| seat.name == name && seat.done) {
+            if speaker == Some(name) || room.seats.iter().any(|seat| seat.name == name && seat.done) || !owes_post(room, name) {
                 continue;
             }
             if !names.iter().any(|have| have == name) {
@@ -512,6 +565,62 @@ impl Store {
         }
         self.rooms[index].status = Status::Settled;
         let text = close_text(&self.rooms[index], "");
+        self.push(index, Author::System, text, vec![CAPTAIN.to_owned()], now);
+        true
+    }
+
+    /// A seat's post in a debate. The synthesis closes the room; any other post counts toward the
+    /// round. True when that closed the room.
+    fn seat_spoke(&mut self, index: usize, name: &str, now: u64) -> bool {
+        let Some(rounds) = self.rooms[index].rounds.as_mut() else { return false };
+        if rounds.synthesizing {
+            let text = self.rooms[index].posts.last().map(|post| post.text.clone()).unwrap_or_default();
+            return self.end_debate(index, &format!("{name} wrote the synthesis:\n{text}"), now);
+        }
+        rounds.posted.push(name.to_owned());
+        self.end_round_if_due(index, now)
+    }
+
+    /// Ends the round once every seat still working has posted in it. A "Round k of N" line then
+    /// wakes them all. After the last round the synthesis seat is asked for the synthesis, or the
+    /// room closes. A synthesis seat that stops before writing it closes the room too. True when it closed.
+    fn end_round_if_due(&mut self, index: usize, now: u64) -> bool {
+        let room = &self.rooms[index];
+        let Some(rounds) = room.rounds.clone().filter(|_| room.status == Status::Open) else { return false };
+        let working = |name: &str| room.seats.iter().any(|seat| seat.name == name && !seat.done);
+        if rounds.synthesizing {
+            let seat = rounds.synthesis.unwrap_or_default();
+            return !working(&seat) && self.end_debate(index, &format!("no synthesis: {seat} stopped before writing it"), now);
+        }
+        if room.seats.iter().any(|seat| !seat.done && !rounds.posted.contains(&seat.name)) {
+            return false;
+        }
+        let over = match rounds.total {
+            1 => "the round is over".to_owned(),
+            total => format!("the {total} rounds are over"),
+        };
+        if rounds.round < rounds.total {
+            let to = open_seats(room, None);
+            let round = rounds.round + 1;
+            self.rooms[index].rounds = Some(Rounds { round, posted: vec![], ..rounds });
+            self.push(index, Author::System, format!("Round {round} of {}. Post once with room_post, then end your turn.", rounds.total), to, now);
+            return false;
+        }
+        match rounds.synthesis {
+            Some(seat) if working(&seat) => {
+                self.rooms[index].rounds = Some(Rounds { synthesizing: true, posted: vec![], synthesis: Some(seat.clone()), ..rounds });
+                self.push(index, Author::System, format!("{seat}, {over}. Write the synthesis now: your next post is the synthesis, and it closes the room."), vec![seat], now);
+                false
+            }
+            Some(seat) => self.end_debate(index, &format!("no synthesis: {seat} stopped before writing it"), now),
+            None => self.end_debate(index, &over, now),
+        }
+    }
+
+    /// Closes a room whose debate is over. The close line wakes the Captain.
+    fn end_debate(&mut self, index: usize, reason: &str, now: u64) -> bool {
+        self.rooms[index].status = Status::Settled;
+        let text = close_text(&self.rooms[index], reason);
         self.push(index, Author::System, text, vec![CAPTAIN.to_owned()], now);
         true
     }
@@ -639,13 +748,62 @@ pub fn check_names(names: &[String]) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-pub fn seat_brief(id: &str, name: &str, others: &[String], brief: &str) -> String {
+/// The debate a room opens with. Its seat posts and the synthesis must fit under the post cap, so
+/// the cap never cuts a debate off halfway.
+fn check_rounds(rounds: Option<u32>, synthesis: Option<&str>, names: &[String], post_cap: u32) -> Result<Option<Rounds>, String> {
+    let Some(total) = rounds else {
+        return match synthesis {
+            Some(_) => Err("a synthesis needs rounds".into()),
+            None => Ok(None),
+        };
+    };
+    if !(1..=MAX_ROUNDS).contains(&total) {
+        return Err(format!("rounds is 1 to {MAX_ROUNDS}, not {total}"));
+    }
+    let synthesis = synthesis.map(str::trim);
+    if let Some(seat) = synthesis.filter(|seat| !names.iter().any(|name| name == seat)) {
+        return Err(format!("synthesis \"{seat}\" is not one of the seats"));
+    }
+    let needed = total * names.len() as u32 + u32::from(synthesis.is_some());
+    if needed > post_cap {
+        let plus = if synthesis.is_some() { " and the synthesis" } else { "" };
+        return Err(format!("{} of {} seats{plus} need {needed} posts, over the post cap of {post_cap}. Raise postCap or run fewer rounds.", rounds_of(total), names.len()));
+    }
+    Ok(Some(Rounds { total, round: 1, posted: vec![], synthesis: synthesis.map(str::to_owned), synthesizing: false }))
+}
+
+/// A seat posts once a round. Once the rounds are over, only the synthesis seat posts.
+fn check_turn(rounds: &Rounds, name: &str) -> Result<(), String> {
+    if rounds.synthesizing {
+        let seat = rounds.synthesis.as_deref().unwrap_or_default();
+        return match seat == name {
+            true => Ok(()),
+            false => Err(format!("the rounds are over: only {seat} posts now, with the synthesis")),
+        };
+    }
+    if rounds.posted.iter().any(|posted| posted == name) {
+        return Err(format!("{name} already posted in round {} of {}. End your turn and wait: the next round arrives on its own.", rounds.round, rounds.total));
+    }
+    Ok(())
+}
+
+/// A seat's task. With `rounds`, it also says the seat posts once a round and who writes the synthesis.
+pub fn seat_brief(id: &str, name: &str, others: &[String], brief: &str, rounds: Option<u32>, synthesis: Option<&str>) -> String {
     let with = match others {
         [] => "no one else".to_owned(),
         [one] => one.clone(),
         names => format!("{} and {}", names[..names.len() - 1].join(", "), names[names.len() - 1]),
     };
-    format!("You sit in room {id} as {name}, with {with}.\n\n{brief}\n\nSpeak with room_post. A reply that stays only in this session is invisible to the room. End your turn after you post. The next messages arrive on their own. Do not poll. When your part is done, call room_done with a short summary.")
+    let mut text = format!("You sit in room {id} as {name}, with {with}.\n\n{brief}\n\nSpeak with room_post. A reply that stays only in this session is invisible to the room. End your turn after you post. The next messages arrive on their own. Do not poll. When your part is done, call room_done with a short summary.");
+    if let Some(total) = rounds {
+        text.push_str(&format!("\n\nThe room runs in {}. Post once per round with room_post, then end your turn: the next round arrives on its own.", rounds_of(total)));
+        text.push_str(&match synthesis {
+            Some(seat) if seat == name => " After the last round you write the synthesis, and that post closes the room.".to_owned(),
+            Some(seat) => format!(" After the last round, {seat} writes the synthesis."),
+            None => " The room closes when the last round ends.".to_owned(),
+        });
+    }
+    text
 }
 
 fn check_name(raw: &str) -> Result<String, String> {
@@ -674,6 +832,13 @@ fn check_text(raw: &str) -> Result<String, String> {
     Ok(text.to_owned())
 }
 
+fn rounds_of(total: u32) -> String {
+    match total {
+        1 => "1 round".to_owned(),
+        total => format!("{total} rounds"),
+    }
+}
+
 fn one_line(text: &str) -> String {
     let text = text.trim().replace(['\n', '\r'], " ");
     match text.chars().count() > 400 {
@@ -684,6 +849,16 @@ fn one_line(text: &str) -> String {
 
 fn open_seats(room: &Room, except: Option<&str>) -> Vec<String> {
     room.seats.iter().filter(|seat| !seat.done && Some(seat.name.as_str()) != except).map(|seat| seat.name.clone()).collect()
+}
+
+/// In a debate, a seat that has posted in the round owes nothing until the next one. Once the
+/// rounds are over, only the synthesis seat owes a post.
+fn owes_post(room: &Room, name: &str) -> bool {
+    match &room.rounds {
+        None => true,
+        Some(rounds) if rounds.synthesizing => rounds.synthesis.as_deref() == Some(name),
+        Some(rounds) => !rounds.posted.iter().any(|posted| posted == name),
+    }
 }
 
 fn counted(room: &Room) -> u32 {
@@ -757,7 +932,7 @@ mod tests {
     }
 
     fn open(store: &mut Store) -> String {
-        store.open("/app", "tab-captain", "Fix the parser.", &names(&["Ana", "Beto"]), None, 1).unwrap()
+        store.open("/app", "tab-captain", "Fix the parser.", &names(&["Ana", "Beto"]), None, None, None, 1).unwrap()
     }
 
     fn bind(store: &mut Store, id: &str) {
@@ -765,6 +940,215 @@ mod tests {
         store.bind_seat(id, "Beto", "task-beto", "tab-beto").unwrap();
         store.set_tab(id, "tab-room");
         store.publish(id).unwrap();
+    }
+
+    /// A published room that debates in `rounds`, each seat bound to its own task and tab.
+    fn debate(store: &mut Store, seats: &[&str], rounds: u32, synthesis: Option<&str>, post_cap: Option<u32>) -> String {
+        let id = store.open("/app", "tab-captain", "Which parser?", &names(seats), post_cap, Some(rounds), synthesis, 1).unwrap();
+        for seat in seats {
+            store.bind_seat(&id, seat, &format!("task-{seat}"), &format!("tab-{seat}")).unwrap();
+        }
+        store.set_tab(&id, "tab-room");
+        store.publish(&id).unwrap();
+        id
+    }
+
+    /// Acks every wake, as `deliver_room` does once it queues them.
+    fn acked(store: &mut Store, id: &str, outcome: Outcome) -> Outcome {
+        for wake in &outcome.wakes {
+            store.ack(id, &wake.who, wake.through);
+        }
+        outcome
+    }
+
+    fn say(store: &mut Store, id: &str, name: &str, text: &str) -> Result<Outcome, String> {
+        let outcome = store.post(id, Speech::Seat { name: name.into(), text: text.into(), to: vec![] }, 2)?;
+        Ok(acked(store, id, outcome))
+    }
+
+    fn woken(outcome: &Outcome) -> Vec<&str> {
+        outcome.wakes.iter().map(|wake| wake.who.key()).collect()
+    }
+
+    fn last_line(store: &Store, id: &str) -> String {
+        store.get(id).unwrap().posts.last().unwrap().text.clone()
+    }
+
+    #[test]
+    fn a_debate_that_cannot_run_does_not_open() {
+        let mut store = Store::load(None);
+        let two = names(&["Ana", "Beto"]);
+        let four = names(&["Ana", "Beto", "Cleo", "Dani"]);
+        assert_eq!(store.open("/app", "tab-captain", "Debate it.", &two, None, Some(0), None, 1).unwrap_err(), "rounds is 1 to 10, not 0");
+        assert_eq!(store.open("/app", "tab-captain", "Debate it.", &two, None, Some(11), None, 1).unwrap_err(), "rounds is 1 to 10, not 11");
+        assert_eq!(store.open("/app", "tab-captain", "Debate it.", &two, None, None, Some("Ana"), 1).unwrap_err(), "a synthesis needs rounds");
+        assert_eq!(store.open("/app", "tab-captain", "Debate it.", &two, None, Some(2), Some("Zed"), 1).unwrap_err(), "synthesis \"Zed\" is not one of the seats");
+        let full = store.open("/app", "tab-captain", "Debate it.", &four, Some(12), Some(3), Some("Ana"), 1).unwrap_err();
+        assert!(full.contains("need 13 posts") && full.contains("post cap of 12") && full.contains("postCap"), "{full}");
+        assert_eq!(store.open("/app", "tab-captain", "Debate it.", &four, Some(13), Some(3), Some("Ana"), 1).unwrap(), "room-1", "a refusal uses up no id");
+    }
+
+    #[test]
+    fn a_seat_posts_once_a_round_and_sleeps_until_the_next() {
+        let mut store = Store::load(None);
+        let id = debate(&mut store, &["Ana", "Beto", "Cleo"], 2, None, None);
+        assert_eq!(woken(&say(&mut store, &id, "Ana", "split on the colon").unwrap()), vec!["Beto", "Cleo"]);
+        let again = say(&mut store, &id, "Ana", "and another thing").unwrap_err();
+        assert!(again.contains("Ana already posted in round 1 of 2") && again.contains("next round arrives on its own"), "{again}");
+        assert_eq!(store.read(&id, 0).unwrap()["posts"].as_array().unwrap().len(), 1, "the refused post is not recorded");
+        assert_eq!(woken(&say(&mut store, &id, "Beto", "split on the comma").unwrap()), vec!["Cleo"], "Ana has posted, so she sleeps");
+        let outcome = say(&mut store, &id, "Cleo", "both work").unwrap();
+        assert!(last_line(&store, &id).starts_with("Round 2 of 2"), "{}", last_line(&store, &id));
+        assert_eq!(woken(&outcome), vec!["Ana", "Beto", "Cleo"], "the round line wakes each seat once, and not the Captain");
+        let ana = &outcome.wakes[0].text;
+        assert!(ana.contains("Beto: split on the comma") && ana.contains("Cleo: both work") && ana.contains("Round 2 of 2"), "{ana}");
+        let read = store.read(&id, 0).unwrap();
+        assert_eq!((&read["round"], &read["rounds"], &read["synthesis"]), (&json!(2), &json!(2), &Value::Null));
+    }
+
+    #[test]
+    fn captain_and_user_lines_neither_count_toward_a_round_nor_wake_a_seat_that_posted() {
+        let mut store = Store::load(None);
+        let id = debate(&mut store, &["Ana", "Beto", "Cleo"], 2, None, None);
+        say(&mut store, &id, "Ana", "split on the colon").unwrap();
+        let card = store.post(&id, Speech::Card { text: "keep it short".into(), to: vec![] }, 3).unwrap();
+        assert_eq!(woken(&acked(&mut store, &id, card)), vec!["Beto", "Cleo"]);
+        let user = store.post(&id, Speech::User { text: "and simple".into() }, 4).unwrap();
+        assert_eq!(woken(&acked(&mut store, &id, user)), vec!["Beto", "Cleo", "captain"]);
+        let named = store.post(&id, Speech::Card { text: "Ana, one more?".into(), to: names(&["Ana"]) }, 5).unwrap();
+        assert_eq!(woken(&named), Vec::<&str>::new(), "even by name, Ana waits for the next round");
+        assert_eq!(store.read(&id, 0).unwrap()["round"], 1);
+        say(&mut store, &id, "Beto", "split on the comma").unwrap();
+        assert_eq!(store.read(&id, 0).unwrap()["round"], 1, "Cleo has not posted yet");
+        say(&mut store, &id, "Cleo", "both work").unwrap();
+        assert!(last_line(&store, &id).starts_with("Round 2 of 2"));
+        assert_eq!(store.read(&id, 0).unwrap()["round"], 2);
+    }
+
+    #[test]
+    fn a_seat_that_is_done_no_longer_holds_the_round() {
+        for gone in [false, true] {
+            let mut store = Store::load(None);
+            let id = debate(&mut store, &["Ana", "Beto", "Cleo"], 2, None, None);
+            say(&mut store, &id, "Ana", "split on the colon").unwrap();
+            say(&mut store, &id, "Beto", "split on the comma").unwrap();
+            let outcome = match gone {
+                true => store.seat_gone(&id, "Cleo", 3).unwrap(),
+                false => store.finish(&id, "Cleo", "nothing to add", 3).unwrap(),
+            };
+            assert!(!outcome.closed);
+            assert!(last_line(&store, &id).starts_with("Round 2 of 2"), "{}", last_line(&store, &id));
+            let seats: Vec<&str> = woken(&outcome).into_iter().filter(|who| *who != CAPTAIN).collect();
+            assert_eq!(seats, vec!["Ana", "Beto"]);
+        }
+    }
+
+    #[test]
+    fn after_the_last_round_only_the_synthesis_seat_posts_and_its_post_closes_the_room() {
+        let mut store = Store::load(None);
+        let id = debate(&mut store, &["Ana", "Beto"], 1, Some("Beto"), None);
+        say(&mut store, &id, "Ana", "split on the colon").unwrap();
+        let outcome = say(&mut store, &id, "Beto", "split on the comma").unwrap();
+        let ask = store.get(&id).unwrap().posts.last().unwrap().clone();
+        assert!(ask.text.contains("Beto") && ask.text.contains("synthesis"), "{}", ask.text);
+        assert_eq!(ask.to, names(&["Beto"]));
+        assert_eq!(woken(&outcome), vec!["Beto"]);
+        let late = say(&mut store, &id, "Ana", "one more").unwrap_err();
+        assert!(late.contains("rounds are over") && late.contains("Beto"), "{late}");
+        let outcome = store.post(&id, Speech::Seat { name: "Beto".into(), text: "the synthesis text".into(), to: vec![] }, 3).unwrap();
+        assert!(outcome.closed && outcome.rounds_closed);
+        assert_eq!(store.get(&id).unwrap().status, Status::Settled);
+        let close = last_line(&store, &id);
+        assert!(close.contains("room-1 is closed") && close.contains("Beto wrote the synthesis") && close.contains("the synthesis text"), "{close}");
+        let captain = outcome.wakes.iter().find(|wake| wake.who == Who::Captain).unwrap();
+        assert!(captain.text.contains(&close), "{}", captain.text);
+    }
+
+    #[test]
+    fn with_no_synthesis_seat_the_last_round_closes_the_room() {
+        let mut store = Store::load(None);
+        let id = debate(&mut store, &["Ana", "Beto"], 2, None, None);
+        say(&mut store, &id, "Ana", "split on the colon").unwrap();
+        say(&mut store, &id, "Beto", "split on the comma").unwrap();
+        say(&mut store, &id, "Ana", "the colon").unwrap();
+        let outcome = say(&mut store, &id, "Beto", "fine, the colon").unwrap();
+        assert!(outcome.closed && outcome.rounds_closed);
+        assert!(last_line(&store, &id).contains("the 2 rounds are over"), "{}", last_line(&store, &id));
+        assert!(outcome.wakes.iter().any(|wake| wake.who == Who::Captain));
+    }
+
+    #[test]
+    fn a_synthesis_seat_that_stops_closes_the_room_with_no_synthesis() {
+        let mut store = Store::load(None);
+        let id = debate(&mut store, &["Ana", "Beto"], 1, Some("Beto"), None);
+        store.finish(&id, "Beto", "I am out", 2).unwrap();
+        let outcome = say(&mut store, &id, "Ana", "split on the colon").unwrap();
+        assert!(outcome.closed && outcome.rounds_closed);
+        let close = last_line(&store, &id);
+        assert!(close.contains("no synthesis") && close.contains("Beto"), "{close}");
+
+        let mut store = Store::load(None);
+        let id = debate(&mut store, &["Ana", "Beto"], 1, Some("Beto"), None);
+        say(&mut store, &id, "Ana", "split on the colon").unwrap();
+        say(&mut store, &id, "Beto", "split on the comma").unwrap();
+        let outcome = store.fail_seat(&id, "Beto", "the turn failed", 3).unwrap();
+        assert!(outcome.closed && outcome.rounds_closed);
+        let close = last_line(&store, &id);
+        assert!(close.contains("no synthesis") && close.contains("Beto"), "{close}");
+    }
+
+    #[test]
+    fn a_synthesis_that_reaches_the_post_cap_closes_as_the_synthesis() {
+        let mut store = Store::load(None);
+        let id = debate(&mut store, &["Ana", "Beto"], 2, Some("Ana"), Some(5));
+        for (name, text) in [("Ana", "colon"), ("Beto", "comma"), ("Ana", "colon"), ("Beto", "colon then")] {
+            say(&mut store, &id, name, text).unwrap();
+        }
+        let outcome = say(&mut store, &id, "Ana", "we split on the colon").unwrap();
+        assert!(outcome.closed);
+        assert_eq!(counted(store.get(&id).unwrap()), 5);
+        let close = last_line(&store, &id);
+        assert!(close.contains("Ana wrote the synthesis") && !close.contains("reached"), "{close}");
+    }
+
+    #[test]
+    fn a_debate_carries_on_from_the_same_round_after_a_restart() {
+        let dir = std::env::temp_dir().join(format!("pinned-room-rounds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = Store::load(Some(&dir));
+        let id = debate(&mut store, &["Ana", "Beto"], 2, Some("Beto"), None);
+        say(&mut store, &id, "Ana", "split on the colon").unwrap();
+        let mut reloaded = Store::load(Some(&dir));
+        assert!(say(&mut reloaded, &id, "Ana", "again").unwrap_err().contains("already posted in round 1 of 2"));
+        say(&mut reloaded, &id, "Beto", "split on the comma").unwrap();
+        assert!(last_line(&reloaded, &id).starts_with("Round 2 of 2"));
+        let read = reloaded.read(&id, 0).unwrap();
+        assert_eq!((&read["round"], &read["synthesis"]), (&json!(2), &json!("Beto")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_room_without_rounds_writes_no_new_keys() {
+        let mut store = Store::load(None);
+        let id = open(&mut store);
+        bind(&mut store, &id);
+        store.post(&id, Speech::Seat { name: "Ana".into(), text: "hi".into(), to: vec![] }, 2).unwrap();
+        let saved = serde_json::to_value(store.get(&id).unwrap()).unwrap();
+        let room_keys = ["id", "project", "owner_tab", "tab", "brief", "status", "seq", "post_cap", "seats", "posts", "owner_cursor", "opened"];
+        assert!(saved.as_object().unwrap().keys().all(|key| room_keys.contains(&key.as_str())), "{saved}");
+        for seat in saved["seats"].as_array().unwrap() {
+            assert!(seat.as_object().unwrap().keys().all(|key| ["name", "task", "tab", "cursor", "done", "summary"].contains(&key.as_str())), "{seat}");
+        }
+    }
+
+    #[test]
+    fn a_seat_brief_tells_the_rounds_and_who_writes_the_synthesis() {
+        let plain = seat_brief("room-1", "Ana", &names(&["Beto"]), "Fix it.", None, None);
+        assert_eq!(plain, "You sit in room room-1 as Ana, with Beto.\n\nFix it.\n\nSpeak with room_post. A reply that stays only in this session is invisible to the room. End your turn after you post. The next messages arrive on their own. Do not poll. When your part is done, call room_done with a short summary.");
+        let ana = seat_brief("room-1", "Ana", &names(&["Beto", "Cleo"]), "Fix it.", Some(3), Some("Beto"));
+        assert!(ana.contains("3 rounds") && ana.contains("once per round") && ana.contains("Beto writes the synthesis"), "{ana}");
+        let beto = seat_brief("room-1", "Beto", &names(&["Ana", "Cleo"]), "Fix it.", Some(3), Some("Beto"));
+        assert!(beto.contains("you write the synthesis") && beto.contains("closes the room"), "{beto}");
     }
 
     #[test]
@@ -824,7 +1208,7 @@ mod tests {
     #[test]
     fn addressing_one_seat_leaves_the_other_quiet_until_a_later_post_catches_them_up() {
         let mut store = Store::load(None);
-        let id = store.open("/app", "tab-captain", "Fix it.", &names(&["Ana", "Beto", "Cleo"]), None, 1).unwrap();
+        let id = store.open("/app", "tab-captain", "Fix it.", &names(&["Ana", "Beto", "Cleo"]), None, None, None, 1).unwrap();
         for (name, n) in [("Ana", "1"), ("Beto", "2"), ("Cleo", "3")] {
             store.bind_seat(&id, name, &format!("task-{n}"), &format!("tab-{n}")).unwrap();
         }
@@ -879,7 +1263,7 @@ mod tests {
     #[test]
     fn the_post_cap_counts_speech_and_not_the_close_line() {
         let mut store = Store::load(None);
-        let id = store.open("/app", "tab-captain", "Fix it.", &names(&["Ana", "Beto"]), Some(1), 1).unwrap();
+        let id = store.open("/app", "tab-captain", "Fix it.", &names(&["Ana", "Beto"]), Some(1), None, None, 1).unwrap();
         bind(&mut store, &id);
         let outcome = store.post(&id, Speech::Seat { name: "Ana".into(), text: "only one".into(), to: vec![] }, 2).unwrap();
         assert!(outcome.closed);
@@ -1004,7 +1388,7 @@ mod tests {
   ]
 }"#;
         std::fs::write(dir.join(FILE), legacy).unwrap();
-        let store = Store::load(Some(&dir));
+        let mut store = Store::load(Some(&dir));
         let room = store.get("room-2").unwrap();
         assert_eq!(room.status, Status::Open);
         assert_eq!(room.post_cap, DEFAULT_POST_CAP);
@@ -1016,6 +1400,10 @@ mod tests {
         assert!(!room.seats[0].done);
         assert!(room.published);
         assert_eq!(store.next, 3);
+        let read = store.read("room-2", 0).unwrap();
+        assert!(["round", "rounds", "synthesis"].iter().all(|key| read.get(key).is_none()), "{read}");
+        store.post("room-2", Speech::Seat { name: "Ana".into(), text: "again".into(), to: vec![] }, 10).unwrap();
+        store.post("room-2", Speech::Seat { name: "Ana".into(), text: "and again".into(), to: vec![] }, 11).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

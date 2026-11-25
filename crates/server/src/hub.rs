@@ -1083,6 +1083,10 @@ impl Hub {
             HubCall::ConnectPosthog { key, project, host } => (json(c().await?.connect_posthog(&key, &project, &host).await?), true),
             HubCall::DisconnectPosthog => (json(c().await?.disconnect_posthog()?), true),
             HubCall::VercelModels => (json(c().await?.vercel_models().await?), false),
+            HubCall::Classify { text, categories, question, instructions, model, unsure_below, sure_at } => {
+                let ask = pinned_core::classify::Ask { text, categories, question, instructions, model, unsure_below, sure_at };
+                (json(c().await?.agent_classify(ask).await?), false)
+            }
             HubCall::ConnectUpstash { key, claude_token } => {
                 let keys = upstash::Keys::parse(&key, &claude_token)?;
                 self.boxes.check_key(&keys.api_key).await?;

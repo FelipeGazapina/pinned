@@ -435,6 +435,12 @@ pub enum Call {
     AutoArchiveSettings,
     /// The `auto_archive::Settings` saved, answered as saved.
     SetAutoArchiveSettings { settings: crate::auto_archive::Settings },
+    /// `compaction::Settings` of this machine: from what context size the app offers to compact a
+    /// session.
+    CompactionSettings,
+    /// The `compaction::Settings` saved, answered as saved. A threshold under
+    /// `compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.
+    SetCompactionSettings { settings: crate::compaction::Settings },
     /// `on`, as saved. Whether the desktop app on this machine runs in the background, with no
     /// window, which it applies at once: on closes the window, off opens it. A machine without the
     /// app refuses it.
@@ -1722,6 +1728,32 @@ pub enum HubCall {
     RecordGlobalOrchestratorSave { settings: global::Settings, took: Vec<MachineId> },
     /// The account's last `global_orchestrator::AccountSave`, or `null` when it has none.
     GlobalOrchestratorSave,
+    /// `classify::Answer`: which of `categories`, or `yes` or `no` to `question`, a decision model on
+    /// the account's Vercel AI Gateway finds fits `text`, asked with the account's key. One gateway call.
+    Classify {
+        /// What to classify, at most 8,000 characters. The model reads it as data, never as instructions.
+        text: String,
+        /// Two to 20 categories to choose from, each a `name` and an optional `description` the model
+        /// reads to tell them apart. Leave it out to ask `question` instead.
+        #[serde(default)]
+        categories: Vec<crate::classify::Category>,
+        /// A yes/no question about the text, answered as the categories `yes` and `no`. Leave it out to
+        /// give `categories` instead.
+        #[serde(default)]
+        question: Option<String>,
+        /// Extra guidance for the model. With the question and the categories, at most 4,000 characters.
+        #[serde(default)]
+        instructions: String,
+        /// The decision model's gateway id, as `provider/name`. `typesafe-ai/jev` when left out.
+        #[serde(default)]
+        model: Option<String>,
+        /// The pick is `unsure` below this probability, from 0 to 1. 0.6 when left out.
+        #[serde(default)]
+        unsure_below: Option<f64>,
+        /// The pick is `sure` at or above this probability, from 0 to 1. 0.85 when left out.
+        #[serde(default)]
+        sure_at: Option<f64>,
+    },
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -2507,6 +2539,38 @@ mod tests {
         round_trip(HubCall::ConnectVercel { key: "vck_1".into() }, json!({ "cmd": "connect_vercel", "key": "vck_1" }));
         round_trip(HubCall::DisconnectVercel, json!({ "cmd": "disconnect_vercel" }));
         round_trip(HubCall::VercelModels, json!({ "cmd": "vercel_models" }));
+        round_trip(
+            HubCall::Classify {
+                text: "The export button 500s".into(),
+                categories: vec![
+                    crate::classify::Category { name: "bug".into(), description: "something broke".into() },
+                    crate::classify::Category { name: "other".into(), description: String::new() },
+                ],
+                question: None,
+                instructions: "Support tickets.".into(),
+                model: Some("typesafe-ai/jev".into()),
+                unsure_below: Some(0.5),
+                sure_at: Some(0.9),
+            },
+            json!({
+                "cmd": "classify",
+                "text": "The export button 500s",
+                "categories": [{ "name": "bug", "description": "something broke" }, { "name": "other", "description": "" }],
+                "question": null,
+                "instructions": "Support tickets.",
+                "model": "typesafe-ai/jev",
+                "unsure_below": 0.5,
+                "sure_at": 0.9,
+            }),
+        );
+        let asked: HubCall = serde_json::from_value(json!({ "cmd": "classify", "text": "The export button 500s", "question": "Is this a bug report?" })).unwrap();
+        assert!(
+            matches!(&asked, HubCall::Classify { text, categories, question: Some(question), instructions, model: None, unsure_below: None, sure_at: None }
+                if text == "The export button 500s" && categories.is_empty() && question == "Is this a bug report?" && instructions.is_empty()),
+            "a classify with only text and a question reads"
+        );
+        let bare: crate::classify::Category = serde_json::from_value(json!({ "name": "bug" })).unwrap();
+        assert_eq!(bare.description, "", "a category's description may be left out");
         round_trip(
             HubCall::ConnectPosthog { key: "phx_1".into(), project: "12345".into(), host: "eu".into() },
             json!({ "cmd": "connect_posthog", "key": "phx_1", "project": "12345", "host": "eu" }),

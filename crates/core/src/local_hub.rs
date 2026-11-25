@@ -211,6 +211,9 @@ impl LocalHub<'_> {
             HubCall::ConnectPosthog { key, project, host } => done(self.connectors.connect_posthog(&key, &project, &host).await),
             HubCall::DisconnectPosthog => done(self.connectors.disconnect_posthog()),
             HubCall::VercelModels => done(self.connectors.vercel_models().await),
+            HubCall::Classify { text, categories, question, instructions, model, unsure_below, sure_at } => {
+                done(self.connectors.agent_classify(crate::classify::Ask { text, categories, question, instructions, model, unsure_below, sure_at }).await)
+            }
             HubCall::SaveConnector { connector } => done(self.connectors.save_connector(connector)),
             HubCall::DeleteConnector { id } => done(self.connectors.delete_connector(&id)),
             HubCall::SetRepoInsight { settings } => done(self.connectors.set_repo_insight(settings)),
@@ -678,6 +681,24 @@ mod tests {
         let signed_in_place = LocalHub { connectors: &connectors, machine: &machine, place_as: "macbook", taste_dir: None, account: Some(&Kept(std::sync::Mutex::new(vec![]))) };
         let refused = drive(&signed_in_place, HubCall::RunWorkflow { id: saved.id });
         assert_eq!(refused, Answer::Done(Err(BOX_OFF.into())));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_classify_without_a_vercel_key_answers_not_connected_here_and_is_not_left_to_the_hub() {
+        refuse_real_home();
+        let dir = scratch("classify");
+        let connectors = Arc::new(Connectors::new(FileStorage::new(dir.join("store")), "/bin/pinned".into()));
+        let machine = machine_in(&dir);
+        let classify = || -> HubCall {
+            serde_json::from_value(serde_json::json!({ "cmd": "classify", "text": "The export button 500s", "question": "Is this a bug report?" })).unwrap()
+        };
+        let not_connected = Answer::Done(Err("Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".into()));
+        let signed_out = LocalHub { connectors: &connectors, machine: &machine, place_as: "local", taste_dir: None, account: None };
+        assert_eq!(drive(&signed_out, classify()), not_connected);
+        let kept = Kept(std::sync::Mutex::new(vec![]));
+        let signed_in = LocalHub { connectors: &connectors, machine: &machine, place_as: "macbook", taste_dir: None, account: Some(&kept) };
+        assert_eq!(drive(&signed_in, classify()), not_connected);
         let _ = std::fs::remove_dir_all(dir);
     }
 

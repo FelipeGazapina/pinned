@@ -1266,6 +1266,36 @@
                 ]
               },
               {
+                "description": "`compaction::Settings` of this machine: from what context size the app offers to compact a\nsession.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "compaction_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `compaction::Settings` saved, answered as saved. A threshold under\n`compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_compaction_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/CompactionSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`on`, as saved. Whether the desktop app on this machine runs in the background, with no\nwindow, which it applies at once: on closes the window, off opens it. A machine without the\napp refuses it.",
                 "type": "object",
                 "properties": {
@@ -4366,6 +4396,25 @@
             "required": [
               "workers",
               "sessions"
+            ]
+          },
+          "CompactionSettings": {
+            "description": "When this machine's sessions are offered a compaction.",
+            "type": "object",
+            "properties": {
+              "offer_tokens": {
+                "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 200000
+              }
+            },
+            "required": [
+              "offer_tokens"
             ]
           },
           "RepoLook": {
@@ -8000,6 +8049,77 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "`classify::Answer`: which of `categories`, or `yes` or `no` to `question`, a decision model on\nthe account's Vercel AI Gateway finds fits `text`, asked with the account's key. One gateway call.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "classify"
+                  },
+                  "text": {
+                    "description": "What to classify, at most 8,000 characters. The model reads it as data, never as instructions.",
+                    "type": "string"
+                  },
+                  "categories": {
+                    "description": "Two to 20 categories to choose from, each a `name` and an optional `description` the model\nreads to tell them apart. Leave it out to ask `question` instead.",
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Category2"
+                    },
+                    "default": []
+                  },
+                  "question": {
+                    "description": "A yes/no question about the text, answered as the categories `yes` and `no`. Leave it out to\ngive `categories` instead.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "instructions": {
+                    "description": "Extra guidance for the model. With the question and the categories, at most 4,000 characters.",
+                    "type": "string",
+                    "default": ""
+                  },
+                  "model": {
+                    "description": "The decision model's gateway id, as `provider/name`. `typesafe-ai/jev` when left out.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "unsure_below": {
+                    "description": "The pick is `unsure` below this probability, from 0 to 1. 0.6 when left out.",
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  },
+                  "sure_at": {
+                    "description": "The pick is `sure` at or above this probability, from 0 to 1. 0.85 when left out.",
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "text",
+                  "categories",
+                  "question",
+                  "instructions",
+                  "model",
+                  "unsure_below",
+                  "sure_at"
+                ]
               }
             ]
           },
@@ -10553,7 +10673,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -10656,6 +10788,12 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -10782,6 +10920,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -10793,7 +10932,8 @@
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
-              "escalate_areas"
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "ReviewerPatch": {
@@ -11000,6 +11140,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -11013,7 +11154,8 @@
                     "Release and version bumps",
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
-                  ]
+                  ],
+                  "manage_only": false
                 }
               },
               "captains": {
@@ -11041,6 +11183,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -11054,7 +11197,8 @@
                     "Release and version bumps",
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
-                  ]
+                  ],
+                  "manage_only": false
                 }
               },
               "projects": {
@@ -11197,8 +11341,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -11275,6 +11431,11 @@
                   "CI and deploy config",
                   "Sign-in, tokens and secrets"
                 ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -11288,6 +11449,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -11297,7 +11459,8 @@
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
-              "escalate_areas"
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "Reviewer": {
@@ -13713,6 +13876,25 @@
               }
             ]
           },
+          "Category2": {
+            "description": "One category the model may pick.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "What the answer's `pick` says when the text fits this category.",
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this category from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "name",
+              "description"
+            ]
+          },
           "Target4": {
             "type": "object",
             "properties": {
@@ -14956,6 +15138,36 @@
                   },
                   "settings": {
                     "$ref": "#/$defs/AutoArchiveSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
+                "description": "`compaction::Settings` of this machine: from what context size the app offers to compact a\nsession.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "compaction_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `compaction::Settings` saved, answered as saved. A threshold under\n`compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_compaction_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/CompactionSettings"
                   }
                 },
                 "required": [
@@ -18014,6 +18226,22 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": null
+              }
+            }
+          },
+          "CompactionSettings": {
+            "description": "When this machine's sessions are offered a compaction.",
+            "type": "object",
+            "properties": {
+              "offer_tokens": {
+                "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 200000
               }
             }
           },
@@ -21607,6 +21835,71 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "`classify::Answer`: which of `categories`, or `yes` or `no` to `question`, a decision model on\nthe account's Vercel AI Gateway finds fits `text`, asked with the account's key. One gateway call.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "classify"
+                  },
+                  "text": {
+                    "description": "What to classify, at most 8,000 characters. The model reads it as data, never as instructions.",
+                    "type": "string"
+                  },
+                  "categories": {
+                    "description": "Two to 20 categories to choose from, each a `name` and an optional `description` the model\nreads to tell them apart. Leave it out to ask `question` instead.",
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Category2"
+                    },
+                    "default": []
+                  },
+                  "question": {
+                    "description": "A yes/no question about the text, answered as the categories `yes` and `no`. Leave it out to\ngive `categories` instead.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "instructions": {
+                    "description": "Extra guidance for the model. With the question and the categories, at most 4,000 characters.",
+                    "type": "string",
+                    "default": ""
+                  },
+                  "model": {
+                    "description": "The decision model's gateway id, as `provider/name`. `typesafe-ai/jev` when left out.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "unsure_below": {
+                    "description": "The pick is `unsure` below this probability, from 0 to 1. 0.6 when left out.",
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  },
+                  "sure_at": {
+                    "description": "The pick is `sure` at or above this probability, from 0 to 1. 0.85 when left out.",
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "text"
+                ]
               }
             ]
           },
@@ -24067,7 +24360,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -24170,6 +24475,12 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -24291,6 +24602,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -24302,7 +24614,8 @@
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
-              "escalate_areas"
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "ReviewerPatch": {
@@ -24503,6 +24816,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -24516,7 +24830,8 @@
                     "Release and version bumps",
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
-                  ]
+                  ],
+                  "manage_only": false
                 }
               },
               "captains": {
@@ -24544,6 +24859,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -24557,7 +24873,8 @@
                     "Release and version bumps",
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
-                  ]
+                  ],
+                  "manage_only": false
                 }
               },
               "projects": {
@@ -24690,8 +25007,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -24768,6 +25097,11 @@
                   "CI and deploy config",
                   "Sign-in, tokens and secrets"
                 ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             }
           },
@@ -27096,6 +27430,24 @@
                   "thread"
                 ]
               }
+            ]
+          },
+          "Category2": {
+            "description": "One category the model may pick.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "What the answer's `pick` says when the text fits this category.",
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this category from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "name"
             ]
           },
           "Target4": {
@@ -31337,6 +31689,77 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "`classify::Answer`: which of `categories`, or `yes` or `no` to `question`, a decision model on\nthe account's Vercel AI Gateway finds fits `text`, asked with the account's key. One gateway call.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "classify"
+                  },
+                  "text": {
+                    "description": "What to classify, at most 8,000 characters. The model reads it as data, never as instructions.",
+                    "type": "string"
+                  },
+                  "categories": {
+                    "description": "Two to 20 categories to choose from, each a `name` and an optional `description` the model\nreads to tell them apart. Leave it out to ask `question` instead.",
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Category2"
+                    },
+                    "default": []
+                  },
+                  "question": {
+                    "description": "A yes/no question about the text, answered as the categories `yes` and `no`. Leave it out to\ngive `categories` instead.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "instructions": {
+                    "description": "Extra guidance for the model. With the question and the categories, at most 4,000 characters.",
+                    "type": "string",
+                    "default": ""
+                  },
+                  "model": {
+                    "description": "The decision model's gateway id, as `provider/name`. `typesafe-ai/jev` when left out.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "unsure_below": {
+                    "description": "The pick is `unsure` below this probability, from 0 to 1. 0.6 when left out.",
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  },
+                  "sure_at": {
+                    "description": "The pick is `sure` at or above this probability, from 0 to 1. 0.85 when left out.",
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "text",
+                  "categories",
+                  "question",
+                  "instructions",
+                  "model",
+                  "unsure_below",
+                  "sure_at"
+                ]
               }
             ]
           },
@@ -34006,7 +34429,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort2"
@@ -34109,6 +34544,12 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -34266,6 +34707,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -34277,7 +34719,8 @@
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
-              "escalate_areas"
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "ReviewerPatch": {
@@ -34484,6 +34927,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -34497,7 +34941,8 @@
                     "Release and version bumps",
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
-                  ]
+                  ],
+                  "manage_only": false
                 }
               },
               "captains": {
@@ -34525,6 +34970,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -34538,7 +34984,8 @@
                     "Release and version bumps",
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
-                  ]
+                  ],
+                  "manage_only": false
                 }
               },
               "projects": {
@@ -34681,8 +35128,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort2"
@@ -34759,6 +35218,11 @@
                   "CI and deploy config",
                   "Sign-in, tokens and secrets"
                 ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -34772,6 +35236,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -34781,7 +35246,8 @@
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
-              "escalate_areas"
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "Reviewer": {
@@ -37806,6 +38272,25 @@
                 "type": "string",
                 "const": "tool_only"
               }
+            ]
+          },
+          "Category2": {
+            "description": "One category the model may pick.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "What the answer's `pick` says when the text fits this category.",
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this category from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "name",
+              "description"
             ]
           }
         }
@@ -41842,6 +42327,71 @@
                 "required": [
                   "cmd"
                 ]
+              },
+              {
+                "description": "`classify::Answer`: which of `categories`, or `yes` or `no` to `question`, a decision model on\nthe account's Vercel AI Gateway finds fits `text`, asked with the account's key. One gateway call.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "classify"
+                  },
+                  "text": {
+                    "description": "What to classify, at most 8,000 characters. The model reads it as data, never as instructions.",
+                    "type": "string"
+                  },
+                  "categories": {
+                    "description": "Two to 20 categories to choose from, each a `name` and an optional `description` the model\nreads to tell them apart. Leave it out to ask `question` instead.",
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Category2"
+                    },
+                    "default": []
+                  },
+                  "question": {
+                    "description": "A yes/no question about the text, answered as the categories `yes` and `no`. Leave it out to\ngive `categories` instead.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "instructions": {
+                    "description": "Extra guidance for the model. With the question and the categories, at most 4,000 characters.",
+                    "type": "string",
+                    "default": ""
+                  },
+                  "model": {
+                    "description": "The decision model's gateway id, as `provider/name`. `typesafe-ai/jev` when left out.",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "unsure_below": {
+                    "description": "The pick is `unsure` below this probability, from 0 to 1. 0.6 when left out.",
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  },
+                  "sure_at": {
+                    "description": "The pick is `sure` at or above this probability, from 0 to 1. 0.85 when left out.",
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double",
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "text"
+                ]
               }
             ]
           },
@@ -44416,7 +44966,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort2"
@@ -44519,6 +45081,12 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -44671,6 +45239,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -44682,7 +45251,8 @@
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
-              "escalate_areas"
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "ReviewerPatch": {
@@ -44883,6 +45453,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -44896,7 +45467,8 @@
                     "Release and version bumps",
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
-                  ]
+                  ],
+                  "manage_only": false
                 }
               },
               "captains": {
@@ -44924,6 +45496,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -44937,7 +45510,8 @@
                     "Release and version bumps",
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
-                  ]
+                  ],
+                  "manage_only": false
                 }
               },
               "projects": {
@@ -45070,8 +45644,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort2"
@@ -45148,6 +45734,11 @@
                   "CI and deploy config",
                   "Sign-in, tokens and secrets"
                 ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             }
           },
@@ -48068,6 +48659,24 @@
                 "const": "tool_only"
               }
             ]
+          },
+          "Category2": {
+            "description": "One category the model may pick.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "description": "What the answer's `pick` says when the text fits this category.",
+                "type": "string"
+              },
+              "description": {
+                "description": "What the model reads to tell this category from the others.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "name"
+            ]
           }
         }
       }
@@ -49364,6 +49973,171 @@
                 ]
               }
             }
+          }
+        }
+      }
+    },
+    "ClassifyAnswer": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Answer",
+        "description": "What `classify` answers.",
+        "type": "object",
+        "properties": {
+          "pick": {
+            "description": "The category the model picked: `yes` or `no` for a question.",
+            "type": "string"
+          },
+          "probability": {
+            "description": "How likely the model found the pick, from 0 to 1.",
+            "type": "number",
+            "format": "double"
+          },
+          "probabilities": {
+            "description": "Every category in the order given, `yes` then `no` for a question. A category the model\ngave no probability has 0.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Scored"
+            }
+          },
+          "confidence": {
+            "$ref": "#/$defs/Confidence"
+          }
+        },
+        "required": [
+          "pick",
+          "probability",
+          "probabilities",
+          "confidence"
+        ],
+        "$defs": {
+          "Scored": {
+            "description": "One category and how likely the model found it.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "probability": {
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "name",
+              "probability"
+            ]
+          },
+          "Confidence": {
+            "description": "How sure the model was of its pick: `sure` at or above `sure_at`, `unsure` below\n`unsure_below`, `likely` between.",
+            "type": "string",
+            "enum": [
+              "sure",
+              "likely",
+              "unsure"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Answer",
+        "description": "What `classify` answers.",
+        "type": "object",
+        "properties": {
+          "pick": {
+            "description": "The category the model picked: `yes` or `no` for a question.",
+            "type": "string"
+          },
+          "probability": {
+            "description": "How likely the model found the pick, from 0 to 1.",
+            "type": "number",
+            "format": "double"
+          },
+          "probabilities": {
+            "description": "Every category in the order given, `yes` then `no` for a question. A category the model\ngave no probability has 0.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Scored"
+            }
+          },
+          "confidence": {
+            "$ref": "#/$defs/Confidence"
+          }
+        },
+        "required": [
+          "pick",
+          "probability",
+          "probabilities",
+          "confidence"
+        ],
+        "$defs": {
+          "Scored": {
+            "description": "One category and how likely the model found it.",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "probability": {
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "required": [
+              "name",
+              "probability"
+            ]
+          },
+          "Confidence": {
+            "description": "How sure the model was of its pick: `sure` at or above `sure_at`, `unsure` below\n`unsure_below`, `likely` between.",
+            "type": "string",
+            "enum": [
+              "sure",
+              "likely",
+              "unsure"
+            ]
+          }
+        }
+      }
+    },
+    "CompactionSettings": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "CompactionSettings",
+        "description": "When this machine's sessions are offered a compaction.",
+        "type": "object",
+        "properties": {
+          "offer_tokens": {
+            "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "default": 200000
+          }
+        },
+        "required": [
+          "offer_tokens"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "CompactionSettings",
+        "description": "When this machine's sessions are offered a compaction.",
+        "type": "object",
+        "properties": {
+          "offer_tokens": {
+            "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "default": 200000
           }
         }
       }
@@ -67025,6 +67799,7 @@
               "skills": [],
               "context": [],
               "tier": "high",
+              "default_model": null,
               "default_effort": null,
               "max_effort": "max",
               "budget_cents": 0,
@@ -67038,7 +67813,8 @@
                 "Release and version bumps",
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
-              ]
+              ],
+              "manage_only": false
             }
           },
           "captains": {
@@ -67066,6 +67842,7 @@
               "skills": [],
               "context": [],
               "tier": "high",
+              "default_model": null,
               "default_effort": null,
               "max_effort": "max",
               "budget_cents": 0,
@@ -67079,7 +67856,8 @@
                 "Release and version bumps",
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
-              ]
+              ],
+              "manage_only": false
             }
           },
           "projects": {
@@ -67222,8 +68000,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -67300,6 +68090,11 @@
                   "CI and deploy config",
                   "Sign-in, tokens and secrets"
                 ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -67313,6 +68108,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -67322,7 +68118,8 @@
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
-              "escalate_areas"
+              "escalate_areas",
+              "manage_only"
             ]
           },
           "Strategy": {
@@ -67518,7 +68315,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -67621,6 +68430,12 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -67935,6 +68750,7 @@
               "skills": [],
               "context": [],
               "tier": "high",
+              "default_model": null,
               "default_effort": null,
               "max_effort": "max",
               "budget_cents": 0,
@@ -67948,7 +68764,8 @@
                 "Release and version bumps",
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
-              ]
+              ],
+              "manage_only": false
             }
           },
           "captains": {
@@ -67976,6 +68793,7 @@
               "skills": [],
               "context": [],
               "tier": "high",
+              "default_model": null,
               "default_effort": null,
               "max_effort": "max",
               "budget_cents": 0,
@@ -67989,7 +68807,8 @@
                 "Release and version bumps",
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
-              ]
+              ],
+              "manage_only": false
             }
           },
           "projects": {
@@ -68122,8 +68941,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -68200,6 +69031,11 @@
                   "CI and deploy config",
                   "Sign-in, tokens and secrets"
                 ]
+              },
+              "manage_only": {
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": false
               }
             }
           },
@@ -68396,7 +69232,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -68499,6 +69347,12 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -81735,6 +82589,36 @@
                 ]
               },
               {
+                "description": "`compaction::Settings` of this machine: from what context size the app offers to compact a\nsession.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "compaction_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `compaction::Settings` saved, answered as saved. A threshold under\n`compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_compaction_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/CompactionSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`on`, as saved. Whether the desktop app on this machine runs in the background, with no\nwindow, which it applies at once: on closes the window, off opens it. A machine without the\napp refuses it.",
                 "type": "object",
                 "properties": {
@@ -84837,6 +85721,25 @@
               "sessions"
             ]
           },
+          "CompactionSettings": {
+            "description": "When this machine's sessions are offered a compaction.",
+            "type": "object",
+            "properties": {
+              "offer_tokens": {
+                "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 200000
+              }
+            },
+            "required": [
+              "offer_tokens"
+            ]
+          },
           "RepoLook": {
             "description": "What the global orchestrator asks of a checkout.",
             "oneOf": [
@@ -87410,6 +88313,36 @@
                   },
                   "settings": {
                     "$ref": "#/$defs/AutoArchiveSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
+                "description": "`compaction::Settings` of this machine: from what context size the app offers to compact a\nsession.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "compaction_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `compaction::Settings` saved, answered as saved. A threshold under\n`compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_compaction_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/CompactionSettings"
                   }
                 },
                 "required": [
@@ -90468,6 +91401,22 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": null
+              }
+            }
+          },
+          "CompactionSettings": {
+            "description": "When this machine's sessions are offered a compaction.",
+            "type": "object",
+            "properties": {
+              "offer_tokens": {
+                "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 200000
               }
             }
           },

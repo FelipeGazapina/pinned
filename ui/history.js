@@ -11,13 +11,16 @@ async function showGeneral() {
     ${globalOrchestrator}
     ${sidebarSettingsHtml()}
     ${sendShortcutHtml()}
+    ${compactionSettingsHtml()}
     ${browserSettingsHtml()}`;
   bindFeaturesSettings();
   bindOrchestrationSettings();
   bindGlobalOrchestratorSettings();
   bindSidebarSettings();
   bindSendShortcut();
+  bindCompactionSettings();
   bindBrowserSettings();
+  refreshCompactionSettings();
 }
 
 /** T3 Code's Appearance page: colors and themes, the interface, motion and typography. */

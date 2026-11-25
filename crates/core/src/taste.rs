@@ -53,6 +53,15 @@ impl fmt::Display for ModelRef {
     }
 }
 
+/// Refuses a model name that could reach a CLI as anything but a model: an empty one, one that
+/// starts with `-`, or one with a character outside letters, digits and `-.[]_`.
+pub fn check_model_name(model: &str) -> Result<(), String> {
+    if model.is_empty() || model.starts_with('-') || !model.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.[]_".contains(&b)) {
+        return Err(format!("{model:?} is not a model name"));
+    }
+    Ok(())
+}
+
 /// How a worker climbs the model ladder.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -142,7 +151,12 @@ pub struct Taste {
     pub context: Vec<String>,
     /// The costliest model tier a worker may run on.
     pub tier: Tier,
-    /// The effort a worker gets when the call names none. None leaves it to the model.
+    /// The model a new session starts on when its start names none, on a Claude Code or OpenCode
+    /// Go account that lists it. None leaves it to the CLI. Always written, null included, so a
+    /// page tells a hub that has it from one that predates it.
+    pub default_model: Option<ModelRef>,
+    /// The effort a worker gets when the call names none, and a new session when its start names
+    /// none. None leaves it to the model.
     pub default_effort: Option<Effort>,
     /// The most effort a call may ask for.
     pub max_effort: Effort,
@@ -166,6 +180,9 @@ pub struct Taste {
     pub escalate_over_lines: u32,
     /// Areas whose changes always go to the user, as free text.
     pub escalate_areas: Vec<String>,
+    /// The Captain starts without the file-editing tools and hands every change to a worker. Only
+    /// the Captains' and a project's scope use it.
+    pub manage_only: bool,
 }
 
 /// A scope's delegation limits, resolved: what `delegate_task` and the boxes enforce.
@@ -204,6 +221,11 @@ pub struct TastePatch {
     pub context: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<Tier>,
+    /// A project's default model over the Captains'. A patch can set it but not clear it;
+    /// resetting the field clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<ModelRef>,
+    /// The effort a worker whose call names none gets, and a new session whose start names none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_effort: Option<Effort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -234,6 +256,8 @@ pub struct TastePatch {
     pub escalate_over_lines: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escalate_areas: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manage_only: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
@@ -261,6 +285,7 @@ pub enum TasteField {
     Skills,
     Context,
     Tier,
+    DefaultModel,
     DefaultEffort,
     MaxEffort,
     BudgetCents,
@@ -273,11 +298,12 @@ pub enum TasteField {
     EscalateProcessFailure,
     EscalateOverLines,
     EscalateAreas,
+    ManageOnly,
 }
 
 impl TasteField {
     /// The JSON name of a setting only the user changes on the Way of working page: a review setting, Boxes at
-    /// once, or an escalation setting. None for the rest.
+    /// once, an escalation setting or Manage only. None for the rest.
     pub fn review_setting(self) -> Option<&'static str> {
         match self {
             TasteField::ReviewDiffs => Some("review_diffs"),
@@ -287,12 +313,13 @@ impl TasteField {
             TasteField::EscalateProcessFailure => Some("escalate_process_failure"),
             TasteField::EscalateOverLines => Some("escalate_over_lines"),
             TasteField::EscalateAreas => Some("escalate_areas"),
+            TasteField::ManageOnly => Some("manage_only"),
             _ => None,
         }
     }
 }
 
-/// The refusal of an agent's change to review or escalation settings, which only the user makes on the Way of working page.
+/// The refusal of an agent's change to review or escalation settings or Manage only, which only the user makes on the Way of working page.
 /// Refused whole, so the other fields of the same change wait too.
 pub fn refuse_review_settings(named: impl IntoIterator<Item = &'static str>) -> Result<(), String> {
     let named: Vec<&str> = named.into_iter().collect();
@@ -436,6 +463,7 @@ fn balanced() -> Taste {
         skills: vec![],
         context: vec![],
         tier: Tier::High,
+        default_model: None,
         default_effort: None,
         max_effort: Effort::Max,
         budget_cents: 0,
@@ -446,6 +474,7 @@ fn balanced() -> Taste {
         escalate_process_failure: true,
         escalate_over_lines: 500,
         escalate_areas: ["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"].map(str::to_owned).to_vec(),
+        manage_only: false,
     }
 }
 
@@ -512,6 +541,9 @@ impl Taste {
         }
         if self.ladder.iter().chain(&self.hard_model).any(|m| m.model.trim().is_empty()) {
             return Err("every model needs a name".into());
+        }
+        if let Some(default) = &self.default_model {
+            check_model_name(&default.model)?;
         }
         if !(1..=MAX_PARALLEL).contains(&self.parallel) {
             return Err(format!("parallel workers go from 1 to {MAX_PARALLEL}"));
@@ -581,6 +613,7 @@ impl Taste {
             TasteField::Skills => self.skills = default.skills,
             TasteField::Context => self.context = default.context,
             TasteField::Tier => self.tier = default.tier,
+            TasteField::DefaultModel => self.default_model = default.default_model,
             TasteField::DefaultEffort => self.default_effort = default.default_effort,
             TasteField::MaxEffort => self.max_effort = default.max_effort,
             TasteField::BudgetCents => self.budget_cents = default.budget_cents,
@@ -592,6 +625,7 @@ impl Taste {
             TasteField::EscalateProcessFailure => self.escalate_process_failure = default.escalate_process_failure,
             TasteField::EscalateOverLines => self.escalate_over_lines = default.escalate_over_lines,
             TasteField::EscalateAreas => self.escalate_areas = default.escalate_areas,
+            TasteField::ManageOnly => self.manage_only = default.manage_only,
         }
     }
 }
@@ -724,7 +758,7 @@ pub(crate) fn usd(cents: u32) -> String {
 
 impl TastePatch {
     /// The settings this patch sets that only the user changes, on the Way of working page: the review settings,
-    /// Boxes at once and the escalation settings, by name.
+    /// Boxes at once, the escalation settings and Manage only, by name.
     pub fn review_settings(&self) -> Vec<&'static str> {
         [
             ("review_diffs", self.review_diffs.is_some()),
@@ -734,6 +768,7 @@ impl TastePatch {
             ("escalate_process_failure", self.escalate_process_failure.is_some()),
             ("escalate_over_lines", self.escalate_over_lines.is_some()),
             ("escalate_areas", self.escalate_areas.is_some()),
+            ("manage_only", self.manage_only.is_some()),
         ]
             .into_iter()
             .filter(|(_, set)| *set)
@@ -760,6 +795,9 @@ impl TastePatch {
         put(&self.skills, &mut taste.skills);
         put(&self.context, &mut taste.context);
         put(&self.tier, &mut taste.tier);
+        if self.default_model.is_some() {
+            taste.default_model.clone_from(&self.default_model);
+        }
         if self.default_effort.is_some() {
             taste.default_effort = self.default_effort;
         }
@@ -774,6 +812,7 @@ impl TastePatch {
         put(&self.escalate_process_failure, &mut taste.escalate_process_failure);
         put(&self.escalate_over_lines, &mut taste.escalate_over_lines);
         put(&self.escalate_areas, &mut taste.escalate_areas);
+        put(&self.manage_only, &mut taste.manage_only);
     }
 
     /// Takes each field `newer` sets, and keeps the rest.
@@ -793,6 +832,7 @@ impl TastePatch {
         take(newer.skills, &mut self.skills);
         take(newer.context, &mut self.context);
         take(newer.tier, &mut self.tier);
+        take(newer.default_model, &mut self.default_model);
         take(newer.default_effort, &mut self.default_effort);
         take(newer.max_effort, &mut self.max_effort);
         take(newer.budget_cents, &mut self.budget_cents);
@@ -805,6 +845,7 @@ impl TastePatch {
         take(newer.escalate_process_failure, &mut self.escalate_process_failure);
         take(newer.escalate_over_lines, &mut self.escalate_over_lines);
         take(newer.escalate_areas, &mut self.escalate_areas);
+        take(newer.manage_only, &mut self.manage_only);
     }
 
     /// Drops each field equal to `base`'s, so the scope inherits it again.
@@ -826,6 +867,9 @@ impl TastePatch {
         drop_same(&mut self.skills, &base.skills);
         drop_same(&mut self.context, &base.context);
         drop_same(&mut self.tier, &base.tier);
+        if self.default_model.is_some() && self.default_model == base.default_model {
+            self.default_model = None;
+        }
         if self.default_effort.is_some() && self.default_effort == base.default_effort {
             self.default_effort = None;
         }
@@ -840,6 +884,7 @@ impl TastePatch {
         drop_same(&mut self.escalate_process_failure, &base.escalate_process_failure);
         drop_same(&mut self.escalate_over_lines, &base.escalate_over_lines);
         drop_same(&mut self.escalate_areas, &base.escalate_areas);
+        drop_same(&mut self.manage_only, &base.manage_only);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -866,6 +911,7 @@ impl TastePatch {
             TasteField::Skills => self.skills = None,
             TasteField::Context => self.context = None,
             TasteField::Tier => self.tier = None,
+            TasteField::DefaultModel => self.default_model = None,
             TasteField::DefaultEffort => self.default_effort = None,
             TasteField::MaxEffort => self.max_effort = None,
             TasteField::BudgetCents => self.budget_cents = None,
@@ -878,6 +924,7 @@ impl TastePatch {
             TasteField::EscalateProcessFailure => self.escalate_process_failure = None,
             TasteField::EscalateOverLines => self.escalate_over_lines = None,
             TasteField::EscalateAreas => self.escalate_areas = None,
+            TasteField::ManageOnly => self.manage_only = None,
         }
     }
 }
@@ -1198,7 +1245,7 @@ pub fn chat_prompt(scope: &TasteScope) -> String {
     format!(
         "Help me adjust the way of working of {who} in pinned (scope {name}).
 
-You have three tools for it. taste_get(scope) reads a scope: the settings its sessions get (effective), what the scope sets itself (own), and the brief text they start with. taste_set(scope, patch) changes the fields the patch names and keeps the rest; a project's field set to the Captains' value goes back to inheriting it. taste_reset(scope, field) makes a project inherit the field again, or gives the orchestrator and the Captains its default back. A scope is orchestrator, captains, or project: followed by the project's repo, as in project:github.com/acme/site. The fields are strategy (cheap_with_guidance, escalate_on_failure or strongest_first), ladder (models, cheapest first), hard_model, parallel (workers at once, 1 to 100), autonomy (ask_first, decide_and_tell or report_at_end), skills ({{name, enabled}}) and context (notes every turn carries), and the delegation limits pinned enforces: tier (low, mid or high), default_effort and max_effort (low, medium, high, xhigh or max), budget_cents (per worker, 0 for no cap), time_limit_min (1 to 10080) and box_budget_cents (per box, 0 for none), and box_size (small, medium or large: the size of a box opened with none named; captains holds the account's, a project overrides it, small when neither does). Leave review_diffs, second_opinion, boxes_at_once and the escalation settings (escalate_breaking_change, escalate_process_failure, escalate_over_lines and escalate_areas) alone: taste_set and taste_reset refuse them, and only the user sets them, on the Way of working page. The Way of working page shows each change as soon as it lands, and new sessions start with it.
+You have three tools for it. taste_get(scope) reads a scope: the settings its sessions get (effective), what the scope sets itself (own), and the brief text they start with. taste_set(scope, patch) changes the fields the patch names and keeps the rest; a project's field set to the Captains' value goes back to inheriting it. taste_reset(scope, field) makes a project inherit the field again, or gives the orchestrator and the Captains its default back. A scope is orchestrator, captains, or project: followed by the project's repo, as in project:github.com/acme/site. The fields are strategy (cheap_with_guidance, escalate_on_failure or strongest_first), ladder (models, cheapest first), hard_model, parallel (workers at once, 1 to 100), autonomy (ask_first, decide_and_tell or report_at_end), skills ({{name, enabled}}), context (notes every turn carries) and default_model (a model, with its provider when that matters: the model new sessions start on when they name none, on a Claude Code or OpenCode Go account that lists it), and the delegation limits pinned enforces: tier (low, mid or high), default_effort and max_effort (low, medium, high, xhigh or max; default_effort is the effort of a worker whose call names none and of new sessions that name none), budget_cents (per worker, 0 for no cap), time_limit_min (1 to 10080) and box_budget_cents (per box, 0 for none), and box_size (small, medium or large: the size of a box opened with none named; captains holds the account's, a project overrides it, small when neither does). Leave review_diffs, second_opinion, boxes_at_once, manage_only and the escalation settings (escalate_breaking_change, escalate_process_failure, escalate_over_lines and escalate_areas) alone: taste_set and taste_reset refuse them, and only the user sets them, on the Way of working page. The Way of working page shows each change as soon as it lands, and new sessions start with it.
 
 Start with taste_get(\"{name}\"). Then interview me: one short question at a time, each with two or three answers to pick from, and change nothing yet. When you know what to change, list the changes in plain words, apply them with taste_set or taste_reset once I agree, and read the scope again to show me the new brief.",
         who = scope.label(),
@@ -1469,6 +1516,7 @@ mod tests {
             skills: vec![],
             context: vec![],
             tier: Tier::High,
+            default_model: None,
             default_effort: None,
             max_effort: Effort::Max,
             budget_cents: 0,
@@ -1479,6 +1527,7 @@ mod tests {
             escalate_process_failure: true,
             escalate_over_lines: 500,
             escalate_areas: vec!["Release and version bumps".into(), "CI and deploy config".into(), "Sign-in, tokens and secrets".into()],
+            manage_only: false,
         };
         assert_eq!(tastes.resolve(&site()), expected);
         assert_eq!(tastes.resolve(&TasteScope::Project { repo: "github.com/acme/api".into() }).parallel, 2, "a project with no patch is the Capitães'");
@@ -1591,14 +1640,16 @@ Deploys go through the VPS."
             "orchestrator": {
                 "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 8, "autonomy": "report_at_end",
                 "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
-                "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
+                "tier": "high", "default_model": null, "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
                 "box_size": null, "escalate_breaking_change": true, "escalate_process_failure": true, "escalate_over_lines": 500, "escalate_areas": areas,
+                "manage_only": false,
             },
             "captains": {
                 "strategy": "escalate_on_failure", "ladder": [{ "model": "glm-5.3" }, { "model": "claude-sonnet-5-5" }, opus], "hard_model": opus,
                 "parallel": 5, "autonomy": "decide_and_tell", "review_diffs": true, "second_opinion": false, "skills": [], "context": [],
-                "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
+                "tier": "high", "default_model": null, "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
                 "box_size": null, "escalate_breaking_change": true, "escalate_process_failure": true, "escalate_over_lines": 500, "escalate_areas": areas,
+                "manage_only": false,
             },
             "projects": { "github.com/acme/site": { "hard_model": { "provider": "cursor", "model": "grok-4.7" }, "parallel": 4 } },
             "placement": { "prefer": [], "avoid": [], "heavy": "worktree" },
@@ -2194,5 +2245,106 @@ Deploys go through the VPS."
         assert_eq!((back.captains.escalate_breaking_change, back.captains.escalate_over_lines, back.captains.escalate_areas.clone()), (false, 90, areas(&["Billing"])));
         assert_eq!((back.orchestrator.escalate_over_lines, back.boxes_at_once), (90, 3), "what the copy does not carry keeps its stored value");
         assert!(back.projects.is_empty(), "a project the copy does not name is gone");
+    }
+
+    #[test]
+    fn manage_only_is_off_by_default_and_a_project_sets_inherits_and_resets_it() {
+        assert!(!Taste::default().manage_only);
+        let old: Tastes = serde_json::from_value(json!({ "captains": { "parallel": 3 }, "projects": { "github.com/acme/site": { "parallel": 2 } } })).unwrap();
+        assert_eq!((old.captains.manage_only, old.resolve(&site()).manage_only), (false, false), "tastes from before the field");
+        let api = TasteScope::Project { repo: "github.com/acme/api".into() };
+
+        let mut tastes = Tastes::default();
+        tastes.set(&site(), TastePatch { manage_only: Some(true), ..TastePatch::default() }).unwrap();
+        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "manage_only": true } }));
+        assert_eq!((tastes.resolve(&site()).manage_only, tastes.resolve(&api).manage_only), (true, false), "another project stays off");
+        tastes.set(&site(), TastePatch { parallel: Some(2), manage_only: Some(false), ..TastePatch::default() }).unwrap();
+        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 2 } }), "the Captains' value set on the project is dropped");
+        tastes.set(&site(), TastePatch { manage_only: Some(true), ..TastePatch::default() }).unwrap();
+        tastes.reset(&site(), TasteField::ManageOnly);
+        assert_eq!((tastes.projects[SITE].manage_only, tastes.resolve(&site()).manage_only), (None, false), "a reset inherits again");
+
+        tastes.set(&TasteScope::Captains, TastePatch { manage_only: Some(true), ..TastePatch::default() }).unwrap();
+        assert_eq!((tastes.resolve(&site()).manage_only, tastes.resolve(&api).manage_only), (true, true), "a project without its own inherits the Captains'");
+        tastes.reset(&TasteScope::Captains, TasteField::ManageOnly);
+        assert!(!tastes.captains.manage_only, "a reset gives the Captains off back");
+        assert_eq!(tastes.set(&TasteScope::Orchestrator, TastePatch { manage_only: Some(true), ..TastePatch::default() }), Ok(()), "the orchestrator's scope takes it and nothing reads it");
+    }
+
+    #[test]
+    fn manage_only_leaves_the_profile_and_the_brief_alone() {
+        let mut taste = preset(Profile::Balanced);
+        let brief = taste.brief();
+        taste.manage_only = true;
+        assert_eq!((taste.profile(), taste.brief()), (Profile::Balanced, brief));
+        taste.apply(Profile::Aggressive);
+        assert_eq!((taste.profile(), taste.manage_only), (Profile::Aggressive, true), "a preset keeps it");
+    }
+
+    #[test]
+    fn manage_only_is_the_users_own() {
+        let refused = Err("manage_only is changed only by the user, on the Way of working page; nothing changed".to_owned());
+        let patch = TastePatch { manage_only: Some(true), ..TastePatch::default() };
+        assert_eq!(refuse_review_settings(patch.review_settings()), refused);
+        assert_eq!(refuse_review_settings(TastePatch { parallel: Some(2), ..patch }.review_settings()), refused, "mixed with an allowed field");
+        assert_eq!(refuse_review_settings(TasteField::ManageOnly.review_setting()), refused);
+        assert_eq!(serde_json::to_value(TasteField::ManageOnly).unwrap(), json!("manage_only"));
+    }
+
+    #[test]
+    fn the_captains_default_model_resolves_for_every_project_and_a_projects_own_beats_it_there() {
+        let api = TasteScope::Project { repo: "github.com/acme/api".into() };
+        let sonnet = ModelRef::named("claude-sonnet-5-5");
+        let glm = ModelRef { provider: Some("opencode".into()), model: "glm-5.3".into() };
+        let old: Tastes = serde_json::from_value(json!({ "captains": { "parallel": 3 }, "projects": { "github.com/acme/site": { "parallel": 2 } } })).unwrap();
+        assert_eq!((old.resolve(&site()).default_model, old.captains.default_model), (None, None), "tastes from before the field");
+
+        let mut tastes = Tastes::default();
+        tastes.set(&TasteScope::Captains, TastePatch { default_model: Some(sonnet.clone()), ..TastePatch::default() }).unwrap();
+        assert_eq!((tastes.resolve(&site()).default_model, tastes.resolve(&api).default_model), (Some(sonnet.clone()), Some(sonnet.clone())));
+        tastes.set(&site(), TastePatch { default_model: Some(glm.clone()), ..TastePatch::default() }).unwrap();
+        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "default_model": { "provider": "opencode", "model": "glm-5.3" } } }));
+        assert_eq!((tastes.resolve(&site()).default_model, tastes.resolve(&api).default_model), (Some(glm.clone()), Some(sonnet.clone())), "only that project");
+
+        tastes.set(&site(), TastePatch { default_model: Some(sonnet.clone()), parallel: Some(4), ..TastePatch::default() }).unwrap();
+        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 4 } }), "the Captains' model set on the project is dropped");
+        tastes.set(&site(), TastePatch { default_model: Some(glm), ..TastePatch::default() }).unwrap();
+        tastes.reset(&site(), TasteField::DefaultModel);
+        assert_eq!(tastes.resolve(&site()).default_model, Some(sonnet), "a reset project inherits again");
+        assert!(serde_json::to_value(&tastes.projects[SITE]).unwrap().get("default_model").is_none(), "a project's patch leaves it out");
+        tastes.reset(&TasteScope::Captains, TasteField::DefaultModel);
+        assert_eq!((tastes.captains.default_model.clone(), tastes.resolve(&site()).default_model), (None, None), "a reset gives the Captains none back");
+        assert_eq!(serde_json::to_value(&tastes.captains).unwrap()["default_model"], Value::Null, "the Captains' is written, null included");
+
+        assert_eq!(serde_json::to_value(TasteField::DefaultModel).unwrap(), json!("default_model"));
+        assert_eq!(TasteField::DefaultModel.review_setting(), None, "the taste tools may set it");
+    }
+
+    #[test]
+    fn a_default_model_that_is_no_model_name_is_refused_and_changes_nothing() {
+        let evil = ModelRef { provider: None, model: "--evil".into() };
+        assert_eq!(Taste { default_model: Some(evil.clone()), ..Taste::default() }.check(), Err("\"--evil\" is not a model name".into()));
+        let mut tastes = Tastes::default();
+        let before = tastes.clone();
+        for scope in [TasteScope::Captains, site()] {
+            assert_eq!(tastes.set(&scope, TastePatch { default_model: Some(evil.clone()), parallel: Some(2), ..TastePatch::default() }), Err("\"--evil\" is not a model name".into()), "{}", scope.name());
+        }
+        assert_eq!(tastes, before);
+        assert_eq!(check_model_name("claude-sonnet-5-5"), Ok(()));
+        assert_eq!(check_model_name("glm 5"), Err("\"glm 5\" is not a model name".into()));
+    }
+
+    #[test]
+    fn a_default_model_leaves_the_profile_and_the_brief_alone() {
+        let sonnet = Some(ModelRef::named("claude-sonnet-5-5"));
+        for profile in Profile::PRESETS {
+            assert_eq!(preset(profile).default_model, None);
+        }
+        let mut taste = preset(Profile::Economical);
+        let brief = taste.brief();
+        taste.default_model.clone_from(&sonnet);
+        assert_eq!((taste.profile(), taste.brief()), (Profile::Economical, brief));
+        taste.apply(Profile::Aggressive);
+        assert_eq!((taste.profile(), taste.default_model), (Profile::Aggressive, sonnet), "a preset keeps it");
     }
 }

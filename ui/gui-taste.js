@@ -21,6 +21,7 @@ const TASTE_FIELD_LABELS = {
   skills: "Skills",
   context: "Context",
   tier: "Model tier",
+  default_model: "Default model",
   default_effort: "Default effort",
   max_effort: "Most effort",
   budget_cents: "Budget per worker",
@@ -32,6 +33,7 @@ const TASTE_FIELD_LABELS = {
   escalate_process_failure: "The process did not work as designed",
   escalate_over_lines: "Too big to merge unseen",
   escalate_areas: "Always send to me",
+  manage_only: "Manage only",
 };
 const TASTE_TIER_ABOUT = { low: "Haiku and flash models", mid: "Sonnet, GLM and the like", high: "Opus and pro models" };
 
@@ -240,7 +242,20 @@ function tasteBoxSizeHtml() {
     <span class="taste-quiet"><output aria-live="polite">${tasteBoxSizeText(draft, scope)}</output>. ${inherits}Boxes opened with no size named start at this size. A size named for one box wins.</span></div>`;
 }
 
-function tasteLimitsHtml(t) {
+/** The model a new session starts on when it names none: the CLI's own, or one from the catalog, or
+ * a stored model the catalog does not list. A hub that predates it sends none, so there is nothing
+ * to show. */
+function tasteDefaultModelHtml(t, catalog, names) {
+  if (tasteUi.draft.captains.default_model === undefined) return "";
+  const model = t.default_model;
+  const key = model ? tasteRefKey(model) : "";
+  const listed = model && !model.provider && names.has(model.model);
+  const stored = model && !listed ? `<option value="${esc(key)}" selected>${esc(tasteRefLabel(model, names))}</option>` : "";
+  return `<div class="taste-field taste-inline"><label class="taste-label">${TASTE_FIELD_LABELS.default_model} <select data-default-model><option value=""${model ? "" : " selected"}>The CLI's own</option>${stored}${tasteOptionsHtml(catalog, { selected: key })}</select></label>${tasteTagHtml("default_model")}
+    <span class="taste-quiet">New sessions start on this model and on the default effort when they name none. A model picked in the session wins. The model applies only on Claude Code and OpenCode Go accounts that list it.</span></div>`;
+}
+
+function tasteLimitsHtml(t, catalog, names) {
   const note = (text, rest = "") => `<section class="taste-section"><div class="taste-heading"><h2>Delegation limits</h2><p>${text}</p></div>${rest}</section>`;
   if (tasteUi.scope.kind === "orchestrator") return note("The orchestrator starts no workers itself. Each Captain follows the limits under Captains (all) or its project.");
   if (t.tier == null) return note("Update pinned on the hub to set the other delegation limits.", tasteParallelHtml(t));
@@ -252,6 +267,7 @@ function tasteLimitsHtml(t) {
     <div class="taste-field">${tasteLabelHtml("tier")}<div class="taste-seg" role="group" aria-label="Model tier">${tiers}</div>
       <span class="taste-quiet">The costliest tier a worker's own model may be. ${TASTE_TIER_ABOUT[t.tier]} and below. The models a worker picks for its own subagents are not held to it.</span></div>
     <div class="taste-limit-pair">
+      ${tasteDefaultModelHtml(t, catalog, names)}
       <div class="taste-field taste-inline"><label class="taste-label">${TASTE_FIELD_LABELS.default_effort} <select data-effort="default_effort">${efforts(t.default_effort, "The model's own")}</select></label>${tasteTagHtml("default_effort")}</div>
       <div class="taste-field taste-inline"><label class="taste-label">${TASTE_FIELD_LABELS.max_effort} <select data-effort="max_effort">${efforts(t.max_effort)}</select></label>${tasteTagHtml("max_effort")}</div>
     </div>
@@ -317,6 +333,7 @@ function tastePaceHtml(t) {
     <div class="taste-field">${tasteLabelHtml("autonomy")}<div class="taste-seg" role="group" aria-label="Autonomy">${autonomies}</div></div>
     ${tasteToggleHtml(t, "review_diffs", "Review each diff before accepting", "The Captain reads the worker's diff before merging it in.")}
     ${tasteToggleHtml(t, "second_opinion", "Second opinion on risky changes", "Another model reviews the change before it goes ahead.")}
+    ${tasteUi.scope.kind !== "orchestrator" && t.manage_only != null ? tasteToggleHtml(t, "manage_only", "Manage only", "The Captain starts without Claude Code's Edit, Write and NotebookEdit tools and hands every change to a worker. Applies from its next start. Bash stays, so the shell can still change files.") : ""}
   </section>`;
 }
 
@@ -423,7 +440,7 @@ function tasteRender() {
     <div class="taste-scopes"><div class="taste-seg" role="group" aria-label="Whose way of working">${tabs}</div>${scope.kind === "project" ? `<span class="taste-quiet">Inherits from Captains (all).</span>` : ""}</div>
     <div class="taste-split"><div class="taste-controls">
       <section class="taste-section"><div class="taste-heading"><h2>Profile</h2><p>Sets every field below. Changing a field makes it Custom.</p></div><div class="taste-cards">${cards}${custom}</div></section>
-      ${tasteModelsHtml(t, catalog, names)}${tastePaceHtml(t)}${tasteEscalateHtml(t)}${tasteLimitsHtml(t)}${tastePlacementHtml()}${tasteSkillsHtml(t)}${tasteContextHtml(t)}${tasteReviewerHtml(t)}${tasteProfilesHtml(t)}
+      ${tasteModelsHtml(t, catalog, names)}${tastePaceHtml(t)}${tasteEscalateHtml(t)}${tasteLimitsHtml(t, catalog, names)}${tastePlacementHtml()}${tasteSkillsHtml(t)}${tasteContextHtml(t)}${tasteReviewerHtml(t)}${tasteProfilesHtml(t)}
     </div>${tastePreviewHtml(t)}</div>
     ${delegationSectionHtml()}
   </div></div>${tasteFootHtml()}`);
@@ -488,6 +505,7 @@ pageView.addEventListener("change", (e) => {
   if (e.target.matches("[data-effort]")) return tasteEditEffort(e.target.dataset.effort, e.target.value || null);
   if (e.target.matches("[data-boxes-at-once]")) return tasteEditBoxes(e.target.value);
   if (e.target.matches("[data-escalate-lines]")) return tasteEditLines(e.target.value);
+  if (e.target.matches("[data-default-model]")) return tasteEditField("default_model", e.target.value ? tasteRefOf(e.target.value) : null);
   if (!e.target.value) return;
   if (e.target.matches("[data-place-add]")) tasteEditPlacement(placementAdd(tasteUi.draft.placement, e.target.dataset.placeAdd, e.target.value));
   else if (e.target.matches("[data-add-model]")) tasteEditField("ladder", [...tasteShown().ladder, tasteRefOf(e.target.value)]);

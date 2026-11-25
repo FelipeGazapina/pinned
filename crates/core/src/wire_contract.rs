@@ -96,6 +96,7 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("GithubRepo".into(), schemas::<github::Repo>());
     outbound.insert("VercelAccount".into(), schemas::<vercel::Account>());
     outbound.insert("VercelModel".into(), schemas::<vercel::Model>());
+    outbound.insert("ClassifyAnswer".into(), schemas::<crate::classify::Answer>());
     outbound.insert("UpstashAccount".into(), schemas::<upstash::Account>());
     outbound.insert("ConvexConnection".into(), schemas::<crate::convex::Connection>());
     outbound.insert("ExternalAgents".into(), schemas::<ExternalAgents>());
@@ -104,6 +105,7 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("GlobalOrchestratorSettings".into(), schemas::<crate::global_orchestrator::Settings>());
     outbound.insert("GlobalOrchestratorSave".into(), schemas::<crate::global_orchestrator::AccountSave>());
     outbound.insert("AutoArchiveSettings".into(), schemas::<crate::auto_archive::Settings>());
+    outbound.insert("CompactionSettings".into(), schemas::<crate::compaction::Settings>());
     outbound.insert("Handoff".into(), schemas::<crate::global_orchestrator::Handoff>());
     outbound.insert("Overview".into(), schemas::<crate::global_orchestrator::Overview>());
     outbound.insert("Tastes".into(), schemas::<crate::taste::Tastes>());

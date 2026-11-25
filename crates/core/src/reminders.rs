@@ -153,14 +153,14 @@ pub fn permissions() -> Vec<String> {
         .into_iter()
         .chain(project)
         .chain(convex::TOOLS.map(String::from))
-        .chain(["room_open", "room_post", "room_read", "room_done", "room_close"].map(String::from))
+        .chain(["board_note", "board_read", "room_open", "room_post", "room_read", "room_done", "room_close"].map(String::from))
         .map(|tool| format!("mcp__{SERVER}__{tool}"))
         .collect()
 }
 
 /// pinned's own tools that only read. A read-only session calls these without asking and is
 /// refused every other tool of `permissions`, which act.
-const READ_TOOLS: [&str; 22] = [
+const READ_TOOLS: [&str; 23] = [
     LIST_TOOL,
     CAPABILITIES_TOOL,
     STATUS_TOOL,
@@ -182,6 +182,7 @@ const READ_TOOLS: [&str; 22] = [
     "convex_data",
     "convex_run",
     "convex_logs",
+    "board_read",
     "room_read",
 ];
 
@@ -691,7 +692,8 @@ fn project_tools() -> [(Audience, serde_json::Value); 24] {
                             "skills": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "enabled": { "type": "boolean" } }, "required": ["name", "enabled"] }, "description": "Skills the sessions follow; the whole list." },
                             "context": { "type": "array", "items": { "type": "string" }, "description": "Notes every turn carries; the whole list." },
                             "tier": { "type": "string", "enum": ["low", "mid", "high"], "description": "The costliest model tier a worker may run on, as orchestrator_capabilities lists it. It covers the worker's own model, not the models it picks for its subagents." },
-                            "default_effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "The effort a worker gets when the call names none." },
+                            "default_model": { "type": "object", "properties": model["properties"].clone(), "required": ["model"], "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode Go account that lists it. Unset leaves it to the CLI." },
+                            "default_effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "The effort a worker gets when the call names none, and a new session when its start names none." },
                             "max_effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "The most effort a call may ask for." },
                             "budget_cents": { "type": "integer", "minimum": 0, "description": "What one worker may spend, in US cents; 0 sets no cap." },
                             "time_limit_min": { "type": "integer", "minimum": 1, "maximum": 10080, "description": "Minutes a worker runs before pinned stops it." },
@@ -710,7 +712,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 24] {
                 "type": "object",
                 "properties": {
                     "scope": scope,
-                    "field": { "type": "string", "enum": ["strategy", "ladder", "hard_model", "parallel", "autonomy", "skills", "context", "tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"] },
+                    "field": { "type": "string", "enum": ["strategy", "ladder", "hard_model", "parallel", "autonomy", "skills", "context", "tier", "default_model", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"] },
                 },
                 "required": ["scope", "field"],
             },
@@ -1044,9 +1046,10 @@ mod tests {
         let (reads, acting) = read_and_acting_permissions();
         assert_eq!(reads.len(), READ_TOOLS.len(), "a read tool pinned no longer has: {reads:?}");
         assert_eq!(reads.len() + acting.len(), permissions().len());
-        for tool in ["memory_save", "memory_forget", "delegate_task", "act", "task_cancel", "remind_me", "taste_set", "send_to_captain", "plan_set"] {
+        for tool in ["memory_save", "memory_forget", "delegate_task", "act", "task_cancel", "remind_me", "taste_set", "send_to_captain", "plan_set", "board_note"] {
             assert!(acting.contains(&format!("mcp__{SERVER}__{tool}")), "{tool} {acting:?}");
         }
+        assert!(reads.contains(&format!("mcp__{SERVER}__board_read")), "{reads:?}");
     }
 
     fn at_noon() -> DateTime<FixedOffset> {
@@ -1427,7 +1430,7 @@ fn restore_var(name: &str, value: Option<String>) {
         let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats"];
         let memory = ["memory_search", "memory_save", "memory_forget", "actions", "act"];
         assert_eq!(names(false), [&reminders[..], &delegation, &["agents", "work_cost"], &memory].concat());
-        assert_eq!(names(true), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory, &["room_post", "room_read", "room_done"]].concat());
+        assert_eq!(names(true), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory, &["board_note", "board_read", "room_post", "room_read", "room_done"]].concat());
         let on_a_node = tool_definitions(false, false, Seat::Other).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         assert_eq!(on_a_node, [&delegation[..], &["agents", "work_cost"], &memory].concat());
         assert_eq!(
@@ -1461,6 +1464,8 @@ fn restore_var(name: &str, value: Option<String>) {
                 "mcp__pinned__convex_data",
                 "mcp__pinned__convex_run",
                 "mcp__pinned__convex_logs",
+                "mcp__pinned__board_note",
+                "mcp__pinned__board_read",
                 "mcp__pinned__room_open",
                 "mcp__pinned__room_post",
                 "mcp__pinned__room_read",
@@ -1488,7 +1493,7 @@ fn restore_var(name: &str, value: Option<String>) {
     #[test]
     fn the_taste_tools_offer_no_review_setting() {
         let taste = |name: &str| project_tools().into_iter().find(|(audience, tool)| *audience == Audience::TasteChat && tool["name"] == name).unwrap().1;
-        let owners = ["review_diffs", "second_opinion", "escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas"];
+        let owners = ["review_diffs", "second_opinion", "escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas", "manage_only"];
         let set = taste("taste_set");
         let patch = set["inputSchema"]["properties"]["patch"]["properties"].as_object().unwrap();
         assert!(!owners.iter().any(|name| patch.contains_key(*name)), "taste_set still offers a review setting: {set}");
@@ -1615,8 +1620,8 @@ fn restore_var(name: &str, value: Option<String>) {
         assert!(!plain.contains(&"delegate".to_owned()), "delegate_task is the one delegation tool: {plain:?}");
         let empty_task = offered(None, Some(""));
         assert!(empty_task.contains(&"delegate_task".to_owned()), "{empty_task:?}");
-        assert_eq!(offered(Some("orchestrator"), None), [&plain[..], &CAPTAIN_TOOLS.map(String::from), &ROOM_CAPTAIN.map(String::from)].concat());
-        assert_eq!(offered(Some("worker"), None), [&plain[..], &ROOM_WORKER.map(String::from)].concat(), "a worker starts workers the way a plain thread does, and can sit in a room");
+        assert_eq!(offered(Some("orchestrator"), None), [&plain[..], &CAPTAIN_TOOLS.map(String::from), &TEAM_CAPTAIN.map(String::from)].concat());
+        assert_eq!(offered(Some("worker"), None), [&plain[..], &TEAM_WORKER.map(String::from)].concat(), "a worker starts workers the way a plain thread does, shares its Captain's board and can sit in a room");
         let child = offered(None, Some("task-1"));
         assert!(!child.contains(&"delegate_task".to_owned()), "{child:?}");
         assert!(!child.contains(&"delegate".to_owned()), "{child:?}");
@@ -1632,12 +1637,12 @@ fn restore_var(name: &str, value: Option<String>) {
         let memory = ["memory_search", "memory_save", "memory_forget", "actions", "act"];
         let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats", "agents", "work_cost"], &memory].concat();
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
-        assert_eq!(offered(Some("worker"), None), [&today[..], &ROOM_WORKER].concat());
-        assert_eq!(offered(Some("orchestrator"), None), [&today[..], &CAPTAIN_TOOLS, &ROOM_CAPTAIN].concat());
+        assert_eq!(offered(Some("worker"), None), [&today[..], &TEAM_WORKER].concat());
+        assert_eq!(offered(Some("orchestrator"), None), [&today[..], &CAPTAIN_TOOLS, &TEAM_CAPTAIN].concat());
         assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &["delegation_stats"], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session", "repo_overview", "repo_read", "repo_search"]].concat());
         assert_eq!(offered(Some("taste-chat"), None), [&today[..], &["taste_get", "taste_set", "taste_reset"]].concat(), "only a taste chat may change the way of working");
-        assert_eq!(offered(Some("taste-chat"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory, &ROOM_WORKER].concat(), "a taste chat's delegated child can't");
-        assert_eq!(offered(Some("global-orchestrator"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory, &ROOM_WORKER].concat(), "a delegated child plays no role");
+        assert_eq!(offered(Some("taste-chat"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory, &TEAM_WORKER].concat(), "a taste chat's delegated child can't");
+        assert_eq!(offered(Some("global-orchestrator"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory, &TEAM_WORKER].concat(), "a delegated child plays no role");
 
         let ask = |name, args| project_request(name, &args, Some("tab-9".into())).map(|m| serde_json::to_string(&m).unwrap());
         assert_eq!(
@@ -1661,10 +1666,10 @@ fn restore_var(name: &str, value: Option<String>) {
 
     /// What a Captain is offered on top of what a plain thread is.
     const CAPTAIN_TOOLS: [&str; 5] = ["tell_orchestrator", "plan_set", "plan_step", "plan_fix", "plan_close"];
-    /// Room tools a seated worker is offered, after the project tools.
-    const ROOM_WORKER: [&str; 3] = ["room_post", "room_read", "room_done"];
-    /// Room tools a project's Captain is offered. `room_done` is a seat's.
-    const ROOM_CAPTAIN: [&str; 4] = ["room_open", "room_post", "room_read", "room_close"];
+    /// Team tools a worker is offered, after the project tools: the board's, and a room seat's.
+    const TEAM_WORKER: [&str; 5] = ["board_note", "board_read", "room_post", "room_read", "room_done"];
+    /// Team tools a project's Captain is offered. `room_done` is a seat's.
+    const TEAM_CAPTAIN: [&str; 6] = ["board_note", "board_read", "room_open", "room_post", "room_read", "room_close"];
 
     #[test]
     #[cfg(unix)]

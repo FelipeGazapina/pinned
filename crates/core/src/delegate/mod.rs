@@ -820,6 +820,9 @@ mod tests {
 
     #[test]
     fn each_provider_builds_the_argv_for_its_access() {
+        let guard = crate::hooks::headless_worker_settings(Path::new("/bin/pinned"));
+        #[cfg(unix)]
+        assert_eq!(guard, r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"'/bin/pinned' worker-guard headless"}]}]}}"#);
         let mut full = spec("do the thing", Access::Full);
         full.model = Some("claude-haiku-5-5");
         full.effort = Some("low");
@@ -837,6 +840,8 @@ mod tests {
                 "--effort",
                 "low",
                 "--dangerously-skip-permissions",
+                "--settings",
+                &guard,
                 "--mcp-config",
                 "/tmp/mcp.json",
             ],
@@ -851,11 +856,14 @@ mod tests {
                 "--verbose",
                 "--permission-mode",
                 "auto",
+                "--settings",
+                &guard,
             ],
         );
         let read_only = claude_read_only_args();
         let mut expect = vec!["-p", "do the thing", "--output-format", "stream-json", "--verbose"];
         expect.extend(read_only.iter().map(String::as_str));
+        expect.extend(["--settings", guard.as_str()]);
         same(driver_args(Provider::Claude, &spec("do the thing", Access::ReadOnly)), &expect);
         assert_eq!(read_only[read_only.len() - 2..], ["--permission-mode", "dontAsk"]);
 
