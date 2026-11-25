@@ -379,7 +379,6 @@ cmd_apple_env() (
   # secrets that exist. Without APPLE_CERTIFICATE it prints nothing and the release stays ad-hoc
   # signed: tauri reads a variable that is set but empty as a certificate or identity, and fails.
   # With them it also prints PINNED_DEVELOPER_ID_BUILD=1, which turns the Keychain on.
-  # docs/release/developer-id.md lists the secrets.
   if [ "${RUNNER_OS:-macOS}" != macOS ]; then
     exit 0
   fi
@@ -391,7 +390,7 @@ cmd_apple_env() (
   need() {
     for name in "$@"; do
       if [ -z "${!name:-}" ]; then
-        echo "apple-signing-env: $name is missing; docs/release/developer-id.md lists what signing needs" >&2
+        echo "apple-signing-env: $name is missing" >&2
         exit 1
       fi
     done
