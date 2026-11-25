@@ -1,3 +1,9 @@
+# Rules to follow
+
+1. never create docs files or push docs files, after the usage remove it, we don't want to have documents to context drift the agent
+2. don't create rules, the code should talk by him self, any agent rule should be at AGENTS.md file.
+3. never left don't used or trash on the codebase, we aren't supposed to have a bunch of not utilized code saved, this distils the agent
+
 # Hub wire compatibility
 
 A hub release must keep working for every app version that has a snapshot in `crates/core/wire-contract`.

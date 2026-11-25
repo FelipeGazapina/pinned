@@ -361,3 +361,28 @@ test("the box size is the project's, else the account's, else small; the account
   assert.deepEqual(here(tasteSaveCalls(tastes, account)), [{ cmd: "set_taste", scope: captains, patch: { box_size: "medium" } }]);
   assert.deepEqual(here(tasteSaveCalls(account, tasteResetField(account, captains, "box_size"))), [{ cmd: "reset_taste_field", scope: captains, field: "box_size" }]);
 });
+
+/** Tastes from a hub that has the default model, unset everywhere. */
+const modelled = (projects = {}) => ({ ...defaults(projects), orchestrator: { ...fixture.presets.balanced, default_model: null }, captains: { ...fixture.presets.balanced, default_model: null } });
+
+test("a default model saves with the Captains, clears with a reset, and a project inherits it unless it sets its own", () => {
+  const { tasteSaveCalls, tasteSetField, tasteResetField, tasteResolve, tasteProfile } = taste();
+  const sonnet = { model: "claude-sonnet-5-5" };
+  const haiku = { model: "claude-haiku-5-5" };
+  const saved = modelled();
+  const set = tasteSetField(saved, captains, "default_model", sonnet);
+  assert.deepEqual(here(tasteSaveCalls(saved, set)), [{ cmd: "set_taste", scope: { kind: "captains" }, patch: { default_model: { model: "claude-sonnet-5-5" } } }]);
+  assert.equal(tasteProfile(set.captains), "balanced", "no profile sets or compares it");
+  for (const cleared of [tasteResetField(set, captains, "default_model"), tasteSetField(set, captains, "default_model", null)]) {
+    assert.equal(cleared.captains.default_model, null);
+    assert.deepEqual(here(tasteSaveCalls(set, cleared)), [{ cmd: "reset_taste_field", scope: { kind: "captains" }, field: "default_model" }]);
+  }
+
+  assert.deepEqual(here(tasteSetField(set, site, "default_model", sonnet).projects), {}, "a project set to the Captains' model inherits it");
+  const own = tasteSetField(set, site, "default_model", haiku);
+  assert.deepEqual(here(own.projects), { [SITE]: { default_model: haiku } });
+  assert.deepEqual(here(tasteResolve(own, site).default_model), haiku);
+  assert.deepEqual(here(tasteResolve(own, { kind: "project", repo: "github.com/acme/api" }).default_model), sonnet, "another project keeps the Captains'");
+  assert.deepEqual(here(tasteSetField(own, site, "default_model", null).projects), {}, "null on a project inherits");
+  assert.deepEqual(here(tasteSaveCalls(own, tasteResetField(own, site, "default_model"))), [{ cmd: "reset_taste_field", scope: site, field: "default_model" }]);
+});

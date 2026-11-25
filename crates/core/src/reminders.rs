@@ -704,7 +704,8 @@ fn project_tools() -> [(Audience, serde_json::Value); 25] {
                             "skills": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "enabled": { "type": "boolean" } }, "required": ["name", "enabled"] }, "description": "Skills the sessions follow; the whole list." },
                             "context": { "type": "array", "items": { "type": "string" }, "description": "Notes every turn carries; the whole list." },
                             "tier": { "type": "string", "enum": ["low", "mid", "high"], "description": "The costliest model tier a worker may run on, as orchestrator_capabilities lists it. It covers the worker's own model, not the models it picks for its subagents." },
-                            "default_effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "The effort a worker gets when the call names none." },
+                            "default_model": { "type": "object", "properties": model["properties"].clone(), "required": ["model"], "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode Go account that lists it. Unset leaves it to the CLI." },
+                            "default_effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "The effort a worker gets when the call names none, and a new session when its start names none." },
                             "max_effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "The most effort a call may ask for." },
                             "budget_cents": { "type": "integer", "minimum": 0, "description": "What one worker may spend, in US cents; 0 sets no cap." },
                             "time_limit_min": { "type": "integer", "minimum": 1, "maximum": 10080, "description": "Minutes a worker runs before pinned stops it." },
@@ -723,7 +724,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 25] {
                 "type": "object",
                 "properties": {
                     "scope": scope,
-                    "field": { "type": "string", "enum": ["strategy", "ladder", "hard_model", "parallel", "autonomy", "skills", "context", "tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"] },
+                    "field": { "type": "string", "enum": ["strategy", "ladder", "hard_model", "parallel", "autonomy", "skills", "context", "tier", "default_model", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"] },
                 },
                 "required": ["scope", "field"],
             },
