@@ -1,6 +1,5 @@
 /* The chat header and the terminal drawer above phone width: named actions, a Captain or Worker chip,
-   one layout group, the steps it folds through as it narrows (data-fold, gui-header.js), and whether
-   the thread's counts have room (data-counts). */
+   one layout group, and the steps it folds through as it narrows (data-fold and data-cut, gui-header.js). */
 @media (min-width: 769px) {
   #chat-head { height: 49px; box-sizing: border-box; gap: 10px; padding: 0 14px 0 18px; border-bottom: 1px solid var(--g-border); font-size: 13px; }
   #chat-head .crumb { gap: 10px; font-weight: 400; }
@@ -57,7 +56,9 @@
   #chat-head:is([data-fold="4"], [data-fold="5"]) #head-more { display: grid; }
   #chat-head[data-fold="5"] .crumb :is(.role-chip, .stats) { display: none; }
   #chat-head[data-fold="5"] .crumb .project { flex: 0 1 auto; }
-  #chat-head[data-counts="off"] .crumb .stats .counts { display: none; }
+  /* The stats overrun the crumb with no fold left to make room: the title goes to its narrowest, then they are cut short. */
+  #chat-head[data-cut] .crumb button.title { flex-shrink: 100; }
+  #chat-head[data-cut] .crumb .stats { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 }
 .controls .layout { display: flex; gap: 4px; }
 @media (max-width: 768px) {

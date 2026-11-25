@@ -3,22 +3,18 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-// The header's label helpers, with the sidebar's statsLabel, the delegation page's token format and the settings page's esc they build on.
+// The header's label helpers, with the sidebar's statsLabel and the delegation page's token format they build on.
 function load() {
   const read = (file) => readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
-  const between = (src, from, to) => {
-    const start = src.indexOf(from);
-    return src.slice(start, src.indexOf(to, start));
-  };
+  const between = (src, from, to) => src.slice(src.indexOf(from), src.indexOf(to));
   const sidebar = read("gui-sidebar.js");
   const durationLabel = between(sidebar, "const durationLabel", "/** The thread's active time and cost");
   const statsLabel = between(sidebar, "function statsLabel", "function statsHtml");
   const tokens = between(read("delegation.js"), "function delegationTokens", "const delegationPercent");
   const header = between(read("gui-header.js"), "function headStatsLabel", "function headStatsHtml");
-  const esc = between(read("settings.js"), "const esc = ", "\n");
   const context = { statusOf: () => "idle", nowS: () => 0 };
   vm.createContext(context);
-  vm.runInContext(`${durationLabel}\n${statsLabel}\n${tokens}\n${esc}\n${header}\nthis.api = { headStatsLabel, headCountsLabel, headLongLabel, headLongHtml };`, context);
+  vm.runInContext(`${durationLabel}\n${statsLabel}\n${tokens}\n${header}\nthis.api = { headStatsLabel, headCountsLabel, headLongLabel };`, context);
   return context.api;
 }
 const tab = (view) => ({ key: "m:tab", view });
@@ -68,16 +64,4 @@ test("headStatsLabel, which the phone's second line reads, never shows the count
   }
   assert.equal(headStatsLabel(tab(views[0])), "1h 12m · $3.42");
   assert.equal(headStatsLabel(tab(views[2])), "");
-});
-
-test("the header's markup keeps the counts in their own span, and reads as the label", () => {
-  const { headLongLabel, headLongHtml } = load();
-  const text = (html) => html.replace(/<[^>]+>/g, "");
-  const full = tab({ stats: { active_ms: 4320000, cost_usd: 3.42 }, turns: 14, tokens_in: 2400000, tokens_out: 52000 });
-  assert.equal(headLongHtml(full), `1h 12m · $3.42<span class="counts"> · 14 turns · 2.4M in · 52k out</span>`);
-  const tokensOnly = tab({ tokens_in: 2400000, tokens_out: 52000 });
-  assert.equal(headLongHtml(tokensOnly), `<span class="counts">2.4M in · 52k out</span>`);
-  const plain = tab({ stats: { active_ms: 5000, cost_usd: 0.42 } });
-  assert.equal(headLongHtml(plain), "5s · $0.42", "no counts, no span");
-  for (const view of [full, tokensOnly, plain]) assert.equal(text(headLongHtml(view)), headLongLabel(view));
 });

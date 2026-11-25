@@ -19,27 +19,22 @@ function headCountsLabel(tab) {
 function headLongLabel(tab) {
   return [headStatsLabel(tab), headCountsLabel(tab)].filter(Boolean).join(" · ");
 }
-/** `headLongLabel` as markup: the counts sit in their own span, which `fitHead` hides while the crumb has no room to spare for them. */
-function headLongHtml(tab) {
-  const [stats, counts] = [headStatsLabel(tab), headCountsLabel(tab)];
-  return `${esc(stats)}${counts ? `<span class="counts">${esc(stats ? ` · ${counts}` : counts)}</span>` : ""}`;
-}
 /** The header's time, cost and counts. A phone shows the cost only, so the cost comes twice and the style shows one. */
 function headStatsHtml(tab) {
+  const label = headLongLabel(tab);
   const work = tab.view.work;
   const title = work ? `Cost of this thread and the ${nWorkers(work.workers)} it started${work.unknown ? `. ${unknownTitle(work.unknown)}` : ""}` : "";
-  return headLongLabel(tab) ? `<span class="stats" data-head-stats="${esc(tab.key)}"${title ? ` title="${esc(title)}"` : ""}><span class="long">${headLongHtml(tab)}</span><span class="usd">${esc(statsLabel(tab, true))}</span></span>` : "";
+  return label ? `<span class="stats" data-head-stats="${esc(tab.key)}"${title ? ` title="${esc(title)}"` : ""}><span class="long">${esc(label)}</span><span class="usd">${esc(statsLabel(tab, true))}</span></span>` : "";
 }
 visibleInterval(() => {
   if (!guiOn()) return;
   for (const el of crumbEl.querySelectorAll("[data-head-stats]")) {
     const tab = tabByKey(el.dataset.headStats);
     if (!tab) continue;
-    const long = el.querySelector(".long");
-    if (long && long.textContent !== headLongLabel(tab)) long.innerHTML = headLongHtml(tab);
-    const usd = el.querySelector(".usd");
-    const cost = statsLabel(tab, true);
-    if (usd && usd.textContent !== cost) usd.textContent = cost;
+    for (const [part, text] of [[".long", headLongLabel(tab)], [".usd", statsLabel(tab, true)]]) {
+      const at = el.querySelector(part);
+      if (at && at.textContent !== text) at.textContent = text;
+    }
   }
 }, 1000);
 
@@ -92,8 +87,10 @@ function setPressed(button, on) {
 /** Above phone width the header folds in steps while the crumb would lose its title: Open in drops
  * its label, then goes (Thread details and ⌘O keep it), with the scripts menu's chevron; then the
  * other labels drop; then the actions fold into the ⋯ menu; last, the crumb drops its chip and stats.
- * The thread's turns and tokens take no part in the folds: they show only in room the crumb has to
- * spare once every other part of it has its full width (data-counts). */
+ * The title gives its room to the stats and the thread's counts first. While they still overrun the
+ * crumb with the title at its narrowest the header folds on, up to the ⋯ menu, as long as folding
+ * gives the crumb room (the global orchestrator's header has no actions to fold). Stats that overrun
+ * it even then are cut short (data-cut). */
 const HEAD_FOLDS = 5;
 const CRUMB_ROOM = 200;
 const chatHeadEl = document.getElementById("chat-head");
@@ -106,15 +103,21 @@ let fittingHead = false;
 function fitHead() {
   if (fittingHead || narrow(768) || !chatHeadEl.offsetWidth) return;
   fittingHead = true;
-  chatHeadEl.dataset.counts = "off";
+  chatHeadEl.removeAttribute("data-cut");
   const need = Math.min(crumbNeed(), CRUMB_ROOM);
   let fold = 0;
-  chatHeadEl.dataset.fold = "0";
-  while (fold < HEAD_FOLDS && crumbEl.clientWidth < need) chatHeadEl.dataset.fold = String(++fold);
-  const spare = crumbEl.clientWidth - crumbNeed();
-  chatHeadEl.dataset.counts = "on";
-  const counts = crumbEl.querySelector(".stats .counts")?.getBoundingClientRect().width ?? 0;
-  chatHeadEl.dataset.counts = counts <= spare ? "on" : "off";
+  const foldTo = (step) => (chatHeadEl.dataset.fold = String((fold = step)));
+  foldTo(0);
+  while (fold < HEAD_FOLDS && crumbEl.clientWidth < need) foldTo(fold + 1);
+  const overrun = () => crumbEl.scrollWidth > crumbEl.clientWidth;
+  if (fold < HEAD_FOLDS - 1 && overrun()) {
+    const [from, width] = [fold, crumbEl.clientWidth];
+    foldTo(HEAD_FOLDS - 1);
+    const roomier = crumbEl.clientWidth > width;
+    foldTo(from);
+    while (roomier && fold < HEAD_FOLDS - 1 && overrun()) foldTo(fold + 1);
+  }
+  chatHeadEl.toggleAttribute("data-cut", overrun());
   fittingHead = false;
 }
 new ResizeObserver(fitHead).observe(chatHeadEl);
