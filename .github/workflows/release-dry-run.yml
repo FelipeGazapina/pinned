@@ -6,7 +6,8 @@ on:
   workflow_dispatch:
 
 # release.yml asks for contents: write and actions: write, so its caller has to grant them. A dry run never uses
-# them: no step that writes a release or starts the hub deploy runs when dry_run is true.
+# them: linux.yml's "release.yml: no step that writes a release runs in a dry run" check proves that no step
+# which writes a release, a tag or a workflow run is reachable when dry_run is true.
 permissions:
   contents: write
   actions: write
