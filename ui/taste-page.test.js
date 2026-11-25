@@ -795,3 +795,123 @@ test("a hub that predates the escalation settings asks for an update and draws n
   assert.match(section, /<h2>Escalate to me<\/h2>.*<p class="taste-quiet">Update pinned on the hub to choose what is escalated to you\.<\/p><\/section>$/s);
   assert.doesNotMatch(section, /<button|<input|<form/);
 });
+
+const managing = (over = {}) => tastesWith({ orchestrator: { ...balanced, manage_only: false }, captains: { ...balanced, manage_only: false }, ...over });
+const paceSection = (html) => html.match(/<section class="taste-section"><h2>Pace<\/h2>.*?<\/section>/s)?.[0];
+const MANAGE_ONLY_HINT = "The Captain starts without Claude Code's Edit, Write and NotebookEdit tools and hands every change to a worker. Applies from its next start. Bash stays, so the shell can still change files.";
+
+test("Manage only is a switch in the Captains' Pace that flips and saves only itself", async () => {
+  const p = page({ answer: (cmd, args) => (cmd === "get_tastes" ? managing() : managing({ captains: { ...balanced, manage_only: false, ...args.patch } })) });
+  await p.show();
+  const section = paceSection(p.html());
+  assert.match(section, /role="switch" aria-checked="false" aria-label="Manage only" data-act="toggle" data-field="manage_only"/);
+  assert.ok(section.includes(`<b>Manage only</b><span>${MANAGE_ONLY_HINT}</span>`), "the hint says when it applies and that Bash stays");
+  assert.ok(section.indexOf('data-field="second_opinion"') < section.indexOf('data-field="manage_only"'), "after the review switches");
+  await p.click(/data-field="manage_only"/);
+  assert.match(paceSection(p.html()), /aria-checked="true" aria-label="Manage only"/);
+  assert.match(p.html(), /class="taste-card active" data-act="profile" data-profile="balanced"/, "the profile stays as it was");
+  assert.deepEqual(lines(p.html()), balancedBrief(), "the brief stays as it was");
+  p.calls.length = 0;
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls, [["set_taste", { scope: { kind: "captains" }, patch: { manage_only: true } }]]);
+});
+
+test("a project tab marks Manage only changed here, and Reset inherits it again", async () => {
+  const p = page({ answer: () => managing({ projects: { [SITE]: { manage_only: true } } }) });
+  await p.show();
+  await p.click(/data-act="scope" data-kind="project"/);
+  const section = paceSection(p.html());
+  assert.match(section, /aria-checked="true" aria-label="Manage only"/);
+  assert.match(section, /<b>Manage only<\/b><span>[^<]*<\/span><\/span><span class="taste-tags"><span class="taste-tag changed">changed here<\/span><button type="button" class="taste-reset" data-act="reset" data-field="manage_only" aria-label="Inherit manage only from Captains \(all\)"/);
+  await p.click(/data-act="reset" data-field="manage_only"/);
+  assert.match(paceSection(p.html()), /aria-checked="false" aria-label="Manage only"/, "the project inherits the Captains' off");
+  p.calls.length = 0;
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls, [["reset_taste_field", { scope: { kind: "project", repo: SITE }, field: "manage_only" }]]);
+});
+
+test("the Orchestrator tab, and a hub that predates Manage only, draw no switch for it", async () => {
+  const p = page({ answer: () => managing() });
+  await p.show();
+  await p.click(/data-act="scope" data-kind="orchestrator"/);
+  assert.doesNotMatch(p.html(), /data-field="manage_only"/);
+  const old = page({ answer: () => tastesWith({ projects: { [SITE]: { parallel: 4 } } }) });
+  await old.show();
+  for (const kind of ["captains", "orchestrator", "project"]) {
+    await old.click(new RegExp(`data-act="scope" data-kind="${kind}"`));
+    assert.doesNotMatch(old.html(), /data-field="manage_only"/, `the ${kind} tab`);
+  }
+});
+
+const modelled = (captains = null, projects = {}) => limited({ captains: { ...balanced, ...limits, default_model: captains }, projects });
+
+test("the Captains' default model starts on the CLI's own, and picking or clearing one saves it", async () => {
+  let tastes = modelled();
+  const p = page({ answer: (cmd, args) => (cmd === "get_tastes" ? tastes : (tastes = modelled(cmd === "set_taste" ? args.patch.default_model : null))) });
+  await p.show();
+  let html = p.html();
+  assert.match(html, /<div class="taste-limit-pair">\s*<div class="taste-field taste-inline"><label class="taste-label">Default model <select data-default-model><option value="" selected>The CLI's own<\/option><optgroup label="Claude">/);
+  assert.match(html, /<span class="taste-quiet">New sessions start on this model and on the default effort when they name none\. A model picked in the session wins\. The model applies only on Claude Code and OpenCode Go accounts that list it\.<\/span>/);
+  assert.ok(html.indexOf("data-default-model") < html.indexOf('data-effort="default_effort"'), "beside Default effort, before it");
+
+  p.pick("data-default-model", "claude-sonnet-5-5");
+  await p.settle();
+  html = p.html();
+  assert.match(html, /<option value="">The CLI's own<\/option>/);
+  assert.match(html, /<option value="claude-sonnet-5-5" title="claude-sonnet-5-5" selected>Claude Sonnet 5.5<\/option>/);
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.at(-1), ["set_taste", { scope: { kind: "captains" }, patch: { default_model: { model: "claude-sonnet-5-5" } } }]);
+
+  p.pick("data-default-model", "");
+  await p.settle();
+  assert.match(p.html(), /<option value="" selected>The CLI's own<\/option>/);
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.at(-1), ["reset_taste_field", { scope: { kind: "captains" }, field: "default_model" }]);
+});
+
+test("a stored default model the catalog does not list, or one with a provider, shows as itself", async () => {
+  const p = page({ answer: () => modelled({ provider: "opencode", model: "glm-5.3" }) });
+  await p.show();
+  assert.match(p.html(), /<select data-default-model><option value="">The CLI's own<\/option><option value="glm-5.3\nopencode" selected>GLM-5.3 through opencode<\/option>/);
+});
+
+test("a project's own default model is tagged, and Reset makes it inherit the Captains' again", async () => {
+  const opus = { model: "claude-opus-5-5" };
+  let tastes = modelled(opus, { [SITE]: { parallel: 2 } });
+  const p = page({
+    answer: (cmd, args) => {
+      if (cmd === "set_taste") tastes = modelled(opus, { [SITE]: { parallel: 2, ...args.patch } });
+      if (cmd === "reset_taste_field") tastes = modelled(opus, { [SITE]: { parallel: 2 } });
+      return tastes;
+    },
+  });
+  await p.show();
+  await p.click(/data-act="scope" data-kind="project"/);
+  assert.match(p.html(), /<option value="claude-opus-5-5" title="claude-opus-5-5" selected>/, "the project shows the Captains' model it inherits");
+  assert.doesNotMatch(p.html(), /data-field="default_model"/);
+
+  p.pick("data-default-model", "claude-sonnet-5-5");
+  await p.settle();
+  assert.match(p.html(), /<\/select><\/label><span class="taste-tag changed">changed here<\/span><button type="button" class="taste-reset" data-act="reset" data-field="default_model"/);
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.at(-1), ["set_taste", { scope: { kind: "project", repo: SITE }, patch: { default_model: { model: "claude-sonnet-5-5" } } }]);
+
+  await p.click(/data-act="reset" data-field="default_model"/);
+  assert.doesNotMatch(p.html(), /data-field="default_model"/);
+  assert.match(p.html(), /<option value="claude-opus-5-5" title="claude-opus-5-5" selected>/);
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.at(-1), ["reset_taste_field", { scope: { kind: "project", repo: SITE }, field: "default_model" }]);
+});
+
+test("the orchestrator tab, and a hub that predates the default model, draw no select for it", async () => {
+  const p = page({ answer: () => modelled() });
+  await p.show();
+  await p.click(/data-act="scope" data-kind="orchestrator"/);
+  assert.doesNotMatch(p.html(), /data-default-model/);
+  const old = page({ answer: () => limited({ projects: { [SITE]: { parallel: 2 } } }) });
+  await old.show();
+  for (const kind of ["captains", "project"]) {
+    await old.click(new RegExp(`data-act="scope" data-kind="${kind}"`));
+    assert.doesNotMatch(old.html(), /data-default-model|Default model/, `the ${kind} tab`);
+  }
+});

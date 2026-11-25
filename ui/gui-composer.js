@@ -2071,14 +2071,28 @@ contextCard.onclick = (e) => {
 };
 window.addEventListener("mousedown", (e) => !contextCard.hidden && !e.target.closest("#context-card, #context-meter") && (contextCard.hidden = true), true);
 
+/** The offer threshold of `machine`'s compaction settings, which its `machines` entry keeps as
+ * `compaction`. The first look asks the machine once; until it answers, and after a failed ask
+ * until it comes back online, it counts as the default. Its answer redraws the active tab's composer. */
+function compactThreshold(machine) {
+  const m = machines.get(machine);
+  if (!m) return undefined;
+  if (m.compaction === undefined) {
+    m.compaction = null;
+    callOn(machine, { cmd: "compaction_settings" }).then((settings) => {
+      if (m.compaction !== null) return;
+      m.compaction = settings;
+      if (active?.machine === machine) renderComposer(active);
+    }, () => {});
+  }
+  return m.compaction?.offer_tokens;
+}
 /** T3 Code offers to compact a long conversation first once claude's prompt cache has gone cold,
  * so the next turn doesn't read the whole history again at full price. */
-const COMPACT_OFFER_TOKENS = 200_000;
-const CACHE_COLD_MS = 70 * 60_000;
 function compactOffer(tab) {
   const context = contextOf(tab);
-  if (!context || context.tokens < COMPACT_OFFER_TOKENS || tab.menu || phaseOf(tab) === "working") return null;
-  return Date.now() - Date.parse(context.at) >= CACHE_COLD_MS ? context.tokens : null;
+  if (!context || tab.menu || phaseOf(tab) === "working") return null;
+  return compactOfferTokens(context, compactThreshold(tab.machine), Date.now());
 }
 const compactPill = document.getElementById("compact-pill");
 function renderCompactPill(tab) {
@@ -2098,6 +2112,68 @@ compactPill.onclick = () => {
   t.keepHistory = !t.keepHistory;
   renderComposer(active);
 };
+
+/** The last read of the machines' compaction settings: `{ machines, view }`. */
+let compactionSettings = { machines: [], view: mergeCompaction([]) };
+/** Reads `compaction_settings` from every online machine that is not a box, keeping each answer
+ * where `compactThreshold` reads it. A machine that is too old to answer is marked `update`, and one
+ * that failed carries its `error`. */
+async function readCompaction() {
+  const list = await Promise.all(
+    [...machines.entries()]
+      .filter(([, m]) => !m.view.upstash_box)
+      .map(async ([id, m]) => {
+        const machine = { id, name: machineName(id), online: m.view.online === true, settings: null, update: false, error: null };
+        if (!machine.online) return machine;
+        try {
+          machine.settings = m.compaction = await callOn(id, { cmd: "compaction_settings" });
+        } catch (e) {
+          if (isOlderPinned(e)) machine.update = true;
+          else machine.error = String(e?.message ?? e);
+        }
+        return machine;
+      }),
+  );
+  return { machines: list, view: mergeCompaction(list) };
+}
+/** The General page's Compaction section: from what context size the composer offers to compact. */
+function compactionSettingsHtml() {
+  return `<section id="compaction-settings"><h2 class="looks-title">Compaction</h2>
+    <div class="side-setting" data-setting="offer"><div><label for="compaction-offer">Offer to compact</label><p class="meta">When a thread's context reaches this size and it has sat idle for over an hour, the composer offers to summarize its history before your next message.</p></div>
+    <select id="compaction-offer" aria-label="Offer to compact">${compactionOptions(compactionSettings.view.offer_tokens)}</select></div>
+    <p class="error" id="compaction-error"></p></section>`;
+}
+function bindCompactionSettings() {
+  const select = document.getElementById("compaction-offer");
+  if (!select) return;
+  const error = document.getElementById("compaction-error");
+  select.onchange = async () => {
+    const view = { offer_tokens: compactionChoice(select.value) };
+    const live = compactionSettings.machines.map((m) => ({ ...m, online: machines.get(m.id)?.view.online === true }));
+    const writes = compactionWrites(view, live);
+    // Each machine's answer is what its composer offers from now on.
+    const write = (w) => callOn(w.machine, { cmd: "set_compaction_settings", settings: w.settings }).then((saved) => {
+      const m = machines.get(w.machine);
+      if (m) m.compaction = saved;
+    });
+    const results = await Promise.allSettled(writes.map(write));
+    const failed = results.filter((r) => r.status === "rejected");
+    error.textContent = !writes.length ? "No machine is online to take this." : failed.length ? `Couldn't save on ${failed.length} of ${writes.length} machines: ${failed[0].reason?.message ?? failed[0].reason}` : "";
+    if (writes.length > failed.length) compactionSettings.view = view;
+    if (active) renderComposer(active);
+  };
+}
+/** The machines answer after General is up, and what they hold replaces what the section showed. */
+function refreshCompactionSettings() {
+  readCompaction().then((read) => {
+    compactionSettings = read;
+    if (active) renderComposer(active);
+    const section = document.getElementById("compaction-settings");
+    if (!section || !settingsOpen() || page !== "general") return;
+    section.outerHTML = compactionSettingsHtml();
+    bindCompactionSettings();
+  }, () => {});
+}
 
 const listsOf = new Map();
 /** The tab's slash commands or files, kept until `fresh` asks the machine again. */

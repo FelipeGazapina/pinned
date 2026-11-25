@@ -1012,9 +1012,9 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
     let aggressive = json!({
         "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 4, "autonomy": "report_at_end",
         "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
-        "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
+        "tier": "high", "default_model": null, "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
         "box_size": null, "escalate_breaking_change": true, "escalate_process_failure": true, "escalate_over_lines": 500,
-        "escalate_areas": ["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"],
+        "escalate_areas": ["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"], "manage_only": false,
     });
     assert_eq!(client.hub(get()).unwrap()["captains"], aggressive, "the old style's preset, with workers at once lowered to the old cap of 4");
 
@@ -9330,6 +9330,19 @@ fn the_reads_of_linear_slack_github_and_vercel_answer_from_the_callers_account_o
         assert_eq!(asked_of(gateway), before + 1);
     }
 
+    // A classify spends the caller's own gateway key: ana's asks the gateway once, and bob has none to spend.
+    let classify = json!({ "text": "The export button 500s", "question": "Is this a bug report?" });
+    let asked = asked_of(gateway);
+    let hers = seen.log(act(&ana.dir, &ana.tab, "classify", classify.clone())).unwrap_err();
+    assert!(hers.starts_with("Vercel AI Gateway: unreachable"), "ana's classify goes to the gateway: {hers}");
+    assert_eq!(asked_of(gateway), asked + 1, "one gateway call");
+    assert_eq!(
+        seen.log(act(&bob.dir, &bob.tab, "classify", classify)),
+        Err("Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".into()),
+        "bob has no key, and never takes ana's"
+    );
+    assert_eq!(asked_of(gateway), asked + 1, "bob's refused classify reaches nobody");
+
     // Once bob keeps a connection of his own, his reads use it.
     let bobs_keys = seed(&mut bob.client, "bob");
     assert!(seen.log(act(&bob.dir, &bob.tab, "slack_suggestions", json!({}))).unwrap_err().starts_with("Slack unreachable"));
@@ -9343,7 +9356,7 @@ fn the_reads_of_linear_slack_github_and_vercel_answer_from_the_callers_account_o
         holds_none_of(&all, &format!("{who}'s audit trail"), &format!("{:?}", trail_of(client)));
     }
     let bobs_reads: std::collections::BTreeSet<String> = trail_of(&mut bob.client).into_iter().map(|r| r.0).collect();
-    assert_eq!(bobs_reads.into_iter().collect::<Vec<_>>(), ["github_repos", "linear_suggestions", "machines", "slack_suggestions", "vercel_models"], "bob's trail holds his reads only");
+    assert_eq!(bobs_reads.into_iter().collect::<Vec<_>>(), ["classify", "github_repos", "linear_suggestions", "machines", "slack_suggestions", "vercel_models"], "bob's trail holds his reads only");
 }
 
 #[test]
@@ -10861,6 +10874,8 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("disconnect_github", json!({})),
         ("connect_vercel", json!({})),
         ("disconnect_vercel", json!({})),
+        ("connect_posthog", json!({ "project": "12345", "host": "us" })),
+        ("disconnect_posthog", json!({})),
         ("connect_upstash", json!({})),
         ("disconnect_upstash", json!({})),
         ("set_box_access", json!({ "access": { "worker": { "mode": "fresh" } } })),
@@ -10888,6 +10903,7 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("disconnect_convex", json!({ "id": "quick-lemur-789" })),
         ("extend_box", json!({ "machine": machine, "extra_usd": 1.0 })),
         ("report_issue", json!({ "draft": { "kind": "problem", "title": "Crash" } })),
+        ("set_global_orchestrator_settings", json!({ "settings": { "host": true } })),
     ]
     .into_iter()
     .collect();
@@ -13454,6 +13470,7 @@ mod teams_hardening;
 #[path = "hub/teams_one_live_run.rs"] mod teams_one_live_run;
 #[path = "hub/trigger_fires.rs"] mod trigger_fires;
 #[path = "hub/account_mirror.rs"] mod account_mirror;
+#[path = "hub/store_lock_freeze.rs"] mod store_lock_freeze;
 #[path = "hub/global_settings.rs"] mod global_settings;
 #[path = "hub/reports.rs"]
 mod reports;
