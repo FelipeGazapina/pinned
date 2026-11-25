@@ -920,6 +920,26 @@ fn first_prog(words: &[Word]) -> Option<String> {
     Some(w.text.rsplit('/').next().unwrap_or("").to_owned())
 }
 
+/// Whether the command runs `scripts/release.sh` to make a release: as the program, or as the script of `bash`/`sh`,
+/// with no argument, with `prepare`, with a version, or with an `asset` step that writes. Other subcommands only read or build.
+fn runs_release_script(c: &Cmd) -> bool {
+    let pos = c.positionals();
+    let args: Vec<&str> = match c.prog.as_str() {
+        "release.sh" => pos.iter().map(|w| w.text.as_str()).collect(),
+        "bash" | "sh" => match pos.split_first() {
+            Some((script, rest)) if script.text.ends_with("scripts/release.sh") => rest.iter().map(|w| w.text.as_str()).collect(),
+            _ => return false,
+        },
+        _ => return false,
+    };
+    match args.as_slice() {
+        [] => true,
+        ["prepare", ..] => true,
+        ["asset", "draft" | "upload" | "publish", ..] => true,
+        [first, ..] => first.starts_with(|c: char| c.is_ascii_digit()),
+    }
+}
+
 struct Cmd {
     /// The program's file name, without its directory.
     prog: String,
@@ -1333,7 +1353,7 @@ impl<'c, 'a> Scan<'c, 'a> {
         let prog = c.prog.as_str();
         let pos = c.positionals();
         let sub = pos.first().map(|w| w.text.as_str()).unwrap_or("");
-        if prog == "release.sh" || c.args.iter().any(|w| w.text.ends_with("scripts/release.sh")) {
+        if runs_release_script(c) {
             self.hit(NeverItem::Release, "scripts/release.sh");
         }
         if RUNNERS.contains(&prog) && (pipe_fetch || c.args.iter().any(|w| w.fetch)) {
@@ -1962,8 +1982,20 @@ mod tests {
             ("gh release upload v1 x.zip", Some(Release)),
             ("gh -R a/b release delete v1", Some(Release)),
             ("scripts/release.sh", Some(Release)),
-            ("./scripts/release.sh patch", Some(Release)),
-            ("bash scripts/release.sh patch", Some(Release)),
+            ("scripts/release.sh prepare 1.2.3", Some(Release)),
+            ("./scripts/release.sh 1.2.3", Some(Release)),
+            ("bash scripts/release.sh 1.2.3", Some(Release)),
+            ("sh scripts/release.sh asset publish v1.2.3", Some(Release)),
+            ("scripts/release.sh asset draft v1.2.3", Some(Release)),
+            ("scripts/release.sh asset upload v1.2.3 x.zip", Some(Release)),
+            ("scripts/release.sh asset verify dist", None),
+            ("scripts/release.sh fragment --target x --tag v1", None),
+            ("scripts/release.sh assemble-latest-json --notes n --out o dir", None),
+            ("scripts/release.sh sign-sums node-release", None),
+            ("scripts/release.sh apple-env", None),
+            ("shellcheck scripts/release.sh", None),
+            ("git add scripts/release.sh", None),
+            ("cat scripts/release.sh", None),
             ("git push --tags", Some(Release)),
             ("git push origin --follow-tags", Some(Release)),
             ("git tag v1.2.3 && git push origin v1.2.3", Some(Release)),
