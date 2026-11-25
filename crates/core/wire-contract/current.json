@@ -8217,6 +8217,25 @@
                 "required": [
                   "mode"
                 ]
+              },
+              {
+                "description": "One box for workflows, like `Fixed`, that no timer ends but its budget.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "durable"
+                  },
+                  "row": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
               }
             ]
           },
@@ -21985,6 +22004,25 @@
                 "required": [
                   "mode"
                 ]
+              },
+              {
+                "description": "One box for workflows, like `Fixed`, that no timer ends but its budget.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "durable"
+                  },
+                  "row": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
               }
             ]
           },
@@ -31868,6 +31906,25 @@
                   "mode": {
                     "type": "string",
                     "const": "ask"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "One box for workflows, like `Fixed`, that no timer ends but its budget.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "durable"
+                  },
+                  "row": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -42515,6 +42572,25 @@
                   "mode": {
                     "type": "string",
                     "const": "ask"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "One box for workflows, like `Fixed`, that no timer ends but its budget.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "durable"
+                  },
+                  "row": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -62379,6 +62455,25 @@
                 "required": [
                   "mode"
                 ]
+              },
+              {
+                "description": "One box for workflows, like `Fixed`, that no timer ends but its budget.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "durable"
+                  },
+                  "row": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
               }
             ]
           },
@@ -64998,6 +65093,25 @@
                   "mode": {
                     "type": "string",
                     "const": "ask"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "One box for workflows, like `Fixed`, that no timer ends but its budget.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "durable"
+                  },
+                  "row": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -75085,6 +75199,25 @@
                 "required": [
                   "mode"
                 ]
+              },
+              {
+                "description": "One box for workflows, like `Fixed`, that no timer ends but its budget.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "durable"
+                  },
+                  "row": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
               }
             ]
           },
@@ -79911,6 +80044,25 @@
                   "mode": {
                     "type": "string",
                     "const": "ask"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "description": "One box for workflows, like `Fixed`, that no timer ends but its budget.",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "durable"
+                  },
+                  "row": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [

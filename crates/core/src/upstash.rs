@@ -89,7 +89,7 @@ pub struct NewBox {
     pub name: String,
     pub labels: Vec<String>,
     pub size: BoxSize,
-    /// Only the account's fixed box ("One box, reused"): it must outlive the runs it serves.
+    /// Only the account's fixed box ("One box, reused") or durable box: it must outlive the runs it serves.
     pub keep_alive: bool,
     /// Runs on every container start, after create and on each resume.
     pub init_command: String,
