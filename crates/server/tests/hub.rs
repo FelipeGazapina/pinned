@@ -1012,9 +1012,9 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
     let aggressive = json!({
         "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 4, "autonomy": "report_at_end",
         "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
-        "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
+        "tier": "high", "default_model": null, "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
         "box_size": null, "escalate_breaking_change": true, "escalate_process_failure": true, "escalate_over_lines": 500,
-        "escalate_areas": ["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"],
+        "escalate_areas": ["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"], "manage_only": false,
     });
     assert_eq!(client.hub(get()).unwrap()["captains"], aggressive, "the old style's preset, with workers at once lowered to the old cap of 4");
 
@@ -10874,6 +10874,8 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("disconnect_github", json!({})),
         ("connect_vercel", json!({})),
         ("disconnect_vercel", json!({})),
+        ("connect_posthog", json!({ "project": "12345", "host": "us" })),
+        ("disconnect_posthog", json!({})),
         ("connect_upstash", json!({})),
         ("disconnect_upstash", json!({})),
         ("set_box_access", json!({ "access": { "worker": { "mode": "fresh" } } })),
@@ -10901,6 +10903,7 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("disconnect_convex", json!({ "id": "quick-lemur-789" })),
         ("extend_box", json!({ "machine": machine, "extra_usd": 1.0 })),
         ("report_issue", json!({ "draft": { "kind": "problem", "title": "Crash" } })),
+        ("set_global_orchestrator_settings", json!({ "settings": { "host": true } })),
     ]
     .into_iter()
     .collect();
@@ -13467,6 +13470,7 @@ mod teams_hardening;
 #[path = "hub/teams_one_live_run.rs"] mod teams_one_live_run;
 #[path = "hub/trigger_fires.rs"] mod trigger_fires;
 #[path = "hub/account_mirror.rs"] mod account_mirror;
+#[path = "hub/store_lock_freeze.rs"] mod store_lock_freeze;
 #[path = "hub/global_settings.rs"] mod global_settings;
 #[path = "hub/reports.rs"]
 mod reports;
