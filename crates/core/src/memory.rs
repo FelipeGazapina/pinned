@@ -27,7 +27,7 @@ pub struct Memory {
     pub weight: f64,
     /// How many times recall put it in a prompt.
     #[serde(default)]
-    pub hits: u64,
+    pub hits: u32,
     /// When recall last put it in a prompt, in Unix seconds; absent until then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_used: Option<i64>,
@@ -916,7 +916,7 @@ mod tests {
         memories.search(app, "deploy", 8).unwrap();
         for m in memories.search(app, "", 8).unwrap() {
             let recalled = ids.contains(&m.id);
-            assert_eq!((m.hits, m.last_used.is_some()), (u64::from(recalled), recalled), "#{}", m.id);
+            assert_eq!((m.hits, m.last_used.is_some()), (u32::from(recalled), recalled), "#{}", m.id);
         }
         let _ = std::fs::remove_dir_all(dir);
     }
