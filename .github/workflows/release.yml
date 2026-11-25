@@ -37,10 +37,12 @@ jobs:
   # A dry run builds the ref it runs on and makes no tag.
   prepare:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
     outputs:
       tag: ${{ steps.bump.outputs.tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
       ref: ${{ steps.bump.outputs.ref || github.sha }}
-      bumped: ${{ steps.bump.outputs.tag != '' }}
     steps:
       - name: Refuse a real release run that has no tag and is not on main
         if: ${{ !inputs.dry_run && github.ref_type != 'tag' && github.ref != 'refs/heads/main' }}
@@ -58,6 +60,19 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
         run: |
+          # ls-remote exits 2 when origin has no such tag. Any other failure means origin did not answer, so stop there.
+          set +e
+          git ls-remote --exit-code origin "refs/tags/v$VERSION" >/dev/null
+          found=$?
+          set -e
+          if [ "$found" = 0 ]; then
+            echo "v$VERSION is already on origin. To finish that release, use \"Re-run failed jobs\" on its run, or run this workflow on the tag v$VERSION (Use workflow from: v$VERSION). \"Re-run all jobs\" cannot work, because prepare would bump it again." >&2
+            exit 1
+          fi
+          if [ "$found" != 2 ]; then
+            echo "could not ask origin about v$VERSION (git ls-remote exit $found)" >&2
+            exit "$found"
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           bash scripts/release.sh prepare "$VERSION"
@@ -66,6 +81,14 @@ jobs:
             echo "tag=v$VERSION"
             echo "ref=refs/tags/v$VERSION"
           } >> "$GITHUB_OUTPUT"
+      # The push above, made with GITHUB_TOKEN, started no hub-deploy run, so start it here, as a tag push did before.
+      # hub-deploy.yml resolves the newest version tag on main itself and runs its own compatibility gate. A suffixed tag is never deployed.
+      - name: Deploy the hub for a release this run bumped
+        if: ${{ !inputs.dry_run && steps.bump.outputs.tag != '' && !contains(steps.bump.outputs.tag, '-') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: gh workflow run hub-deploy.yml --ref "$TAG"
 
   draft:
     needs: prepare
@@ -327,7 +350,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      actions: write
     concurrency:
       group: release-publish
       cancel-in-progress: false
@@ -344,11 +366,3 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare.outputs.tag }}
         run: bash scripts/release.sh asset publish "$TAG"
-      # The push that prepare made with GITHUB_TOKEN started no hub-deploy run, so start it here. It resolves the
-      # newest version tag on main itself and runs its own compatibility gate. A suffixed tag is never deployed.
-      - name: Deploy the hub for a release this run bumped
-        if: ${{ needs.prepare.outputs.bumped == 'true' && !contains(needs.prepare.outputs.tag, '-') }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.prepare.outputs.tag }}
-        run: gh workflow run hub-deploy.yml --ref "$TAG"
