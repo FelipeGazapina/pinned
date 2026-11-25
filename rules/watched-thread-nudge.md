@@ -38,6 +38,6 @@ A tab can name a session before Claude writes its transcript. A search of the pr
 
 ## Evidence
 
-Three alternating runs per side of `ITERATIONS=40 RTT_MS=150 scripts/latency-bench/run.sh`, errors 0. `thread_message` p50 476 ms (475 to 483) on the nudge against 883 ms (882 to 884) on `origin/main` at `85ef28b`, 1.86x. p95 507 ms against 1288 ms. The nudge costs one more round trip than the earlier page push, which measured 171 to 179 ms. `wire-contract check --base origin/main` reported no new breaks.
+Three alternating runs per side of the latency bench at `ITERATIONS=40 RTT_MS=150` (removed from the repo since), errors 0. `thread_message` p50 476 ms (475 to 483) on the nudge against 883 ms (882 to 884) on `origin/main` at `85ef28b`, 1.86x. p95 507 ms against 1288 ms. The nudge costs one more round trip than the earlier page push, which measured 171 to 179 ms. `wire-contract check --base origin/main` reported no new breaks.
 
 Round 5, after the merge with `origin/main` at `327708e`. Three alternating runs per side of the same bench, errors 0 and 240 work items in every run. `thread_message` p50 481 ms (477 to 482) against 886 ms (880 to 892) on main, 1.84x. p95 506 ms against 1289 ms. The round 4 head measured 480 ms (478 to 484) in the same rotation. `write_input` stayed at 154 ms on every side, and `open_remote` read 517 ms on this branch against 529 ms on main. In headless Chromium at 0 ms RTT, a transcript that gained a line every 11 ms was read 10 times a second, against 22 before the read gap.

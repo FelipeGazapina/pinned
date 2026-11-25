@@ -4,13 +4,14 @@ A Linux node updates from the public GitHub release. The release workflow builds
 
 ## What a tag runs
 
-A tag `v*` starts `.github/workflows/release.yml`. The workflow sets `GH_REPO` to `github.repository` for every job. `gh` reads the repository from `GH_REPO` or from the git remote of the current directory, and it ignores `GITHUB_REPOSITORY`. The `draft` job has no checkout, so without `GH_REPO` its `gh release view` fails with `not a git repository` and every later job is skipped.
+`.github/workflows/release.yml` runs a release, and `scripts/release.sh` is the only script it calls. Start one from Actions, on `main`: run `release` with `version` set and `dry_run` off. A pushed tag `v*` starts the same workflow and builds that tag. The workflow sets `GH_REPO` to `github.repository` for every job. `gh` reads the repository from `GH_REPO` or from the git remote of the current directory, and it ignores `GITHUB_REPOSITORY`. The `draft` job has no checkout, so without `GH_REPO` its `gh release view` fails with `not a git repository` and every later job is skipped.
 
+0. `prepare` resolves which tag the run builds. For a dispatch it runs `scripts/release.sh prepare <version>` and pushes the commit and the tag to `main` in one `git push --atomic`. The build runs in this same run, because a push made with `GITHUB_TOKEN` starts no workflow. Every later job checks out that tag. A tag push builds the tag it carries, and a dry run builds the ref it runs on and makes no tag.
 1. `draft` opens a draft release, or sets an existing release back to draft.
 2. `build` drafts the release again, then `tauri-action` uploads the Mac, Windows and Linux bundles. `includeUpdaterJson` is false, so the action does not write `latest.json`. Each leg writes `updater-fragment.json` and uploads it as the Actions artifact `updater-<target>`. The job runs its steps in bash, including on Windows. There are five legs: two Mac, one Windows, and two Linux. The Linux legs run on `ubuntu-22.04` (`x86_64-unknown-linux-gnu`) and `ubuntu-22.04-arm` (`aarch64-unknown-linux-gnu`) with `--bundles appimage,deb`, after a step installs `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf build-essential`. They use 22.04 so the AppImage runs on glibc 2.35 and later. `sign-node` needs every leg, so a failed Linux leg blocks the whole release.
 3. `linux-node` builds the musl binaries and uploads them as the artifact `linux-node-binaries`. It uploads no release asset.
 4. `sign-node` runs after `build` and `linux-node` succeed. It assembles `latest.json` from the fragments, checks the version against the tag, signs that file with the two binaries, then uploads the five files below in one `gh release upload --clobber`. That upload drafts the release first.
-5. `publish` checks the signed files and clears the draft flag. It is the only step that makes a release public.
+5. `publish` checks the signed files and clears the draft flag. It is the only step that makes a release public. For a release `prepare` pushed, it then runs `gh workflow run hub-deploy.yml --ref <tag>`, because that push started no hub deploy. A suffixed tag does not dispatch one.
 
 Both `upload-artifact` steps set `overwrite: true`. The action fails when an artifact with the same name exists, and a re-run can find the artifact from an earlier attempt.
 
@@ -22,7 +23,7 @@ The five node files are:
 - `SHA256SUMS`
 - `SHA256SUMS.minisig`
 
-`sign-node` signs the bytes on disk, then uploads them. Nothing after the signature writes `latest.json`. `scripts/release-asset.sh upload` refuses `latest.json` when `SHA256SUMS` is not in the same upload or does not list that file's hash. It also refuses when `gh release edit --draft=true` leaves the release public.
+`sign-node` signs the bytes on disk, then uploads them. Nothing after the signature writes `latest.json`. `scripts/release.sh asset upload` refuses `latest.json` when `SHA256SUMS` is not in the same upload or does not list that file's hash. It also refuses when `gh release edit --draft=true` leaves the release public.
 
 ## What publish checks
 
@@ -33,15 +34,15 @@ The five node files are:
 - `SHA256SUMS` lists `latest.json` and both musl binaries.
 - Each desktop bundle that `latest.json` names verifies against its `signature`.
 
-`scripts/release-asset.sh verify <dir>` runs the same checks on a local directory, and `publish` calls it on the download. A dry run uses it.
+`scripts/release.sh asset verify <dir>` runs the same checks on a local directory, and `publish` calls it on the download. A dry run uses it.
 
-`scripts/minisign-verify.mjs` checks the signatures with `node:crypto`. It accepts only the prehashed `ED` algorithm, the same as the node. It refuses base64 that does not encode back to the same text, because the `minisign-verify` crate in the node rejects stray characters that `Buffer.from` skips.
+The `minisign_verify` function in `scripts/release.sh` checks the signatures with `node:crypto`. It accepts only the prehashed `ED` algorithm, the same as the node. It refuses base64 that does not encode back to the same text, because the `minisign-verify` crate in the node rejects stray characters that `Buffer.from` skips.
 
 The trust root is `tauri.conf.json` and nothing else. No environment variable replaces the key.
 
 ## Desktop updater keys
 
-`scripts/updater-fragment.sh` writes one fragment per leg. The Tauri 2.12 bundler signs the AppImage and the .deb directly when `createUpdaterArtifacts` is true, so a Linux leg has two signatures: `*.AppImage.sig` and `*.deb.sig`. The script refuses a leg that does not have exactly one of each. A `.AppImage.tar.gz.sig` is the old v1 format and does not count. The updater plugin looks up `{os}-{arch}-{bundle type}` first, then `{os}-{arch}`, so the fragment holds:
+`scripts/release.sh fragment` writes one fragment per leg. The Tauri 2.12 bundler signs the AppImage and the .deb directly when `createUpdaterArtifacts` is true, so a Linux leg has two signatures: `*.AppImage.sig` and `*.deb.sig`. The script refuses a leg that does not have exactly one of each. A `.AppImage.tar.gz.sig` is the old v1 format and does not count. The updater plugin looks up `{os}-{arch}-{bundle type}` first, then `{os}-{arch}`, so the fragment holds:
 
 | Leg | Keys | Asset |
 | --- | --- | --- |
@@ -55,11 +56,11 @@ The trust root is `tauri.conf.json` and nothing else. No environment variable re
 
 The Linux asset name is the signature name without `.sig`. `tauri-action` uploads those files under the names the bundler gave them. The bundler writes `amd64` for both x86_64 bundles, `aarch64` for the arm64 AppImage and `arm64` for the arm64 .deb.
 
-`scripts/assemble-latest-json.sh` needs all twelve keys by default and writes them sorted by key, so the order does not depend on the fragment folders. `--required KEY,KEY,...` replaces that list. The v0.16.0 fixture test passes the six Mac and Windows keys, because that release has no Linux desktop bundles. `--version` sets the version the fragments must carry when the tag is a placeholder.
+`scripts/release.sh assemble-latest-json` needs all twelve keys by default and writes them sorted by key, so the order does not depend on the fragment folders. `--required KEY,KEY,...` replaces that list. `--version` sets the version the fragments must carry when the tag is a placeholder.
 
 ## Dry run
 
-`release.yml` also runs from `workflow_call` and `workflow_dispatch` with a boolean `dry_run`. `.github/workflows/release-dry-run.yml` calls it with `dry_run: true` on `workflow_dispatch` only. Run it by hand before each release; it has no pull request trigger, because it inherits the updater signing key and the Apple secrets. A dry run builds all five legs with updater signing, assembles `latest.json`, signs `SHA256SUMS`, and runs `release-asset.sh verify` on the local files. It uploads the result as the Actions artifacts `dry-run-bundles-<target>` and `dry-run-release`, kept for three days.
+`release.yml` also runs from `workflow_call` and `workflow_dispatch` with a boolean `dry_run`, which defaults to true, so a dispatch with no version is a dry run. `.github/workflows/release-dry-run.yml` calls it with `dry_run: true` on `workflow_dispatch` only. Run it by hand before each release; it has no pull request trigger, because it inherits the updater signing key and the Apple secrets. A dry run builds all five legs with updater signing, assembles `latest.json`, signs `SHA256SUMS`, and runs `release.sh asset verify` on the local files. It uploads the result as the Actions artifacts `dry-run-bundles-<target>` and `dry-run-release`, kept for three days.
 
 It makes no tag, no release, and no change to `latest.json` on GitHub. These steps and jobs carry `if: ${{ !inputs.dry_run }}`:
 
@@ -68,9 +69,8 @@ It makes no tag, no release, and no change to `latest.json` on GitHub. These ste
 - `sign-node`: the step `Upload the signed node files`.
 - `publish`: the whole job.
 
-A second `tauri-action` step, `tauri-dry`, has `if: ${{ inputs.dry_run }}` and no `tagName` or `releaseId`. With neither, the action only builds and lists the bundles. The version is the one in `Cargo.toml`, with no bump. A placeholder tag `v<version>-dryrun` goes into the fragment URLs and is never pushed. A real run, with `dry_run` false or empty, that is not on a tag stops in `draft`, so a `workflow_dispatch` on a branch cannot open a release named after the branch.
+A second `tauri-action` step, `tauri-dry`, has `if: ${{ inputs.dry_run }}` and no `tagName` or `releaseId`. With neither, the action only builds and lists the bundles. The version is the one in `Cargo.toml`, with no bump. A placeholder tag `v<version>-dryrun` goes into the fragment URLs and is never pushed. A real run, with `dry_run` false or empty, that is neither on a tag nor on `main` stops in `prepare`, so a `workflow_dispatch` on a branch cannot open a release named after the branch. A dry run and a real run use different concurrency groups, so a dry run never takes the place of a queued release.
 
-`scripts/test-release-rerun.py` checks that every step that writes a release has that guard, and replays a dry run against the fake `gh`, which must see no call at all.
 
 ## Which release is latest
 
@@ -84,7 +84,9 @@ A tag without a suffix takes latest when it is not older than the current latest
 
 ## Cutting a release
 
-`scripts/release.sh <version>` refuses to start unless all of these hold:
+Run `release` from Actions on `main` with `version` set and `dry_run` off. Nothing runs on a developer's machine. The agent preauth rules treat `gh workflow run release.yml` as a release, so an agent does not start one.
+
+`scripts/release.sh prepare <version>` refuses to start unless all of these hold:
 
 - The version is `MAJOR.MINOR.PATCH`, with an optional `-suffix`.
 - The tree is clean, and the current branch is `main`.
@@ -93,9 +95,7 @@ A tag without a suffix takes latest when it is not older than the current latest
 - `HEAD` equals `origin/main` after a fetch.
 - Origin has no tag `v<version>`.
 
-The release commit holds only `Cargo.toml`, `Cargo.lock` and the snapshot. The script refuses before the commit when anything else changed during the build, and names the files. Any failure before the commit puts `Cargo.toml` and `Cargo.lock` back and removes the new snapshot.
-
-It pushes `main` and the tag in one `git push --atomic`, so origin gets both or neither. If another session moves `origin/main` while the release builds, or origin takes the tag at another commit, the push is rejected. The script then reads origin with `git ls-remote`. It says the release went out only when origin's tag is at the release commit. In that case the connection dropped after origin took the push, and the script keeps the release commit and the tag. It also keeps them when it cannot read origin. Otherwise it deletes the local tag and resets `main` to the commit it started from with `git reset --keep`, which keeps edits to files the release did not touch.
+The release commit holds only `Cargo.toml`, `Cargo.lock` and the snapshot. The script refuses before the commit when anything else changed during the build, and names the files. It commits and tags and pushes nothing. The workflow then pushes `main` and the tag in one `git push --atomic`, so origin gets both or neither. If another push moves `origin/main` first, the push is rejected and nothing is released. Re-run only the failed jobs of a run: a re-run of `prepare` refuses, because the tag exists.
 
 A version without a suffix writes `crates/core/wire-contract/<version>.json`. A suffixed version writes no snapshot, because `AGENTS.md` makes every later hub honor every snapshot and the hub never runs a release candidate. A release candidate that someone installs by hand gets no compatibility promise from later hubs.
 
@@ -103,7 +103,7 @@ A version without a suffix writes `crates/core/wire-contract/<version>.json`. A 
 
 `SHA256SUMS` has one line per file. The line is 64 hex digits, two spaces, then the file name. The files are `latest.json`, `pinned-server-aarch64-unknown-linux-musl`, and `pinned-server-x86_64-unknown-linux-musl`. The node splits each line on whitespace. One `*` before the name is the same name. The signature is over the exact bytes of `SHA256SUMS`.
 
-`scripts/sign-node-sums.sh` writes `SHA256SUMS` from the three files in the directory and replaces a checksum file already there. `tauri signer sign` writes `SHA256SUMS.sig` as base64 of a minisign signature. The script decodes that to `SHA256SUMS.minisig` and exits unless the first two bytes are `ED`. The node calls `Signature::decode` on that text with `allow_legacy` false. The workflow does not upload the `.sig` wrapper.
+`scripts/release.sh sign-sums <dir>` writes `SHA256SUMS` from the three files in the directory and replaces a checksum file already there. `tauri signer sign` writes `SHA256SUMS.sig` as base64 of a minisign signature. The script decodes that to `SHA256SUMS.minisig` and exits unless the first two bytes are `ED`. The node calls `Signature::decode` on that text with `allow_legacy` false. The workflow does not upload the `.sig` wrapper.
 
 The private key is the existing `TAURI_SIGNING_PRIVATE_KEY` secret, with an empty password, the same values the desktop bundles use. There is no new secret.
 
@@ -118,28 +118,6 @@ GitHub re-runs one job without the jobs it needs, so each uploading job drafts t
 
 `publish` also has the job-level group `release-publish`, so the `publish` jobs of two tags run one at a time. The second reads the latest release after the first sets it, and an older tag cannot end up latest. The group sets `queue: max`, which keeps every pending `publish`, up to 100, and runs them in the order they started waiting. Without it a group keeps one pending job. A third tag then cancels the pending one, and that tag stays a draft until someone re-runs its `publish`. actionlint 1.7.12 rejects the key with `unexpected key "queue"`, so run it as `actionlint -ignore 'unexpected key "queue"'`.
 
-## Replay
-
-`python3 scripts/test-release-rerun.py` runs in the Linux CI job. It reads `release.yml` with `scripts/workflow.py`, a YAML reader that fails on syntax it does not know. It runs every `run` step of every job against the real scripts. A job fails at any `uses` step that is not one of `actions/checkout`, `actions/setup-node`, `dtolnay/rust-toolchain`, `swatinem/rust-cache`, `actions/upload-artifact`, `actions/download-artifact`, or `tauri-apps/tauri-action`. A step that writes the release some other way therefore fails the replay. It models these parts of the runner:
-
-- A full run tries every job order that `needs` allows. A job whose need failed is skipped, and the others still run. A scenario that names jobs fails if it runs a job before one it needs.
-- `build` runs all five matrix legs. Each job and leg gets its own directory, and files move between jobs only through `upload-artifact` and `download-artifact`.
-- `tauri-action` writes a signed bundle for the `--target` in `args`, uploads it under the name GitHub shows, and sets `artifactPaths` and `appVersion`.
-- Fakes replace `gh`, `npx`, `npm`, `docker`, `sudo`, `curl`, and `wget`. `docker cp` copies two fixed binaries, `sudo` runs nothing, and `curl` and `wget` fail.
-- Each step runs under the shell GitHub picks, `bash -e` by default and `bash -eo pipefail` for `shell: bash`. Each step gets the workflow, job, and step `env`. A job without `actions/checkout` has no `.git` and no `scripts/`.
-- The fake `gh` refuses without `GH_TOKEN` or `GITHUB_TOKEN`, and refuses without `GH_REPO` or a `.git`, the way `gh` 2.102.0 does.
-- `--clobber` deletes and uploads one file at a time. `REPLAY_UPLOAD_CANCEL` maps a file name to `new` or `missing` and cancels the upload. Files it does not name keep their old bytes.
-- `upload-artifact` fails when the artifact exists from an earlier attempt and `overwrite` is not true.
-- `REPLAY_LATEST_ERROR` fails the read of the latest release. `REPLAY_DRAFT_IGNORED` makes `gh release edit --draft=true` leave the release public.
-- The fake `gh` records a violation when an edit asks for `--latest=true` on a prerelease. GitHub ignores that request, so only the fake can see it.
-- Two tags publish at once, and then three. The replay reads the `concurrency` groups of the workflow and of `publish`, and models GitHub's pending slot. If the groups let the runs overlap, every run reads the latest release before any edits it. With `queue: max` every tag runs in turn. Without it every pending tag but the last is cancelled and stays a draft.
-- A job with a checkout gets a throwaway `tauri.conf.json` that holds the replay key.
-- `if` on a job or a step, `inputs.dry_run`, `runner.os`, `github.ref_type` and `||` fallbacks are evaluated. A skipped step has empty outputs, and a skipped job skips the jobs that need it. A scenario can set the inputs and the ref type. `tauri-action` without `tagName` writes no release, and the fake `gh` logs every call, so a dry run must leave that log empty.
-
-It also checks `version_is_newer` against a table of tags, and `scripts/minisign-verify.mjs` against the `minisign-verify` 0.3.0 test vectors.
-
-`python3 scripts/test-release-tags.py` also runs in the Linux CI job. It runs `scripts/release.sh` against a scratch bare remote with a fake `cargo`, and the `pick` step of `hub-deploy.yml` against scratch tags.
-
 ## Build
 
 The Linux job runs `docker build --target build`. That stage is the hub `Dockerfile` stage that runs `cargo zigbuild --release -p pinned-server` for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, then copies the binaries to `/downloads`.
@@ -150,4 +128,4 @@ Hub deploy does not wait for `publish`. The hub image still serves the first ins
 
 ## Proof limit
 
-The musl image was not built here, and `update_self` was not driven through a live hub. The library test `a_signed_release_installs_a_newer_version_and_refuses_a_tampered_or_older_one` runs `scripts/sign-node-sums.sh` with a throwaway key and calls `NodeUpdate::prepare` over a local HTTP server. No release workflow has run on this branch.
+The musl image was not built here, and `update_self` was not driven through a live hub. The library test `a_signed_release_installs_a_newer_version_and_refuses_a_tampered_or_older_one` runs `scripts/release.sh sign-sums` with a throwaway key and calls `NodeUpdate::prepare` over a local HTTP server. The workflow replay and the tag tests that used to run in the Linux CI job were removed with the other scripts, so a change to `release.yml` or `release.sh` is checked by `actionlint` and by a dry run.

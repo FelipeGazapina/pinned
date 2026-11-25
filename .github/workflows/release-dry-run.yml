@@ -5,10 +5,11 @@ name: release-dry-run
 on:
   workflow_dispatch:
 
-# release.yml asks for contents: write, so its caller has to grant it. A dry run never uses it: no step that writes
-# a release runs when dry_run is true, and scripts/test-release-rerun.py proves that.
+# release.yml asks for contents: write and actions: write, so its caller has to grant them. A dry run never uses
+# them: no step that writes a release or starts the hub deploy runs when dry_run is true.
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: release-dry-run-${{ github.ref }}

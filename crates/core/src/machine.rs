@@ -13023,7 +13023,7 @@ exec sleep 30
     fn a_model_claudes_menu_adds_reaches_the_picker_and_delegate_task_and_outlives_a_restart() {
         let dir = std::env::temp_dir().join(format!("pinned-model-menu-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/web-sweep/screens/claude-2.1.321-model-menu.txt")).unwrap();
+        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-screens/claude-2.1.321-model-menu.txt")).unwrap();
         let lines: Vec<String> = menu.replace("Fable 5.2", "Fable 5.3").lines().map(String::from).collect();
         let picker = |m: &Machine| -> Vec<String> {
             let accounts = m.call(Call::ListAccounts).unwrap();
@@ -15903,7 +15903,7 @@ Have another model review a risky change before it goes ahead.";
     #[cfg(unix)]
     fn the_tier_cap_holds_a_model_claudes_menu_added_at_its_familys_tier() {
         let (m, dir, captain) = limited_captain("limits-learned", TastePatch { tier: Some(taste::Tier::Low), ..TastePatch::default() });
-        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/web-sweep/screens/claude-2.1.321-model-menu.txt")).unwrap();
+        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-screens/claude-2.1.321-model-menu.txt")).unwrap();
         let lines = menu.replace("Fable 5.2", "Fable 5.3").replace("Haiku 5.5", "Haiku 6").lines().map(String::from).collect();
         m.call(Call::LearnModelMenu { lines }).unwrap();
         assert_eq!(

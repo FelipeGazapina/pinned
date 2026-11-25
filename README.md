@@ -859,13 +859,12 @@ Windows before a release.
 
 ## Release
 
-```sh
-scripts/release.sh 0.2.0
-```
-
-The script runs only from a clean `main` that matches `origin/main`. It bumps the version
-in `Cargo.toml`, tags `v0.2.0`, and pushes `main` and the tag in one atomic push. The `release`
-workflow builds both Mac architectures, the Windows installer, the Linux AppImage and .deb for
+A release runs in GitHub Actions. Open Actions, choose `release`, click Run workflow on `main`,
+enter the version (for example `0.2.0`) and turn `dry_run` off. `dry_run` is on by default and
+builds and verifies every leg without a tag or a release. The first job runs
+`scripts/release.sh prepare`, which works only from a clean `main` that matches `origin/main`.
+It bumps the version in `Cargo.toml`, writes the wire snapshot, and tags `v0.2.0`, and the
+workflow pushes `main` and the tag in one atomic push. The same run builds both Mac architectures, the Windows installer, the Linux AppImage and .deb for
 x86_64 and arm64 (on `ubuntu-22.04` and `ubuntu-22.04-arm`), and the Linux musl node
 binaries. Each desktop job uploads its own updater fragment and does not upload
 `latest.json`. One job assembles that file, signs it with the musl binaries, then uploads

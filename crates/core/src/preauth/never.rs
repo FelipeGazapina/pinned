@@ -1625,6 +1625,9 @@ impl<'c, 'a> Scan<'c, 'a> {
         match (group, action) {
             ("pr", "merge") => self.hit(NeverItem::PushToMain, "gh pr merge"),
             ("release", _) => self.hit(NeverItem::Release, format!("gh release {action}")),
+            ("workflow", "run") if pos.iter().skip(2).any(|w| matches!(w.trim_start_matches(".github/workflows/"), "release" | "release.yml" | "release.yaml")) => {
+                self.hit(NeverItem::Release, "gh workflow run release")
+            }
             ("workflow", "run" | "enable" | "disable") => self.hit(NeverItem::Deploy, format!("gh workflow {action}")),
             ("auth" | "secret", _) => self.hit(NeverItem::Secrets, format!("gh {group}")),
             ("api", _) => {
@@ -1990,6 +1993,11 @@ mod tests {
             ("docker push img:tag", Some(Deploy)),
             ("docker build -t img .", None),
             ("gh workflow run hub-deploy.yml", Some(Deploy)),
+            ("gh workflow run release.yml -f version=1.2.3", Some(Release)),
+            ("gh workflow run release -f dry_run=false -f version=1.2.3", Some(Release)),
+            ("gh workflow run -f version=1.2.3 release.yml --ref main", Some(Release)),
+            ("gh -R a/b workflow run .github/workflows/release.yml", Some(Release)),
+            ("gh workflow run release-dry-run.yml", Some(Deploy)),
             ("gh api -X POST repos/x/y/dispatches", Some(Deploy)),
             ("gh api --method DELETE repos/x/y", Some(Deploy)),
             ("gh api -XPUT repos/x/y/pulls/3/merge", Some(Deploy)),
@@ -2297,7 +2305,7 @@ mod tests {
             ("systemctl restart x", Some(MachineWide)),
             ("defaults read com.x", None),
             ("crontab -l", None),
-            ("chmod +x scripts/a.sh", None),
+            ("chmod +x bin/a.sh", None),
         ]);
     }
 
