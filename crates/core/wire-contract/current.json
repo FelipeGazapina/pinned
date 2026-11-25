@@ -1448,6 +1448,33 @@
                 ]
               },
               {
+                "description": "The `memory::Memory` with its new weight, from 0.1 to 10. Among memories that match a search\nabout equally, the heavier comes first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_set_weight"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "weight": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id",
+                  "weight"
+                ]
+              },
+              {
                 "description": "`memory::Status`: how many memories the project has and whether search also matches by meaning.",
                 "type": "object",
                 "properties": {
@@ -15319,6 +15346,33 @@
                   "cmd",
                   "path",
                   "id"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` with its new weight, from 0.1 to 10. Among memories that match a search\nabout equally, the heavier comes first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_set_weight"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "weight": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id",
+                  "weight"
                 ]
               },
               {
@@ -56646,6 +56700,27 @@
           "updated": {
             "type": "integer",
             "format": "int64"
+          },
+          "weight": {
+            "description": "How much it counts among memories that match a search about equally: 0.1 to 10, 1 by default.",
+            "type": "number",
+            "format": "double",
+            "default": 1.0
+          },
+          "hits": {
+            "description": "How many times recall put it in a prompt.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 0
+          },
+          "last_used": {
+            "description": "When recall last put it in a prompt, in Unix seconds; absent until then.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           }
         },
         "required": [
@@ -56653,7 +56728,9 @@
           "title",
           "text",
           "created",
-          "updated"
+          "updated",
+          "weight",
+          "hits"
         ]
       },
       "accept": {
@@ -56685,6 +56762,27 @@
           },
           "updated": {
             "type": "integer",
+            "format": "int64"
+          },
+          "weight": {
+            "description": "How much it counts among memories that match a search about equally: 0.1 to 10, 1 by default.",
+            "type": "number",
+            "format": "double",
+            "default": 1.0
+          },
+          "hits": {
+            "description": "How many times recall put it in a prompt.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 0
+          },
+          "last_used": {
+            "description": "When recall last put it in a prompt, in Unix seconds; absent until then.",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64"
           }
         },
@@ -82900,6 +82998,33 @@
                 ]
               },
               {
+                "description": "The `memory::Memory` with its new weight, from 0.1 to 10. Among memories that match a search\nabout equally, the heavier comes first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_set_weight"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "weight": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id",
+                  "weight"
+                ]
+              },
+              {
                 "description": "`memory::Status`: how many memories the project has and whether search also matches by meaning.",
                 "type": "object",
                 "properties": {
@@ -88629,6 +88754,33 @@
                   "cmd",
                   "path",
                   "id"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` with its new weight, from 0.1 to 10. Among memories that match a search\nabout equally, the heavier comes first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_set_weight"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "weight": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id",
+                  "weight"
                 ]
               },
               {
