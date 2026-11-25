@@ -110,6 +110,7 @@ pub enum ProjectTool {
         id: Option<i64>,
     },
     MemoryForget { id: i64 },
+    MemorySetWeight { id: i64, weight: f64 },
     /// The global orchestrator's: every project of the account, the machines it is on and its Capitão.
     Projects,
     /// The global orchestrator's: hands `message` to the Capitão of `project`, a key `projects`

@@ -479,7 +479,7 @@ fn reminder_tools() -> Vec<Value> {
 
 /// Each project tool, named as `ProjectTool` tags it, and who is offered it. Every session gets the
 /// memory tools; one outside a project is told it has no memory.
-fn project_tools() -> [(Audience, serde_json::Value); 24] {
+fn project_tools() -> [(Audience, serde_json::Value); 25] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
     let project = serde_json::json!({ "type": "string", "description": "The project's key from projects, its folder on this machine, or <machine>:<folder> for a folder on another machine." });
     let machine = serde_json::json!({ "type": "string", "description": "The machine's id or name from projects, with or without @. Pass it whenever projects lists the project on more than one machine." });
@@ -536,6 +536,18 @@ fn project_tools() -> [(Audience, serde_json::Value); 24] {
                 "type": "object",
                 "properties": { "id": { "type": "integer", "description": "The memory's id." } },
                 "required": ["id"],
+            },
+        })),
+        (Audience::Everyone, serde_json::json!({
+            "name": "memory_set_weight",
+            "description": "Set how much a memory counts, by its id: a weight from 0.1 to 10, 1 by default. Among memories that match about equally, the heavier one is recalled first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "The memory's id." },
+                    "weight": { "type": "number", "description": "From 0.1 to 10; 1 is the default." },
+                },
+                "required": ["id", "weight"],
             },
         })),
         (Audience::Everyone, serde_json::json!({
@@ -1045,7 +1057,7 @@ mod tests {
         let (reads, acting) = read_and_acting_permissions();
         assert_eq!(reads.len(), READ_TOOLS.len(), "a read tool pinned no longer has: {reads:?}");
         assert_eq!(reads.len() + acting.len(), permissions().len());
-        for tool in ["memory_save", "memory_forget", "delegate_task", "act", "task_cancel", "remind_me", "taste_set", "send_to_captain", "plan_set", "board_note"] {
+        for tool in ["memory_save", "memory_forget", "memory_set_weight", "delegate_task", "act", "task_cancel", "remind_me", "taste_set", "send_to_captain", "plan_set", "board_note"] {
             assert!(acting.contains(&format!("mcp__{SERVER}__{tool}")), "{tool} {acting:?}");
         }
         assert!(reads.contains(&format!("mcp__{SERVER}__board_read")), "{reads:?}");
@@ -1426,7 +1438,7 @@ fn restore_var(name: &str, value: Option<String>) {
         let names = |child| tool_definitions(true, child, Seat::Other).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats"];
-        let memory = ["memory_search", "memory_save", "memory_forget", "actions", "act"];
+        let memory = ["memory_search", "memory_save", "memory_forget", "memory_set_weight", "actions", "act"];
         assert_eq!(names(false), [&reminders[..], &delegation, &["agents", "work_cost"], &memory].concat());
         assert_eq!(names(true), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory, &["board_note", "board_read", "room_post", "room_read", "room_done"]].concat());
         let on_a_node = tool_definitions(false, false, Seat::Other).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
@@ -1439,6 +1451,7 @@ fn restore_var(name: &str, value: Option<String>) {
                 "mcp__pinned__memory_search",
                 "mcp__pinned__memory_save",
                 "mcp__pinned__memory_forget",
+                "mcp__pinned__memory_set_weight",
                 "mcp__pinned__actions",
                 "mcp__pinned__act",
                 "mcp__pinned__projects",
@@ -1477,8 +1490,9 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("work_cost", serde_json::json!({}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"work_cost"}}"#.into()));
         assert_eq!(ask("work_cost", serde_json::json!({"taskId": "task-7"}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"work_cost","taskId":"task-7"}}"#.into()));
         assert_eq!(ask("memory_forget", serde_json::json!({"id": 3}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"memory_forget","id":3}}"#.into()));
+        assert_eq!(ask("memory_set_weight", serde_json::json!({"id": 3, "weight": 2}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"memory_set_weight","id":3,"weight":2.0}}"#.into()));
         assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
-        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `work_cost`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `repo_overview`, `repo_read`, `repo_search`, `tell_orchestrator`, `plan_set`, `plan_step`, `plan_fix`, `plan_close`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `convex`, `act`".into()));
+        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `work_cost`, `memory_search`, `memory_save`, `memory_forget`, `memory_set_weight`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `repo_overview`, `repo_read`, `repo_search`, `tell_orchestrator`, `plan_set`, `plan_step`, `plan_fix`, `plan_close`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `convex`, `act`".into()));
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
         assert_eq!(
             ask("act", serde_json::json!({ "action": "rename_machine", "args": { "name": "Mini", "id": "m1" }, "request_id": "r-1" }), Some("tab-2")),
@@ -1632,7 +1646,7 @@ fn restore_var(name: &str, value: Option<String>) {
     #[cfg(unix)]
     fn the_global_orchestrator_routes_and_remembers_and_only_a_capitao_reports_to_it() {
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
-        let memory = ["memory_search", "memory_save", "memory_forget", "actions", "act"];
+        let memory = ["memory_search", "memory_save", "memory_forget", "memory_set_weight", "actions", "act"];
         let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats", "agents", "work_cost"], &memory].concat();
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
         assert_eq!(offered(Some("worker"), None), [&today[..], &TEAM_WORKER].concat());

@@ -1802,6 +1802,7 @@ impl Machine {
                 }
             }
             Call::MemoryForget { path, id } => json(self.memories.forget(&self.known_project(&path)?, id)?),
+            Call::MemorySetWeight { path, id, weight } => json(self.memories.set_weight(&self.known_project(&path)?, id, weight)?),
             Call::MemoryStatus { path } => json(self.memories.status(&self.known_project(&path)?)?),
             Call::SignIn { account } => json(self.sign_in(&account)?),
             // The link to the hub answers it itself, so the token goes to the hub alone.
@@ -4296,6 +4297,7 @@ impl Machine {
                 })
             }
             ProjectTool::MemoryForget { id } => self.memories.forget(&self.project_of_tab(tab)?, id).map(|m| format!("Forgot #{} {}.", m.id, pinned_lines::quoted(&m.title, memory::MEMORY_TITLE_CHARS))),
+            ProjectTool::MemorySetWeight { id, weight } => self.memories.set_weight(&self.project_of_tab(tab)?, id, weight).map(|m| format!("Set the weight of #{} {} to {}.", m.id, pinned_lines::quoted(&m.title, memory::MEMORY_TITLE_CHARS), m.weight)),
             ProjectTool::Actions { search } => text_json(json!({ "actions": surface::listing(search.as_deref()) })),
             ProjectTool::Convex { ask } => self.convex(tab, ask),
             ProjectTool::Act { action, args, request_id, machine } => {
@@ -19132,12 +19134,14 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(tool(&worktree, r#""name":"memory_search","query":"which package manager?""#), Ok("[1] Package manager (convention): Use pnpm, not npm.".into()));
         assert_eq!(tool(&plain, r#""name":"memory_save","title":"Deploys","text":"The hub deploys from version tags.","id":2"#), Ok("Updated #2.".into()));
         assert_eq!(tool(&plain, r#""name":"memory_search","query":"""#), Ok("[2] Deploys: The hub deploys from version tags.\n[1] Package manager (convention): Use pnpm, not npm.".into()));
+        assert_eq!(tool(&plain, r#""name":"memory_set_weight","id":1,"weight":2.5"#), Ok("Set the weight of #1 \"Package manager\" to 2.5.".into()));
         assert_eq!(tool(&plain, r#""name":"memory_forget","id":2"#), Ok("Forgot #2 \"Deploys\".".into()));
         assert_eq!(tool(&plain, r#""name":"memory_search","query":"deploys""#), Ok("No memory matches that.".into()));
         assert_eq!(tool(&plain, r#""name":"memory_save","title":" ","text":"x""#), Err("a memory needs a title and a text".into()));
         let none = Err("This thread is not in a project, so it has no memory. Memory belongs to a project folder opened in pinned.".into());
         assert_eq!(tool(&scratch, r#""name":"memory_search","query":"pnpm""#), none);
         assert_eq!(tool(&scratch, r#""name":"memory_save","title":"Scratch","text":"x""#), none);
+        assert_eq!(tool(&scratch, r#""name":"memory_set_weight","id":1,"weight":2"#), none);
         assert_eq!(tool(&plain, r#""name":"agents""#), Ok("No workers yet.".into()));
 
         let call = |c: Call| m.call(c);
@@ -19149,6 +19153,12 @@ Have another model review a risky change before it goes ahead.";
             call(Call::MemorySave { path: path.clone(), title: "TESTS".into(), text: "Run them.".into(), kind: None, id: None }),
             Err("Memory #3 \"Tests\" already says nearly this. Change that one instead.".into())
         );
+        let weighted = call(Call::MemorySetWeight { path: path.clone(), id: 3, weight: 2.0 }).unwrap();
+        assert_eq!(
+            (&weighted["id"], &weighted["title"], &weighted["text"], &weighted["weight"], &weighted["hits"], weighted.get("last_used")),
+            (&json!(3), &json!("Tests"), &json!("Run cargo test."), &json!(2.0), &json!(0), None)
+        );
+        assert_eq!(call(Call::MemorySetWeight { path: path.clone(), id: 3, weight: 11.0 }), Err("a memory's weight is a number from 0.1 to 10".into()));
         let found = call(Call::MemorySearch { path: path.clone(), query: "".into(), limit: Some(1) }).unwrap();
         assert_eq!(found.as_array().unwrap().iter().map(|m| m["title"].clone()).collect::<Vec<_>>(), [json!("Tests")]);
         assert_eq!(call(Call::MemoryStatus { path: path.clone() }), Ok(json!({ "count": 2, "vectors": "off" })));
