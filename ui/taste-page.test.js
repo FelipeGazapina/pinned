@@ -940,13 +940,14 @@ test("Done with a blank name keeps the form open, marks the name and adds no row
   assert.match(section, /aria-label="Edit tester"/);
 });
 
-test("the form takes focus when it opens, the rows' Edit waits while it is open, and focus comes back when it closes", async () => {
+test("the form takes focus when it opens, the rows' Edit and Remove wait while it is open, and focus comes back when it closes", async () => {
   const p = page({ answer: profileHub({ account: [scout, fixer], projects: {} }) });
   await p.show();
   const focused = [];
   p.context.pageView.querySelector = (selector) => ({ focus: () => focused.push(selector), scrollIntoView: () => focused.push(`view ${selector}`) });
   await p.click(/data-act="wpadd"/);
   assert.match(profilesSection(p.html()), /aria-label="Edit scout" disabled>/, "Edit on another row would drop what was typed");
+  assert.match(profilesSection(p.html()), /aria-label="Remove scout" disabled>/, "Remove waits too");
   await p.click(/data-act="wpcancel"/);
   await p.click(/aria-label="Edit fixer"/);
   await p.submitProfile();

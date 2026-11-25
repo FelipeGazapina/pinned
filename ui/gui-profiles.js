@@ -18,7 +18,7 @@ function tasteProfileRowHtml(p, i, names, open) {
   return `<li><span class="taste-skill-text"><span class="taste-skill-name"><b>${name}</b><span class="taste-chip">${p.access === "read_only" ? "Read-only" : "Can edit"}</span></span>
       <span class="taste-skill-about">Model: ${model} · Effort: ${esc(p.effort ?? "none")}</span>${p.delivers ? `<span class="taste-skill-about">Delivers: ${esc(p.delivers)}</span>` : ""}</span>
     <button type="button" class="taste-icon" data-act="wpedit" data-wp="${i}" aria-label="Edit ${name}"${open ? " disabled" : ""}>${icon("pencil")}</button>
-    <button type="button" class="taste-icon" data-act="wpremove" data-wp="${i}" aria-label="Remove ${name}">${icon("trash-2")}</button></li>`;
+    <button type="button" class="taste-icon" data-act="wpremove" data-wp="${i}" aria-label="Remove ${name}"${open ? " disabled" : ""}>${icon("trash-2")}</button></li>`;
 }
 
 function tasteProfileFormHtml(f, catalog, names) {
