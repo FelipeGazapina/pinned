@@ -1113,7 +1113,7 @@ impl Hub {
             HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } | HubCall::RemoteAsked { .. } | HubCall::Place { .. } => {
                 return Err("only a thread's machine delegates a task, asks after it or reports its end".into());
             }
-            HubCall::SetBoxAccess { access } if account.team && [&access.workflow, &access.session, &access.worker, &access.orchestrator].iter().any(|p| matches!(p, pinned_core::connectors::BoxPermission::Fixed { .. })) => {
+            HubCall::SetBoxAccess { access } if account.team && [&access.workflow, &access.session, &access.worker, &access.orchestrator].iter().any(|p| matches!(p, pinned_core::connectors::BoxPermission::Fixed { .. } | pinned_core::connectors::BoxPermission::Durable { .. })) => {
                 return Err(crate::teams::bots::OWN_BOX_EACH.into());
             }
             HubCall::SetBoxAccess { access } => (json(c().await?.set_box_access(access)?), true),
