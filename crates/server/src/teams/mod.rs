@@ -5,6 +5,7 @@
 //! Each op is one function in one file: membership.rs, projects.rs, groups.rs, bots.rs, calls.rs,
 //! chat.rs, triggers.rs, run_log.rs. Their SQL lives in db.rs, one function per query.
 
+pub mod board;
 pub mod bots;
 pub mod calls;
 pub mod chat;
@@ -126,6 +127,9 @@ pub fn owner_only(op: &Op, locked: bool) -> bool {
             | TeamOp::AnswerCall { .. }
             | TeamOp::TakeOver { .. }
             | TeamOp::Chat { .. }
+            | TeamOp::AddCard { .. }
+            | TeamOp::CardAct { .. }
+            | TeamOp::SetBoardSetup { .. }
             | TeamOp::Hub { .. } => true,
             // A stop, giving a run back, and what only reads.
             TeamOp::List
@@ -142,7 +146,9 @@ pub fn owner_only(op: &Op, locked: bool) -> bool {
             | TeamOp::StopRun { .. }
             | TeamOp::RunLog { .. }
             | TeamOp::AskPeople { .. }
-            | TeamOp::RunModelCost { .. } => false,
+            | TeamOp::RunModelCost { .. }
+            | TeamOp::Board
+            | TeamOp::CardReport { .. } => false,
         },
     };
     locked && team
@@ -167,6 +173,7 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
         TeamOp::Join { code } => return json(membership::join(hub, person.id, &code).await?),
         TeamOp::AskPeople { .. } => return Err("only a session in one of the team's boxes asks people".into()),
         TeamOp::RunModelCost { .. } => return Err("only a team's box reports what its run's model cost".into()),
+        TeamOp::CardReport { .. } => return Err("only the run working a card reports on it, from its box".into()),
         _ => {}
     }
     let team = team.ok_or("name the team")?;
@@ -174,7 +181,7 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
     let scope = Scope { team, member: person.id, role };
     let s = &scope;
     match op {
-        TeamOp::List | TeamOp::Create { .. } | TeamOp::Join { .. } | TeamOp::AskPeople { .. } | TeamOp::RunModelCost { .. } | TeamOp::Hub { .. } => unreachable!("answered above"),
+        TeamOp::List | TeamOp::Create { .. } | TeamOp::Join { .. } | TeamOp::AskPeople { .. } | TeamOp::RunModelCost { .. } | TeamOp::CardReport { .. } | TeamOp::Hub { .. } => unreachable!("answered above"),
         TeamOp::Rename { name } => json(membership::rename(hub, s, &name).await?),
         TeamOp::Members => json(membership::members(hub, s).await?),
         TeamOp::Invite => json(membership::invite(hub, s).await?),
@@ -204,6 +211,10 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
         TeamOp::SetBotCeiling { workflow, usd, minutes } => json(bots::set_bot_ceiling(hub, s, &workflow, usd, minutes).await?),
         TeamOp::RunLog { run } => json(run_log::run_log(hub, s, &run).await?),
         TeamOp::Chat { text } => json(chat::chat(hub, s, &text).await?),
+        TeamOp::Board => json(board::board(hub, s).await?),
+        TeamOp::AddCard { title, brief, project } => json(board::add_card(hub, s, &title, &brief, &project).await?),
+        TeamOp::CardAct { card, act } => json(board::card_act(hub, s, &card, act).await?),
+        TeamOp::SetBoardSetup { setup } => json(board::set_setup(hub, s, setup).await?),
     }
 }
 
@@ -221,12 +232,13 @@ async fn run_hub_call(hub: &Arc<Hub>, s: &Scope, call: HubCall) -> Result<Value,
     Ok(answer)
 }
 
-/// Runs a machine's `HubCall::Team`: only `AskPeople` and `RunModelCost`, each from a box of a
+/// Runs a machine's `HubCall::Team`: only `AskPeople`, `RunModelCost` and `CardReport`, each from a box of a
 /// team's own account; any other op is refused.
 pub async fn machine_call(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, op: TeamOp) -> Result<Value, String> {
     match op {
         TeamOp::AskPeople { situation, question, choices, step } => json(calls::ask_people(hub, account, machine, situation, &question, choices, step.as_deref()).await?),
         TeamOp::RunModelCost { workflow, subject, usd } => json(calls::model_cost(hub, account, machine, &workflow, &subject, usd).await?),
+        TeamOp::CardReport { report } => json(board::card_report(hub, account, machine, report).await?),
         op => Err(format!("a machine may not send the team op {}", op.name())),
     }
 }

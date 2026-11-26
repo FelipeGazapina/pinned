@@ -454,6 +454,9 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         step: Option<String>,
     },
+    /// `pinned card`: the agent working a team board's card reports on it. The node sends it to
+    /// the hub as `TeamOp::CardReport` and returns the hub's answer.
+    CardReport { report: crate::work_board::Report },
     /// `pinned run set <name> <value>`: a value the session's graph run reads as `{{vars.<name>}}`.
     RunSet {
         connector: String,

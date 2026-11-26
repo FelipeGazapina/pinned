@@ -646,6 +646,23 @@ pub enum TeamOp {
     /// was told for the live run of that workflow and subject bound to this box, so a report lost
     /// or sent twice never counts twice, and refuses a box that does not run it.
     RunModelCost { workflow: String, subject: crate::agent::Subject, usd: f64 },
+    /// `work_board::BoardView`: the team's work board, its setup and its cards.
+    Board,
+    /// `Card`: a new card in Backlog. `project` is one of the team's projects, by key.
+    AddCard {
+        title: String,
+        #[serde(default)]
+        brief: String,
+        #[serde(default)]
+        project: String,
+    },
+    /// `Card`: a person's act on card `card`.
+    CardAct { card: String, act: crate::work_board::CardAct },
+    /// Owner only: how the board runs, its profiles and who sits in each seat.
+    SetBoardSetup { setup: crate::work_board::BoardSetup },
+    /// From a box's session only (`pinned card`): what the agent working a card reports about it.
+    /// The card is the one the run in this box works.
+    CardReport { report: crate::work_board::Report },
 }
 
 /// The most a run's model cost may be reported as, in USD (`TeamOp::RunModelCost`): the hub
@@ -678,6 +695,7 @@ pub enum TeamEvent {
     CallOpened { call: Call },
     CallResolved { call: Call },
     RunChanged { run: Run },
+    CardChanged { card: crate::work_board::Card },
 }
 
 #[cfg(test)]
@@ -731,6 +749,10 @@ mod tests {
             json!({ "op": "chat", "text": "hi" }),
             json!({ "op": "hub", "call": { "cmd": "get_settings" } }),
             json!({ "op": "ask_people", "situation": "in_doubt", "question": "Which?", "choices": ["red", "blue"] }),
+            json!({ "op": "board" }),
+            json!({ "op": "add_card", "title": "Fix Safari export", "brief": "", "project": "github.com/acme/site" }),
+            json!({ "op": "card_act", "card": "k1", "act": { "act": "queue" } }),
+            json!({ "op": "card_report", "report": { "kind": "stuck", "why": "no repo" } }),
         ];
         for case in cases {
             let name = case["op"].as_str().unwrap().to_owned();

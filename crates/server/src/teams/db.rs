@@ -1707,3 +1707,42 @@ pub async fn runs_past_max_life(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid)>,
         .map_err(err)?;
     Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
 }
+
+// ---- board.rs ----
+
+/// The team's board setup as stored, or None before the owner saved one.
+pub async fn board_setup(db: &Db, team: Uuid) -> Result<Option<serde_json::Value>, String> {
+    let row = db.client().await?.query_opt("select setup from team_board where team = $1", &[&team]).await.map_err(err)?;
+    Ok(row.map(|r| r.get(0)))
+}
+
+pub async fn save_board_setup(db: &Db, team: Uuid, setup: &serde_json::Value) -> Result<(), String> {
+    db.client()
+        .await?
+        .execute("insert into team_board (team, setup) values ($1, $2) on conflict (team) do update set setup = excluded.setup", &[&team, setup])
+        .await
+        .map_err(err)?;
+    Ok(())
+}
+
+/// The team's cards, oldest first.
+pub async fn cards(db: &Db, team: Uuid) -> Result<Vec<serde_json::Value>, String> {
+    let rows = db.client().await?.query("select card from team_cards where team = $1 order by card->'created_at', id", &[&team]).await.map_err(err)?;
+    Ok(rows.iter().map(|r| r.get(0)).collect())
+}
+
+pub async fn card(db: &Db, team: Uuid, id: Uuid) -> Result<Option<serde_json::Value>, String> {
+    let row = db.client().await?.query_opt("select card from team_cards where team = $1 and id = $2", &[&team, &id]).await.map_err(err)?;
+    Ok(row.map(|r| r.get(0)))
+}
+
+pub async fn insert_card(db: &Db, team: Uuid, id: Uuid, card: &serde_json::Value) -> Result<(), String> {
+    db.client().await?.execute("insert into team_cards (team, id, card) values ($1, $2, $3)", &[&team, &id, card]).await.map_err(err)?;
+    Ok(())
+}
+
+/// Writes `new` over card `id` only while it is still `old`: false when someone changed it first.
+pub async fn save_card_if(db: &Db, team: Uuid, id: Uuid, old: &serde_json::Value, new: &serde_json::Value) -> Result<bool, String> {
+    let n = db.client().await?.execute("update team_cards set card = $4 where team = $1 and id = $2 and card = $3", &[&team, &id, old, new]).await.map_err(err)?;
+    Ok(n == 1)
+}

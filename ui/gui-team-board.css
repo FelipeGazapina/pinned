@@ -1,0 +1,58 @@
+/* The team's work board (gui-team-board.js): seven columns side by side, each queue naming who
+   picks it up. It takes the thread's place as the other team pages do. Colours are the app's own tokens. */
+
+body[data-mode="gui"][data-page="team-board"] #expanded > header,
+body[data-mode="gui"][data-page="team-board"] #chat { display: none; }
+body[data-mode="gui"][data-page="team-board"] #page-view { display: flex; flex-direction: column; grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; z-index: 1;
+  background: var(--g-bg); color: var(--g-fg); }
+body[data-mode="gui"][data-page="team-board"] #workspace { grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0; }
+body[data-mode="gui"][data-page="team-board"][data-sidebar="closed"] #workspace { grid-template-columns: 0 minmax(0, 1fr) 0; }
+body[data-mode="gui"][data-page="team-board"] #panel { visibility: hidden; }
+
+.wb-wrap { --tc-line: rgb(var(--g-ink-rgb) / 0.09); --tc-edge: rgb(var(--g-ink-rgb) / 0.16); --tc-link: color-mix(in srgb, var(--g-link) 77%, var(--g-ink));
+  padding: 20px 20px 40px; display: flex; flex-direction: column; gap: 18px; color: var(--g-fg); font-size: 13px; line-height: 1.4; min-width: 0; }
+.wb-top { display: flex; flex-direction: column; gap: 12px; max-width: 900px; }
+.wb-top h1 { margin: 0; font-size: 20px; }
+.wb-add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.wb-add input, .wb-add select, .wb-seat select, .wb-seat input, .wb-sendback input { min-height: 32px; padding: 0 10px; border: 1px solid var(--tc-edge); border-radius: 9px; background: var(--g-raised); color: var(--g-fg); font: inherit; }
+.wb-add input[name="title"] { flex: 2 1 260px; }
+.wb-add input[name="brief"] { flex: 3 1 260px; }
+.wb-add button, .wb-seats button { min-height: 32px; padding: 0 14px; border-radius: 9px; font: inherit; font-weight: 500; cursor: pointer; }
+.wb-seats summary { cursor: pointer; color: var(--g-side-muted); }
+.wb-seats form { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; align-items: flex-start; }
+.wb-seat { display: flex; gap: 8px; align-items: center; }
+.wb-seat b { width: 84px; font-weight: 500; }
+
+.wb-columns { display: grid; grid-template-columns: repeat(7, minmax(168px, 1fr)); gap: 10px; overflow-x: auto; padding-bottom: 8px; align-items: start; }
+.wb-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 10px; border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.035); min-height: 240px; }
+.wb-col[data-column^="ready_"] { background: rgb(var(--g-primary-rgb) / 0.06); }
+.wb-col-head { display: flex; flex-direction: column; gap: 4px; text-align: left; }
+.wb-col-name { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.wb-count { color: var(--g-side-muted); font-weight: 400; }
+.wb-kind { margin-left: auto; padding: 0 6px; border-radius: 5px; background: rgb(var(--g-primary-rgb) / 0.16); color: var(--tc-link); font-size: 11px; font-weight: 500; }
+.wb-who { display: flex; flex-wrap: wrap; gap: 2px 4px; align-items: baseline; color: var(--g-side-muted); font-size: 12px; }
+.wb-who[data-who="person"] { display: block; }
+.wb-who b { color: var(--g-fg); font-weight: 600; }
+.wb-profile { padding: 0 6px; border-radius: 5px; border: 1px solid var(--tc-edge); color: var(--g-fg); font-size: 11px; }
+.wb-bot { font-size: 11px; }
+.wb-empty-seat { font-size: 11px; color: var(--g-warning-fg); }
+.wb-cards { display: flex; flex-direction: column; gap: 8px; }
+.wb-card { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--tc-line); border-radius: 10px; background: var(--g-raised); min-width: 0; }
+.wb-card[data-state="person"] { border-color: rgb(var(--g-warning-rgb) / 0.55); }
+.wb-card[data-state="working"] { border-color: rgb(var(--g-primary-rgb) / 0.45); }
+.wb-card-title { font-weight: 600; overflow-wrap: anywhere; }
+.wb-meta { color: var(--g-side-muted); font-size: 12px; }
+.wb-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.wb-pr { color: var(--tc-link); text-decoration: none; font-weight: 500; }
+.wb-pr:hover { text-decoration: underline; }
+.wb-score { padding: 0 6px; border-radius: 5px; font-weight: 600; background: rgb(var(--g-warning-rgb) / 0.16); color: var(--g-warning-fg); }
+.wb-score[data-pass="true"] { background: color-mix(in srgb, var(--g-success) 16%, transparent); color: var(--g-success); }
+.wb-working { display: flex; align-items: center; gap: 2px; font-size: 12px; }
+.wb-next { color: var(--g-side-muted); }
+.wb-person { padding: 6px 8px; border-radius: 8px; background: rgb(var(--g-warning-rgb) / 0.12); color: var(--g-fg); font-size: 12px; overflow-wrap: anywhere; }
+.wb-request { font-size: 12px; color: var(--g-side-muted); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; }
+.wb-request span { color: var(--g-fg); font-weight: 500; }
+.wb-acts { display: flex; flex-wrap: wrap; gap: 6px; }
+.wb-acts button { min-height: 28px; padding: 0 10px; font-size: 12px; }
+.wb-sendback { display: flex; gap: 6px; }
+.wb-sendback input { flex: 1; min-width: 0; }
