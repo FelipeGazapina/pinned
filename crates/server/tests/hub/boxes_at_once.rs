@@ -135,7 +135,7 @@ fn boxes_at_once_is_8_by_default_and_only_the_user_changes_it() {
     assert_eq!(asks(&mut ana.client), json!([]), "a refused act held no ask for the owner");
 
     // An ask held before the refusal, approved by the owner, changes nothing either.
-    let asked = Confirmation { id: String::new(), at: 1, machine: machine.clone(), machine_name: "boxes-owner-mac".into(), tab: tab.clone(), title: "Way of working".into(), role: ActorRole::Session, action: "set_taste".into(), about: String::new(), args: json!({ "scope": captains, "patch": { "boxes_at_once": 3 } }), target: None, request_id: Some("held-boxes".into()), decision: None, decided_at: None, outcome: None };
+    let asked = Confirmation { id: String::new(), at: 1, machine: machine.clone(), machine_name: "boxes-owner-mac".into(), tab: tab.clone(), title: "Way of working".into(), role: ActorRole::Session, action: "set_taste".into(), about: String::new(), args: json!({ "scope": captains, "patch": { "boxes_at_once": 3 } }), target: None, request_id: Some("held-boxes".into()), decision: None, decided_at: None, outcome: None, reason: None };
     let (account_id, machine_id) = (uuid::Uuid::parse_str(&owner.id).unwrap(), uuid::Uuid::parse_str(&machine).unwrap());
     let held = hub.runtime.block_on(hub.hub().db.hold_confirmation(account_id, machine_id, None, &asked)).unwrap().0.to_string();
     ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();

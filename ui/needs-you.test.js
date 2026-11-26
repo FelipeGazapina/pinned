@@ -45,6 +45,7 @@ function page(world) {
     needsYouItems: () => items,
     machines: new Map(),
     agentConfirmations: world.agents ?? [],
+    agentTastes: world.tastes ?? null,
     agentDeciding: new Set(),
     agentShown: world.shown ?? null,
     agentShownHtml: () => `<div class="agent-once"><b>Pairing command</b><div class="row"><code>pinned pair 123</code><button type="button" class="outline" data-agent="copy-code">Copy</button><button type="button" class="outline" data-agent="dismiss-code">Done</button></div></div>`,
@@ -58,7 +59,7 @@ function page(world) {
     machineName: (id) => ({ mini: "mac-mini", book: "macbook", vps: "vps" })[id] ?? id,
   };
   vm.createContext(context);
-  vm.runInContext([line(chat, "const OFFER_SECS"), decl(chat, "function offerOf"), line(model, "const askSig"), line(model, "const GLYPH_LOOKS"), line(model, "const glyphHtml"), line(model, "const runsInBox"), line(model, "const boxMarkHtml"), decl(agentSurface, "const AGENT_BOX_COPY"), line(agentSurface, "const AGENT_TITLE_ONLY"), `agentActionTitle = (action, args) => AGENT_BOX_COPY[action]?.(args) ?? ({ pair_code: "Pair a new machine" })[action] ?? action;`, read("gui-needs-you.js")].join("\n"), context);
+  vm.runInContext([line(chat, "const OFFER_SECS"), decl(chat, "function offerOf"), line(model, "const askSig"), line(model, "const GLYPH_LOOKS"), line(model, "const glyphHtml"), line(model, "const runsInBox"), line(model, "const boxMarkHtml"), decl(agentSurface, "const AGENT_BOX_COPY"), line(agentSurface, "const AGENT_TITLE_ONLY"), read("taste.js"), decl(agentSurface, "const agentTasteTitle"), line(agentSurface, "const AGENT_TASTE_COPY"), decl(agentSurface, "function agentTasteHtml"), line(agentSurface, "const agentReasonHtml"), `agentActionTitle = (action, args) => AGENT_BOX_COPY[action]?.(args) ?? AGENT_TASTE_COPY[action]?.(args) ?? ({ pair_code: "Pair a new machine" })[action] ?? action;`, read("gui-needs-you.js")].join("\n"), context);
   return (code, args = {}) => {
     Object.assign(context, { args });
     return vm.runInContext(code, context);
@@ -218,6 +219,42 @@ test("an extend_box request on the Needs you card reads as the amount and the bo
   assert.deepEqual(card.buttons, ["deny Deny", "approve Approve"]);
   const other = shown(page({ agents: [{ ...asked, id: "c3", action: "pair_code", args: { code: "x" } }] }), "agent:c3");
   assert.match(other.html, /<pre>[\s\S]*&#34;code&#34;/, "an action that is not title-only still lists its arguments");
+});
+
+test("an agent's way of working change reads as its scope, a row per field from now to next, and its reason, with no raw arguments", () => {
+  const evil = "<img src=x onerror=alert(1)>";
+  const base = { machine: "mini", machine_name: "mac-mini", role: "worker", title: "Tidy the README.", at: S - 45 };
+  const tastes = { orchestrator: { parallel: 1 }, captains: { parallel: 5, autonomy: "decide_and_tell", ladder: [{ model: "glm-5.3" }] }, projects: {} };
+  const run = page({
+    tastes,
+    agents: [
+      { ...base, id: "c7", action: "set_taste", args: { scope: { kind: "captains" }, patch: { parallel: 3, autonomy: "ask_first" } }, reason: "Workers keep timing out on site." },
+      { ...base, id: "c8", action: "set_taste", args: { scope: { kind: "captains" }, patch: { ladder: [{ model: `glm${evil}` }] } }, reason: `Cheaper. ${evil}` },
+      { ...base, id: "c9", action: "remove_machine", args: { id: "imac-id" }, reason: "It is gone." },
+    ],
+  });
+  const rows = (html) => [...html.matchAll(/<li aria-label="([^"]*)">([\s\S]*?)<\/li>/g)].map(([, aria, row]) => [text(aria), text(row)]);
+  const reason = (html) => text(html.match(/<p class="agent-reason">([\s\S]*?)<\/p>/)?.[1] ?? "") || null;
+  const card = shown(run, "agent:c7");
+  assert.equal(card.name, "Change the way of working of Captains (all)");
+  assert.deepEqual(rows(card.html), [
+    ["Workers at once: from 5 to 3", "Workers at once: 5 → 3"],
+    ["Autonomy: from Decide and tell to Ask first", "Autonomy: Decide and tell → Ask first"],
+  ]);
+  assert.equal(reason(card.html), "Reason: Workers keep timing out on site.");
+  assert.equal(card.line, "Asked by “Tidy the README.”");
+  assert.deepEqual(card.buttons, ["deny Deny", "approve Approve"]);
+  assert.ok(!card.html.includes("<pre"), `no raw arguments on the card: ${card.html}`);
+
+  const hostile = shown(run, "agent:c8");
+  assert.ok(!hostile.html.includes("<img"), `agent text is escaped: ${hostile.html}`);
+  assert.deepEqual(rows(hostile.html), [[`Model ladder: from glm-5.3 to glm${evil}`, `Model ladder: glm-5.3 → glm${evil}`]]);
+  assert.equal(reason(hostile.html), `Reason: Cheaper. ${evil}`);
+
+  const other = shown(run, "agent:c9");
+  assert.match(other.html, /<pre>[\s\S]*&#34;id&#34;: &#34;imac-id&#34;/, "any other action still lists its arguments");
+  assert.equal(reason(other.html), "Reason: It is gone.", "and shows the reason it was given");
+  assert.equal(shown(page({ agents: [{ ...base, id: "c10", action: "remove_machine", args: { id: "x" } }] }), "agent:c10").html.includes("agent-reason"), false, "no reason, no line");
 });
 
 test("the list puts asks first, newest first, then limits, failures, reviews and offers, under a summary of threads and machines", () => {
