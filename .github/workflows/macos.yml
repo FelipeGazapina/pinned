@@ -10,7 +10,6 @@ on:
       - "Info.plist"
       - "Cargo.toml"
       - "Cargo.lock"
-      - "scripts/mic-probe/**"
       - ".github/workflows/macos.yml"
   workflow_dispatch:
 
@@ -43,13 +42,3 @@ jobs:
           plutil -p "$app/Contents/Info.plist" | grep UsageDescription
           echo "== helper --permissions, answering for this runner's shell"
           "$helper" --permissions
-      - name: Microphone request with and without the entitlement
-        run: scripts/mic-probe/run.sh mic-probe
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: mic-probe
-          path: |
-            mic-probe/*.png
-            mic-probe/*.txt
-          if-no-files-found: warn

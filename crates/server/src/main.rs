@@ -47,6 +47,21 @@ fn main() {
     }
 }
 
+/// A dev hub runs from a checkout, so it holds the checkout to its file layout (crates/layout) the
+/// way the app's build does: a broken layout keeps it from starting, missing tests only warn.
+fn check_layout() -> Result<(), String> {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if !repo.join("crates/layout").is_dir() {
+        return Ok(());
+    }
+    let report = pinned_layout::check(&repo);
+    eprintln!("pinned-server: {}; {} files have no tests (`cargo run -p pinned-layout` lists them)", report.coverage_line(), report.warnings.len());
+    if report.errors.is_empty() {
+        return Ok(());
+    }
+    Err(format!("the file layout is broken (`cargo run -p pinned-layout` for the whole report):\n{}", report.errors_text()))
+}
+
 struct Args {
     positional: Vec<String>,
     flags: HashMap<String, String>,
@@ -122,6 +137,10 @@ fn hub(args: &[String]) -> Result<(), String> {
                         std::process::exit(2);
                     }
                 }
+                if let Err(broken) = check_layout() {
+                    eprintln!("pinned-server: {broken}");
+                    std::process::exit(2);
+                }
                 eprintln!("DEV HUB: not production (time scale {})", dev.time_scale);
                 dev
             }
@@ -157,7 +176,11 @@ fn hub(args: &[String]) -> Result<(), String> {
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
-        let pinned_server::Running { hub, server, .. } = pinned_server::start(config).await?;
+        let pinned_server::Running { hub, server, addr } = pinned_server::start(config).await?;
+        let watchdog = pinned_server::watchdog::start(&tokio::runtime::Handle::current(), addr, pinned_server::watchdog::Timing::HUB, |why| {
+            eprintln!("pinned-server: watchdog: {why}; exiting so the hub is restarted");
+            std::process::exit(1);
+        });
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|e| e.to_string())?;
         let mut server = server;
         let ended = tokio::select! {
@@ -165,6 +188,8 @@ fn hub(args: &[String]) -> Result<(), String> {
             _ = terminate.recv() => { eprintln!("pinned-server: SIGTERM, closing every socket before stopping"); None }
             _ = tokio::signal::ctrl_c() => { eprintln!("pinned-server: interrupted, closing every socket before stopping"); None }
         };
+        // A stop closes the sockets on purpose; past here an unanswered request is not a freeze.
+        watchdog.disarm();
         let ended = match ended {
             Some(ended) => ended,
             None => {

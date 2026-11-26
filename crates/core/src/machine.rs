@@ -64,6 +64,8 @@ const CARD_CANCEL: &str = "cancelled from the card";
 pub const STARTING_LIMIT: Duration = Duration::from_secs(10 * 60);
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
 const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
+/// How often the transcripts of tabs that work are read for their turns and tokens, between turn ends.
+const COUNTS_EVERY: Duration = Duration::from_secs(3);
 const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
 /// The most items a `Call::Thread` with a limit asks for that a machine reads back.
 const THREAD_PAGE_MAX: usize = 5000;
@@ -838,6 +840,9 @@ struct Tab {
     left_session: Option<String>,
     /// `claude_session`'s transcript as read so far, which starts over whenever the session changes.
     tally: Tally,
+    /// Held through each read of the transcript into `tally`, so a slower read never writes an
+    /// older tally over a newer one. Never lock it while holding the tabs lock.
+    tally_read: Arc<Mutex<()>>,
     last_found_transcript: Option<PathBuf>,
     /// A turn is running, or died on an error: the session has work left if pinned quits now.
     interrupted: bool,
@@ -1015,6 +1020,9 @@ impl Tab {
             interrupted: self.interrupted,
             cut_by_sleep: self.cut_by_sleep,
             stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
+            turns: Some(self.tally.turns).filter(|n| *n > 0),
+            tokens_in: self.tally.tokens().map(|(tokens_in, _)| tokens_in),
+            tokens_out: self.tally.tokens().map(|(_, tokens_out)| tokens_out),
             branch: self.tally.branch.clone(),
             pr: self.tally.pr.clone(),
             last_message_at: self.tally.last_at,
@@ -1260,6 +1268,8 @@ pub struct Machine {
     /// The sessions the hub or their folders kept open, and when: they are not looked at again
     /// for `auto_archive::RETRY_SECS`.
     auto_archive_kept: Mutex<HashMap<String, Instant>>,
+    /// From what context size the app offers to compact a session here.
+    compaction: Mutex<crate::compaction::Settings>,
     /// `~/.pinned/orquestrador`, the global orchestrator's folder and the key of the global memory.
     global_dir: PathBuf,
     /// Every message handed to a Capitão or to the global orchestrator here. Never locked while
@@ -1480,6 +1490,7 @@ impl Machine {
             global: Mutex::new(global::Settings::load(dir.as_deref())),
             auto_archive: Mutex::new(crate::auto_archive::Settings::load(dir.as_deref())),
             auto_archive_kept: Mutex::default(),
+            compaction: Mutex::new(crate::compaction::Settings::load(dir.as_deref())),
             global_dir,
             turns: sent.turns(),
             sent: Mutex::new(sent),
@@ -1502,6 +1513,7 @@ impl Machine {
         });
         machine.reconcile_rooms();
         machine.start_auto_archive();
+        machine.start_live_counts();
         machine
     }
 
@@ -1785,6 +1797,8 @@ impl Machine {
             Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
             Call::AutoArchiveSettings => json(self.auto_archive_settings()),
             Call::SetAutoArchiveSettings { settings } => json(self.set_auto_archive_settings(settings)?),
+            Call::CompactionSettings => json(self.compaction_settings()),
+            Call::SetCompactionSettings { settings } => json(self.set_compaction_settings(settings)?),
             Call::SetBackground { on } => json(self.set_background(on)?),
             Call::ReadSession { tab, items } => self.read_session_here(&tab, read_items(items)).ok_or_else(|| format!("no session {tab} on this machine")),
             Call::RepoLook { path, look } => self.repo_look(&path, &look),
@@ -2566,8 +2580,13 @@ impl Machine {
         let id = self.open_run(run)?;
         let (cwd, account) = self.tab(&id, |t| (t.cwd.clone(), t.account.clone()))?;
         let project = history::project_of(&cwd);
-        let limits = caller.map_or_else(|| self.tastes().resolve(&captain_scope(&project)).limits(), |caller| self.limits_in(caller, &project));
-        let effort = match limits.admit(&account, model.as_deref(), flag("--effort").as_deref(), &self.claude_models()) {
+        let tastes = self.tastes();
+        let limits = caller.map_or_else(|| tastes.resolve(&captain_scope(&project)).limits(), |caller| self.limits_from(&tastes, caller, &project));
+        // A fresh run that names no model or effort starts on the project's defaults, which the
+        // limits see. A resume starts on neither, so they are not its model or effort.
+        let (default_model, default_effort) = if run.args.iter().any(|a| a == "--resume") { (None, None) } else { self.session_defaults(&tastes, &account, &cwd) };
+        let model = model.or(default_model);
+        let effort = match limits.admit(&account, model.as_deref(), flag("--effort").or(default_effort).as_deref(), &self.claude_models()) {
             Ok(effort) => effort,
             Err(refused) => {
                 self.close_tab(&id);
@@ -2741,9 +2760,22 @@ impl Machine {
         if self.thread_task(tab, false).is_some_and(|task| self.delegates.get(&task).is_some_and(|t| t.thread.is_some_and(|thread| !thread.runs))) {
             return self.tab(tab, |t| t.cwd.display().to_string());
         }
+        let idle = |t: &Tab| !replace && (t.session.is_some() || t.starting) && t.launch.is_empty();
+        // A fresh Claude Code or OpenCode Go session, other than the global orchestrator's, starts on
+        // its project's default model and effort when it names neither. The tastes are read outside
+        // the tabs lock, once, for those defaults and for the orchestrators' prompts below.
+        let starting = self.tab(tab, |t| {
+            let fresh = t.program == Program::Agent && t.account.provider == Provider::Claude && !global::is_global(&t.env) && !t.launch.iter().any(|a| a == "--resume");
+            (!idle(t)).then(|| (fresh.then(|| (t.account.clone(), t.cwd.clone())), global::is_global(&t.env) || role_of(&t.env).is_some_and(|(role, _)| role == Role::Orchestrator)))
+        })?;
+        let Some((fresh, orchestrates)) = starting else {
+            return self.tab(tab, |t| t.cwd.display().to_string());
+        };
+        let tastes = (fresh.is_some() || orchestrates).then(|| self.tastes());
+        let defaults = fresh.zip(tastes.as_ref()).map(|((account, cwd), tastes)| self.session_defaults(tastes, &account, &cwd));
         let mut dropped = None;
         let prepared = self.tab(tab, |t| {
-            if !replace && (t.session.is_some() || t.starting) && t.launch.is_empty() {
+            if idle(t) {
                 return None;
             }
             let slept = std::mem::take(&mut t.asleep);
@@ -2769,6 +2801,14 @@ impl Machine {
             if t.read_only && t.account.provider == Provider::Claude {
                 crate::delegate::keep_read_only(&mut args);
             }
+            if let Some((model, effort)) = defaults.as_ref().filter(|_| !args.iter().any(|a| a == "--resume")) {
+                if t.model.is_none() && !args.iter().any(|a| a == "--model") {
+                    t.model.clone_from(model);
+                }
+                if let Some(effort) = effort.as_ref().filter(|_| !args.iter().any(|a| a == "--effort")) {
+                    args.extend(["--effort".to_owned(), effort.clone()]);
+                }
+            }
             t.mode_live = args.iter().any(|a| a == "--permission-mode");
             t.effort = args.iter().position(|a| a == "--effort").and_then(|at| args.get(at + 1).cloned());
             if let Some(model) = t.model.clone().filter(|_| !args.iter().any(|a| a == "--model")) {
@@ -2787,7 +2827,6 @@ impl Machine {
         }
         let settings = self.global_settings();
         let role = role_of(&env).map(|(role, _)| role);
-        let tastes = (global::is_global(&env) || role == Some(Role::Orchestrator)).then(|| self.tastes());
         if global::is_global(&env) {
             prompt.push(global::prompt(&settings.name, &crate::account::hostname(), tastes.as_ref().map_or(8, Tastes::boxes_limit)));
             prompt.extend(global::orchestrator_approval_prompt(&settings));
@@ -3064,9 +3103,7 @@ impl Machine {
     /// returns its folder. Claude's own /model saves its pick as the default for every session.
     /// With `account`, a model from another account moves the conversation there first.
     pub fn set_model(&self, tab: &str, model: &str, cols: u16, rows: u16, account: Option<&str>) -> Result<String, String> {
-        if model.is_empty() || model.starts_with('-') || !model.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.[]_".contains(&b)) {
-            return Err(format!("{model:?} is not a model name"));
-        }
+        taste::check_model_name(model)?;
         if let Some(id) = account.filter(|id| !id.is_empty()) {
             let to = self.accounts.get(id).ok_or_else(|| format!("no account {id} on this machine"))?;
             if self.tab(tab, |t| t.account.id != to.id)? {
@@ -3618,6 +3655,17 @@ impl Machine {
         Ok(settings)
     }
 
+    pub fn compaction_settings(&self) -> crate::compaction::Settings {
+        *self.compaction.lock().unwrap()
+    }
+
+    pub fn set_compaction_settings(&self, settings: crate::compaction::Settings) -> Result<crate::compaction::Settings, String> {
+        settings.check()?;
+        settings.save(self.orchestration_dir.as_deref())?;
+        *self.compaction.lock().unwrap() = settings;
+        Ok(settings)
+    }
+
     /// Asks the hub to archive each finished session whose work is over, its report delivered, and
     /// which idled for the grace period the settings give its kind. See `auto_archive::keeps`. The
     /// tabs are read in one pass and git, which runs in each folder, only for a tab nothing else
@@ -3671,6 +3719,12 @@ impl Machine {
             let now = crate::connectors::unix_millis() / 1000;
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| machine.auto_archive_tick(now)));
         });
+    }
+
+    /// Starts reading the transcripts of tabs that work every `COUNTS_EVERY`, so their turns and
+    /// tokens show while a turn runs.
+    fn start_live_counts(&self) {
+        self.every(COUNTS_EVERY, Machine::count_working_tabs);
     }
 
     /// Hands `text` from the global orchestrator `sender` to the Capitão of the project at `path`,
@@ -4395,10 +4449,14 @@ impl Machine {
         if tab == caller {
             return Err("enqueue hands a message to a Captain; your own session is the one reading this".into());
         }
-        let (running, model, account) = self.tab(&tab, |t| (t.live() || t.starting, t.model.clone(), t.account.clone()))?;
+        let (running, model, account, cwd, resumes) = self.tab(&tab, |t| (t.live() || t.starting, t.model.clone(), t.account.clone(), t.cwd.clone(), t.claude_session.is_some()))?;
         if !running {
-            let limits = self.limits_in(caller, &project);
-            limits.admit(&account, model.as_deref(), None, &self.claude_models())?;
+            let tastes = self.tastes();
+            let limits = self.limits_from(&tastes, caller, &project);
+            // A Captain with no conversation starts a fresh one on the project's defaults, which the
+            // limits see. One with a conversation resumes it on neither.
+            let (default_model, default_effort) = if resumes { (None, None) } else { self.session_defaults(&tastes, &account, &cwd) };
+            limits.admit(&account, model.or(default_model).as_deref(), default_effort.as_deref(), &self.claude_models())?;
             let working = self.delegates.working_in(&project);
             if working >= limits.parallel as usize {
                 return Err(workers_full(working));
@@ -4433,9 +4491,9 @@ impl Machine {
     fn start_for(&self, caller: &str, tab: &str, cols: u16, rows: u16) -> Result<String, String> {
         use crate::delegate::{Access, Caller, Claim, Mode, NewTask, Parent, Thread};
         let (home, global, ceiling) = self.tab(caller, |t| (history::project_of(&t.cwd), global::is_global(&t.env), t.child_access()))?;
-        let (running, ruled, cwd, account, model, title, access) = self.tab(tab, |t| {
+        let (running, ruled, cwd, account, model, title, access, resumes) = self.tab(tab, |t| {
             let reads_only = t.reads_only();
-            (t.live() || t.starting, matches!(role_of(&t.env), Some((Role::Orchestrator, _))) || global::is_global(&t.env) || taste::is_chat(&t.env), t.cwd.clone(), t.account.clone(), t.model.clone(), t.title.clone(), Access::derive(t.bypass, reads_only))
+            (t.live() || t.starting, matches!(role_of(&t.env), Some((Role::Orchestrator, _))) || global::is_global(&t.env) || taste::is_chat(&t.env), t.cwd.clone(), t.account.clone(), t.model.clone(), t.title.clone(), Access::derive(t.bypass, reads_only), t.launch.iter().any(|a| a == "--resume"))
         })?;
         if running || self.thread_task(tab, false).is_some() {
             return self.start_claude(tab, cols, rows);
@@ -4452,7 +4510,11 @@ impl Machine {
         if crate::delegate::tighten(ceiling, access) != access {
             return Err(format!("{tab} runs with {} access, wider than your session's {}", access.as_str(), ceiling.as_str()));
         }
-        let limits = self.caller_limits(caller)?;
+        let tastes = self.tastes();
+        let limits = self.caller_limits_from(&tastes, caller)?;
+        // A tab with no model of its own starts a fresh conversation on the project's default, which
+        // the limits see. A resume starts on no default, so it has no model to check.
+        let model = if resumes { model } else { model.or_else(|| self.session_defaults(&tastes, &account, &cwd).0) };
         let effort = limits.admit(&account, model.as_deref(), None, &self.claude_models())?;
         self.require_priced(&limits, model.as_deref())?;
         let caller_ref = Caller { tab: Some(caller.to_owned()), task: None };
@@ -4589,10 +4651,6 @@ impl Machine {
 
     /// The limits for starting a session in `project` on behalf of `tab`: the project's, narrowed by
     /// the limits of the task `tab` itself runs, when it is a worker here.
-    fn limits_in(&self, tab: &str, project: &Path) -> taste::Limits {
-        self.limits_from(&self.tastes(), tab, project)
-    }
-
     fn limits_from(&self, tastes: &Tastes, tab: &str, project: &Path) -> taste::Limits {
         let own_task = self.tab(tab, |t| t.task.clone()).ok().flatten();
         let limits = tastes.resolve(&captain_scope(project)).limits();
@@ -5865,6 +5923,8 @@ impl Machine {
         self.delegates.describe(&task.id, delegator.clone(), effort);
         self.delegates.note_parent(&task.id, session);
         self.delegates.set_remote(&task.id, RemoteTarget { machine: String::new(), name: place, tab: None, looked: None, waiting: None });
+        // The request already carries what its profile set, and an older machine refuses a name.
+        request.profile = None;
         let asked = HubCall::Delegate { tab: tab.clone(), task: task.id.clone(), request: Box::new(request), repo, access: ceiling, delegator, limits: held };
         let begun = Instant::now();
         match self.call_hub(asked.clone()) {
@@ -6476,18 +6536,25 @@ impl Machine {
     /// Whether `next` can run ladder rung `rung` here: it names the rung's provider when the rung
     /// does, lists the model, is signed in and its CLI is installed.
     fn rung_runs_on(&self, rung: &taste::ModelRef, next: &Account) -> bool {
-        if let Some(provider) = &rung.provider {
-            let wanted = provider.trim().to_ascii_lowercase();
-            let driver = serde_json::to_value(next.provider).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
-            let go = next.auth == Auth::OpenCodeGo && matches!(wanted.as_str(), "opencode" | "opencode-go" | "go");
-            if !(go || wanted == next.id.to_ascii_lowercase() || wanted == next.name.to_ascii_lowercase() || (wanted == driver && next.auth != Auth::OpenCodeGo)) {
-                return false;
-            }
-        }
-        if !self.launch.bin(next.provider).is_file() || !self.status(next).signed_in {
+        if !names_account(rung, next) || !self.launch.bin(next.provider).is_file() || !self.status(next).signed_in {
             return false;
         }
         next.provider == Provider::Codex || self.catalog_of(next, true).0.iter().any(|model| model.id == rung.model)
+    }
+
+    /// The model and the effort a new session in `folder` on `account` starts on when its start
+    /// names neither: its project's default model, when the account is a Claude Code login or an
+    /// OpenCode Go key that lists it and is the provider the default names, and its project's
+    /// default effort. A Codex or Cursor account gets neither. Never asks a CLI whether it is
+    /// signed in.
+    fn session_defaults(&self, tastes: &Tastes, account: &Account, folder: &Path) -> (Option<String>, Option<String>) {
+        if account.provider != Provider::Claude {
+            return (None, None);
+        }
+        let taste = tastes.resolve(&captain_scope(&history::project_of(folder)));
+        let lists = |model: &str| self.catalog_of(account, true).0.iter().any(|listed| listed.id == model);
+        let model = taste.default_model.filter(|default| taste::check_model_name(&default.model).is_ok() && names_account(default, account) && lists(&default.model));
+        (model.map(|default| default.model), taste.default_effort.map(|effort| effort.name().to_owned()))
     }
 
     fn launch_child(&self, side: ChildParent, tool: Option<String>, request: crate::delegate::Request) -> Result<String, String> {
@@ -6514,6 +6581,12 @@ impl Machine {
         // The same CLI can mean a Claude login or a Go key. A model id from one is not the other's.
         let inherited_model = if parent_auth == account.auth { inherited_model } else { None };
         let model = crate::delegate::child_model(parent_provider, account.provider, inherited_model, request.target.model.clone());
+        // A worker with no model named or inherited is a new session: it starts on the project's
+        // default, and every check below sees that model.
+        let model = match model {
+            None if account.provider == Provider::Claude => self.session_defaults(&self.tastes(), &account, &cwd).0,
+            model => model,
+        };
         let (account, mut model, moved) = self.route_around_limits(account, model, &limits, &cwd, request.target.effort.as_deref())?;
         let mut effort = limits.admit(&account, model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
         // Only a Claude thread is metered; a Cursor or Codex child is held by its time limit.
@@ -7407,6 +7480,7 @@ impl Machine {
             claude_session,
             left_session: None,
             tally: Tally::default(),
+            tally_read: Arc::default(),
             last_found_transcript: None,
             interrupted: false,
             resume_at: None,
@@ -7595,12 +7669,32 @@ impl Machine {
         });
     }
 
+    /// Reads what the transcripts of tabs that work gained, one tab after another, and sends the
+    /// tabs once when a tab's turns or tokens moved.
+    fn count_working_tabs(&self) {
+        let counts = |t: &Tab| (t.tally.turns, t.tally.tokens());
+        let working: Vec<(TabId, _)> = {
+            let tabs = self.tabs.lock().unwrap();
+            tabs.iter().filter(|(_, t)| t.status == Some(AgentStatus::Working) && t.claude_session.is_some()).map(|(id, t)| (id.clone(), counts(t))).collect()
+        };
+        let mut moved = false;
+        for (id, before) in working {
+            self.read_stats(&id);
+            moved |= self.tab(&id, |t| counts(t) != before).unwrap_or(false);
+        }
+        if moved {
+            self.emit_tabs();
+        }
+    }
+
     /// Reads what the tab's transcript gained since the last read, outside the tabs lock, saves the
     /// session's figures, and returns the turns counted so far. `None` when the tab has no
-    /// transcript to read.
+    /// transcript to read. One read of a tab waits for another to end.
     fn read_stats(&self, tab: &str) -> Option<u32> {
-        let (session, mut tally, account) = self.tab(tab, |t| Some((t.claude_session.clone()?, t.tally.clone(), t.account.clone()))).ok()??;
-        let file = self.find_transcript(&account, &session)?;
+        let tally_read = self.tab(tab, |t| t.tally_read.clone()).ok()?;
+        let _one_read = tally_read.lock().unwrap();
+        let (session, mut tally, account, kept) = self.tab(tab, |t| Some((t.claude_session.clone()?, t.tally.clone(), t.account.clone(), t.last_found_transcript.clone()))).ok()??;
+        let file = self.kept_transcript(tab, &account, &session, kept, || self.find_transcript(&account, &session))?;
         tally.advance(&file).ok()?;
         let turns = tally.turns;
         // Held from before the session is checked, so a save before its drop lands after this one.
@@ -8462,6 +8556,16 @@ fn share_tastes(hub: &dyn Fn(HubCall) -> Result<Value, String>, shared: &AtomicB
     if hub(HubCall::ImportTastes { tastes }).is_ok() {
         shared.store(true, Ordering::SeqCst);
     }
+}
+
+/// Whether `account` is the provider `model` names, or `model` names none: the account's id or
+/// name, its driver, or `opencode`, `opencode-go` or `go` for an OpenCode Go key.
+fn names_account(model: &taste::ModelRef, account: &Account) -> bool {
+    let Some(provider) = &model.provider else { return true };
+    let wanted = provider.trim().to_ascii_lowercase();
+    let driver = serde_json::to_value(account.provider).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+    let go = account.auth == Auth::OpenCodeGo && matches!(wanted.as_str(), "opencode" | "opencode-go" | "go");
+    go || wanted == account.id.to_ascii_lowercase() || wanted == account.name.to_ascii_lowercase() || (wanted == driver && account.auth != Auth::OpenCodeGo)
 }
 
 /// The taste a Capitão in `folder` follows: its project's, or every Capitão's when the folder has
@@ -9813,6 +9917,63 @@ pub(crate) mod tests {
         m.nudge_thread_watchers(&mut looks);
         assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })]);
         assert_eq!(texts_from(&m, &tab, assistant_line("ready").len() as u64), vec!["after"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_tick_reads_working_tabs_counts_and_sends_the_tabs_only_when_they_moved() {
+        use std::io::Write;
+        let (root, m, heard, tab, dir) = watching("live-counts");
+        let idle = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s2".into()));
+        let reply = |id: &str, output: u64| format!("{}\n", json!({ "type": "assistant", "requestId": format!("r-{id}"), "message": { "id": id, "model": "claude-opus-5-5", "content": [], "usage": { "input_tokens": 10, "cache_read_input_tokens": 100, "output_tokens": output } } }));
+        let append = |file: &Path, line: String| std::fs::OpenOptions::new().append(true).create(true).open(file).unwrap().write_all(line.as_bytes()).unwrap();
+        append(&dir.join("s1.jsonl"), reply("m1", 5));
+        append(&dir.join("s2.jsonl"), reply("m9", 7));
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Working)).unwrap();
+        let counts = |id: &str| m.tabs().into_iter().find(|v| v.id == id).map(|v| (v.turns, v.tokens_in, v.tokens_out)).unwrap();
+        let tabs_sent = || heard.lock().unwrap().iter().filter(|event| event["kind"] == "tabs").count();
+        let projects = root.join("config/accounts/work/projects");
+        let scans = || thread::PROJECT_SCANS.lock().unwrap().iter().filter(|path| path.as_path() == projects).count();
+        let before = scans();
+
+        m.count_working_tabs();
+        assert_eq!(counts(&tab), (None, Some(110), Some(5)));
+        heard.lock().unwrap().clear();
+        append(&dir.join("s1.jsonl"), reply("m2", 40));
+        m.count_working_tabs();
+        assert_eq!(counts(&tab), (None, Some(220), Some(45)), "what the running turn wrote shows with no turn end");
+        assert_eq!(tabs_sent(), 1, "a tick that moved a count sends the tabs once");
+
+        heard.lock().unwrap().clear();
+        m.count_working_tabs();
+        assert_eq!(tabs_sent(), 0, "a tick with nothing new sends nothing");
+        assert_eq!(counts(&idle), (None, None, None), "a tab that is not working is not read");
+        assert_eq!(scans(), before + 1, "later ticks read the transcript the first one found");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_tick_that_moves_only_working_tabs_counts_writes_no_session_cost() {
+        let (root, m, _heard, tab, dir) = watching("live-counts-save");
+        let reply = |id: &str, at: &str| json!({ "type": "assistant", "timestamp": at, "requestId": format!("r-{id}"), "message": { "id": id, "model": "claude-opus-5-5", "content": [], "usage": { "input_tokens": 10, "output_tokens": 5 } } });
+        let transcript = dir.join("s1.jsonl");
+        let saved = root.join("config").join(session_costs::FILE);
+        std::fs::write(&transcript, format!("{}\n{}\n", reply("m1", "2026-11-20T10:00:00Z"), json!({ "type": "system", "subtype": "turn_duration", "durationMs": 60_000 }))).unwrap();
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Working)).unwrap();
+        m.count_working_tabs();
+        assert!(saved.exists(), "the first figures are saved");
+        std::fs::remove_file(&saved).unwrap();
+
+        append(&transcript, &[reply("m2", "2026-11-20T10:00:03Z")]);
+        m.count_working_tabs();
+        assert_eq!(m.view(&tab).unwrap().tokens_out, Some(10));
+        assert!(!saved.exists(), "new tokens and a newer last message alone write nothing");
+
+        append(&transcript, &[json!({ "type": "system", "subtype": "turn_duration", "durationMs": 30_000 })]);
+        m.count_working_tabs();
+        let records: Vec<session_costs::Record> = serde_json::from_slice(&std::fs::read(&saved).expect("a new turn writes")).unwrap();
+        assert_eq!((records[0].turns, records[0].active_ms, records[0].last_at), (2, Some(90_000), 1_795_168_803));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -12957,7 +13118,7 @@ exec sleep 30
     fn a_model_claudes_menu_adds_reaches_the_picker_and_delegate_task_and_outlives_a_restart() {
         let dir = std::env::temp_dir().join(format!("pinned-model-menu-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/web-sweep/screens/claude-2.1.321-model-menu.txt")).unwrap();
+        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-screens/claude-2.1.321-model-menu.txt")).unwrap();
         let lines: Vec<String> = menu.replace("Fable 5.2", "Fable 5.3").lines().map(String::from).collect();
         let picker = |m: &Machine| -> Vec<String> {
             let accounts = m.call(Call::ListAccounts).unwrap();
@@ -13609,7 +13770,7 @@ while True:
     }
 
     #[cfg(unix)]
-    fn started(claude: &Path, tab: &str) -> Vec<String> {
+    pub(super) fn started(claude: &Path, tab: &str) -> Vec<String> {
         let file = PathBuf::from(format!("{}.{tab}", claude.display()));
         wait_for("claude to start", || file.exists());
         let text = std::fs::read_to_string(&file).unwrap();
@@ -14904,6 +15065,25 @@ while True:
     }
 
     #[test]
+    fn compaction_settings_refuse_a_threshold_under_10000_and_survive_a_restart() {
+        use crate::compaction::{Settings, SETTINGS_FILE};
+        let dir = temp("compaction-settings");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        assert_eq!(m.call(Call::CompactionSettings), Ok(json!({ "offer_tokens": 200000 })));
+        let low = Settings { offer_tokens: Some(9_999) };
+        assert_eq!(m.call(Call::SetCompactionSettings { settings: low }), Err("offer_tokens must be at least 10000 tokens, or null for never".into()));
+        assert!(!dir.join("config").join(SETTINGS_FILE).exists(), "a refused threshold saves nothing");
+        assert_eq!(m.call(Call::CompactionSettings), Ok(json!({ "offer_tokens": 200000 })));
+        let fifty = Settings { offer_tokens: Some(50_000) };
+        assert_eq!(m.call(Call::SetCompactionSettings { settings: fifty }), Ok(json!({ "offer_tokens": 50000 })));
+        assert_eq!(m.call(Call::CompactionSettings), Ok(json!({ "offer_tokens": 50000 })));
+        drop(m);
+        let again = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        assert_eq!(again.compaction_settings(), fifty, "it survives a restart");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_worker_with_a_task_still_running_is_not_archived() {
         use crate::delegate::{Access, Claim, Mode, NewTask, Parent};
         let folder = temp("auto-archive-child-folder");
@@ -15818,7 +15998,7 @@ Have another model review a risky change before it goes ahead.";
     #[cfg(unix)]
     fn the_tier_cap_holds_a_model_claudes_menu_added_at_its_familys_tier() {
         let (m, dir, captain) = limited_captain("limits-learned", TastePatch { tier: Some(taste::Tier::Low), ..TastePatch::default() });
-        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/web-sweep/screens/claude-2.1.321-model-menu.txt")).unwrap();
+        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-screens/claude-2.1.321-model-menu.txt")).unwrap();
         let lines = menu.replace("Fable 5.2", "Fable 5.3").replace("Haiku 5.5", "Haiku 6").lines().map(String::from).collect();
         m.call(Call::LearnModelMenu { lines }).unwrap();
         assert_eq!(
@@ -15942,6 +16122,187 @@ Have another model review a risky change before it goes ahead.";
         );
         assert!(!m.delegates.has_pending(), "no session waits on the user's run, so nothing is typed into its own tab");
         assert!(run_now(run_now_spec(&path, "claude-sonnet-5-5", "acceptEdits")).is_ok(), "an ended run frees its place");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    fn named(model: &str) -> taste::ModelRef {
+        taste::ModelRef { provider: None, model: model.into() }
+    }
+
+    /// A tab in `path` on the `work` account, not started.
+    #[cfg(unix)]
+    fn work_tab(m: &Machine, path: &str) -> TabId {
+        let tab = m.open_tab(Some(path.to_owned()), false).unwrap();
+        let work = m.accounts.get("work").unwrap();
+        m.tab(&tab, |t| t.account = work).unwrap();
+        tab
+    }
+
+    #[cfg(unix)]
+    fn has(args: &[String], pair: [&str; 2]) -> bool {
+        args.windows(2).any(|w| w == pair)
+    }
+
+    #[cfg(unix)]
+    const OPUS_ABOVE_MID: &str = "claude-opus-5-5 is a high-tier model; this project allows up to mid. Pick a mid model or raise Tier in Settings › Way of working";
+
+    #[test]
+    #[cfg(unix)]
+    fn a_fresh_session_starts_on_the_default_model_and_effort_and_its_own_wins() {
+        let (m, dir, captain) = limited_captain("default-model", TastePatch { default_model: Some(named("claude-sonnet-5-5")), default_effort: Some(taste::Effort::Low), ..TastePatch::default() });
+        let claude = dir.join("claude");
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+
+        let fresh = work_tab(&m, &path);
+        m.start_claude(&fresh, 80, 24).unwrap();
+        let args = started(&claude, &fresh);
+        assert!(has(&args, ["--model", "claude-sonnet-5-5"]) && has(&args, ["--effort", "low"]), "{args:?}");
+        assert_eq!(m.tab(&fresh, |t| (t.model.clone(), t.effort.clone())).unwrap(), (Some("claude-sonnet-5-5".into()), Some("low".into())), "the tab keeps them for its restarts");
+        m.set_model(&fresh, "claude-haiku-5-5", 80, 24, None).unwrap();
+        let args = started(&claude, &fresh);
+        assert!(has(&args, ["--model", "claude-haiku-5-5"]) && !has(&args, ["--model", "claude-sonnet-5-5"]), "a model picked later wins: {args:?}");
+
+        let own = work_tab(&m, &path);
+        m.tab(&own, |t| (t.model, t.launch) = (Some("claude-haiku-5-5".into()), vec!["--effort".into(), "high".into()])).unwrap();
+        m.start_claude(&own, 80, 24).unwrap();
+        let args = started(&claude, &own);
+        assert!(has(&args, ["--model", "claude-haiku-5-5"]) && has(&args, ["--effort", "high"]), "{args:?}");
+        assert!(!has(&args, ["--model", "claude-sonnet-5-5"]) && !has(&args, ["--effort", "low"]), "the session's own model and effort win: {args:?}");
+
+        let resumed = work_tab(&m, &path);
+        m.tab(&resumed, |t| t.launch = vec!["--resume".into(), "s1".into()]).unwrap();
+        m.start_claude(&resumed, 80, 24).unwrap();
+        let args = started(&claude, &resumed);
+        assert!(!args.iter().any(|a| a == "--model" || a == "--effort"), "a resumed conversation is left as it was: {args:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_default_model_the_account_does_not_list_or_another_provider_runs_is_left_to_the_cli() {
+        let (m, dir, captain) = limited_captain("default-model-unlisted", TastePatch { default_model: Some(named("glm-5.3")), ..TastePatch::default() });
+        let claude = dir.join("claude");
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let tab = work_tab(&m, &path);
+        m.start_claude(&tab, 80, 24).unwrap();
+        let args = started(&claude, &tab);
+        assert!(!args.iter().any(|a| a == "--model"), "a Claude login does not list glm-5.3: {args:?}");
+        assert_eq!(m.tab(&tab, |t| t.model.clone()).unwrap(), None);
+
+        let through_go = taste::ModelRef { provider: Some("opencode".into()), model: "claude-sonnet-5-5".into() };
+        m.set_local_taste(&TasteScope::Captains, TastePatch { default_model: Some(through_go), ..TastePatch::default() }).unwrap();
+        let tab = work_tab(&m, &path);
+        m.start_claude(&tab, 80, 24).unwrap();
+        let args = started(&claude, &tab);
+        assert!(!args.iter().any(|a| a == "--model"), "the default names OpenCode Go, which a Claude login is not: {args:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_default_model_goes_only_to_claude_code_and_opencode_go_accounts_that_list_it() {
+        let (m, dir, captain) = limited_captain("default-model-accounts", TastePatch::default());
+        let folder = m.tab(&captain, |t| t.cwd.clone()).unwrap();
+        let login = m.accounts.get("work").unwrap();
+        let go = Account { id: "go".into(), name: "Go".into(), auth: Auth::OpenCodeGo, ..Account::builtin(Provider::Claude) };
+        let with = |model: taste::ModelRef| {
+            let mut tastes = Tastes::default();
+            tastes.set(&TasteScope::Captains, TastePatch { default_model: Some(model), default_effort: Some(taste::Effort::High), ..TastePatch::default() }).unwrap();
+            tastes
+        };
+        let high = Some("high".to_owned());
+        let glm = with(taste::ModelRef { provider: Some("go".into()), model: "glm-5.3".into() });
+        assert_eq!(m.session_defaults(&glm, &go, &folder), (Some("glm-5.3".into()), high.clone()));
+        assert_eq!(m.session_defaults(&glm, &login, &folder), (None, high.clone()), "the effort applies on its own");
+        let sonnet = with(named("claude-sonnet-5-5"));
+        assert_eq!(m.session_defaults(&sonnet, &login, &folder), (Some("claude-sonnet-5-5".into()), high.clone()));
+        assert_eq!(m.session_defaults(&sonnet, &go, &folder), (None, high), "OpenCode Go does not list it");
+        for other in [Provider::Codex, Provider::Cursor] {
+            assert_eq!(m.session_defaults(&sonnet, &Account::builtin(other), &folder), (None, None), "{other:?}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_global_orchestrator_takes_no_default_model_or_effort() {
+        let (m, dir, _) = limited_captain("default-model-global", TastePatch { default_model: Some(named("claude-sonnet-5-5")), default_effort: Some(taste::Effort::Low), ..TastePatch::default() });
+        let global = m.open_global_orchestrator().unwrap();
+        let work = m.accounts.get("work").unwrap();
+        m.tab(&global, |t| t.account = work).unwrap();
+        m.start_claude(&global, 80, 24).unwrap();
+        let args = started(&dir.join("claude"), &global);
+        assert!(!has(&args, ["--model", "claude-sonnet-5-5"]) && !has(&args, ["--effort", "low"]), "{args:?}");
+        assert_eq!(m.tab(&global, |t| t.model.clone()).unwrap(), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agents_start_on_a_default_model_above_the_tier_is_refused() {
+        let (m, dir, captain) = limited_captain("default-model-tier", TastePatch { tier: Some(taste::Tier::Mid), default_model: Some(named("claude-opus-5-5")), ..TastePatch::default() });
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let start = |tab: &str| m.call(Call::ActFor { caller: captain.clone(), call: json!({ "cmd": "start_claude", "tab": tab, "cols": 80, "rows": 24 }) });
+        let tab = work_tab(&m, &path);
+        assert_eq!(start(&tab), Err(OPUS_ABOVE_MID.into()));
+        assert!(!m.view(&tab).unwrap().running, "a refused start starts nothing");
+
+        m.set_local_taste(&TasteScope::Captains, TastePatch { default_model: Some(named("claude-sonnet-5-5")), ..TastePatch::default() }).unwrap();
+        assert_eq!(start(&tab), Ok(json!(path)));
+        assert!(has(&started(&dir.join("claude"), &tab), ["--model", "claude-sonnet-5-5"]));
+        let task = m.tab(&tab, |t| t.task.clone()).unwrap().expect("the started tab runs a task");
+        assert_eq!(m.delegates.get(&task).unwrap().model.as_deref(), Some("claude-sonnet-5-5"), "the task records the model it runs on");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_resume_is_held_to_the_tier_without_the_default_model_it_does_not_start_on() {
+        let (m, dir, captain) = limited_captain("default-model-resume", TastePatch { tier: Some(taste::Tier::Mid), default_model: Some(named("claude-sonnet-5-5")), ..TastePatch::default() });
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let no_model = "name a model: this project allows models up to the mid tier, and a worker without one runs on its account's default. Pick a mid model from orchestrator_capabilities, or raise Tier in Settings › Way of working";
+
+        let resumed = work_tab(&m, &path);
+        m.tab(&resumed, |t| t.launch = vec!["--resume".into(), "s1".into()]).unwrap();
+        assert_eq!(act_as(&m, &captain, "start_claude", json!({ "tab": resumed, "cols": 80, "rows": 24 })), Err(no_model.into()));
+        assert!(!m.view(&resumed).unwrap().running, "a refused start starts nothing");
+
+        let mut run = run_now_spec(&path, "none", "auto");
+        run.args.splice(..2, ["--resume".to_owned(), "conv-1".to_owned()]);
+        let before = m.tabs().len();
+        assert_eq!(m.call(Call::RunNow { run, title: "Nightly · Run now".into() }), Err(no_model.into()));
+        assert_eq!(m.tabs().len(), before, "a run the limits refuse leaves no tab");
+
+        let session = m.open_tab(Some(path.clone()), false).unwrap();
+        let enqueue = |request: &str| act_as(&m, &session, "enqueue", json!({ "path": path, "text": "Ship it.", "request_id": request, "sender": "Orchestrator" }));
+        m.tab(&captain, |t| t.claude_session = Some("s1".into())).unwrap();
+        assert_eq!(enqueue("r-1"), Err(no_model.into()), "a Captain with a conversation resumes it, on no default");
+        m.tab(&captain, |t| t.claude_session = None).unwrap();
+        assert!(enqueue("r-2").is_ok());
+        assert!(has(&started(&dir.join("claude"), &captain), ["--model", "claude-sonnet-5-5"]), "a Captain with none starts a fresh one on the default");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_run_now_on_a_default_model_above_the_tier_is_refused() {
+        let (m, dir, captain) = limited_captain("default-model-run-now", TastePatch { tier: Some(taste::Tier::Mid), default_model: Some(named("claude-opus-5-5")), ..TastePatch::default() });
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let run_now = |permission: &str| {
+            let mut spec = run_now_spec(&path, "none", permission);
+            spec.args.drain(..2);
+            m.call(Call::RunNow { run: spec, title: "Nightly · Run now".into() })
+        };
+        let before = m.tabs().len();
+        assert_eq!(run_now("auto"), Err(OPUS_ABOVE_MID.into()));
+        assert_eq!(m.tabs().len(), before, "a run the limits refuse leaves no tab");
+
+        m.set_local_taste(&TasteScope::Captains, TastePatch { default_model: Some(named("claude-sonnet-5-5")), ..TastePatch::default() }).unwrap();
+        let tab: String = serde_json::from_value(run_now("acceptEdits").unwrap()).unwrap();
+        assert!(has(&started(&dir.join("claude"), &tab), ["--model", "claude-sonnet-5-5"]));
+        let task = m.tab(&tab, |t| t.task.clone()).unwrap().expect("the run is a task");
+        assert_eq!(m.delegates.get(&task).unwrap().model.as_deref(), Some("claude-sonnet-5-5"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -16109,6 +16470,20 @@ Have another model review a risky change before it goes ahead.";
         let report = act("save_skill", json!({ "text": "# nothing", "copies": [{ "dir": dir.join("no-such-skill").display().to_string(), "since": "abc" }] })).unwrap();
         assert_eq!(report["copies"][0]["outcome"], "missing", "a save reaches the skills writer, which finds no such copy: {report}");
         assert!(act("read_skill", json!({ "dir": dir.join("no-such-skill").display().to_string() })).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_agent_reads_and_sets_the_compaction_threshold_through_the_surface() {
+        let dir = temp("act-compaction");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let caller = m.open_tab(None, false).unwrap();
+        let act = |action: &str, args: Value| act_as(&m, &caller, action, args);
+        assert_eq!(act("compaction_settings", json!({})), Ok(json!({ "offer_tokens": 200000 })));
+        assert_eq!(act("set_compaction_settings", json!({ "settings": { "offer_tokens": null } })), Ok(json!({ "offer_tokens": null })));
+        assert_eq!(act("compaction_settings", json!({})), Ok(json!({ "offer_tokens": null })), "the read sees what the write saved");
+        assert_eq!(act("set_compaction_settings", json!({ "settings": { "offer_tokens": 5000 } })), Err("offer_tokens must be at least 10000 tokens, or null for never".into()));
+        assert_eq!(m.compaction_settings(), crate::compaction::Settings { offer_tokens: None }, "a refused act saves nothing");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -20593,7 +20968,7 @@ Have another model review a risky change before it goes ahead.";
     /// A Captain on `m-book` (MacBook) in a project with a GitHub origin, whose account prefers
     /// `m-mini` for heavy work.
     #[cfg(unix)]
-    fn placing_captain(name: &str) -> (Arc<Machine>, PathBuf, String) {
+    pub(super) fn placing_captain(name: &str) -> (Arc<Machine>, PathBuf, String) {
         let policy = crate::placement::Placement { prefer: vec!["m-mini".into(), "m-vps".into()], ..Default::default() };
         let (m, dir, captain) = limited_captain(name, TastePatch { placement: Some(policy), ..TastePatch::default() });
         for args in [&["init", "-q"][..], &["remote", "add", "origin", "https://github.com/acme/app.git"]] {
@@ -20605,7 +20980,7 @@ Have another model review a risky change before it goes ahead.";
 
     /// A hub that answers each `Place` with the next of `answers` and starts a worker on any
     /// machine but those in `refuse`. Returns every call it saw.
-    fn placing_hub(m: &Machine, answers: Vec<Result<Value, String>>, refuse: &'static [&'static str]) -> Arc<Mutex<Vec<HubCall>>> {
+    pub(super) fn placing_hub(m: &Machine, answers: Vec<Result<Value, String>>, refuse: &'static [&'static str]) -> Arc<Mutex<Vec<HubCall>>> {
         let calls = Arc::new(Mutex::new(vec![]));
         let (seen, answers) = (calls.clone(), Mutex::new(answers.into_iter()));
         m.set_hub(Arc::new(move |call| {

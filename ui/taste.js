@@ -9,8 +9,11 @@ const TASTE_KNOBS = ["strategy", "ladder", "hard_model", "parallel", "autonomy",
 const TASTE_LIMITS = ["tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"];
 /** What the agents escalate to the user. Only the user sets these, and no profile does. */
 const TASTE_ESCALATION = ["escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas"];
-/** `manage_only` starts the Captain without the file-editing tools. Only the user sets it, and no profile does. */
-const TASTE_FIELDS = [...TASTE_KNOBS, "skills", "context", ...TASTE_LIMITS, ...TASTE_ESCALATION, "manage_only"];
+/** `manage_only` starts the Captain without the file-editing tools. Only the user sets it, and no profile does.
+ * `default_model` is the model a new session starts on when it names none; no profile sets it. */
+const TASTE_FIELDS = [...TASTE_KNOBS, "skills", "context", ...TASTE_LIMITS, ...TASTE_ESCALATION, "manage_only", "default_model"];
+/** The Captains' fields a save clears with a reset, since a null in a patch means "not set". */
+const TASTE_CAPTAINS_CLEARED = ["box_size", "default_model"];
 const TASTE_FIELD_LABELS = {
   strategy: "Strategy",
   ladder: "Model ladder",
@@ -22,6 +25,7 @@ const TASTE_FIELD_LABELS = {
   skills: "Skills",
   context: "Context",
   tier: "Model tier",
+  default_model: "Default model",
   default_effort: "Default effort",
   max_effort: "Most effort",
   budget_cents: "Budget per worker",
@@ -221,9 +225,10 @@ function tasteBoxSizeText(tastes, scope) {
 }
 
 /** A project inherits the field again. The orchestrator has nothing to inherit, and the Captains
- * have only the box size to clear: the account goes back to the built-in small. */
+ * have only the box size and the default model to clear: the account goes back to the built-in
+ * small and to the CLI's own model. */
 function tasteResetField(tastes, scope, field) {
-  if (scope.kind === "captains" && field === "box_size") return tasteSetField(tastes, scope, field, null);
+  if (scope.kind === "captains" && TASTE_CAPTAINS_CLEARED.includes(field)) return tasteSetField(tastes, scope, field, null);
   if (scope.kind !== "project") return tastes;
   const { [field]: _, ...patch } = tastes.projects?.[scope.repo] ?? {};
   return tasteWithPatch(tastes, scope.repo, patch);
@@ -239,16 +244,29 @@ function tasteApplyProfile(tastes, scope, profile) {
 /** The fields of `now` that differ from `was`'s, as one patch. */
 const tasteChanged = (was, now) => Object.fromEntries(TASTE_FIELDS.filter((field) => now[field] != null && !tasteSame(now[field], was[field])).map((field) => [field, now[field]]));
 
+/** The tastes with the account's worker profiles, or `repo`'s, set to `profiles`. A project with
+ * none has no list, as Rust's `Tastes::set_worker_profiles` leaves it. */
+function tasteSetProfiles(tastes, repo, profiles) {
+  const lists = tastes.worker_profiles;
+  if (repo == null) return { ...tastes, worker_profiles: { ...lists, account: profiles } };
+  const projects = { ...lists.projects };
+  if (profiles.length) projects[repo] = profiles;
+  else delete projects[repo];
+  return { ...tastes, worker_profiles: { ...lists, projects } };
+}
+
 /** The calls that turn `saved` into `draft`, in order: the orchestrator, the Captains, then each
- * project, whose dropped fields reset before its changed ones are set. Each sends only the fields
- * the draft changed, so a change made elsewhere to another field stands. */
+ * project, whose dropped fields reset before its changed ones are set, then the worker profiles
+ * that changed, the account's before each project's. Each sends only the fields the draft
+ * changed, so a change made elsewhere to another field stands. A hub that predates worker
+ * profiles sends none, so none are saved. */
 function tasteSaveCalls(saved, draft) {
   const calls = [];
   for (const kind of ["orchestrator", "captains"]) {
     const patch = tasteChanged(saved[kind], draft[kind]);
     if (kind === "captains" && draft.placement != null && !tasteSame(saved.placement, draft.placement)) patch.placement = draft.placement;
     if (kind === "captains" && draft.boxes_at_once != null && draft.boxes_at_once !== saved.boxes_at_once) patch.boxes_at_once = draft.boxes_at_once;
-    if (kind === "captains" && saved.captains.box_size != null && draft.captains.box_size == null) calls.push({ cmd: "reset_taste_field", scope: { kind }, field: "box_size" });
+    if (kind === "captains") for (const field of TASTE_CAPTAINS_CLEARED) if (saved.captains[field] != null && draft.captains[field] == null) calls.push({ cmd: "reset_taste_field", scope: { kind }, field });
     if (Object.keys(patch).length) calls.push({ cmd: "set_taste", scope: { kind }, patch });
   }
   const repos = [...new Set([...Object.keys(saved.projects ?? {}), ...Object.keys(draft.projects ?? {})])].sort();
@@ -260,6 +278,13 @@ function tasteSaveCalls(saved, draft) {
     const patch = tasteChanged(was, now);
     if (Object.keys(patch).length) calls.push({ cmd: "set_taste", scope, patch });
   }
+  const [had, lists] = [saved.worker_profiles ?? {}, draft.worker_profiles];
+  if (lists == null) return calls;
+  if (!tasteSame(had.account ?? [], lists.account)) calls.push({ cmd: "set_worker_profiles", profiles: lists.account });
+  for (const repo of [...new Set([...Object.keys(had.projects ?? {}), ...Object.keys(lists.projects ?? {})])].sort()) {
+    const profiles = lists.projects?.[repo] ?? [];
+    if (!tasteSame(had.projects?.[repo] ?? [], profiles)) calls.push({ cmd: "set_worker_profiles", project: repo, profiles });
+  }
   return calls;
 }
 
@@ -268,6 +293,7 @@ function tasteSaveCalls(saved, draft) {
 function tasteRebase(saved, draft, fresh) {
   return tasteSaveCalls(saved, draft).reduce((next, call) => {
     if (call.cmd === "reset_taste_field") return tasteResetField(next, call.scope, call.field);
+    if (call.cmd === "set_worker_profiles") return next.worker_profiles ? tasteSetProfiles(next, call.project, call.profiles) : next;
     const { placement, boxes_at_once, ...fields } = call.patch;
     const set = Object.keys(fields).length ? tasteSetFields(next, call.scope, fields) : next;
     return { ...set, ...(placement ? { placement } : {}), ...(boxes_at_once != null ? { boxes_at_once } : {}) };
@@ -379,6 +405,7 @@ const TASTE_VALUE_WORDS = {
   hard_model: (v) => (v === null ? "The top rung of the ladder" : tasteIsRef(v) ? tasteModelName(v) : undefined),
   parallel: (v) => (tasteIsCount(v) ? String(v) : undefined),
   tier: (v) => (TASTE_TIERS.includes(v) ? `${v[0].toUpperCase()}${v.slice(1)}` : undefined),
+  default_model: (v) => (v === null ? "The CLI's own" : tasteIsRef(v) ? tasteModelName(v) : undefined),
   default_effort: (v) => (v === null ? "The model's own" : TASTE_EFFORTS.includes(v) ? v : undefined),
   max_effort: (v) => (TASTE_EFFORTS.includes(v) ? v : undefined),
   budget_cents: (v) => (tasteIsCount(v) ? tasteMoney(v) : undefined),

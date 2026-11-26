@@ -12,7 +12,7 @@ const taste = () => {
   const context = {};
   vm.createContext(context);
   vm.runInContext(
-    `${read("taste.js")}\nthis.api = { TASTE_PRESETS, tasteProfile, tasteResolve, tasteBrief, tasteSetField, tasteResetField, tasteBoxSize, tasteApplyProfile, tasteSaveCalls, tasteRebase, tasteCost, tasteSpeed, tasteModelTier, tasteCatalog, tasteProjectTabs, placementMachines, placementAdd, placementRemove, placementMove, placementRows, placementLoad, tasteProposal, tasteValueText };`,
+    `${read("taste.js")}\nthis.api = { TASTE_PRESETS, tasteProfile, tasteResolve, tasteBrief, tasteSetField, tasteResetField, tasteBoxSize, tasteApplyProfile, tasteSaveCalls, tasteRebase, tasteSetProfiles, tasteCost, tasteSpeed, tasteModelTier, tasteCatalog, tasteProjectTabs, placementMachines, placementAdd, placementRemove, placementMove, placementRows, placementLoad, tasteProposal, tasteValueText };`,
     context,
   );
   return context.api;
@@ -438,6 +438,80 @@ test("each value reads as the page words it, and one it doesn't know as its JSON
     ["review_diffs", false, "Off"],
     ["manage_only", true, "On"],
     ["escalate_over_lines", 750, "750"],
+    ["default_model", null, "The CLI's own"],
+    ["default_model", { model: "claude-haiku-5-5" }, "claude-haiku-5-5"],
   ];
   for (const [field, value, words] of cases) assert.equal(tasteValueText(field, value), words, `${field}: ${JSON.stringify(value)}`);
+});
+
+
+const scout = { name: "scout", skills: [], tools: ["Read"], access: "read_only", delivers: "A map.", by: "user", prompt: "You map code." };
+const fixer = { name: "fixer", skills: [{ name: "tdd", enabled: true }], tools: [], access: "edit", model: { model: "glm-5.3" }, effort: "high", delivers: "", by: "user", prompt: "" };
+const profiled = (projects = {}) => ({ ...defaults(), worker_profiles: { account: [scout], projects, proposed: [{ ...fixer, name: "tester", by: "orchestrator" }] } });
+
+test("an unchanged draft sends no set_worker_profiles, and a hub without profiles none at all", () => {
+  const { tasteSaveCalls, tasteSetField } = taste();
+  const saved = profiled({ [SITE]: [fixer] });
+  assert.deepEqual(here(tasteSaveCalls(saved, JSON.parse(JSON.stringify(saved)))), []);
+  assert.deepEqual(here(tasteSaveCalls(defaults(), tasteSetField(defaults(), captains, "parallel", 4))), [{ cmd: "set_taste", scope: captains, patch: { parallel: 4 } }]);
+});
+
+test("a changed account list saves after the set_taste calls, and a changed project list names its project", () => {
+  const { tasteSaveCalls, tasteSetField, tasteSetProfiles } = taste();
+  const saved = profiled({ [SITE]: [fixer] });
+  let draft = tasteSetField(saved, captains, "parallel", 4);
+  draft = tasteSetProfiles(draft, null, [scout, { ...fixer, name: "builder" }]);
+  draft = tasteSetProfiles(draft, "github.com/acme/api", [scout]);
+  draft = tasteSetProfiles(draft, SITE, []);
+  assert.deepEqual(here(draft.worker_profiles.projects), { "github.com/acme/api": [scout] }, "an emptied project has no list");
+  assert.deepEqual(here(tasteSaveCalls(saved, draft)), [
+    { cmd: "set_taste", scope: captains, patch: { parallel: 4 } },
+    { cmd: "set_worker_profiles", profiles: [scout, { ...fixer, name: "builder" }] },
+    { cmd: "set_worker_profiles", project: "github.com/acme/api", profiles: [scout] },
+    { cmd: "set_worker_profiles", project: SITE, profiles: [] },
+  ]);
+});
+
+test("an emptied project list that was never saved sends nothing", () => {
+  const { tasteSaveCalls, tasteSetProfiles } = taste();
+  const saved = profiled();
+  assert.deepEqual(here(tasteSaveCalls(saved, tasteSetProfiles(tasteSetProfiles(saved, SITE, [fixer]), SITE, []))), []);
+  assert.deepEqual(here(tasteSaveCalls(saved, { ...saved, worker_profiles: { ...saved.worker_profiles, projects: { [SITE]: [] } } })), [], "a missing list and an empty one are the same");
+});
+
+test("a rebase keeps an unsaved profile edit over the profiles another device saved", () => {
+  const { tasteRebase, tasteSetField, tasteSetProfiles } = taste();
+  const saved = profiled();
+  const draft = tasteSetProfiles(saved, null, [{ ...scout, prompt: "You map code, and only that." }]);
+  const fresh = tasteSetProfiles(tasteSetField(saved, captains, "parallel", 6), SITE, [fixer]);
+  const rebased = tasteRebase(saved, draft, fresh);
+  assert.deepEqual(here(rebased.worker_profiles.account), [{ ...scout, prompt: "You map code, and only that." }]);
+  assert.deepEqual(here(rebased.worker_profiles.projects), { [SITE]: [fixer] });
+  assert.equal(rebased.captains.parallel, 6);
+  assert.deepEqual(here(rebased.worker_profiles.proposed), here(saved.worker_profiles.proposed));
+});
+
+/** Tastes from a hub that has the default model, unset everywhere. */
+const modelled = (projects = {}) => ({ ...defaults(projects), orchestrator: { ...fixture.presets.balanced, default_model: null }, captains: { ...fixture.presets.balanced, default_model: null } });
+
+test("a default model saves with the Captains, clears with a reset, and a project inherits it unless it sets its own", () => {
+  const { tasteSaveCalls, tasteSetField, tasteResetField, tasteResolve, tasteProfile } = taste();
+  const sonnet = { model: "claude-sonnet-5-5" };
+  const haiku = { model: "claude-haiku-5-5" };
+  const saved = modelled();
+  const set = tasteSetField(saved, captains, "default_model", sonnet);
+  assert.deepEqual(here(tasteSaveCalls(saved, set)), [{ cmd: "set_taste", scope: { kind: "captains" }, patch: { default_model: { model: "claude-sonnet-5-5" } } }]);
+  assert.equal(tasteProfile(set.captains), "balanced", "no profile sets or compares it");
+  for (const cleared of [tasteResetField(set, captains, "default_model"), tasteSetField(set, captains, "default_model", null)]) {
+    assert.equal(cleared.captains.default_model, null);
+    assert.deepEqual(here(tasteSaveCalls(set, cleared)), [{ cmd: "reset_taste_field", scope: { kind: "captains" }, field: "default_model" }]);
+  }
+
+  assert.deepEqual(here(tasteSetField(set, site, "default_model", sonnet).projects), {}, "a project set to the Captains' model inherits it");
+  const own = tasteSetField(set, site, "default_model", haiku);
+  assert.deepEqual(here(own.projects), { [SITE]: { default_model: haiku } });
+  assert.deepEqual(here(tasteResolve(own, site).default_model), haiku);
+  assert.deepEqual(here(tasteResolve(own, { kind: "project", repo: "github.com/acme/api" }).default_model), sonnet, "another project keeps the Captains'");
+  assert.deepEqual(here(tasteSetField(own, site, "default_model", null).projects), {}, "null on a project inherits");
+  assert.deepEqual(here(tasteSaveCalls(own, tasteResetField(own, site, "default_model"))), [{ cmd: "reset_taste_field", scope: site, field: "default_model" }]);
 });

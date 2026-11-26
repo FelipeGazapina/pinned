@@ -146,6 +146,9 @@ function page(world) {
       between(gui, "function hookPhase", "const drawnOf"),
       between(agents, "const agentsOf", "function agentSteps"),
       decl(agents, "function stepLine"),
+      decl(agents, "function workersBlockHtml"),
+      "const tickerHtml = () => '', icon = () => '', workersClock = () => null;",
+      "function workerRowHtml(tab, row) { return `<row>${row.title}</row>`; }",
       line(sidebar, "const unixOf"),
       line(sidebar, "const lastPrompt"),
       line(sidebar, "const nowS"),
@@ -297,7 +300,7 @@ test("workersOf lists a Captain's worker threads, delegated tasks and subagents 
     { kind: "subagent", key: "mini:cap:a1b2", title: "Explore the release scripts", state: "working", step: "Ran release", ask: null, model: "haiku", elapsedMs: null, since: Date.parse("2026-11-11T18:05:00Z"), tab: null, agent: "a1b2", depth: 0 },
     { kind: "subagent", key: "mini:cap:a3", title: "Nested", state: "working", step: null, ask: null, model: null, elapsedMs: null, since: null, tab: null, agent: "a3", depth: 1 },
   ]);
-  assert.deepEqual({ ...p.run("workersSummary(workersOf(captain))") }, { total: 7, done: 1, working: 3, needs: 1, since: Date.parse("2026-11-11T18:05:00Z") }, "a nested agent counts");
+  assert.deepEqual({ ...p.run("workersSummary(workersOf(captain))") }, { total: 7, done: 3, working: 3, needs: 1, since: Date.parse("2026-11-11T18:05:00Z") }, "a nested agent counts, and the failed and the cancelled one count as finished");
   assert.equal(p.run("threadState(captain)"), "working", "a Captain whose own turn ended is working while its workers run");
 });
 
@@ -677,4 +680,41 @@ test("the workers strip counts 3 idle workers as done and a starting one and a r
   assert.deepEqual({ ...p.run("workersSummary(workersOf(captain))") }, { total: 5, done: 3, working: 2, needs: 0, since: Date.parse("2026-11-11T17:58:00Z") });
   p.context.three = Object.values(w).filter((t) => ["Slept", "Resumed", "Asleep", "Turn"].includes(t.title));
   assert.deepEqual({ ...p.run("workersSummary(three.map((t) => threadWorker(t)))") }, { total: 4, done: 3, working: 1, needs: 0, since: Date.parse("2026-11-11T17:58:00Z") });
+});
+
+/** A Captain whose turn started one worker per agent state given, with each agent's ids and names
+ * as the Captain's agents report them. */
+function captainWithAgents(agents) {
+  const captain = tab("Release", { id: "cap", status: "done", role: "orchestrator" }, { agents });
+  const p = page({ tabs: [captain], active: captain });
+  p.context.captain = captain;
+  return p;
+}
+const FOUR_WORKERS = [
+  { id: "task-1", name: "Done worker", kind: "Explore", model: "haiku", state: "done", started: "2026-11-11T18:00:00Z", updated: "2026-11-11T18:01:00Z", steps: [] },
+  { id: "task-2", name: "Failed worker", kind: "Cursor", model: "composer-2.5", state: "failed", started: "2026-11-11T18:01:00Z", updated: "2026-11-11T18:02:00Z", steps: [{ kind: "text", text: "Build failed: missing crate" }] },
+  { id: "task-3", name: "Cancelled worker", kind: "Codex", model: null, state: "cancelled", started: "2026-11-11T18:02:00Z", updated: "2026-11-11T18:03:00Z", steps: [] },
+  { id: "a4", name: "Working worker", kind: "Explore", model: "haiku", state: "running", started: "2026-11-11T18:05:00Z", updated: "2026-11-11T18:06:00Z", steps: [] },
+];
+const rowsIn = (html) => [...html.matchAll(/<row>(.*?)<\/row>/g)].map((m) => m[1]);
+const countIn = (html) => /workers-count">([^<]*)</.exec(html)?.[1];
+
+test("away from the turn that started them, the Workers block lists only the unfinished workers and counts them all", () => {
+  const p = captainWithAgents(FOUR_WORKERS);
+  assert.deepEqual({ ...p.run("workersSummary(workersOf(captain))") }, { total: 4, done: 3, working: 1, needs: 0, since: Date.parse("2026-11-11T18:05:00Z") }, "done, failed and cancelled count as finished");
+  const away = p.run("workersBlockHtml(captain, null, false)");
+  assert.deepEqual(rowsIn(away), ["Working worker"]);
+  assert.equal(countIn(away), "3 of 4 done");
+});
+
+test("in the turn that started them, the Workers block lists every worker, failed and cancelled ones included", () => {
+  const p = captainWithAgents(FOUR_WORKERS);
+  const home = p.run("workersBlockHtml(captain, null, true)");
+  assert.deepEqual(rowsIn(home), ["Done worker", "Failed worker", "Cancelled worker", "Working worker"]);
+  assert.equal(countIn(home), "3 of 4 done");
+});
+
+test("away from the turn that started them, a Workers block with only failed and cancelled workers draws nothing", () => {
+  const p = captainWithAgents(FOUR_WORKERS.slice(1, 3));
+  assert.equal(p.run("workersBlockHtml(captain, null, false)"), "");
 });

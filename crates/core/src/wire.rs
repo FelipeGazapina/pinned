@@ -135,6 +135,16 @@ pub struct TabView {
     /// What the conversation's work came to so far, once its transcript holds any of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<ThreadStats>,
+    /// How many turns the conversation finished, once its transcript logged one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<u32>,
+    /// The tokens the conversation's own transcript sent, cache reads and writes included, once a
+    /// message there reported its usage. Its workers' and subagents' are not in it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_in: Option<u64>,
+    /// The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_out: Option<u64>,
     /// The git branch of the conversation's last message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
@@ -435,6 +445,12 @@ pub enum Call {
     AutoArchiveSettings,
     /// The `auto_archive::Settings` saved, answered as saved.
     SetAutoArchiveSettings { settings: crate::auto_archive::Settings },
+    /// `compaction::Settings` of this machine: from what context size the app offers to compact a
+    /// session.
+    CompactionSettings,
+    /// The `compaction::Settings` saved, answered as saved. A threshold under
+    /// `compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.
+    SetCompactionSettings { settings: crate::compaction::Settings },
     /// `on`, as saved. Whether the desktop app on this machine runs in the background, with no
     /// window, which it applies at once: on closes the window, off opens it. A machine without the
     /// app refuses it.
@@ -2022,7 +2038,7 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_team_calls_round_trip_and_an_older_decision_reads_without_a_reason() {
+    fn the_agent_team_calls_and_worker_profiles_round_trip_and_an_older_decision_reads_without_a_reason() {
         let old: HubCall = serde_json::from_value(json!({ "cmd": "decide_confirmation", "id": "c1", "approve": false })).unwrap();
         assert!(matches!(old, HubCall::DecideConfirmation { reason: None, .. }));
         round_trip(
@@ -2038,11 +2054,11 @@ mod tests {
         round_trip(HubCall::SetWorkerProfiles { project: None, profiles: vec![], drop_proposed: vec![] }, json!({ "cmd": "set_worker_profiles", "profiles": [] }));
         round_trip(
             HubCall::SetWorkerProfiles { project: Some("github.com/acme/site".into()), profiles: serde_json::from_value(json!([{ "name": "scout" }])).unwrap(), drop_proposed: vec!["scout".into()] },
-            json!({ "cmd": "set_worker_profiles", "project": "github.com/acme/site", "profiles": [{ "name": "scout", "skills": [], "tools": [], "access": "edit", "delivers": "", "by": "user" }], "drop_proposed": ["scout"] }),
+            json!({ "cmd": "set_worker_profiles", "project": "github.com/acme/site", "profiles": [{ "name": "scout", "skills": [], "tools": [], "access": "edit", "delivers": "", "by": "user", "prompt": "" }], "drop_proposed": ["scout"] }),
         );
         round_trip(
             HubCall::ProposeWorkerProfile { tab: "tab-1".into(), profile: serde_json::from_value(json!({ "name": "scout" })).unwrap() },
-            json!({ "cmd": "propose_worker_profile", "tab": "tab-1", "profile": { "name": "scout", "skills": [], "tools": [], "access": "edit", "delivers": "", "by": "user" } }),
+            json!({ "cmd": "propose_worker_profile", "tab": "tab-1", "profile": { "name": "scout", "skills": [], "tools": [], "access": "edit", "delivers": "", "by": "user", "prompt": "" } }),
         );
     }
 
@@ -2099,6 +2115,9 @@ mod tests {
             interrupted: false,
             cut_by_sleep: None,
             stats: Some(ThreadStats { active_ms: Some(4_320_000), cost_usd: Some(3.42) }),
+            turns: None,
+            tokens_in: None,
+            tokens_out: None,
             branch: Some("felipe/forms".into()),
             pr: Some(PrLink { number: 92, url: "https://github.com/o/site/pull/92".into() }),
             last_message_at: Some(1_794_226_200),
@@ -2133,6 +2152,21 @@ mod tests {
         let plain = serde_json::to_value(tab_view()).unwrap();
         assert!(plain.get("spawned_by").is_none(), "a tab nobody started sends no spawned_by: {plain}");
         assert_eq!(serde_json::from_value::<TabView>(plain).unwrap().spawned_by, None, "an older machine's tab reads as started by nobody");
+    }
+
+    #[test]
+    fn a_tab_carries_its_turns_and_tokens_and_an_older_tab_reads_without_them() {
+        let counted = TabView { turns: Some(14), tokens_in: Some(2_400_000), tokens_out: Some(52_000), ..tab_view() };
+        let sent = serde_json::to_value(&counted).unwrap();
+        assert_eq!((&sent["turns"], &sent["tokens_in"], &sent["tokens_out"]), (&json!(14), &json!(2_400_000), &json!(52_000)));
+        assert_eq!(sent["stats"], json!({ "active_ms": 4_320_000, "cost_usd": 3.42 }), "the counts stay out of stats");
+        assert_eq!(serde_json::from_value::<TabView>(sent).unwrap(), counted);
+        let plain = serde_json::to_value(tab_view()).unwrap();
+        for key in ["turns", "tokens_in", "tokens_out"] {
+            assert!(plain.get(key).is_none(), "a tab with no counts sends no {key}: {plain}");
+        }
+        let older = serde_json::from_value::<TabView>(plain).unwrap();
+        assert_eq!((older.turns, older.tokens_in, older.tokens_out), (None, None, None), "an older machine's tab reads with no counts");
     }
 
     #[test]

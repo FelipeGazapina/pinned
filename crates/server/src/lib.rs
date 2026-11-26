@@ -18,6 +18,7 @@ pub mod sync_limits;
 pub mod traffic;
 pub mod surface;
 pub mod teams;
+pub mod watchdog;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

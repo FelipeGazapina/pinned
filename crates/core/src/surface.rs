@@ -167,6 +167,8 @@ pub const ACTIONS: &[Action] = &[
     n("set_global_orchestrator_settings", Confirm, "Saves the machine's global orchestrator settings, auto-merge and the approval profile included. The user approves it in the app, since auto-merge lets the Captains merge pull requests the profile clears.").wired(),
     n("auto_archive_settings", Excluded, "the user's own setting for when finished threads archive themselves"),
     n("set_auto_archive_settings", Excluded, "the user's own setting for when finished threads archive themselves"),
+    n("compaction_settings", Read, "The machine's compaction settings: offer_tokens, the context size in tokens from which the app offers to compact a session before the user's next message, or null for never.").wired(),
+    n("set_compaction_settings", Write, "Saves the machine's compaction settings and answers them as saved: offer_tokens, the context size in tokens from which the app offers to compact a session before the user's next message, 10000 or more, or null for never.").wired().checks(crate::compaction::agent_check),
     n("set_background", Excluded, "the user's own setting for whether the app on a machine keeps a window"),
     n("read_session", Read, "A session's state and its last items (20, at most 50) of conversation, read from the end of its transcript, on the session's machine or the one machine names.").named("node_read_session").wired(),
     n("memory_search", Read, "The memories of the project at path that best match query, best first, or the latest for an empty query. Any project of the account: pass machine for one on another machine.").wired(),
@@ -1161,7 +1163,7 @@ mod tests {
             [
                 "open_tab", "open_scratch", "start_claude", "set_bypass", "set_model", "restart_claude", "stop_turn", "set_folder", "create_project",
                 "publish_project", "make_folder", "add_account", "set_account_key", "remove_account", "set_project_account", "open_orchestrator",
-                "enqueue", "open_global_orchestrator", "set_global_orchestrator_settings", "memory_save", "memory_forget", "sign_in",
+                "enqueue", "open_global_orchestrator", "set_global_orchestrator_settings", "set_compaction_settings", "memory_save", "memory_forget", "sign_in",
                 "switch_account", "prompt", "regenerate_title", "save_skill", "set_usage_prices", "save_project_scripts", "set_workspace",
                 "device_hub", "device_agents", "device", "rewind", "fork", "update_self", "connect_linear", "disconnect_linear", "connect_slack",
                 "disconnect_slack", "connect_github", "disconnect_github", "connect_vercel", "disconnect_vercel", "connect_posthog", "disconnect_posthog", "connect_upstash",
@@ -1192,6 +1194,22 @@ mod tests {
         assert!(find("enqueue").is_some_and(|a| a.starts_work), "a message that starts a Captain goes through the limits");
         assert!(find("run_workflow").is_some_and(|a| a.starts_work && a.class == Write), "a Run now goes through the limits, with no approval");
         assert_eq!(find("run_now").map(|a| a.class), Some(Excluded), "only the hub starts a Run now on a machine");
+    }
+
+    #[test]
+    fn an_agent_reads_the_compaction_threshold_and_sets_it_no_lower_than_10000() {
+        let read = find("compaction_settings").unwrap();
+        let write = find("set_compaction_settings").unwrap();
+        assert_eq!((read.side, read.class, read.wired), (Side::Node, Read, true));
+        assert_eq!((write.side, write.class, write.wired), (Side::Node, Write, true));
+        assert!(read.about.contains("null for never") && write.about.contains("10000 or more"), "{} / {}", read.about, write.about);
+        let set = |tokens: Value| parse(write, &json!({ "settings": { "offer_tokens": tokens } })).err();
+        assert_eq!(set(json!(9_999)), Some("offer_tokens must be at least 10000 tokens, or null for never".into()));
+        assert_eq!(set(json!(null)), None);
+        assert_eq!(set(json!(10_000)), None);
+        for name in ["auto_archive_settings", "set_auto_archive_settings"] {
+            assert_eq!(find(name).map(|a| (a.class, a.wired)), Some((Excluded, false)), "{name} stays the user's own");
+        }
     }
 
     #[test]

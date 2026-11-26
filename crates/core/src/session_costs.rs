@@ -73,11 +73,12 @@ impl Store {
 
     /// Puts `record` in place of its session's last one, keeping when that one was first saved,
     /// drops the records last seen more than 90 days before `now`, and writes the file. A record
-    /// equal to the last one writes nothing.
+    /// whose figures and title equal the last one's writes nothing, even when its last message is
+    /// newer, so a working tab read every few seconds saves only as its figures change.
     pub fn save(&mut self, mut record: Record, now: u64) {
         if let Some(last) = self.by_session.get(&record.session) {
             record.first_at = last.first_at;
-            if *last == record {
+            if *last == (Record { last_at: last.last_at, ..record.clone() }) {
                 return;
             }
         }
@@ -162,6 +163,20 @@ mod tests {
         store.save(spent("s1", 1, None, NOW - 600), NOW - 600);
         store.save(spent("s1", 3, Some(2.5), NOW), NOW);
         assert_eq!(store.since(0), vec![Record { first_at: NOW - 600, ..spent("s1", 3, Some(2.5), NOW) }]);
+    }
+
+    #[test]
+    fn a_session_cost_whose_figures_did_not_move_is_not_written_again_when_only_its_last_message_did() {
+        let dir = temp("unmoved");
+        let mut store = Store::load(Some(&dir));
+        store.save(spent("s1", 2, Some(1.25), NOW - 60), NOW - 60);
+        std::fs::remove_file(dir.join(FILE)).unwrap();
+        store.save(spent("s1", 2, Some(1.25), NOW), NOW);
+        assert!(!dir.join(FILE).exists(), "a newer last message alone writes nothing");
+        assert_eq!(store.since(0), vec![spent("s1", 2, Some(1.25), NOW - 60)]);
+        store.save(spent("s1", 3, Some(1.25), NOW), NOW);
+        assert_eq!(Store::load(Some(&dir)).since(0), vec![Record { first_at: NOW - 60, ..spent("s1", 3, Some(1.25), NOW) }], "a moved figure writes, with the newer last message");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -1266,6 +1266,36 @@
                 ]
               },
               {
+                "description": "`compaction::Settings` of this machine: from what context size the app offers to compact a\nsession.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "compaction_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `compaction::Settings` saved, answered as saved. A threshold under\n`compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_compaction_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/CompactionSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`on`, as saved. Whether the desktop app on this machine runs in the background, with no\nwindow, which it applies at once: on closes the window, off opens it. A machine without the\napp refuses it.",
                 "type": "object",
                 "properties": {
@@ -3990,7 +4020,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -4366,6 +4396,25 @@
             "required": [
               "workers",
               "sessions"
+            ]
+          },
+          "CompactionSettings": {
+            "description": "When this machine's sessions are offered a compaction.",
+            "type": "object",
+            "properties": {
+              "offer_tokens": {
+                "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 200000
+              }
+            },
+            "required": [
+              "offer_tokens"
             ]
           },
           "RepoLook": {
@@ -10624,7 +10673,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -10859,6 +10920,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -11017,6 +11079,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -11025,7 +11092,8 @@
               "tools",
               "access",
               "delivers",
-              "by"
+              "by",
+              "prompt"
             ]
           },
           "ProfileAccess": {
@@ -11072,6 +11140,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -11114,6 +11183,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -11271,8 +11341,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -11367,6 +11449,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -15070,6 +15153,36 @@
                 ]
               },
               {
+                "description": "`compaction::Settings` of this machine: from what context size the app offers to compact a\nsession.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "compaction_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `compaction::Settings` saved, answered as saved. A threshold under\n`compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_compaction_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/CompactionSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`on`, as saved. Whether the desktop app on this machine runs in the background, with no\nwindow, which it applies at once: on closes the window, off opens it. A machine without the\napp refuses it.",
                 "type": "object",
                 "properties": {
@@ -17767,7 +17880,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -18120,6 +18233,22 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": null
+              }
+            }
+          },
+          "CompactionSettings": {
+            "description": "When this machine's sessions are offered a compaction.",
+            "type": "object",
+            "properties": {
+              "offer_tokens": {
+                "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 200000
               }
             }
           },
@@ -24238,7 +24367,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -24468,6 +24609,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -24626,6 +24768,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -24676,6 +24823,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -24718,6 +24866,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -24865,8 +25014,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -27944,6 +28105,33 @@
                     "type": "null"
                   }
                 ]
+              },
+              "turns": {
+                "description": "How many turns the conversation finished, once its transcript logged one.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tokens_in": {
+                "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
               },
               "branch": {
                 "description": "The git branch of the conversation's last message.",
@@ -34282,7 +34470,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort2"
@@ -34548,6 +34748,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -34706,6 +34907,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -34714,7 +34920,8 @@
               "tools",
               "access",
               "delivers",
-              "by"
+              "by",
+              "prompt"
             ]
           },
           "ProfileAccess": {
@@ -34761,6 +34968,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -34803,6 +35011,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -34960,8 +35169,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort2"
@@ -35056,6 +35277,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -35368,7 +35590,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -38605,6 +38827,33 @@
                     "type": "null"
                   }
                 ]
+              },
+              "turns": {
+                "description": "How many turns the conversation finished, once its transcript logged one.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tokens_in": {
+                "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
               },
               "branch": {
                 "description": "The git branch of the conversation's last message.",
@@ -44792,7 +45041,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort2"
@@ -45053,6 +45314,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -45211,6 +45473,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -45261,6 +45528,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -45303,6 +45571,7 @@
                   "skills": [],
                   "context": [],
                   "tier": "high",
+                  "default_model": null,
                   "default_effort": null,
                   "max_effort": "max",
                   "budget_cents": 0,
@@ -45450,8 +45719,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort2"
@@ -45818,7 +46099,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -49898,6 +50179,47 @@
               "likely",
               "unsure"
             ]
+          }
+        }
+      }
+    },
+    "CompactionSettings": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "CompactionSettings",
+        "description": "When this machine's sessions are offered a compaction.",
+        "type": "object",
+        "properties": {
+          "offer_tokens": {
+            "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "default": 200000
+          }
+        },
+        "required": [
+          "offer_tokens"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "CompactionSettings",
+        "description": "When this machine's sessions are offered a compaction.",
+        "type": "object",
+        "properties": {
+          "offer_tokens": {
+            "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "default": 200000
           }
         }
       }
@@ -66401,6 +66723,33 @@
               }
             ]
           },
+          "turns": {
+            "description": "How many turns the conversation finished, once its transcript logged one.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          },
+          "tokens_in": {
+            "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "tokens_out": {
+            "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
           "branch": {
             "description": "The git branch of the conversation's last message.",
             "type": [
@@ -67040,6 +67389,33 @@
               }
             ]
           },
+          "turns": {
+            "description": "How many turns the conversation finished, once its transcript logged one.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          },
+          "tokens_in": {
+            "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "tokens_out": {
+            "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
           "branch": {
             "description": "The git branch of the conversation's last message.",
             "type": [
@@ -67573,6 +67949,7 @@
               "skills": [],
               "context": [],
               "tier": "high",
+              "default_model": null,
               "default_effort": null,
               "max_effort": "max",
               "budget_cents": 0,
@@ -67615,6 +67992,7 @@
               "skills": [],
               "context": [],
               "tier": "high",
+              "default_model": null,
               "default_effort": null,
               "max_effort": "max",
               "budget_cents": 0,
@@ -67772,8 +68150,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -67868,6 +68258,7 @@
               "skills",
               "context",
               "tier",
+              "default_model",
               "default_effort",
               "max_effort",
               "budget_cents",
@@ -68074,7 +68465,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -68432,6 +68835,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -68440,7 +68848,8 @@
               "tools",
               "access",
               "delivers",
-              "by"
+              "by",
+              "prompt"
             ]
           },
           "ProfileAccess": {
@@ -68491,6 +68900,7 @@
               "skills": [],
               "context": [],
               "tier": "high",
+              "default_model": null,
               "default_effort": null,
               "max_effort": "max",
               "budget_cents": 0,
@@ -68533,6 +68943,7 @@
               "skills": [],
               "context": [],
               "tier": "high",
+              "default_model": null,
               "default_effort": null,
               "max_effort": "max",
               "budget_cents": 0,
@@ -68680,8 +69091,20 @@
                 "$ref": "#/$defs/Cost",
                 "default": "high"
               },
+              "default_model": {
+                "description": "The model a new session starts on when its start names none, on a Claude Code or OpenCode\nGo account that lists it. None leaves it to the CLI. Always written, null included, so a\npage tells a hub that has it from one that predates it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "default_effort": {
-                "description": "The effort a worker gets when the call names none. None leaves it to the model.",
+                "description": "The effort a worker gets when the call names none, and a new session when its start names\nnone. None leaves it to the model.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -68959,7 +69382,19 @@
                   }
                 ]
               },
+              "default_model": {
+                "description": "A project's default model over the Captains'. A patch can set it but not clear it;\nresetting the field clears it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "default_effort": {
+                "description": "The effort a worker whose call names none gets, and a new session whose start names none.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Effort"
@@ -69297,6 +69732,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -71680,6 +72120,33 @@
                     "type": "null"
                   }
                 ]
+              },
+              "turns": {
+                "description": "How many turns the conversation finished, once its transcript logged one.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tokens_in": {
+                "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
               },
               "branch": {
                 "description": "The git branch of the conversation's last message.",
@@ -76592,6 +77059,33 @@
                     "type": "null"
                   }
                 ]
+              },
+              "turns": {
+                "description": "How many turns the conversation finished, once its transcript logged one.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tokens_in": {
+                "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
               },
               "branch": {
                 "description": "The git branch of the conversation's last message.",
@@ -82313,6 +82807,36 @@
                 ]
               },
               {
+                "description": "`compaction::Settings` of this machine: from what context size the app offers to compact a\nsession.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "compaction_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `compaction::Settings` saved, answered as saved. A threshold under\n`compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_compaction_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/CompactionSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
                 "description": "`on`, as saved. Whether the desktop app on this machine runs in the background, with no\nwindow, which it applies at once: on closes the window, off opens it. A machine without the\napp refuses it.",
                 "type": "object",
                 "properties": {
@@ -85037,7 +85561,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -85413,6 +85937,25 @@
             "required": [
               "workers",
               "sessions"
+            ]
+          },
+          "CompactionSettings": {
+            "description": "When this machine's sessions are offered a compaction.",
+            "type": "object",
+            "properties": {
+              "offer_tokens": {
+                "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 200000
+              }
+            },
+            "required": [
+              "offer_tokens"
             ]
           },
           "RepoLook": {
@@ -87988,6 +88531,36 @@
                   },
                   "settings": {
                     "$ref": "#/$defs/AutoArchiveSettings"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "settings"
+                ]
+              },
+              {
+                "description": "`compaction::Settings` of this machine: from what context size the app offers to compact a\nsession.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "compaction_settings"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The `compaction::Settings` saved, answered as saved. A threshold under\n`compaction::MIN_OFFER_TOKENS` is refused and nothing is saved.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_compaction_settings"
+                  },
+                  "settings": {
+                    "$ref": "#/$defs/CompactionSettings"
                   }
                 },
                 "required": [
@@ -90693,7 +91266,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -91046,6 +91619,22 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": null
+              }
+            }
+          },
+          "CompactionSettings": {
+            "description": "When this machine's sessions are offered a compaction.",
+            "type": "object",
+            "properties": {
+              "offer_tokens": {
+                "description": "The context size, in tokens, from which the app offers to compact a session before the\nuser's next message. Null is never.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0,
+                "default": 200000
               }
             }
           },

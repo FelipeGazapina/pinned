@@ -41,22 +41,26 @@ fn repo_off(insight: &RepoInsight) -> bool {
 }
 
 impl Connectors {
+    /// The fires are read and kept with no lock held, as a claim is given back: a hub's fires wait
+    /// on its database, and every call on the store would wait behind them. On 2026-11-24 three
+    /// machines mirrored at once, each tokio worker blocked on the store, and the hub stopped.
     pub fn copy_parts(&self) -> (BTreeMap<Item, Version>, Progress, Value) {
+        let fires = self.storage.fires();
         let store = self.store.lock().unwrap();
-        project(&store, self.storage.as_ref())
+        project(&store, self.storage.as_ref(), fires)
     }
 
     pub fn take_copy(&self, copy: &Copy) -> Result<(), String> {
+        let (next, keys) = assemble(None, &copy.items, &copy.progress, Some(&copy.fixed))?;
+        let fires: Vec<Fire> = copy.progress.fires.iter().cloned().collect();
+        self.storage.replace_fires(&fires)?;
         let mut store = self.store.lock().unwrap();
         let mut names = item_key_names(&store);
         names.insert(UPSTASH_KEY.to_owned());
         for name in store.box_claude_tokens.keys() {
             names.insert(named_claude_key(name));
         }
-        let (next, keys) = assemble(None, &copy.items, &copy.progress, Some(&copy.fixed))?;
         write_keys(self.storage.as_ref(), &names, &keys)?;
-        let fires: Vec<Fire> = copy.progress.fires.iter().cloned().collect();
-        self.storage.replace_fires(&fires)?;
         self.save(&next)?;
         *store = next;
         Ok(())
@@ -64,17 +68,18 @@ impl Connectors {
 
     pub fn take_back(&self, changes: &Changes, recorded: &mut BTreeMap<Item, Recorded>, from: &Author) -> Result<Vec<Note>, String> {
         self.adopt_runs(&changes.runs)?;
+        let mut fires: BTreeSet<Fire> = self.storage.fires().into_iter().collect();
+        fires.extend(changes.progress.fires.iter().cloned());
+        self.storage.replace_fires(&fires.iter().cloned().collect::<Vec<_>>())?;
         let mut notes = {
             let mut store = self.store.lock().unwrap();
-            let (mut current, mut progress, _) = project(&store, self.storage.as_ref());
+            let (mut current, mut progress, _) = project(&store, self.storage.as_ref(), fires.into_iter().collect());
             let edits: BTreeMap<Item, Edit> = changes.edits.iter().filter(|(item, _)| !item.is_taste()).map(|(item, edit)| (item.clone(), edit.clone())).collect();
             let notes = crate::account_copy::merge(&mut current, recorded, &edits, from, &Self::normalize);
             progress.join(&changes.progress);
             let names = item_key_names(&store);
             let (next, keys) = assemble(Some(&store), &current, &progress, None)?;
             write_keys(self.storage.as_ref(), &names, &keys)?;
-            let fires: Vec<Fire> = progress.fires.iter().cloned().collect();
-            self.storage.replace_fires(&fires)?;
             self.save(&next)?;
             *store = next;
             notes
@@ -209,7 +214,8 @@ fn round_trip<T: DeserializeOwned + Serialize>(value: &Value) -> Option<Value> {
     serde_json::to_value(serde_json::from_value::<T>(without_order(value)).ok()?).ok()
 }
 
-fn project(store: &super::Store, storage: &dyn Storage) -> (BTreeMap<Item, Version>, Progress, Value) {
+/// `fires` are the storage's, read before the store was locked (`copy_parts`).
+fn project(store: &super::Store, storage: &dyn Storage, fires: Vec<Fire>) -> (BTreeMap<Item, Version>, Progress, Value) {
     let super::Store {
         linear,
         slack: _,
@@ -280,7 +286,7 @@ fn project(store: &super::Store, storage: &dyn Storage) -> (BTreeMap<Item, Versi
     let progress = Progress {
         workflows,
         slack_threads: slack_threads.clone(),
-        fires: storage.fires().into_iter().collect(),
+        fires: fires.into_iter().collect(),
         change_retries: change_retries.clone(),
         apps_seen: apps_seen.clone(),
         linear_changes_from: linear_changes_from.clone(),

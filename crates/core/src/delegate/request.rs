@@ -133,7 +133,6 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         profile: optional_str(&args["profile"]),
         then,
     };
-    crate::profiles::admit(&request)?;
     crate::chain::admit(&request)?;
     Ok(request)
 }
@@ -221,7 +220,7 @@ fn optional_str(value: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn token_ok(value: &str) -> bool {
+pub(crate) fn token_ok(value: &str) -> bool {
     !value.is_empty()
         && !value.starts_with('-')
         && value

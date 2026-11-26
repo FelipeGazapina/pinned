@@ -101,6 +101,8 @@ function page({ answer = () => tastesWith(), projects = {}, machineViews = null,
     typeArea: (value) => fire("input", { target: { value, matches: (sel) => sel === "[data-area-input]" } }),
     submitArea: () => fire("submit", { target: { matches: (sel) => sel === "[data-area-form]" }, preventDefault() {} }),
     submitSkill: (name) => fire("submit", { target: { matches: (sel) => sel === "[data-skill-form]", querySelector: () => ({ value: name }) }, preventDefault() {} }),
+    fill: (field, value) => fire("input", { target: { value, dataset: { wpField: field }, matches: (sel) => sel === "[data-wp-field]" } }),
+    submitProfile: async () => (fire("submit", { target: { matches: (sel) => sel === "[data-wp-form]" }, preventDefault() {} }), settle()),
   };
 }
 
@@ -796,6 +798,166 @@ test("a hub that predates the escalation settings asks for an update and draws n
   assert.doesNotMatch(section, /<button|<input|<form/);
 });
 
+const scout = { name: "scout", skills: [], tools: ["Read"], access: "read_only", delivers: "A map of the code.", by: "user", prompt: "You map code." };
+const fixer = { name: "fixer", skills: [{ name: "tdd", enabled: true }], tools: [], access: "edit", model: { model: "glm-5.3" }, effort: "high", delivers: "", by: "user", prompt: "" };
+const profilesSection = (html) => html.match(/<section class="taste-section taste-profiles">.*?<\/section>/s)[0];
+/** A backend whose `set_worker_profiles` stores the list, or answers `refuse`'s error when it gives one. */
+const profileHub = (worker_profiles, refuse = () => null) => {
+  let stored = tastesWith({ worker_profiles: { proposed: [], ...worker_profiles } });
+  return (cmd, args) => {
+    if (cmd !== "set_worker_profiles") return stored;
+    const error = refuse(args);
+    if (error) throw new Error(error);
+    const lists = stored.worker_profiles;
+    stored = { ...stored, worker_profiles: args.project ? { ...lists, projects: { ...lists.projects, [args.project]: args.profiles } } : { ...lists, account: args.profiles } };
+    return stored;
+  };
+};
+
+test("the Captains tab lists the account's profiles, and a project tab only that project's", async () => {
+  const p = page({ answer: profileHub({ account: [scout], projects: { [SITE]: [fixer] }, proposed: [{ ...fixer, name: "tester", by: "orchestrator" }] }), projects: { mm: [{ path: "/p/site", name: "site", repo: SITE }] } });
+  await p.show();
+  let section = profilesSection(p.html());
+  assert.match(section, /<b>scout<\/b><span class="taste-chip">Read-only<\/span><\/span>\s*<span class="taste-skill-about">Model: none · Effort: none<\/span><span class="taste-skill-about">Delivers: A map of the code.<\/span>/);
+  assert.match(section, /data-act="wpedit" data-wp="0" aria-label="Edit scout"/);
+  assert.match(section, /data-act="wpremove" data-wp="0" aria-label="Remove scout"/);
+  assert.doesNotMatch(section, /fixer|tester|apply here too/, "neither a project's profile nor a proposal");
+  await p.click(/data-act="scope" data-kind="orchestrator"/);
+  assert.match(profilesSection(p.html()), /aria-label="Edit scout"/, "the orchestrator tab edits the account's list too");
+  await p.click(/data-act="scope" data-kind="project"/);
+  section = profilesSection(p.html());
+  assert.match(section, /<b>fixer<\/b><span class="taste-chip">Can edit<\/span><\/span>\s*<span class="taste-skill-about">Model: GLM-5.3 · Effort: high<\/span><\/span>/);
+  assert.match(section, /<p class="taste-quiet">The account's profiles, under Captains \(all\), apply here too. A profile here wins over the account's profile of the same name.<\/p>/);
+  assert.doesNotMatch(section, /scout/);
+});
+
+test("Add profile, the form and Done add a profile, and Save sends it", async () => {
+  const p = page({ answer: profileHub({ account: [], projects: {} }) });
+  await p.show();
+  assert.match(profilesSection(p.html()), /<p class="taste-quiet">No profiles yet.<\/p>/);
+  await p.click(/data-act="wpadd"/);
+  assert.match(profilesSection(p.html()), /<form class="taste-profile-form" data-wp-form aria-label="New profile">/);
+  assert.match(profilesSection(p.html()), /data-act="wpadd" disabled/);
+  p.fill("name", " scout ");
+  p.fill("model", "claude-sonnet-5-5");
+  p.fill("effort", "high");
+  p.fill("access", "read_only");
+  p.fill("prompt", "You map code.\nYou never edit it.");
+  p.fill("delivers", "A map of the code.");
+  p.fill("tools", " Read, Grep ,, Bash ");
+  await p.click(/aria-label="More workers at once"/);
+  const form = profilesSection(p.html());
+  assert.match(form, /data-wp-field="name" value=" scout "/, "what was typed survives a render");
+  assert.match(form, /<option value="claude-sonnet-5-5" title="claude-sonnet-5-5" selected>Claude Sonnet 5.5<\/option>/);
+  assert.match(form, /<option value="read_only" selected>Read-only<\/option>/);
+  assert.match(form, /<textarea data-wp-field="prompt"[^>]*>You map code.\nYou never edit it.<\/textarea>/);
+  await p.submitProfile();
+  const section = profilesSection(p.html());
+  assert.match(section, /<b>scout<\/b><span class="taste-chip">Read-only<\/span><\/span>\s*<span class="taste-skill-about">Model: Claude Sonnet 5.5 · Effort: high<\/span>/);
+  assert.doesNotMatch(section, /data-wp-form/);
+  assert.match(p.html(), /Unsaved changes/);
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.filter(([cmd]) => cmd === "set_worker_profiles"), [
+    ["set_worker_profiles", { profiles: [{ skills: [], by: "user", name: "scout", model: { model: "claude-sonnet-5-5" }, effort: "high", access: "read_only", prompt: "You map code.\nYou never edit it.", delivers: "A map of the code.", tools: ["Read", "Grep", "Bash"] }] }],
+  ]);
+  assert.doesNotMatch(p.html(), /taste-foot/);
+});
+
+test("editing a profile keeps its skills and a model outside the catalog, and Cancel changes nothing", async () => {
+  const grok = { ...scout, name: "critic", model: { provider: "cursor", model: "grok-4.7" } };
+  const p = page({ answer: profileHub({ account: [fixer, grok], projects: {} }) });
+  await p.show();
+  await p.click(/aria-label="Edit critic"/);
+  assert.match(profilesSection(p.html()), /<option value="grok-4.7\ncursor" selected>grok-4.7 through cursor<\/option>/);
+  await p.click(/data-act="wpcancel"/);
+  assert.doesNotMatch(profilesSection(p.html()), /data-wp-form/);
+  await p.click(/aria-label="Edit fixer"/);
+  const form = profilesSection(p.html());
+  assert.match(form, /aria-label="Edit fixer"/);
+  assert.match(form, /<option value="glm-5.3" title="glm-5.3" selected>GLM-5.3<\/option>/);
+  assert.match(form, /<option value="high" selected>high<\/option>/);
+  p.fill("prompt", "You fix what the scout found.");
+  await p.submitProfile();
+  await p.click(/aria-label="Edit critic"/);
+  await p.submitProfile();
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.filter(([cmd]) => cmd === "set_worker_profiles"), [["set_worker_profiles", { profiles: [{ ...fixer, prompt: "You fix what the scout found." }, grok] }]]);
+});
+
+test("Remove, then Save, sends the list without the profile, and a project's list names its project", async () => {
+  const p = page({ answer: profileHub({ account: [scout, fixer], projects: { [SITE]: [scout] } }), projects: { mm: [{ path: "/p/site", name: "site", repo: SITE }] } });
+  await p.show();
+  await p.click(/aria-label="Remove scout"/);
+  assert.doesNotMatch(profilesSection(p.html()), /scout/);
+  await p.click(/data-act="scope" data-kind="project"/);
+  await p.click(/aria-label="Remove scout"/);
+  assert.match(profilesSection(p.html()), /<p class="taste-quiet">This project has no profiles of its own.<\/p>/);
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.filter(([cmd]) => cmd === "set_worker_profiles"), [
+    ["set_worker_profiles", { profiles: [fixer] }],
+    ["set_worker_profiles", { project: SITE, profiles: [] }],
+  ]);
+});
+
+test("a refused profile save shows the hub's error in the footer and keeps the draft", async () => {
+  const p = page({ answer: profileHub({ account: [scout], projects: {} }, (args) => (args.profiles.length > 1 ? "two profiles are named Scout" : null)) });
+  await p.show();
+  await p.click(/data-act="wpadd"/);
+  p.fill("name", "Scout");
+  await p.submitProfile();
+  await p.click(/data-act="save"/);
+  const html = p.html();
+  assert.match(html, /<span class="taste-unsaved">Unsaved changes<\/span><span class="taste-error" role="alert">two profiles are named Scout<\/span>/);
+  assert.match(profilesSection(html), /aria-label="Edit scout".*aria-label="Edit Scout"/s, "the draft stands");
+});
+
+test("a hub that predates worker profiles asks for an update and draws no control", async () => {
+  const p = page();
+  await p.show();
+  const section = profilesSection(p.html());
+  assert.match(section, /<h2>Worker profiles<\/h2>.*<p class="taste-quiet">Update pinned on the hub to set worker profiles\.<\/p><\/section>$/s);
+  assert.doesNotMatch(section, /<button|<input|<form/);
+});
+
+test("Done with a blank name keeps the form open, marks the name and adds no row", async () => {
+  const p = page({ answer: profileHub({ account: [scout], projects: {} }) });
+  await p.show();
+  await p.click(/data-act="wpadd"/);
+  assert.match(profilesSection(p.html()), /data-wp-field="name" value="" placeholder="E.g. scout" required>/);
+  p.fill("name", "   ");
+  p.fill("prompt", "You test.");
+  await p.submitProfile();
+  let section = profilesSection(p.html());
+  assert.match(section, /data-wp-field="name" value="   " placeholder="E.g. scout" required aria-invalid="true" aria-describedby="wp-name-error">/);
+  assert.match(section, /<p class="taste-error" id="wp-name-error" role="alert">Name the profile.<\/p>/);
+  assert.match(section, /<textarea data-wp-field="prompt"[^>]*>You test.<\/textarea>/, "what was typed stays");
+  assert.equal((section.match(/data-act="wpremove"/g) ?? []).length, 1, "no row was added");
+  assert.doesNotMatch(p.html(), /Unsaved changes/);
+  p.fill("name", "tester");
+  await p.submitProfile();
+  section = profilesSection(p.html());
+  assert.doesNotMatch(section, /data-wp-form|wp-name-error/);
+  assert.match(section, /aria-label="Edit tester"/);
+});
+
+test("the form takes focus when it opens, the rows' Edit and Remove wait while it is open, and focus comes back when it closes", async () => {
+  const p = page({ answer: profileHub({ account: [scout, fixer], projects: {} }) });
+  await p.show();
+  const focused = [];
+  p.context.pageView.querySelector = (selector) => ({ focus: () => focused.push(selector), scrollIntoView: () => focused.push(`view ${selector}`) });
+  await p.click(/data-act="wpadd"/);
+  assert.match(profilesSection(p.html()), /aria-label="Edit scout" disabled>/, "Edit on another row would drop what was typed");
+  assert.match(profilesSection(p.html()), /aria-label="Remove scout" disabled>/, "Remove waits too");
+  await p.click(/data-act="wpcancel"/);
+  await p.click(/aria-label="Edit fixer"/);
+  await p.submitProfile();
+  await p.click(/aria-label="Edit fixer"/);
+  await p.click(/data-act="wpcancel"/);
+  const name = '[data-wp-field="name"]';
+  const opened = ["view [data-wp-form]", name];
+  assert.deepEqual(focused, [...opened, '[data-act="wpadd"]', ...opened, '[data-act="wpedit"][data-wp="1"]', ...opened, '[data-act="wpedit"][data-wp="1"]']);
+});
+
 const managing = (over = {}) => tastesWith({ orchestrator: { ...balanced, manage_only: false }, captains: { ...balanced, manage_only: false }, ...over });
 const paceSection = (html) => html.match(/<section class="taste-section"><h2>Pace<\/h2>.*?<\/section>/s)?.[0];
 const MANAGE_ONLY_HINT = "The Captain starts without Claude Code's Edit, Write and NotebookEdit tools and hands every change to a worker. Applies from its next start. Bash stays, so the shell can still change files.";
@@ -840,5 +1002,78 @@ test("the Orchestrator tab, and a hub that predates Manage only, draw no switch 
   for (const kind of ["captains", "orchestrator", "project"]) {
     await old.click(new RegExp(`data-act="scope" data-kind="${kind}"`));
     assert.doesNotMatch(old.html(), /data-field="manage_only"/, `the ${kind} tab`);
+  }
+});
+
+const modelled = (captains = null, projects = {}) => limited({ captains: { ...balanced, ...limits, default_model: captains }, projects });
+
+test("the Captains' default model starts on the CLI's own, and picking or clearing one saves it", async () => {
+  let tastes = modelled();
+  const p = page({ answer: (cmd, args) => (cmd === "get_tastes" ? tastes : (tastes = modelled(cmd === "set_taste" ? args.patch.default_model : null))) });
+  await p.show();
+  let html = p.html();
+  assert.match(html, /<div class="taste-limit-pair">\s*<div class="taste-field taste-inline"><label class="taste-label">Default model <select data-default-model><option value="" selected>The CLI's own<\/option><optgroup label="Claude">/);
+  assert.match(html, /<span class="taste-quiet">New sessions start on this model and on the default effort when they name none\. A model picked in the session wins\. The model applies only on Claude Code and OpenCode Go accounts that list it\.<\/span>/);
+  assert.ok(html.indexOf("data-default-model") < html.indexOf('data-effort="default_effort"'), "beside Default effort, before it");
+
+  p.pick("data-default-model", "claude-sonnet-5-5");
+  await p.settle();
+  html = p.html();
+  assert.match(html, /<option value="">The CLI's own<\/option>/);
+  assert.match(html, /<option value="claude-sonnet-5-5" title="claude-sonnet-5-5" selected>Claude Sonnet 5.5<\/option>/);
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.at(-1), ["set_taste", { scope: { kind: "captains" }, patch: { default_model: { model: "claude-sonnet-5-5" } } }]);
+
+  p.pick("data-default-model", "");
+  await p.settle();
+  assert.match(p.html(), /<option value="" selected>The CLI's own<\/option>/);
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.at(-1), ["reset_taste_field", { scope: { kind: "captains" }, field: "default_model" }]);
+});
+
+test("a stored default model the catalog does not list, or one with a provider, shows as itself", async () => {
+  const p = page({ answer: () => modelled({ provider: "opencode", model: "glm-5.3" }) });
+  await p.show();
+  assert.match(p.html(), /<select data-default-model><option value="">The CLI's own<\/option><option value="glm-5.3\nopencode" selected>GLM-5.3 through opencode<\/option>/);
+});
+
+test("a project's own default model is tagged, and Reset makes it inherit the Captains' again", async () => {
+  const opus = { model: "claude-opus-5-5" };
+  let tastes = modelled(opus, { [SITE]: { parallel: 2 } });
+  const p = page({
+    answer: (cmd, args) => {
+      if (cmd === "set_taste") tastes = modelled(opus, { [SITE]: { parallel: 2, ...args.patch } });
+      if (cmd === "reset_taste_field") tastes = modelled(opus, { [SITE]: { parallel: 2 } });
+      return tastes;
+    },
+  });
+  await p.show();
+  await p.click(/data-act="scope" data-kind="project"/);
+  assert.match(p.html(), /<option value="claude-opus-5-5" title="claude-opus-5-5" selected>/, "the project shows the Captains' model it inherits");
+  assert.doesNotMatch(p.html(), /data-field="default_model"/);
+
+  p.pick("data-default-model", "claude-sonnet-5-5");
+  await p.settle();
+  assert.match(p.html(), /<\/select><\/label><span class="taste-tag changed">changed here<\/span><button type="button" class="taste-reset" data-act="reset" data-field="default_model"/);
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.at(-1), ["set_taste", { scope: { kind: "project", repo: SITE }, patch: { default_model: { model: "claude-sonnet-5-5" } } }]);
+
+  await p.click(/data-act="reset" data-field="default_model"/);
+  assert.doesNotMatch(p.html(), /data-field="default_model"/);
+  assert.match(p.html(), /<option value="claude-opus-5-5" title="claude-opus-5-5" selected>/);
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls.at(-1), ["reset_taste_field", { scope: { kind: "project", repo: SITE }, field: "default_model" }]);
+});
+
+test("the orchestrator tab, and a hub that predates the default model, draw no select for it", async () => {
+  const p = page({ answer: () => modelled() });
+  await p.show();
+  await p.click(/data-act="scope" data-kind="orchestrator"/);
+  assert.doesNotMatch(p.html(), /data-default-model/);
+  const old = page({ answer: () => limited({ projects: { [SITE]: { parallel: 2 } } }) });
+  await old.show();
+  for (const kind of ["captains", "project"]) {
+    await old.click(new RegExp(`data-act="scope" data-kind="${kind}"`));
+    assert.doesNotMatch(old.html(), /data-default-model|Default model/, `the ${kind} tab`);
   }
 });

@@ -383,8 +383,9 @@ pub struct Request {
     /// The step or list of the calling Captain's plan this task drives: a step id or a list id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_step: Option<String>,
-    /// The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses
-    /// it until U6.
+    /// The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`
+    /// looks it up by name and sets the request up as it says. A request sent to another machine
+    /// carries what the profile set, and no name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     /// The profiles that take the work on after this task, in order: a handoff chain.
