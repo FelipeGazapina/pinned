@@ -127,9 +127,9 @@ function app({ answer = async () => [], tabs = [{ key: "local:tab-4" }], reveal 
 async function press(action, runs, options) {
   const page = app({ answer: async () => runs, ...options });
   await page.open();
-  const [, machine, tab] = page.html().match(new RegExp(`data-action="${action}" data-machine="([^"]*)" data-tab="([^"]*)"`));
+  const [, machine, tab, session] = page.html().match(new RegExp(`data-action="${action}" data-machine="([^"]*)" data-tab="([^"]*)" data-session="([^"]*)"`));
   const sessionLine = { textContent: "MacBook · tab-4" };
-  const button = { dataset: { machine, tab }, closest: (selector) => (selector === ".workflow-run-session" ? sessionLine : null) };
+  const button = { dataset: { machine, tab, session }, closest: (selector) => (selector === ".workflow-run-session" ? sessionLine : null) };
   await page.context.runAction(action, button);
   return { ...page, sessionLine };
 }
@@ -220,7 +220,7 @@ test("Fork from here and Rewind show after Open thread only on a failed live run
   const [first, second, third, fourth, fifth, sixth, seventh] = rows(html());
   assert.match(
     fourth,
-    /<p class="workflow-run-session">MacBook · tab-4 <button type="button" class="secondary" data-action="workflow-run-open" data-machine="local" data-tab="tab-4">Open thread<\/button> <button type="button" class="secondary" data-action="workflow-run-fork" data-machine="local" data-tab="tab-4">Fork from here<\/button> <button type="button" class="secondary" data-action="workflow-run-rewind" data-machine="local" data-tab="tab-4">Rewind<\/button><\/p>/,
+    /<p class="workflow-run-session">MacBook · tab-4 <button type="button" class="secondary" data-action="workflow-run-open" data-machine="local" data-tab="tab-4">Open thread<\/button> <button type="button" class="secondary" data-action="workflow-run-fork" data-machine="local" data-tab="tab-4" data-session="">Fork from here<\/button> <button type="button" class="secondary" data-action="workflow-run-rewind" data-machine="local" data-tab="tab-4" data-session="">Rewind<\/button><\/p>/,
   );
   assert.match(second, /Open thread/, "the waiting run's tab is listed too");
   for (const [row, what] of [[first, "running"], [second, "waiting"], [third, "done"], [fifth, "failed, tab not listed"], [sixth, "failed, tab closed"], [seventh, "failed, no session"]]) {
@@ -294,6 +294,51 @@ test("an unloaded thread is read before deciding: a failed read refuses on the l
   assert.deepEqual(read.did, [["fetched", "local:tab-4"], ["fork", "local:tab-4", "L:2"]]);
   const loaded = await press("workflow-run-fork", [failedHere], { fetch: async () => assert.fail("a loaded thread is not read again") });
   assert.deepEqual(loaded.did, [["fork", "local:tab-4", "L:2"]]);
+});
+
+test("a thread still being read when the click lands says so, and nothing forks or rewinds", async () => {
+  for (const action of ["workflow-run-fork", "workflow-run-rewind"]) {
+    // fetchThread returns at once while a read is in flight, so the thread is still unloaded after it.
+    const { did, sessionLine } = await press(action, [failedHere], { thread: { loaded: false, error: null, turns: [] } });
+    assert.equal(sessionLine.textContent, "Still reading that session. Try again in a moment.", action);
+    assert.deepEqual(did, [["fetched", "local:tab-4"]], action);
+  }
+});
+
+test("a second click while a fork or rewind is still pending does nothing", async () => {
+  let holding = true;
+  let open = [];
+  const hold = () => (holding ? new Promise((resolve) => open.push(resolve)) : undefined);
+  for (const action of ["workflow-run-fork", "workflow-run-rewind"]) {
+    holding = true;
+    open = [];
+    const page = app({ answer: async () => [failedHere], fork: hold, reveal: hold });
+    await page.open();
+    const [, machine, tab, session] = page.html().match(new RegExp(`data-action="${action}" data-machine="([^"]*)" data-tab="([^"]*)" data-session="([^"]*)"`));
+    const button = { dataset: { machine, tab, session }, closest: () => ({ textContent: "" }) };
+    const first = page.context.runAction(action, button);
+    await flush();
+    const second = page.context.runAction(action, button);
+    await flush();
+    holding = false;
+    open.forEach((resolve) => resolve());
+    await Promise.all([first, second]);
+    const started = () => page.did.filter(([kind]) => kind === "fork" || kind === "reveal");
+    assert.equal(started().length, 1, `${action}: the second click starts nothing`);
+    await page.context.runAction(action, button);
+    assert.equal(started().length, 2, `${action}: once the first is done, a click acts again`);
+  }
+});
+
+test("a tab that has moved on to another conversation refuses both actions and forks nothing", async () => {
+  const run = { ...failedHere, session: { ...failedHere.session, claude: "ses_1" } };
+  for (const action of ["workflow-run-fork", "workflow-run-rewind"]) {
+    const { did, sessionLine } = await press(action, [run], { thread: { ...settled(), session: "ses_2" } });
+    assert.equal(sessionLine.textContent, "That session has moved on to another conversation since this run.", action);
+    assert.deepEqual(did, [], action);
+  }
+  const same = await press("workflow-run-fork", [run], { thread: { ...settled(), session: "ses_1" } });
+  assert.deepEqual(same.did, [["fork", "local:tab-4", "L:2"]], "the run's own conversation still forks");
 });
 
 test("every value of the answer is escaped, as text and inside attributes", async () => {

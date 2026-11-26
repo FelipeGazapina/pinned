@@ -47,10 +47,12 @@ function workflowRunSessionHtml(run) {
   if (session.state === "detached") return `<p>Tab closed${claude}</p>`;
   if (session.state !== "live") return `<p>No session</p>`;
   const machine = localIdOf(session.machine);
-  const button = (action, label) => ` <button type="button" class="secondary" data-action="${action}" data-machine="${esc(machine)}" data-tab="${esc(session.tab)}">${label}</button>`;
+  const button = (action, label, extra = "") => ` <button type="button" class="secondary" data-action="${action}" data-machine="${esc(machine)}" data-tab="${esc(session.tab)}"${extra}>${label}</button>`;
   const here = tabByKey(keyOf(machine, session.tab));
   const open = here ? button("workflow-run-open", "Open thread") : "";
-  const recover = here && run.status === "failed" ? button("workflow-run-fork", "Fork from here") + button("workflow-run-rewind", "Rewind") : "";
+  // The conversation the run ran in: fork and rewind refuse once the tab has moved on to another.
+  const sessionAttr = ` data-session="${esc(session.claude ?? "")}"`;
+  const recover = here && run.status === "failed" ? button("workflow-run-fork", "Fork from here", sessionAttr) + button("workflow-run-rewind", "Rewind", sessionAttr) : "";
   return `<p class="workflow-run-session">${esc(machineName(machine))} · ${esc(session.tab)}${claude}${open}${recover}</p>`;
 }
 
@@ -114,6 +116,21 @@ function workflowRunSay(button, text) {
 actions["workflow-run-open"] = (button) =>
   revealTab(button.dataset.machine, button.dataset.tab).catch((err) => workflowRunSay(button, `Couldn't open that session: ${err?.message ?? err}`));
 
+/** The sessions a fork or rewind is working on now, by machine and tab: a second click on one does nothing until the first is done. */
+const workflowRunBusy = new Set();
+
+/** Runs `act` for the card's session, unless a fork or rewind of it is already under way. */
+async function workflowRunOnce(button, act) {
+  const key = keyOf(button.dataset.machine, button.dataset.tab);
+  if (workflowRunBusy.has(key)) return;
+  workflowRunBusy.add(key);
+  try {
+    await act();
+  } finally {
+    workflowRunBusy.delete(key);
+  }
+}
+
 /** The run's tab and the turns of its conversation, read first when this app hasn't yet, or why the
  * card can't fork or rewind it. */
 async function workflowRunTurns(button) {
@@ -122,6 +139,9 @@ async function workflowRunTurns(button) {
   if (!threadOf(tab).loaded) await fetchThread(tab);
   const t = threadOf(tab);
   if (t.error) return { why: `Couldn't read that session: ${t.error}` };
+  // A read already in flight returns at once from fetchThread, with the thread still unloaded.
+  if (!t.loaded) return { why: "Still reading that session. Try again in a moment." };
+  if (t.session && t.session !== button.dataset.session) return { why: "That session has moved on to another conversation since this run." };
   const turns = turnsFor(t);
   if (!turns.some((turn) => turn.user)) return { why: "That session has no conversation yet." };
   if (turnLive(tab)) return { why: "That session is working. Try again once it stops." };
@@ -129,29 +149,31 @@ async function workflowRunTurns(button) {
 }
 
 // Forks through the newest settled response, the one that carries "Fork from this response".
-actions["workflow-run-fork"] = async (button) => {
-  const { tab, turns, why } = await workflowRunTurns(button);
-  if (why) return workflowRunSay(button, why);
-  const answer = turns.findLast((turn) => turn.answer)?.answer;
-  if (!answer) return workflowRunSay(button, "Nothing to fork yet: claude hasn't finished a response.");
-  try {
-    await forkTab(tab, answer.id);
-  } catch (err) {
-    workflowRunSay(button, `Couldn't fork that session: ${err?.message ?? err}`);
-  }
-};
+actions["workflow-run-fork"] = (button) =>
+  workflowRunOnce(button, async () => {
+    const { tab, turns, why } = await workflowRunTurns(button);
+    if (why) return workflowRunSay(button, why);
+    const answer = turns.findLast((turn) => turn.answer)?.answer;
+    if (!answer) return workflowRunSay(button, "Nothing to fork yet: claude hasn't finished a response.");
+    try {
+      await forkTab(tab, answer.id);
+    } catch (err) {
+      workflowRunSay(button, `Couldn't fork that session: ${err?.message ?? err}`);
+    }
+  });
 
 // Opens the thread on "Edit from here" for its newest prompt; its own dialog asks before anything rewinds.
-actions["workflow-run-rewind"] = async (button) => {
-  const { turns, why } = await workflowRunTurns(button);
-  if (why) return workflowRunSay(button, why);
-  const user = turns.findLast((turn) => turn.user).user;
-  try {
-    await revealTab(button.dataset.machine, button.dataset.tab);
-  } catch (err) {
-    return workflowRunSay(button, `Couldn't open that session: ${err?.message ?? err}`);
-  }
-  await editFromHere(user.id);
-};
+actions["workflow-run-rewind"] = (button) =>
+  workflowRunOnce(button, async () => {
+    const { turns, why } = await workflowRunTurns(button);
+    if (why) return workflowRunSay(button, why);
+    const user = turns.findLast((turn) => turn.user).user;
+    try {
+      await revealTab(button.dataset.machine, button.dataset.tab);
+    } catch (err) {
+      return workflowRunSay(button, `Couldn't open that session: ${err?.message ?? err}`);
+    }
+    await editFromHere(user.id);
+  });
 
 settingsSection({ page: "workflow-runs", label: "Workflow runs", icon: "rows-3", show: () => showWorkflowRuns(), search: [{ title: "Workflow runs", terms: ["workflow runs history trigger classify steps failed stalled"] }] });
