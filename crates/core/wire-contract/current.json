@@ -11169,7 +11169,7 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false,
+                  "manage_only": true,
                   "claude_memory": true,
                   "worker_claude_memory": true
                 }
@@ -11214,7 +11214,7 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false,
+                  "manage_only": true,
                   "claude_memory": true,
                   "worker_claude_memory": true
                 }
@@ -11451,9 +11451,9 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
               },
               "claude_memory": {
                 "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
@@ -24899,7 +24899,7 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false,
+                  "manage_only": true,
                   "claude_memory": true,
                   "worker_claude_memory": true
                 }
@@ -24944,7 +24944,7 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false,
+                  "manage_only": true,
                   "claude_memory": true,
                   "worker_claude_memory": true
                 }
@@ -25171,9 +25171,9 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
               },
               "claude_memory": {
                 "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
@@ -35089,7 +35089,7 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false,
+                  "manage_only": true,
                   "claude_memory": true,
                   "worker_claude_memory": true
                 }
@@ -35134,7 +35134,7 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false,
+                  "manage_only": true,
                   "claude_memory": true,
                   "worker_claude_memory": true
                 }
@@ -35371,9 +35371,9 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
               },
               "claude_memory": {
                 "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
@@ -45696,7 +45696,7 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false,
+                  "manage_only": true,
                   "claude_memory": true,
                   "worker_claude_memory": true
                 }
@@ -45741,7 +45741,7 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false,
+                  "manage_only": true,
                   "claude_memory": true,
                   "worker_claude_memory": true
                 }
@@ -45968,9 +45968,9 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
               },
               "claude_memory": {
                 "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
@@ -68148,7 +68148,7 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": false,
+              "manage_only": true,
               "claude_memory": true,
               "worker_claude_memory": true
             }
@@ -68193,7 +68193,7 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": false,
+              "manage_only": true,
               "claude_memory": true,
               "worker_claude_memory": true
             }
@@ -68430,9 +68430,9 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
               },
               "claude_memory": {
                 "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
@@ -69127,7 +69127,7 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": false,
+              "manage_only": true,
               "claude_memory": true,
               "worker_claude_memory": true
             }
@@ -69172,7 +69172,7 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": false,
+              "manage_only": true,
               "claude_memory": true,
               "worker_claude_memory": true
             }
@@ -69399,9 +69399,9 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
               },
               "claude_memory": {
                 "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",

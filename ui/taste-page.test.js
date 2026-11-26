@@ -960,7 +960,7 @@ test("the form takes focus when it opens, the rows' Edit and Remove wait while i
 
 const managing = (over = {}) => tastesWith({ orchestrator: { ...balanced, manage_only: false }, captains: { ...balanced, manage_only: false }, ...over });
 const paceSection = (html) => html.match(/<section class="taste-section"><h2>Pace<\/h2>.*?<\/section>/s)?.[0];
-const MANAGE_ONLY_HINT = "The Captain starts without Claude Code's Edit, Write and NotebookEdit tools and hands every change to a worker. Applies from its next start. Bash stays, so the shell can still change files.";
+const MANAGE_ONLY_HINT = "The Captain starts without Claude Code's Edit, Write and NotebookEdit tools and hands every change to a worker. On by default. Applies from its next start. Bash stays, for reading and checking.";
 
 test("Manage only is a switch in the Captains' Pace that flips and saves only itself", async () => {
   const p = page({ answer: (cmd, args) => (cmd === "get_tastes" ? managing() : managing({ captains: { ...balanced, manage_only: false, ...args.patch } })) });

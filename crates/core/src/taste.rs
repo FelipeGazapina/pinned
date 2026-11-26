@@ -180,8 +180,8 @@ pub struct Taste {
     pub escalate_over_lines: u32,
     /// Areas whose changes always go to the user, as free text.
     pub escalate_areas: Vec<String>,
-    /// The Captain starts without the file-editing tools and hands every change to a worker. Only
-    /// the Captains' and a project's scope use it.
+    /// The Captain starts without the file-editing tools and hands every change to a worker. On by
+    /// default. Only the Captains' and a project's scope use it.
     pub manage_only: bool,
     /// Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may
     /// write to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The
@@ -496,7 +496,7 @@ fn balanced() -> Taste {
         escalate_process_failure: true,
         escalate_over_lines: 500,
         escalate_areas: ["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"].map(str::to_owned).to_vec(),
-        manage_only: false,
+        manage_only: true,
         claude_memory: true,
         worker_claude_memory: true,
     }
@@ -1563,7 +1563,7 @@ mod tests {
             escalate_process_failure: true,
             escalate_over_lines: 500,
             escalate_areas: vec!["Release and version bumps".into(), "CI and deploy config".into(), "Sign-in, tokens and secrets".into()],
-            manage_only: false,
+            manage_only: true,
             claude_memory: true,
             worker_claude_memory: true,
         };
@@ -1680,14 +1680,14 @@ Deploys go through the VPS."
                 "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
                 "tier": "high", "default_model": null, "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
                 "box_size": null, "escalate_breaking_change": true, "escalate_process_failure": true, "escalate_over_lines": 500, "escalate_areas": areas,
-                "manage_only": false, "claude_memory": true, "worker_claude_memory": true,
+                "manage_only": true, "claude_memory": true, "worker_claude_memory": true,
             },
             "captains": {
                 "strategy": "escalate_on_failure", "ladder": [{ "model": "glm-5.3" }, { "model": "claude-sonnet-5-5" }, opus], "hard_model": opus,
                 "parallel": 5, "autonomy": "decide_and_tell", "review_diffs": true, "second_opinion": false, "skills": [], "context": [],
                 "tier": "high", "default_model": null, "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
                 "box_size": null, "escalate_breaking_change": true, "escalate_process_failure": true, "escalate_over_lines": 500, "escalate_areas": areas,
-                "manage_only": false, "claude_memory": true, "worker_claude_memory": true,
+                "manage_only": true, "claude_memory": true, "worker_claude_memory": true,
             },
             "projects": { "github.com/acme/site": { "hard_model": { "provider": "cursor", "model": "grok-4.7" }, "parallel": 4 } },
             "placement": { "prefer": [], "avoid": [], "heavy": "worktree" },
@@ -2286,26 +2286,28 @@ Deploys go through the VPS."
     }
 
     #[test]
-    fn manage_only_is_off_by_default_and_a_project_sets_inherits_and_resets_it() {
-        assert!(!Taste::default().manage_only);
+    fn manage_only_is_on_by_default_and_a_project_sets_inherits_and_resets_it() {
+        assert!(Taste::default().manage_only);
+        assert!(Tastes::default().resolve(&TasteScope::Project { repo: "github.com/acme/none".into() }).manage_only, "a project with no tastes is Manage only");
+        assert!(!crate::agent::manage_only_prompt().contains("Step in and do the task yourself"), "the manage-only prompt has no step-in line");
         let old: Tastes = serde_json::from_value(json!({ "captains": { "parallel": 3 }, "projects": { "github.com/acme/site": { "parallel": 2 } } })).unwrap();
-        assert_eq!((old.captains.manage_only, old.resolve(&site()).manage_only), (false, false), "tastes from before the field");
+        assert_eq!((old.captains.manage_only, old.resolve(&site()).manage_only), (true, true), "tastes without the field take the default");
         let api = TasteScope::Project { repo: "github.com/acme/api".into() };
 
         let mut tastes = Tastes::default();
-        tastes.set(&site(), TastePatch { manage_only: Some(true), ..TastePatch::default() }).unwrap();
-        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "manage_only": true } }));
-        assert_eq!((tastes.resolve(&site()).manage_only, tastes.resolve(&api).manage_only), (true, false), "another project stays off");
-        tastes.set(&site(), TastePatch { parallel: Some(2), manage_only: Some(false), ..TastePatch::default() }).unwrap();
+        tastes.set(&site(), TastePatch { manage_only: Some(false), ..TastePatch::default() }).unwrap();
+        assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "manage_only": false } }), "an explicit off is kept");
+        assert_eq!((tastes.resolve(&site()).manage_only, tastes.resolve(&api).manage_only), (false, true), "another project stays on");
+        tastes.set(&site(), TastePatch { parallel: Some(2), manage_only: Some(true), ..TastePatch::default() }).unwrap();
         assert_eq!(serde_json::to_value(&tastes.projects).unwrap(), json!({ "github.com/acme/site": { "parallel": 2 } }), "the Captains' value set on the project is dropped");
-        tastes.set(&site(), TastePatch { manage_only: Some(true), ..TastePatch::default() }).unwrap();
+        tastes.set(&site(), TastePatch { manage_only: Some(false), ..TastePatch::default() }).unwrap();
         tastes.reset(&site(), TasteField::ManageOnly);
-        assert_eq!((tastes.projects[SITE].manage_only, tastes.resolve(&site()).manage_only), (None, false), "a reset inherits again");
+        assert_eq!((tastes.projects[SITE].manage_only, tastes.resolve(&site()).manage_only), (None, true), "a reset inherits again");
 
-        tastes.set(&TasteScope::Captains, TastePatch { manage_only: Some(true), ..TastePatch::default() }).unwrap();
-        assert_eq!((tastes.resolve(&site()).manage_only, tastes.resolve(&api).manage_only), (true, true), "a project without its own inherits the Captains'");
+        tastes.set(&TasteScope::Captains, TastePatch { manage_only: Some(false), ..TastePatch::default() }).unwrap();
+        assert_eq!((tastes.resolve(&site()).manage_only, tastes.resolve(&api).manage_only), (false, false), "a project without its own inherits the Captains'");
         tastes.reset(&TasteScope::Captains, TasteField::ManageOnly);
-        assert!(!tastes.captains.manage_only, "a reset gives the Captains off back");
+        assert!(tastes.captains.manage_only, "a reset gives the Captains on back");
         assert_eq!(tastes.set(&TasteScope::Orchestrator, TastePatch { manage_only: Some(true), ..TastePatch::default() }), Ok(()), "the orchestrator's scope takes it and nothing reads it");
     }
 

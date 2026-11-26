@@ -173,7 +173,7 @@ test("the escalation settings leave the profile as it was, and a profile leaves 
   assert.deepEqual([applied.captains.escalate_breaking_change, applied.captains.escalate_over_lines, here(applied.captains.escalate_areas)], [false, 42, []]);
 });
 
-/** Rust's default Manage only, which the fixture's presets leave out. */
+/** Manage only off, which the fixture's presets leave out: the tests below turn it on. */
 const managing = (projects = {}) => ({ ...defaults(projects), orchestrator: { ...fixture.presets.balanced, manage_only: false }, captains: { ...fixture.presets.balanced, manage_only: false } });
 
 test("manage_only saves with the Captains or a project, and a project's Reset makes it inherit again", () => {
