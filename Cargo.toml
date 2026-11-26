@@ -1,7 +1,7 @@
 [workspace]
 members = [".", "crates/core", "crates/server", "crates/dev", "crates/layout"]
 
-# scripts/release.sh bumps every `version = ` line in this file, this one included.
+# scripts/release.sh prepare bumps every `version = ` line in this file, this one included.
 [workspace.package]
 version = "0.18.11"
 

@@ -3,7 +3,7 @@
 //! can count on, so a login there stays in the file, and a node keeps none (#121).
 //!
 //! macOS uses the Keychain only in a build signed with a Developer ID, which
-//! `scripts/apple-signing-env.sh` marks with `PINNED_DEVELOPER_ID_BUILD=1` at compile time (see
+//! `scripts/release.sh apple-env` marks with `PINNED_DEVELOPER_ID_BUILD=1` at compile time (see
 //! `keychain_on`). An ad-hoc build keeps the login in `account.json`: the Keychain item's access
 //! list would name that exact build by its cdhash, so every update would ask for the user's macOS
 //! password once. Windows always uses the Credential Manager, which never prompts.

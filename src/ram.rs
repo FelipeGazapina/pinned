@@ -237,7 +237,7 @@ fn group(table: &[Proc], figures: &HashMap<u32, Option<u64>>, roots: &[ProcessRo
 
 /// macOS starts WebKit's helpers outside the app's tree: they are the `com.apple.WebKit`
 /// processes the app's responsible process answers for that started no earlier than the app,
-/// which covers an app started from a terminal (`scripts/ram-bench/run.js` `helpersOf`).
+/// which covers an app started from a terminal.
 #[cfg(target_os = "macos")]
 fn webview(table: &[Proc], app: u32) -> HashSet<u32> {
     extern "C" {

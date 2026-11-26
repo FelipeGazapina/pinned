@@ -1,7 +1,6 @@
 /* The app view's color tokens. Dark is T3 Code's default dark (index.css :root dark), light is its
    light (themePalettes.ts T3_CODE_LIGHT_THEME_COLORS). gui-theme.js sets data-appearance, and for a
-   palette data-theme-id plus the --app-theme-* roles, which the last block maps onto the tokens.
-   scripts/theme-tokens.mjs keeps the other gui*.css files on these tokens. */
+   palette data-theme-id plus the --app-theme-* roles, which the last block maps onto the tokens. */
 /* A color used translucently is kept as channels (--g-x-rgb), so `rgb(var(--g-x-rgb) / 0.8)` computes
    to the same rgba() as the literal it replaced, and --g-x is drawn from them. */
 :root {
