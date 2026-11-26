@@ -9,9 +9,10 @@ const TASTE_KNOBS = ["strategy", "ladder", "hard_model", "parallel", "autonomy",
 const TASTE_LIMITS = ["tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"];
 /** What the agents escalate to the user. Only the user sets these, and no profile does. */
 const TASTE_ESCALATION = ["escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas"];
-/** `manage_only` starts the Captain without the file-editing tools. Only the user sets it, and no profile does.
+/** `manage_only` starts the Captain without the file-editing tools. `claude_memory` and `worker_claude_memory` turn Claude Code's
+ * own memory (MEMORY.md) off for the scope's session and for its workers. Only the user sets these, and no profile does.
  * `default_model` is the model a new session starts on when it names none; no profile sets it. */
-const TASTE_FIELDS = [...TASTE_KNOBS, "skills", "context", ...TASTE_LIMITS, ...TASTE_ESCALATION, "manage_only", "default_model"];
+const TASTE_FIELDS = [...TASTE_KNOBS, "skills", "context", ...TASTE_LIMITS, ...TASTE_ESCALATION, "manage_only", "claude_memory", "worker_claude_memory", "default_model"];
 /** The Captains' fields a save clears with a reset, since a null in a patch means "not set". */
 const TASTE_CAPTAINS_CLEARED = ["box_size", "default_model"];
 const TASTE_FIELD_LABELS = {
@@ -38,6 +39,8 @@ const TASTE_FIELD_LABELS = {
   escalate_over_lines: "Too big to merge unseen",
   escalate_areas: "Always send to me",
   manage_only: "Manage only",
+  claude_memory: "Claude Code memory",
+  worker_claude_memory: "Claude Code memory for workers",
 };
 /** The most changed lines the escalation limit may be, as Rust's `MAX_ESCALATE_OVER_LINES`. */
 const TASTE_MAX_ESCALATE_LINES = 100000;
@@ -419,6 +422,8 @@ const TASTE_VALUE_WORDS = {
   escalate_breaking_change: tasteOnOff,
   escalate_process_failure: tasteOnOff,
   manage_only: tasteOnOff,
+  claude_memory: tasteOnOff,
+  worker_claude_memory: tasteOnOff,
 };
 
 /** One value of `field` as the Way of working page words it, not escaped. A field or value it

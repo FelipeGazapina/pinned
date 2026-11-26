@@ -1077,3 +1077,53 @@ test("the orchestrator tab, and a hub that predates the default model, draw no s
     assert.doesNotMatch(old.html(), /data-default-model|Default model/, `the ${kind} tab`);
   }
 });
+
+const remembering = (over = {}) => tastesWith({ orchestrator: { ...balanced, claude_memory: true, worker_claude_memory: true }, captains: { ...balanced, claude_memory: true, worker_claude_memory: true }, ...over });
+const CAPTAIN_MEMORY_HINT = "The Captain loads Claude Code's own memory (MEMORY.md) and may write to it. Off saves tokens; pinned's project memory stays. Applies from its next start.";
+const ORCHESTRATOR_MEMORY_HINT = "The Orchestrator loads Claude Code's own memory (MEMORY.md) and may write to it. Off saves tokens; pinned's project memory stays. Applies from its next start.";
+const WORKER_MEMORY_HINT = "Workers load Claude Code's own memory (MEMORY.md). Off saves tokens; pinned's project memory stays. Applies to workers started after the change.";
+
+test("the Captains' Pace has a switch for Claude Code's memory and one for the workers', each saving only itself", async () => {
+  const p = page({ answer: (cmd, args) => (cmd === "get_tastes" ? remembering() : remembering({ captains: { ...balanced, claude_memory: true, worker_claude_memory: true, ...args.patch } })) });
+  await p.show();
+  const section = paceSection(p.html());
+  assert.match(section, /role="switch" aria-checked="true" aria-label="Claude Code memory" data-act="toggle" data-field="claude_memory"/);
+  assert.match(section, /role="switch" aria-checked="true" aria-label="Claude Code memory for workers" data-act="toggle" data-field="worker_claude_memory"/);
+  assert.ok(section.includes(`<b>Claude Code memory</b><span>${CAPTAIN_MEMORY_HINT}</span>`));
+  assert.ok(section.includes(`<b>Claude Code memory for workers</b><span>${WORKER_MEMORY_HINT}</span>`));
+  await p.click(/data-field="worker_claude_memory"/);
+  assert.match(paceSection(p.html()), /aria-checked="false" aria-label="Claude Code memory for workers"/);
+  assert.match(paceSection(p.html()), /aria-checked="true" aria-label="Claude Code memory" /, "the Captain's own stays on");
+  assert.match(p.html(), /class="taste-card active" data-act="profile" data-profile="balanced"/, "the profile stays as it was");
+  assert.deepEqual(lines(p.html()), balancedBrief(), "the brief stays as it was");
+  p.calls.length = 0;
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls, [["set_taste", { scope: { kind: "captains" }, patch: { worker_claude_memory: false } }]]);
+});
+
+test("the Orchestrator tab has the Claude Code memory switch only, and a project tab resets its own", async () => {
+  const p = page({ answer: () => remembering({ projects: { [SITE]: { claude_memory: false } } }) });
+  await p.show();
+  await p.click(/data-act="scope" data-kind="orchestrator"/);
+  const section = paceSection(p.html());
+  assert.ok(section.includes(`<b>Claude Code memory</b><span>${ORCHESTRATOR_MEMORY_HINT}</span>`));
+  assert.doesNotMatch(section, /data-field="worker_claude_memory"/);
+  await p.click(/data-act="scope" data-kind="project"/);
+  const project = paceSection(p.html());
+  assert.match(project, /aria-checked="false" aria-label="Claude Code memory" data-act="toggle" data-field="claude_memory"/);
+  assert.match(project, /<b>Claude Code memory<\/b><span>[^<]*<\/span><\/span><span class="taste-tags"><span class="taste-tag changed">changed here<\/span><button type="button" class="taste-reset" data-act="reset" data-field="claude_memory"/);
+  await p.click(/data-act="reset" data-field="claude_memory"/);
+  assert.match(paceSection(p.html()), /aria-checked="true" aria-label="Claude Code memory" /, "the project inherits the Captains' on");
+  p.calls.length = 0;
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls, [["reset_taste_field", { scope: { kind: "project", repo: SITE }, field: "claude_memory" }]]);
+});
+
+test("a hub that predates the Claude Code memory switches draws none", async () => {
+  const old = page({ answer: () => tastesWith({ projects: { [SITE]: { parallel: 4 } } }) });
+  await old.show();
+  for (const kind of ["captains", "orchestrator", "project"]) {
+    await old.click(new RegExp(`data-act="scope" data-kind="${kind}"`));
+    assert.doesNotMatch(old.html(), /data-field="(worker_)?claude_memory"/, `the ${kind} tab`);
+  }
+});
