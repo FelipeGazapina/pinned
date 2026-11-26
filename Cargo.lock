@@ -3415,6 +3415,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-web-kit",
  "pinned-core",
+ "pinned-layout",
  "rustls",
  "serde",
  "serde_json",
@@ -3471,6 +3472,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pinned-layout"
+version = "0.18.11"
+
+[[package]]
 name = "pinned-server"
 version = "0.18.11"
 dependencies = [
@@ -3486,6 +3491,7 @@ dependencies = [
  "minisign",
  "minisign-verify",
  "pinned-core",
+ "pinned-layout",
  "rand_core 0.6.4",
  "reqwest",
  "rustls",

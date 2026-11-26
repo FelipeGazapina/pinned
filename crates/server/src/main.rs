@@ -47,6 +47,21 @@ fn main() {
     }
 }
 
+/// A dev hub runs from a checkout, so it holds the checkout to its file layout (crates/layout) the
+/// way the app's build does: a broken layout keeps it from starting, missing tests only warn.
+fn check_layout() -> Result<(), String> {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if !repo.join("crates/layout").is_dir() {
+        return Ok(());
+    }
+    let report = pinned_layout::check(&repo);
+    eprintln!("pinned-server: {}; {} files have no tests (`cargo run -p pinned-layout` lists them)", report.coverage_line(), report.warnings.len());
+    if report.errors.is_empty() {
+        return Ok(());
+    }
+    Err(format!("the file layout is broken (`cargo run -p pinned-layout` for the whole report):\n{}", report.errors_text()))
+}
+
 struct Args {
     positional: Vec<String>,
     flags: HashMap<String, String>,
@@ -121,6 +136,10 @@ fn hub(args: &[String]) -> Result<(), String> {
                         eprintln!("pinned-server: {refusal}");
                         std::process::exit(2);
                     }
+                }
+                if let Err(broken) = check_layout() {
+                    eprintln!("pinned-server: {broken}");
+                    std::process::exit(2);
                 }
                 eprintln!("DEV HUB: not production (time scale {})", dev.time_scale);
                 dev

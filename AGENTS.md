@@ -4,6 +4,18 @@
 2. don't create rules, the code should talk by him self, any agent rule should be at AGENTS.md file.
 3. never left don't used or trash on the codebase, we aren't supposed to have a bunch of not utilized code saved, this distils the agent
 
+# File layout
+
+`crates/layout` holds the layout in code: what may sit at the top of the repo, a flat kebab-case `ui/`, snake_case Rust files that a `mod` reaches, every other file in `src/` and every UI script and style used by something, no `docs` or `rules` folders. The app's build and a dev hub (`pinned-server hub --dev`) refuse to go on while it is broken. A module or UI script that no test reaches only warns.
+
+```
+cargo run -p pinned-layout                     the whole report
+cargo run -p pinned-layout -- new ui <name>    ui/gui-<name>.js, .css and <name>.test.js, loaded by index.html
+cargo run -p pinned-layout -- new core <name>  crates/core/src/<name>.rs, declared in lib.rs
+```
+
+Start new files with `new`. Change a rule in `crates/layout`, with its test, never by working around it.
+
 # Hub wire compatibility
 
 A hub release must keep working for every app version that has a snapshot in `crates/core/wire-contract`.
