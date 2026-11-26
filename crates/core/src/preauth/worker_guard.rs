@@ -6,7 +6,10 @@
 //!
 //! Three classes are held for the owner, checked in this order:
 //! 1. a delete outside the worktree, as the never list finds it (the session's scratch folder,
-//!    `<claude tmp>/<slug>/<session_id>`, counts as inside);
+//!    `<claude tmp>/<slug>/<session_id>`, counts as inside). A delete strictly below a temp folder
+//!    (`$TMPDIR`, and `/tmp` on Unix) runs too, unless a name right under that folder starts with
+//!    `pinned` or `claude`, it holds the worktree, the path holds a variable, or a glob is more than
+//!    a plain last name;
 //! 2. a force-push, as the never list finds it, a branch delete by push included;
 //! 3. dropping a database: `dropdb`, or a SQL client named in a command whose text drops a
 //!    database, a schema or a table, or truncates one.
@@ -53,18 +56,29 @@ pub struct GuardEnv {
     pub claude_home: Option<PathBuf>,
     /// Where Claude Code keeps each session's scratchpad.
     pub claude_tmp: PathBuf,
+    /// The temp folders a delete may run strictly below.
+    pub temp: Vec<PathBuf>,
 }
 
 impl GuardEnv {
     fn from_process(headless: bool) -> GuardEnv {
+        let home = crate::machine::home();
         GuardEnv {
             headless,
             project_dir: std::env::var("CLAUDE_PROJECT_DIR").ok().filter(|v| !v.is_empty()).map(PathBuf::from),
-            home: crate::machine::home(),
             claude_home: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).filter(|p| p.is_absolute()),
             claude_tmp: crate::machine::claude_tmp(),
+            temp: temp_roots(std::iter::once(std::env::temp_dir()).chain(cfg!(unix).then(|| PathBuf::from("/tmp"))), &home),
+            home,
         }
     }
+}
+
+/// The `roots` a delete may run strictly below: each an absolute folder that does not hold `home`.
+fn temp_roots(roots: impl IntoIterator<Item = PathBuf>, home: &Path) -> Vec<PathBuf> {
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_owned());
+    let home = real(home);
+    roots.into_iter().filter(|root| root.is_absolute() && !home.starts_with(real(root))).collect()
 }
 
 /// Runs inside the hook process. Prints an ask or a deny, or nothing so the call runs as before.
@@ -90,7 +104,7 @@ pub fn decide(payload: &str, env: &GuardEnv) -> Option<String> {
     // A session id is one plain name; anything else would point the scratch folder elsewhere.
     let session = hook["session_id"].as_str().filter(|id| Path::new(id).components().eq([Component::Normal(id.as_ref())]));
     let scratch = session.map(|id| env.claude_tmp.join(crate::machine::claude_slug(&start)).join(id));
-    let ctx = AskCtx { worktree: &worktree, scratch: scratch.as_deref(), home: &env.home, claude_home: env.claude_home.as_deref(), cwd: &cwd, default_branch: "main", current_branch: None };
+    let ctx = AskCtx { worktree: &worktree, scratch: scratch.as_deref(), temp: &env.temp, home: &env.home, claude_home: env.claude_home.as_deref(), cwd: &cwd, default_branch: "main", current_branch: None };
     let label = match never(&ctx, &Ask::Bash { command }) {
         Some(hit) if matches!(hit.item, NeverItem::DeleteOutside | NeverItem::ForcePush) => hit.item.label(),
         _ if drops_database(command) => DROP_DATABASE,
@@ -159,27 +173,30 @@ mod tests {
         elsewhere: PathBuf,
         /// The session's scratch folder, under the Claude temp root.
         scratch: PathBuf,
+        /// The temp root a delete may run strictly below.
+        temp: PathBuf,
         env: GuardEnv,
     }
 
-    /// A worktree holding `.git`, a home, a folder outside both, and session `s1`'s scratch folder.
+    /// A worktree holding `.git`, a home, a temp root, a folder outside all three, and session `s1`'s
+    /// scratch folder.
     fn fx(headless: bool) -> Fx {
         let tmp = tempfile::tempdir().unwrap();
         let base = dunce::canonicalize(tmp.path()).unwrap();
-        let (work, home, elsewhere, claude_tmp) = (base.join("work"), base.join("home"), base.join("elsewhere"), base.join("claude-tmp"));
+        let (work, home, elsewhere, claude_tmp, temp) = (base.join("work"), base.join("home"), base.join("elsewhere"), base.join("claude-tmp"), base.join("tmp"));
         let scratch = claude_tmp.join(crate::machine::claude_slug(&work)).join("s1");
-        for dir in [work.join(".git"), home.join(".ssh"), elsewhere.clone(), scratch.clone()] {
+        for dir in [work.join(".git"), home.join(".ssh"), elsewhere.clone(), scratch.clone(), temp.join("x")] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        let env = GuardEnv { headless, project_dir: Some(work.clone()), home: home.clone(), claude_home: None, claude_tmp };
-        Fx { _tmp: tmp, work, home, elsewhere, scratch, env }
+        let env = GuardEnv { headless, project_dir: Some(work.clone()), home: home.clone(), claude_home: None, claude_tmp, temp: vec![temp.clone()] };
+        Fx { _tmp: tmp, work, home, elsewhere, scratch, temp, env }
     }
 
     /// `s` with each `{name}` a path of the fixture.
     #[cfg(unix)]
     fn sub(f: &Fx, s: &str) -> String {
         let show = |p: &Path| p.display().to_string();
-        s.replace("{work}", &show(&f.work)).replace("{home}", &show(&f.home)).replace("{elsewhere}", &show(&f.elsewhere)).replace("{scratch}", &show(&f.scratch))
+        s.replace("{work}", &show(&f.work)).replace("{home}", &show(&f.home)).replace("{elsewhere}", &show(&f.elsewhere)).replace("{scratch}", &show(&f.scratch)).replace("{tmp}", &show(&f.temp))
     }
 
     fn bash(f: &Fx, command: &str, mode: Option<&str>) -> String {
@@ -277,6 +294,65 @@ mod tests {
         assert!(decide(&other, &f.env).is_some(), "another session's scratch folder is outside");
         let climbing = bash(&f, &sub(&f, "rm -rf {home}/x"), Some("default")).replace("\"s1\"", "\"../../home\"");
         assert!(decide(&climbing, &f.env).is_some(), "a session id is no path");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_cleans_temp_files_and_the_rest_stays_held() {
+        let f = fx(false);
+        std::os::unix::fs::symlink(&f.elsewhere, f.temp.join("out")).unwrap();
+        for command in [
+            "rm -f {tmp}/x-unused",
+            "rm -rf {tmp}/x-base-target",
+            "rm -f {tmp}/x/a.log",
+            "rm -rf {tmp}/pg.Kmep {tmp}/x/*.log {tmp}/x-pgdir.txt",
+            "cd {tmp}/x && rm -rf pg",
+            "rm -rf target && rm -rf {tmp}/pg.K",
+        ] {
+            let command = sub(&f, command);
+            assert_eq!(decide(&bash(&f, &command, Some("default")), &f.env), None, "{command}");
+        }
+        let asked = ("ask".to_owned(), "pinned holds this command for the owner (delete outside the worktree).".to_owned());
+        for command in [
+            "rm -rf {tmp}",
+            "rm -rf {tmp}/*",
+            "rm -rf {tmp}/h.*",
+            "rm -rf {tmp}/x/*/../..",
+            "rm -rf {tmp}/x/*/pg",
+            "find {tmp}/x/.* -delete",
+            "rm -rf {tmp}/x/$F",
+            "rm -rf \"$TMPDIR/x\"",
+            "rm -rf {tmp}/out",
+            "rm -rf {tmp}/out/a",
+            "rm -rf {tmp}/pinned-1-a",
+            "rm -f {tmp}/Pinned-1-a/claude-settings-worker.json",
+            "rm -rf {tmp}/claude-501",
+            "rm -rf {tmp}/x {elsewhere}",
+        ] {
+            let command = sub(&f, command);
+            assert_eq!(held(decide(&bash(&f, &command, Some("default")), &f.env)), Some(asked.clone()), "{command}");
+        }
+        // A temp root inside another one opens nothing the outer one holds.
+        let nested = GuardEnv { temp: vec![f.temp.join("claude-501"), f.temp.clone()], ..f.env.clone() };
+        let command = sub(&f, "rm -rf {tmp}/claude-501/s2");
+        assert_eq!(held(decide(&bash(&f, &command, Some("default")), &nested)), Some(asked.clone()), "{command}");
+        // A worktree under a temp root: what holds it stays held.
+        std::fs::create_dir_all(f.temp.join("proj/wt/.git")).unwrap();
+        let inside = GuardEnv { project_dir: Some(f.temp.join("proj/wt")), ..f.env.clone() };
+        for command in ["rm -rf {tmp}/proj", "rm -rf {tmp}/proj/*"] {
+            let command = sub(&f, command);
+            assert_eq!(held(decide(&bash(&f, &command, Some("default")), &inside)), Some(asked.clone()), "{command}");
+        }
+        let command = sub(&f, "rm -rf {tmp}/proj/other");
+        assert_eq!(decide(&bash(&f, &command, Some("default")), &inside), None, "{command}");
+    }
+
+    #[test]
+    fn a_temp_root_that_holds_home_is_dropped() {
+        let f = fx(false);
+        let above_home = f.home.parent().unwrap().to_owned();
+        let roots = [f.temp.clone(), above_home, f.home.clone(), PathBuf::from("tmp")];
+        assert_eq!(temp_roots(roots, &f.home), [f.temp]);
     }
 
     #[test]

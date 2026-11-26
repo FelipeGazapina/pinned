@@ -22,6 +22,8 @@ pub struct AskCtx<'a> {
     pub worktree: &'a Path,
     /// The session's scratch dir. Writes there are fine.
     pub scratch: Option<&'a Path>,
+    /// Temp folders a delete may run strictly below. Empty holds every delete there.
+    pub temp: &'a [PathBuf],
     pub home: &'a Path,
     /// The session's Claude home, `CLAUDE_CONFIG_DIR`, when it is known. pinned runs an added
     /// account with its own, which has no `.claude` component.
@@ -1036,7 +1038,9 @@ fn commands(words: &[Word]) -> Vec<Cmd> {
     if wrapper {
         for j in i + 1..words.len() {
             let t = words[j].text.as_str();
-            if t.starts_with('-') || is_assign(t) {
+            // `xargs git rm`: that `rm` is git's subcommand. After `-u`, `git` names a user instead.
+            let gits_rm = t == "rm" && words[j - 1].text == "git" && words[j - 2].text != "-u";
+            if t.starts_with('-') || is_assign(t) || gits_rm {
                 continue;
             }
             out.push(Cmd::new(&words[j..], stdin));
@@ -1067,6 +1071,8 @@ struct Scan<'c, 'a> {
     ctx: &'c AskCtx<'a>,
     work: PathBuf,
     scratch: Option<PathBuf>,
+    /// The temp roots, canonical.
+    temp: Vec<PathBuf>,
     /// The session's Claude home, canonical.
     claude: Option<PathBuf>,
     hits: Vec<NeverHit>,
@@ -1078,9 +1084,10 @@ const DEV_OK: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin
 
 impl<'c, 'a> Scan<'c, 'a> {
     fn new(ctx: &'c AskCtx<'a>) -> Self {
-        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, claude: None, hits: vec![], tagged: false, pushed: false };
+        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, temp: vec![], claude: None, hits: vec![], tagged: false, pushed: false };
         scan.work = walk(&scan.abs(ctx.worktree));
         scan.scratch = ctx.scratch.map(|s| walk(&scan.abs(s)));
+        scan.temp = ctx.temp.iter().map(|t| walk(&scan.abs(t))).collect();
         scan.claude = ctx.claude_home.map(|c| walk(&scan.abs(c)));
         scan
     }
@@ -1099,6 +1106,31 @@ impl<'c, 'a> Scan<'c, 'a> {
 
     fn outside(&self, p: &Path) -> bool {
         !(p.starts_with(&self.work) || self.scratch.as_ref().is_some_and(|s| p.starts_with(s)))
+    }
+
+    /// Whether `p` is strictly below a temp root and does not hold the worktree. A name right under
+    /// any root that starts with `pinned` or `claude` is theirs (pinned's guard settings, Claude
+    /// Code's scratchpads), even when another root sits inside it.
+    fn scrap(&self, p: &Path) -> bool {
+        let mut names = self.temp.iter().filter_map(|root| p.strip_prefix(root).ok()).map(|below| below.components().next()).peekable();
+        names.peek().is_some()
+            && !path_comps(&self.work).starts_with(&path_comps(p))
+            && names.all(|name| {
+                name.is_some_and(|name| {
+                    let name = name.as_os_str().to_string_lossy().to_ascii_lowercase();
+                    !name.starts_with("pinned") && !name.starts_with("claude")
+                })
+            })
+    }
+
+    /// Whether a delete of `w`, which resolves to `p`, only takes temp files. A glob stays in the
+    /// last name: a match before it may be a link that leads out, and a leading dot may match `..`.
+    fn temp_delete(&self, w: &Word, p: &Path) -> bool {
+        let plain_glob = |at: usize| {
+            let last = w.text.rsplit('/').next().unwrap_or("");
+            !w.text.contains("..") && !w.text[at..].contains('/') && !last.starts_with('.')
+        };
+        w.var_at.is_none() && w.glob_at.is_none_or(plain_glob) && self.scrap(p)
     }
 
     fn home(&self) -> String {
@@ -1341,7 +1373,7 @@ impl<'c, 'a> Scan<'c, 'a> {
                 _ if t.top_var => true,
                 None => true,
                 Some(_) if t.top_glob => risky,
-                Some(p) => self.outside(p) || (risky && w.var_at.is_none() && w.glob_at.is_none() && *p == self.work),
+                Some(p) => (self.outside(p) && !self.temp_delete(w, p)) || (risky && w.var_at.is_none() && w.glob_at.is_none() && *p == self.work),
             };
             if bad {
                 self.hit(NeverItem::DeleteOutside, format!("{what} {}", short(&w.text)));
@@ -1833,7 +1865,7 @@ mod tests {
     }
 
     fn ctx<'a>(f: &'a Fx, branch: Option<&'a str>) -> AskCtx<'a> {
-        AskCtx { worktree: &f.work, scratch: Some(&f.scratch), home: &f.home, claude_home: Some(&f.claude), cwd: &f.work, default_branch: "main", current_branch: branch }
+        AskCtx { worktree: &f.work, scratch: Some(&f.scratch), temp: &[], home: &f.home, claude_home: Some(&f.claude), cwd: &f.work, default_branch: "main", current_branch: branch }
     }
 
     fn item(f: &Fx, branch: Option<&str>, ask: &Ask) -> Option<NeverItem> {
@@ -1894,6 +1926,8 @@ mod tests {
             ("(cd crates && true); rm -rf ../x", Some(DeleteOutside)),
             // Wrappers and nesting.
             ("echo ~ | xargs rm -rf", Some(DeleteOutside)),
+            // After `-u`, `git` is a user, so this `rm` is the program.
+            ("sudo -u git rm -rf ~", Some(DeleteOutside)),
             ("bash -c 'rm -rf ~'", Some(DeleteOutside)),
             ("sh -c \"cd /tmp && rm -rf y\"", Some(DeleteOutside)),
             ("bash -lc 'git log; rm -rf ~'", Some(DeleteOutside)),
@@ -2360,6 +2394,7 @@ mod tests {
             ("git worktree list", None),
             ("git clean -n", None),
             ("git clean -fd", None),
+            ("git ls-files -z | xargs -0 git rm -q -f", None),
             ("cargo test -p pinned-core", None),
             ("cargo test -- --test-threads=4", None),
             ("cargo fmt --all", None),
