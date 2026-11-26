@@ -220,6 +220,9 @@ pub enum ProjectTool {
         request_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         machine: Option<String>,
+        /// Why the session asks, for an act held for the owner.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 }
 /// Set to `1` in the environment of a worker box's node, by the box's `box.env`.

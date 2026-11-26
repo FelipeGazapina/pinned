@@ -4336,8 +4336,8 @@ impl Machine {
             ProjectTool::MemoryForget { id } => self.memories.forget(&self.project_of_tab(tab)?, id).map(|m| format!("Forgot #{} {}.", m.id, pinned_lines::quoted(&m.title, memory::MEMORY_TITLE_CHARS))),
             ProjectTool::Actions { search } => text_json(json!({ "actions": surface::listing(search.as_deref()) })),
             ProjectTool::Convex { ask } => self.convex(tab, ask),
-            ProjectTool::Act { action, args, request_id, machine } => {
-                let act = surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine };
+            ProjectTool::Act { action, args, request_id, machine, reason } => {
+                let act = surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine, reason };
                 match self.call_hub(HubCall::Act { act }) {
                     Ok(answer) => text_json(answer),
                     Err(e) => Err(Self::why_no_hub(&e).map_or(e, |why| format!("{why}, and act writes its audit trail there"))),

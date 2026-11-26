@@ -5,6 +5,9 @@
 let agentConfirmations = [];
 /** Confirmation ids whose Approve or Deny is on its way to the hub. */
 const agentDeciding = new Set();
+/** The account's tastes as get_tastes last answered, for the rows of a waiting way of working
+ * change. Null until read. */
+let agentTastes = null;
 /** What an approved action handed the user to see once, `{ action, result }`, as `create_invite`'s
  * `NewInvite` or `pair_code`'s `PairCode`. It shows nowhere else, so it stays until the user closes it. */
 let agentShown = null;
@@ -73,6 +76,14 @@ const AGENT_BOX_COPY = {
 };
 /** Actions whose title says everything the card shows of their arguments, so the card lists none. */
 const AGENT_TITLE_ONLY = new Set(Object.keys(AGENT_BOX_COPY));
+/** A way of working change in words, naming the scope it changes (tasteProposal, taste.js). */
+const agentTasteTitle = (a) => {
+  const { scope } = tasteProposal(null, "set_taste", a);
+  return scope ? `Change the way of working of ${scope}` : "Change the way of working";
+};
+/** The way of working actions. Their card shows each field's current and proposed value
+ * (agentTasteHtml) instead of the arguments. */
+const AGENT_TASTE_COPY = { set_taste: agentTasteTitle, reset_taste_field: agentTasteTitle };
 const agentMcpName = (id) => (typeof mcpUi !== "undefined" && mcpUi.list.find((entry) => entry.id === id)?.server.name) || id;
 const AGENT_NAMES = { linear: "Linear", slack: "Slack", github: "GitHub", vercel: "Vercel", posthog: "PostHog", upstash: "Upstash", convex: "Convex" };
 /** `remove_machine` as "Remove machine", `connect_github` as "Connect GitHub". */
@@ -153,7 +164,7 @@ function agentActionTitle(action, args, machine) {
       args = null;
     }
   }
-  const said = AGENT_MCP_COPY[action]?.(args ?? {}) ?? AGENT_BOX_COPY[action]?.(args ?? {}) ?? agentSessionCopy(action, args ?? {}, machine);
+  const said = AGENT_MCP_COPY[action]?.(args ?? {}) ?? AGENT_BOX_COPY[action]?.(args ?? {}) ?? AGENT_TASTE_COPY[action]?.(args ?? {}) ?? agentSessionCopy(action, args ?? {}, machine);
   if (said) return said;
   const named = Object.values(args ?? {}).map(agentMachineName).find(Boolean);
   return named ? `${agentWords(action)} ${named}` : agentWords(action);
@@ -162,14 +173,26 @@ function agentActionTitle(action, args, machine) {
 /** The asking thread's title in curly quotes, trailing punctuation dropped, so any title reads cleanly. */
 const agentQuoted = (c) => `\u201c${(c.title || c.tab).replace(/[\s.!?,;:\u2026]+$/, "")}\u201d`;
 
+/** A way of working change's rows, one per field: its label, the scope's value now (from
+ * agentTastes, "unknown" until they are read) and the proposed one. */
+function agentTasteHtml(c) {
+  const rows = tasteProposal(agentTastes, c.action, c.args).rows.map(({ label, now, next }) => `<li aria-label="${esc(`${label}: from ${now} to ${next}`)}"><span class="label">${esc(label)}:</span> ${esc(now)} → ${esc(next)}</li>`);
+  return rows.length ? `<ul class="agent-taste">${rows.join("")}</ul>` : "";
+}
+
+/** Why the agent asks, as it said in act, or "". */
+const agentReasonHtml = (c) => (c.reason ? `<p class="agent-reason">Reason: ${esc(c.reason)}</p>` : "");
+
 function agentConfirmationHtml(c) {
   const busy = agentDeciding.has(c.id) ? " disabled" : "";
   const who = `Asked by ${agentQuoted(c)} · ${agentWords(c.role)} on ${c.machine_name || "removed machine"} · ${agentSince(c.at)}`;
+  const details = AGENT_TASTE_COPY[c.action] ? agentTasteHtml(c) : Object.keys(c.args ?? {}).length && !AGENT_TITLE_ONLY.has(c.action) ? `<pre class="args">${esc(JSON.stringify(c.args, null, 2))}</pre>` : "";
   return `<div class="agent-confirm" data-confirmation="${esc(c.id)}" role="group" aria-label="${esc(`Approve ${c.action}?`)}">
     <span class="dot"></span>
     <div class="texts">
       <b class="title" title="${esc(c.about)}">${esc(agentActionTitle(c.action, c.args, c.machine))}${c.target ? ` on ${esc(agentMachineName(c.target) || c.target)}` : ""}</b>
-      ${Object.keys(c.args ?? {}).length && !AGENT_TITLE_ONLY.has(c.action) ? `<pre class="args">${esc(JSON.stringify(c.args, null, 2))}</pre>` : ""}
+      ${details}
+      ${agentReasonHtml(c)}
       <span class="who">${esc(who)}</span>
       <div class="actions start"><button type="button" class="primary" data-agent="approve"${busy}>Approve</button><button type="button" class="outline" data-agent="deny"${busy}>Deny</button></div>
     </div>
@@ -252,11 +275,25 @@ function agentSurfaceChanged() {
   drawAgentActivity();
 }
 
+/** Reads the account's tastes while a way of working change waits, and repaints its rows with them.
+ * A failed read keeps the last ones. */
+async function agentReadTastes() {
+  const asked = hub;
+  if (!asked || !agentConfirmations.some((c) => AGENT_TASTE_COPY[c.action])) return;
+  try {
+    const tastes = await asked.hub({ cmd: "get_tastes" });
+    if (hub !== asked) return;
+    agentTastes = tastes;
+    agentSurfaceChanged();
+  } catch {}
+}
+
 /** The hub's push of the waiting confirmations, after hello and after every change. */
 function onAgentConfirmations(items) {
   agentConfirmations = items;
   if (agentApproving && !items.some((c) => c.id === agentApproving.id)) forgetAgentApproval();
   agentSurfaceChanged();
+  agentReadTastes();
   if (settingsOpen() && page === "agent-activity") loadAgentAudit();
 }
 
@@ -264,6 +301,7 @@ function resetAgentSurface() {
   agentConfirmations = [];
   agentShown = null;
   agentApproving = null;
+  agentTastes = null;
   agentActivity = agentActivityStart();
 }
 
@@ -368,6 +406,7 @@ function showAgentActivity() {
   agentActivity = agentActivityStart();
   drawAgentActivity();
   loadAgentAudit();
+  agentReadTastes();
 }
 
 function drawAgentActivity() {

@@ -1224,6 +1224,45 @@ fn an_agents_act_with_a_review_setting_changes_nothing_and_an_allowed_field_alon
 }
 
 #[test]
+fn an_agents_way_of_working_proposal_keeps_its_reason_and_leaves_its_audit_rows() {
+    let hub = TestHub::start("act_reason");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "act-reason-mac");
+    let captains = json!({ "kind": "captains" });
+    let reason = "Workers keep timing out on site.";
+    let asked = |client: &mut Client, id: &Value| client.hub(json!({ "cmd": "confirmations" })).unwrap().as_array().unwrap().iter().find(|c| &c["id"] == id).cloned().unwrap();
+    let rows = |client: &mut Client, request: &str| -> Vec<(String, String, String)> {
+        let trail = client.hub(json!({ "cmd": "agent_audit" })).unwrap();
+        trail.as_array().unwrap().iter().filter(|r| r["request_id"] == request).map(|r| (r["action"].as_str().unwrap().to_owned(), r["outcome"].as_str().unwrap().to_owned(), r["detail"].as_str().unwrap().to_owned())).collect()
+    };
+    let row = |outcome: &str, detail: &str| ("set_taste".to_owned(), outcome.to_owned(), detail.to_owned());
+    // The Captains' own choice first: a taste that is exactly the Balanced preset with 3 workers reads as one stored on
+    // the old parallel defaults (`Tastes::take_raised_defaults`), and would load with 5 again.
+    ana.client.hub(json!({ "cmd": "set_taste", "scope": captains, "patch": { "autonomy": "ask_first" } })).unwrap();
+
+    let held = session_tool(&ana.dir, &ana.tab, json!({ "name": "act", "action": "set_taste", "args": { "scope": captains, "patch": { "parallel": 3 } }, "reason": reason, "request_id": "r-reason" })).unwrap();
+    assert_eq!(held["outcome"], "pending", "a proposal waits for the owner: {held}");
+    assert_eq!(asked(&mut ana.client, &held["id"])["reason"], reason, "the held proposal keeps its reason");
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": held["id"], "approve": true })).unwrap()["outcome"], "done");
+    assert_eq!(ana.client.hub(json!({ "cmd": "get_tastes" })).unwrap()["captains"]["parallel"], 3, "the approved proposal lands");
+    let trail = rows(&mut ana.client, "r-reason");
+    for expected in [row("pending", &format!("Reason: {reason}")), row("approved", ""), row("done", "")] {
+        assert!(trail.contains(&expected), "{expected:?} in {trail:?}");
+    }
+    assert_eq!(trail.len(), 3, "{trail:?}");
+
+    let bare = act(&ana.dir, &ana.tab, "set_taste", json!({ "scope": captains, "patch": { "parallel": 4 } })).unwrap();
+    assert_eq!(bare["outcome"], "pending", "{bare}");
+    let listed = asked(&mut ana.client, &bare["id"]);
+    assert!(listed.get("reason").is_none(), "an act without a reason holds none: {listed}");
+    let trail = ana.client.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let pending: Vec<&Value> = trail.as_array().unwrap().iter().filter(|r| r["outcome"] == "pending" && r["request_id"].is_null()).collect();
+    assert_eq!(pending.iter().map(|r| r["detail"].as_str().unwrap()).collect::<Vec<_>>(), [""], "its pending row says nothing more: {pending:?}");
+}
+
+#[test]
 fn a_review_setting_held_before_the_refusal_fails_when_the_owner_approves_it() {
     let hub = TestHub::start("held_review");
     let url = hub.url.clone();
@@ -1236,7 +1275,7 @@ fn a_review_setting_held_before_the_refusal_fails_when_the_owner_approves_it() {
     let other = "second_opinion is changed only by the user, on the Way of working page; nothing changed";
     // Asks an app from before the refusal held, straight into the table, as the hub held them then.
     let hold = |request: &str, action: &str, args: Value| {
-        let asked = Confirmation { id: String::new(), at: 1, machine: machine.clone(), machine_name: "held-review-mac".into(), tab: tab.clone(), title: "Way of working".into(), role: ActorRole::Session, action: action.into(), about: String::new(), args, target: None, request_id: Some(request.into()), decision: None, decided_at: None, outcome: None };
+        let asked = Confirmation { id: String::new(), at: 1, machine: machine.clone(), machine_name: "held-review-mac".into(), tab: tab.clone(), title: "Way of working".into(), role: ActorRole::Session, action: action.into(), about: String::new(), args, target: None, request_id: Some(request.into()), decision: None, decided_at: None, outcome: None, reason: None };
         let (account_id, machine_id) = (uuid::Uuid::parse_str(&owner.id).unwrap(), uuid::Uuid::parse_str(&machine).unwrap());
         hub.runtime.block_on(hub.hub().db.hold_confirmation(account_id, machine_id, None, &asked)).unwrap().0.to_string()
     };

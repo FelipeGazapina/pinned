@@ -188,11 +188,12 @@ function needsYouCardHtml(card, answer = null, grouped = null) {
   }
   const body =
     card.kind === "approval" && card.ask?.command ? `<pre>${esc(card.ask.command)}</pre>`
+      : card.kind === "agent" && AGENT_TASTE_COPY[card.confirmation.action] ? agentTasteHtml(card.confirmation)
       : card.kind === "agent" && Object.keys(card.confirmation.args ?? {}).length && !AGENT_TITLE_ONLY.has(card.confirmation.action) ? `<pre>${esc(JSON.stringify(card.confirmation.args, null, 2))}</pre>`
       : card.kind !== "agent" && card.line && card.line !== card.title ? `<p class="ny-line">${esc(card.line)}</p>`
       : "";
   const unsupervised = card.sleep?.delegated ? `<p class="ny-line">${esc(`${nyPlural(card.sleep.delegated, "delegated task")} still running with nobody to supervise ${card.sleep.delegated === 1 ? "it" : "them"}.`)}</p>` : "";
-  const agentLine = unsupervised + (card.kind === "agent" ? `<p class="ny-line">${esc(card.line)}</p>` : "");
+  const agentLine = unsupervised + (card.kind === "agent" ? `${agentReasonHtml(card.confirmation)}<p class="ny-line">${esc(card.line)}</p>` : "");
   const actions = answer?.state === "sent" ? "" : `<fieldset class="ny-fields"${answer?.state === "sending" ? " disabled" : ""}>${needsYouActionsHtml(card, grouped)}</fieldset>`;
   const pick = grouped?.pick ? `<div class="ny-pick"><span class="ny-picked">Picked: ${esc(grouped.pick.label)}</span>${nyButton("clear", "Clear", "ny-quiet")}</div>` : "";
   const note = answer ? `<p class="ny-note" role="status">${NEEDS_YOU_NOTES[answer.state]}</p>` : "";
@@ -297,6 +298,7 @@ function showNeedsYou() {
   </div></div>`);
   if (!needsYouLive) needsYouLive = { off: onModelChange(drawNeedsYou), timer: setInterval(tickNeedsYou, 15000) };
   drawNeedsYou();
+  agentReadTastes();
 }
 
 /** Answers the card's thread without leaving the page, and says on the card how it went. */

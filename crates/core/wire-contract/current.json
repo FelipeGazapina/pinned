@@ -12058,6 +12058,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, for an act held for the owner.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -25681,6 +25688,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, for an act held for the owner.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -36449,6 +36463,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, for an act held for the owner.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -46939,6 +46960,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, for an act held for the owner.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -50276,6 +50304,13 @@
               "string",
               "null"
             ]
+          },
+          "reason": {
+            "description": "Why the session asks, on one line, secrets masked and cut at 200 characters. Absent when it gave none.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -50387,6 +50422,13 @@
           },
           "outcome": {
             "description": "What running it came to: `done`, or `failed: <error>`. Absent until decided.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Why the session asks, on one line, secrets masked and cut at 200 characters. Absent when it gave none.",
             "type": [
               "string",
               "null"
@@ -75974,6 +76016,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, on one line, secrets masked and cut at 200 characters. Absent when it gave none.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -80776,6 +80825,13 @@
               },
               "outcome": {
                 "description": "What running it came to: `done`, or `failed: <error>`. Absent until decided.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "description": "Why the session asks, on one line, secrets masked and cut at 200 characters. Absent when it gave none.",
                 "type": [
                   "string",
                   "null"
