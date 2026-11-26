@@ -291,7 +291,7 @@ test("a Slack-mention bot is saved with exactly this save_bot, and a Linear labe
 });
 
 test("a bot made before this change still says when its Linear label starts it, and a Run now bot says nothing of a label", async () => {
-  const a = app({ answers: { ...botAnswers({ runs: [], calls: [] }), "hub:get_settings": { connectors: [workflow({ trigger: { kind: "linear-label", label: "weekly" } })] } } });
+  const a = app({ answers: { ...botAnswers({ runs: [], calls: [] }), bot_workflow: workflow({ trigger: { kind: "linear-label", label: "weekly" } }) } });
   await openBot(a);
   assert.ok(text(a.page()).includes("when a Linear issue gets “weekly”"), text(a.page()));
   const b = app({ answers: botAnswers({ runs: [], calls: [] }) });
@@ -515,7 +515,7 @@ test("the done screen turns the bot on only when the person may", async () => {
 });
 
 test("seeing the bot's page opens it by the workflow's id", async () => {
-  const a = app({ answers: { ...wizardAnswers(saving("c1", { bots: [bot()] })), runs: [], calls: [], "hub:get_settings": { connectors: [workflow()] } } });
+  const a = app({ answers: { ...wizardAnswers(saving("c1", { bots: [bot()] })), runs: [], calls: [], bot_workflow: workflow() } });
   await a.open("team-bot-new");
   await a.click("idea", { idea: "review" });
   await a.click("next");
@@ -562,7 +562,9 @@ const botAnswers = (over = {}) => ({
     run({ id: "other", workflow: "c2", started_at: NOW - 10 }),
   ],
   calls: [{ id: "k1", run: "r4", workflow: "c1", situation: "before_irreversible", asked: [{ kind: "group", handle: "publish" }], question: "Publish?", choices: [], created_at: NOW - 90, escalated: false, answer: null }],
-  "hub:get_settings": { connectors: [workflow()] },
+  // The team refuses get_settings; the page reads its workflow through bot_workflow.
+  "hub:get_settings": new Error("get_settings does not run on a team"),
+  bot_workflow: workflow(),
   ...over,
 });
 const openBot = async (a, id = "c1") => {
@@ -582,7 +584,7 @@ test("the bot page reads the bot, people, groups, projects, runs and calls of th
   await openBot(a);
   assert.deepEqual(
     a.frames.map((f) => (f.op === "hub" ? f.call.cmd : f.op)).sort(),
-    ["bots", "calls", "get_settings", "groups", "members", "projects", "runs"],
+    ["bot_workflow", "bots", "calls", "groups", "members", "projects", "runs"],
   );
 });
 
@@ -727,7 +729,7 @@ test("the bot page asks for a team when none is chosen, and for a bot the team d
 
 test("a bot's name, steps and a run's outcome stay text", async () => {
   const bad = `<img src=x onerror="window.pwned=1">`;
-  const a = app({ answers: botAnswers({ bots: [bot({ name: bad })], runs: [run({ outcome: bad })], "hub:get_settings": { connectors: [workflow({ graph: { nodes: [{ type: "session", prompt: `1. ${bad}` }] } })] } }) });
+  const a = app({ answers: botAnswers({ bots: [bot({ name: bad })], runs: [run({ outcome: bad })], bot_workflow: workflow({ graph: { nodes: [{ type: "session", prompt: `1. ${bad}` }] } }) }) });
   await openBot(a);
   assert.ok(!a.page().includes("<img"));
   assert.ok(a.page().includes("&#60;img") || a.page().includes("&lt;img") || a.page().includes("&#"), "escaped");
@@ -1147,4 +1149,26 @@ test("deleting a draft reads the team's lists again, so the sidebar loses it", a
   await a.click("delete");
   assert.deepEqual(a.frames.filter((f) => f.op === "delete_bot"), [{ op: "delete_bot", workflow: "c1" }]);
   assert.equal(reads.n, 1);
+});
+
+test("a team's bot page draws the bot even though the team refuses get_settings", async () => {
+  const a = app({ answers: botAnswers({ runs: [] }) });
+  await openBot(a);
+  assert.ok(text(a.page()).includes("Test publisher"), text(a.page()));
+  assert.ok(!text(a.page()).includes("does not run on a team"), "the refusal is not shown");
+  assert.ok(a.control("run-now"), "Run now is there");
+});
+
+test("a bot page still draws the bot when its workflow and its runs fail to load", async () => {
+  const a = app({ answers: botAnswers({ bot_workflow: new Error("unknown op bot_workflow"), runs: new Error("runs failed") }) });
+  await openBot(a);
+  assert.ok(text(a.page()).includes("Test publisher"), text(a.page()));
+  assert.ok(!text(a.page()).includes("Could not load"), text(a.page()));
+});
+
+test("an on bot in a team with no Claude token says it needs the AI account", async () => {
+  const team = { ...OWNER_TEAM, credential: { upstash: true, claude: false, github: true, slack: false } };
+  const a = app({ team, answers: botAnswers({ bots: [bot({ on: true })] }) });
+  await openBot(a);
+  assert.ok(text(a.page()).includes("The team needs its Upstash key and Claude token before a bot can run."), text(a.page()));
 });

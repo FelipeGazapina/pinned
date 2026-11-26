@@ -545,14 +545,14 @@ async function tbLoadBot(quiet = false) {
   }
   const id = ui.id;
   try {
-    const [bots, members, groups, projects, runs, calls, settings] = await Promise.all([
+    const [bots, members, groups, projects, runs, calls, workflow] = await Promise.all([
       tbCall({ op: "bots" }),
-      tbCall({ op: "members" }),
-      tbCall({ op: "groups" }),
-      tbCall({ op: "projects" }),
-      tbCall({ op: "runs" }),
+      tbCall({ op: "members" }).catch(() => []),
+      tbCall({ op: "groups" }).catch(() => []),
+      tbCall({ op: "projects" }).catch(() => []),
+      tbCall({ op: "runs" }).catch(() => []),
       tbCall({ op: "calls" }).catch(() => []),
-      tbCall({ op: "hub", call: { cmd: "get_settings" } }),
+      tbCall({ op: "bot_workflow", workflow: id }).catch(() => null),
     ]);
     if (ui.id !== id) return;
     const list = (v) => (Array.isArray(v) ? v : []);
@@ -563,7 +563,7 @@ async function tbLoadBot(quiet = false) {
       projects: list(projects),
       runs: list(runs).filter((r) => r.workflow === id).sort((a, b) => b.started_at - a.started_at),
       calls: list(calls),
-      workflow: list(settings?.connectors).find((c) => c.id === id) ?? null,
+      workflow,
     };
     ui.state = "ready";
     if (!quiet) ui.error = "";
@@ -656,7 +656,7 @@ function tbBotHtml(ui, team) {
         <div class="tb-sub">${tbEsc(t.of(project, owner))}${bot.once ? ` <span class="tb-tag">${tbEsc(t.once)}</span>` : ""}</div></div></div>
       <div class="tb-actions">${runBtn}${toggle}</div>
     </div>
-    ${tbError(ui.error && ui.state === "ready" ? ui.error : "")}${offNote}${notice}${needKeys && !bot.on ? tbNeedKeysHtml(team, members) : ""}
+    ${tbError(ui.error && ui.state === "ready" ? ui.error : "")}${offNote}${notice}${needKeys ? tbNeedKeysHtml(team, members) : ""}
     <section class="tb-section"><h2>${tbEsc(manual ? t.doesManual : firesOn ? t.doesOn(firesOn) : t.does)}</h2>${stepRows.length ? `<ol class="tb-steps">${stepRows.join("")}</ol>` : `<p class="tb-hint">${tbEsc(t.noSteps)}</p>`}</section>
     <section class="tb-section"><h2>${tbEsc(t.calls)}</h2><div class="tb-card">${moments.map(moment).join("")}</div><p class="tb-foot">${tbEsc(t.callsNote)}</p></section>
     <section class="tb-section" data-limits><h2>${tbEsc(t.limits)}</h2><div class="tb-card"><div class="tb-row" data-limit="time"><span>${tbEsc(t.time)}</span><span class="tb-value">${tbEsc(t.timeValue(bot.limits?.minutes ?? TB_POLICY.minutes))}</span></div></div><p class="tb-foot">${tbEsc(t.maxLife)}</p></section>

@@ -12876,6 +12876,23 @@
                 ]
               },
               {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
+                ]
+              },
+              {
                 "description": "`SavedBot`. Saves the bot, as a draft. With `connector`, the team's workflow itself (the\n`Connector` `HubCall::SaveConnector` takes) is saved with it: the one way a member changes a\nteam's workflows. The bot then is that workflow's. A new workflow has an empty `id`, which\nthe hub names, or a uuid the app made (lowercase, hyphenated) that it keeps: the same save\nsent again then saves that workflow, never a second one.",
                 "type": "object",
                 "properties": {
@@ -26472,6 +26489,23 @@
                 ]
               },
               {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
+                ]
+              },
+              {
                 "description": "`SavedBot`. Saves the bot, as a draft. With `connector`, the team's workflow itself (the\n`Connector` `HubCall::SaveConnector` takes) is saved with it: the one way a member changes a\nteam's workflows. The bot then is that workflow's. A new workflow has an empty `id`, which\nthe hub names, or a uuid the app made (lowercase, hyphenated) that it keeps: the same save\nsent again then saves that workflow, never a second one.",
                 "type": "object",
                 "properties": {
@@ -37267,6 +37301,23 @@
                 ]
               },
               {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
+                ]
+              },
+              {
                 "description": "`SavedBot`. Saves the bot, as a draft. With `connector`, the team's workflow itself (the\n`Connector` `HubCall::SaveConnector` takes) is saved with it: the one way a member changes a\nteam's workflows. The bot then is that workflow's. A new workflow has an empty `id`, which\nthe hub names, or a uuid the app made (lowercase, hyphenated) that it keeps: the same save\nsent again then saves that workflow, never a second one.",
                 "type": "object",
                 "properties": {
@@ -47727,6 +47778,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
