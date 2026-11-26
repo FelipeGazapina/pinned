@@ -205,7 +205,7 @@ impl Store {
         Ok(memory)
     }
 
-    /// Sets how much `id` counts among close matches. Its text, times and uses stay as they are.
+    /// Sets how far a search moves `id` (see `lift`). Its text, times and uses stay as they are.
     pub fn set_weight(&self, id: i64, weight: f64) -> Result<Memory, String> {
         if !WEIGHTS.contains(&weight) {
             return Err("a memory's weight is a number from 0.1 to 10".into());
@@ -880,12 +880,28 @@ mod tests {
     }
 
     #[test]
-    fn a_memory_past_limit_plus_three_places_never_enters_at_any_weight() {
+    fn a_memory_past_limit_plus_three_places_does_not_enter_past_memories_that_stay() {
         let store = five_matches();
         store.set_weight(5, 10.0).unwrap();
         assert_eq!(titles(store.search(FIVE, None, 0.0, 1, 1)), ["#1 One"], "fifth is four places below a limit of one");
         store.set_weight(4, 10.0).unwrap();
         assert_eq!(titles(store.search(FIVE, None, 0.0, 1, 1)), ["#4 Four"], "fourth is three places below, so the lift brings it in");
+    }
+
+    #[test]
+    fn weight_ten_and_a_recent_use_still_move_three_places() {
+        let store = five_matches();
+        store.set_weight(5, 10.0).unwrap();
+        store.used(&[5], 1).unwrap();
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1)), ["#1 One", "#5 Five", "#2 Two", "#3 Three", "#4 Four"]);
+    }
+
+    #[test]
+    fn many_uses_still_lift_after_forty_five_days() {
+        const DAY: i64 = 24 * 3600;
+        let store = five_matches();
+        store.db.execute("UPDATE memories SET hits = 100, last_used = 1000 WHERE id = 3", []).unwrap();
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1000 + 45 * DAY)), ["#1 One", "#3 Three", "#2 Two", "#4 Four", "#5 Five"]);
     }
 
     #[test]

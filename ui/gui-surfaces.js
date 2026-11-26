@@ -536,13 +536,12 @@ panelBody.addEventListener("click", (e) => {
 });
 
 /** Each project's Memory panel, by `machine:path`: the search, its hits and the status the machine
- * last sent, and the add form's unsent title and text and each row's unsent weight, by id, which a
- * redraw would otherwise drop. */
+ * last sent, and the add form's unsent title and text, which a redraw would otherwise drop. */
 const memoryPanels = new Map();
 const hasProject = (tab) => !!tab && !threadOf(tab).workspace?.scratch;
 function memoryOf(tab) {
   const key = `${tab.machine}:${projectPathOf(tab)}`;
-  if (!memoryPanels.has(key)) memoryPanels.set(key, { query: "", hits: null, status: null, title: "", text: "", weights: {}, at: 0 });
+  if (!memoryPanels.has(key)) memoryPanels.set(key, { query: "", hits: null, status: null, title: "", text: "", at: 0 });
   return memoryPanels.get(key);
 }
 async function refreshMemory(tab) {
@@ -585,26 +584,30 @@ async function changeMemory(tab, call) {
 }
 const VECTORS = { ready: "vector search ready", loading: "downloading model", off: "word search only" };
 /** One memory of the panel, with its weight field, quiet at the default 1, and how many prompts
- * recall put it in. `typed` is the weight not sent yet. An older machine sends neither weight nor
- * uses, which reads as 1 and none. */
-function memoryRowHtml(h, typed) {
+ * recall put it in. An older machine sends no weight, so it gets no field: a change would fail there
+ * with an unknown variant. It sends no uses either, which reads as none. */
+function memoryRowHtml(h) {
   const weight = h.weight ?? 1;
   const hits = h.hits ?? 0;
   const uses = hits > 0 ? `<span class="uses">${hits === 1 ? "1 use" : `${hits} uses`}</span>` : "";
-  return `<li><span class="id">#${h.id}</span><span class="body"><span class="title">${esc(h.title)}</span>${h.kind ? `<span class="kind">${esc(h.kind)}</span>` : ""}${uses}<span class="text">${esc(h.text)}</span></span><input type="number" class="weight${weight === 1 ? " quiet" : ""}" data-weight="${h.id}" min="0.1" max="10" step="0.1" value="${esc(typed ?? weight)}" aria-label="Weight of #${h.id}"><button type="button" class="ghost" data-forget="${h.id}" title="Forget #${h.id}" aria-label="Forget #${h.id}">${icon("x")}</button></li>`;
+  const field = h.weight === undefined ? "" : `<input type="number" class="weight${weight === 1 ? " quiet" : ""}" data-weight="${h.id}" min="0.1" max="10" step="0.1" value="${esc(weight)}" aria-label="Weight of #${h.id}">`;
+  return `<li><span class="id">#${h.id}</span><span class="body"><span class="title">${esc(h.title)}</span>${h.kind ? `<span class="kind">${esc(h.kind)}</span>` : ""}${uses}<span class="text">${esc(h.text)}</span></span>${field}<button type="button" class="ghost" data-forget="${h.id}" title="Forget #${h.id}" aria-label="Forget #${h.id}">${icon("x")}</button></li>`;
 }
 /** What any thread of the project can look up: agents save to it as they work, and pinned adds
  * the closest memories to each prompt. A panel shown again after a few seconds asks again. */
 function renderMemoryPanel() {
   const tab = active;
   if (!hasProject(tab)) return showPanel(`<div class="memory"><p class="memory-empty">This thread is not in a project, so it has no memory.</p></div>`);
+  // A weight being typed keeps its element: a redraw would replace it mid-typing, and its change
+  // would then send a partial value. The panel draws again once the field lets go.
+  if (document.activeElement?.closest?.(".memory [data-weight]")) return;
   const m = memoryOf(tab);
   if (!m.reading && (!m.hits || Date.now() - m.at > 5000)) refreshMemory(tab);
   const count = m.status ? `${m.status.count} ${m.status.count === 1 ? "memory" : "memories"} · ${VECTORS[m.status.vectors] ?? m.status.vectors}` : "";
   const hits = !m.hits
     ? `<p class="memory-empty">Loading…</p>`
     : m.hits.length
-      ? `<ul class="memory-list">${m.hits.map((h) => memoryRowHtml(h, m.weights[h.id])).join("")}</ul>`
+      ? `<ul class="memory-list">${m.hits.map(memoryRowHtml).join("")}</ul>`
       : `<p class="memory-empty">${m.query ? "No memory matches that." : "No memories yet. Agents save them as they work, or add one below."}</p>`;
   const focus = panelBody.contains(document.activeElement) ? document.activeElement : null;
   // The global tab's panel is the account's memory, and reads with the orchestrator's own name.
@@ -613,18 +616,14 @@ function renderMemoryPanel() {
     <input class="memory-find" name="query" type="search" value="${esc(m.query)}" placeholder="${esc(find)}" aria-label="${esc(find)}" autocomplete="off" spellcheck="false">
     ${hits}
     <form class="memory-add"><input name="title" type="text" value="${esc(m.title)}" placeholder="Title" aria-label="New memory's title" autocomplete="off"><textarea name="text" rows="3" placeholder="What to remember about this project" aria-label="New memory's text">${esc(m.text)}</textarea><button type="submit" class="outline">Add</button></form></div>`);
-  const weight = focus?.dataset?.weight;
-  const again = shown && (focus?.name ? panelBody.querySelector(`.memory [name="${focus.name}"]`) : weight && panelBody.querySelector(`.memory [data-weight="${weight}"]`));
+  const again = shown && focus?.name && panelBody.querySelector(`.memory [name="${focus.name}"]`);
   if (again) {
     again.focus();
-    // A number field has no selection to put back.
-    if (again.name) again.setSelectionRange(focus.selectionStart, focus.selectionEnd);
+    again.setSelectionRange(focus.selectionStart, focus.selectionEnd);
   }
 }
 let memorySearchTimer;
 panelBody.addEventListener("input", (e) => {
-  const weight = e.target.closest(".memory [data-weight]");
-  if (weight && active) return void (memoryOf(active).weights[weight.dataset.weight] = weight.value);
   const field = e.target.closest(".memory [name]");
   if (!field || !active) return;
   const tab = active;
@@ -645,11 +644,15 @@ panelBody.addEventListener("change", async (e) => {
   const tab = active;
   const m = memoryOf(tab);
   const id = Number(field.dataset.weight);
-  delete m.weights[id];
   const stored = String(m.hits?.find((h) => h.id === id)?.weight ?? 1);
   const weight = Number(field.value);
   if (!field.value.trim() || !Number.isFinite(weight)) return void (field.value = stored);
   if (!(await changeMemory(tab, { cmd: "memory_set_weight", id, weight }))) field.value = stored;
+});
+// Leaving a weight field reads the panel again: the redraw that its focus held back follows the
+// change sent on the way out.
+panelBody.addEventListener("focusout", (e) => {
+  if (e.target.closest?.(".memory [data-weight]") && active) refreshMemory(active);
 });
 panelBody.addEventListener("submit", async (e) => {
   const form = e.target.closest(".memory-add");
