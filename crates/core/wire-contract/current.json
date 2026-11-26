@@ -11155,7 +11155,7 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true
                 }
               },
               "captains": {
@@ -11198,7 +11198,7 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true
                 }
               },
               "projects": {
@@ -11433,9 +11433,9 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
               }
             },
             "required": [
@@ -24838,7 +24838,7 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true
                 }
               },
               "captains": {
@@ -24881,7 +24881,7 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true
                 }
               },
               "projects": {
@@ -25106,9 +25106,9 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
               }
             }
           },
@@ -34983,7 +34983,7 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true
                 }
               },
               "captains": {
@@ -35026,7 +35026,7 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true
                 }
               },
               "projects": {
@@ -35261,9 +35261,9 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
               }
             },
             "required": [
@@ -45543,7 +45543,7 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true
                 }
               },
               "captains": {
@@ -45586,7 +45586,7 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true
                 }
               },
               "projects": {
@@ -45811,9 +45811,9 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
               }
             }
           },
@@ -67964,7 +67964,7 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": false
+              "manage_only": true
             }
           },
           "captains": {
@@ -68007,7 +68007,7 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": false
+              "manage_only": true
             }
           },
           "projects": {
@@ -68242,9 +68242,9 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
               }
             },
             "required": [
@@ -68915,7 +68915,7 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": false
+              "manage_only": true
             }
           },
           "captains": {
@@ -68958,7 +68958,7 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": false
+              "manage_only": true
             }
           },
           "projects": {
@@ -69183,9 +69183,9 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
               }
             }
           },

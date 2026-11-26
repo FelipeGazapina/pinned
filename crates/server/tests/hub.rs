@@ -1014,7 +1014,7 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
         "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
         "tier": "high", "default_model": null, "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
         "box_size": null, "escalate_breaking_change": true, "escalate_process_failure": true, "escalate_over_lines": 500,
-        "escalate_areas": ["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"], "manage_only": false,
+        "escalate_areas": ["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"], "manage_only": true,
     });
     assert_eq!(client.hub(get()).unwrap()["captains"], aggressive, "the old style's preset, with workers at once lowered to the old cap of 4");
 

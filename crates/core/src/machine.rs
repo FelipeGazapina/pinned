@@ -13769,6 +13769,14 @@ while True:
         claude
     }
 
+    /// A taste file that turns Manage only off for the Captains, for a test whose Captain keeps the
+    /// file-editing tools. Manage only is on by default.
+    #[cfg(unix)]
+    fn captains_may_edit(config: &Path) {
+        std::fs::create_dir_all(config).unwrap();
+        std::fs::write(config.join("taste.json"), json!({ "captains": { "manage_only": false } }).to_string()).unwrap();
+    }
+
     #[cfg(unix)]
     pub(super) fn started(claude: &Path, tab: &str) -> Vec<String> {
         let file = PathBuf::from(format!("{}.{tab}", claude.display()));
@@ -14344,6 +14352,7 @@ while True:
     fn a_stopped_capitao_starts_on_the_message_and_one_without_a_conversation_restarts_on_it() {
         let dir = temp("enqueue-start");
         let (project, config) = (dir.join("site"), dir.join("config"));
+        captains_may_edit(&config);
         std::fs::create_dir_all(&project).unwrap();
         let claude = recording_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
@@ -14372,6 +14381,7 @@ while True:
     fn a_restored_capitao_resumes_its_conversation_on_the_message() {
         let dir = temp("enqueue-resume");
         let (project, config) = (dir.join("site"), dir.join("config"));
+        captains_may_edit(&config);
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&config).unwrap();
         let path = project.display().to_string();
@@ -15279,6 +15289,7 @@ while True:
     #[cfg(unix)]
     fn with_auto_merge_on_a_capitao_and_the_global_orchestrator_hear_the_approval_profile() {
         let dir = temp("auto-merge");
+        captains_may_edit(&dir.join("config"));
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
         let claude = recording_claude(&dir);
@@ -15348,6 +15359,7 @@ while True:
     #[cfg(unix)]
     fn an_orchestrator_cannot_edit_and_starts_with_one_prompt() {
         let dir = temp("orchestrator-args");
+        captains_may_edit(&dir.join("config"));
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(dir.join("config")).unwrap();
@@ -15379,6 +15391,7 @@ while True:
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config.clone()), None, |_| {});
         let account = json!({
             "orchestrator": { "strategy": "strongest_first", "ladder": [{ "model": "claude-opus-5-5" }], "parallel": 6, "autonomy": "report_at_end", "review_diffs": false, "second_opinion": true },
+            "captains": { "manage_only": false },
             "projects": { "github.com/acme/site": { "parallel": 4, "autonomy": "report_at_end", "context": ["Deploys go through the VPS."], "tier": "mid", "budget_cents": 200 } },
         });
         let asked = Arc::new(AtomicU32::new(0));
@@ -15434,13 +15447,13 @@ Have another model review a risky change before it goes ahead.";
         }
         let claude = recording_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
-        let answer = Arc::new(Mutex::new(json!({ "projects": { "github.com/acme/site": { "manage_only": true } } })));
+        let answer = Arc::new(Mutex::new(json!({ "captains": { "manage_only": false }, "projects": { "github.com/acme/site": { "manage_only": true } } })));
         let current = answer.clone();
         m.set_hub(Arc::new(move |call| match call {
             HubCall::GetTastes => Ok(current.lock().unwrap().clone()),
             _ => Err("not this test's".into()),
         }));
-        let line = "This session is manage-only: pinned started it without the Edit, Write and NotebookEdit tools, so you cannot edit files. Re-brief or reassign a stuck or failed worker; never take its task over yourself.";
+        let line = "This session is manage-only: pinned started it without the Edit, Write and NotebookEdit tools, so you cannot edit files. Your tools are for reading and checking a worker's result: use Bash only to read, run tests and checks, and merge (git log, git diff, gh, cargo test, node --test), never to write or change a file (no sed -i, no redirect into a file, no heredoc into a file, no tee, no git commit). Re-brief or reassign a stuck or failed worker; never take its task over yourself.";
         let step_in = "Step in and do the task yourself";
         let refuses = |args: &[String]| args.windows(5).any(|w| w == ["--disallowedTools", "Edit", "Write", "NotebookEdit", "--append-system-prompt"]);
         let open = |repo: &Path| m.call(Call::OpenOrchestrator { path: repo.display().to_string() }).unwrap().as_str().unwrap().to_owned();
@@ -15641,7 +15654,7 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!((&got["effective"]["review_diffs"], &got["effective"]["second_opinion"]), (&json!(true), &json!(false)), "taste_get still shows both");
         let escalation = ["escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas"].map(|name| got["effective"][name].clone());
         assert_eq!(escalation, [json!(true), json!(true), json!(500), json!(["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"])], "taste_get shows the escalation settings");
-        assert_eq!(got["effective"]["manage_only"], json!(false), "taste_get shows Manage only");
+        assert_eq!(got["effective"]["manage_only"], json!(true), "taste_get shows Manage only, on by default");
         let set: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2}"#).unwrap()).unwrap();
         assert_eq!(set["effective"]["parallel"], json!(2), "a field the agent may change still changes");
 
@@ -15696,10 +15709,10 @@ Have another model review a risky change before it goes ahead.";
         let reset = m.reset_local_taste_field(&TasteScope::Captains, TasteField::EscalateAreas).unwrap();
         assert_eq!(reset.captains.escalate_areas.len(), 3, "the Captains get the default areas back");
 
-        let set = m.set_local_taste(&site, TastePatch { manage_only: Some(true), ..TastePatch::default() }).unwrap();
-        assert!(set.resolve(&site).manage_only, "the page's own set turns Manage only on");
+        let set = m.set_local_taste(&site, TastePatch { manage_only: Some(false), ..TastePatch::default() }).unwrap();
+        assert!(!set.resolve(&site).manage_only, "the page's own set turns Manage only off");
         let reset = m.reset_local_taste_field(&site, TasteField::ManageOnly).unwrap();
-        assert!(!reset.resolve(&site).manage_only, "a reset inherits the Captains' Manage only");
+        assert!(reset.resolve(&site).manage_only, "a reset inherits the Captains' Manage only, on by default");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -15732,6 +15745,7 @@ Have another model review a risky change before it goes ahead.";
     fn a_resumed_orchestrator_starts_with_its_role_again() {
         let dir = temp("orchestrator-resume");
         let (project, config) = (dir.join("app"), dir.join("config"));
+        captains_may_edit(&config);
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&config).unwrap();
         let path = project.display().to_string();
@@ -19401,6 +19415,7 @@ Have another model review a risky change before it goes ahead.";
     fn a_global_orchestrators_name_with_brackets_and_a_line_break_leads_each_captain_line_cleaned() {
         let dir = temp("orchestrator-name-prompt");
         let (project, config) = (dir.join("site"), dir.join("config"));
+        captains_may_edit(&config);
         std::fs::create_dir_all(&project).unwrap();
         let claude = recording_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
