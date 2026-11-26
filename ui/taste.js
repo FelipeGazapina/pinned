@@ -219,9 +219,22 @@ function tasteApplyProfile(tastes, scope, profile) {
 /** The fields of `now` that differ from `was`'s, as one patch. */
 const tasteChanged = (was, now) => Object.fromEntries(TASTE_FIELDS.filter((field) => now[field] != null && !tasteSame(now[field], was[field])).map((field) => [field, now[field]]));
 
+/** The tastes with the account's worker profiles, or `repo`'s, set to `profiles`. A project with
+ * none has no list, as Rust's `Tastes::set_worker_profiles` leaves it. */
+function tasteSetProfiles(tastes, repo, profiles) {
+  const lists = tastes.worker_profiles;
+  if (repo == null) return { ...tastes, worker_profiles: { ...lists, account: profiles } };
+  const projects = { ...lists.projects };
+  if (profiles.length) projects[repo] = profiles;
+  else delete projects[repo];
+  return { ...tastes, worker_profiles: { ...lists, projects } };
+}
+
 /** The calls that turn `saved` into `draft`, in order: the orchestrator, the Captains, then each
- * project, whose dropped fields reset before its changed ones are set. Each sends only the fields
- * the draft changed, so a change made elsewhere to another field stands. */
+ * project, whose dropped fields reset before its changed ones are set, then the worker profiles
+ * that changed, the account's before each project's. Each sends only the fields the draft
+ * changed, so a change made elsewhere to another field stands. A hub that predates worker
+ * profiles sends none, so none are saved. */
 function tasteSaveCalls(saved, draft) {
   const calls = [];
   for (const kind of ["orchestrator", "captains"]) {
@@ -240,6 +253,13 @@ function tasteSaveCalls(saved, draft) {
     const patch = tasteChanged(was, now);
     if (Object.keys(patch).length) calls.push({ cmd: "set_taste", scope, patch });
   }
+  const [had, lists] = [saved.worker_profiles ?? {}, draft.worker_profiles];
+  if (lists == null) return calls;
+  if (!tasteSame(had.account ?? [], lists.account)) calls.push({ cmd: "set_worker_profiles", profiles: lists.account });
+  for (const repo of [...new Set([...Object.keys(had.projects ?? {}), ...Object.keys(lists.projects ?? {})])].sort()) {
+    const profiles = lists.projects?.[repo] ?? [];
+    if (!tasteSame(had.projects?.[repo] ?? [], profiles)) calls.push({ cmd: "set_worker_profiles", project: repo, profiles });
+  }
   return calls;
 }
 
@@ -248,6 +268,7 @@ function tasteSaveCalls(saved, draft) {
 function tasteRebase(saved, draft, fresh) {
   return tasteSaveCalls(saved, draft).reduce((next, call) => {
     if (call.cmd === "reset_taste_field") return tasteResetField(next, call.scope, call.field);
+    if (call.cmd === "set_worker_profiles") return next.worker_profiles ? tasteSetProfiles(next, call.project, call.profiles) : next;
     const { placement, boxes_at_once, ...fields } = call.patch;
     const set = Object.keys(fields).length ? tasteSetFields(next, call.scope, fields) : next;
     return { ...set, ...(placement ? { placement } : {}), ...(boxes_at_once != null ? { boxes_at_once } : {}) };

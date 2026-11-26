@@ -1179,6 +1179,7 @@ mod tests {
                 "limitMs".into(),
                 "mode".into(),
                 "planStep".into(),
+                "profile".into(),
                 "role".into(),
                 "runtimeMode".into(),
                 "target".into(),

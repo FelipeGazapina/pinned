@@ -5923,6 +5923,8 @@ impl Machine {
         self.delegates.describe(&task.id, delegator.clone(), effort);
         self.delegates.note_parent(&task.id, session);
         self.delegates.set_remote(&task.id, RemoteTarget { machine: String::new(), name: place, tab: None, looked: None, waiting: None });
+        // The request already carries what its profile set, and an older machine refuses a name.
+        request.profile = None;
         let asked = HubCall::Delegate { tab: tab.clone(), task: task.id.clone(), request: Box::new(request), repo, access: ceiling, delegator, limits: held };
         let begun = Instant::now();
         match self.call_hub(asked.clone()) {
@@ -13768,7 +13770,7 @@ while True:
     }
 
     #[cfg(unix)]
-    fn started(claude: &Path, tab: &str) -> Vec<String> {
+    pub(super) fn started(claude: &Path, tab: &str) -> Vec<String> {
         let file = PathBuf::from(format!("{}.{tab}", claude.display()));
         wait_for("claude to start", || file.exists());
         let text = std::fs::read_to_string(&file).unwrap();
@@ -20966,7 +20968,7 @@ Have another model review a risky change before it goes ahead.";
     /// A Captain on `m-book` (MacBook) in a project with a GitHub origin, whose account prefers
     /// `m-mini` for heavy work.
     #[cfg(unix)]
-    fn placing_captain(name: &str) -> (Arc<Machine>, PathBuf, String) {
+    pub(super) fn placing_captain(name: &str) -> (Arc<Machine>, PathBuf, String) {
         let policy = crate::placement::Placement { prefer: vec!["m-mini".into(), "m-vps".into()], ..Default::default() };
         let (m, dir, captain) = limited_captain(name, TastePatch { placement: Some(policy), ..TastePatch::default() });
         for args in [&["init", "-q"][..], &["remote", "add", "origin", "https://github.com/acme/app.git"]] {
@@ -20978,7 +20980,7 @@ Have another model review a risky change before it goes ahead.";
 
     /// A hub that answers each `Place` with the next of `answers` and starts a worker on any
     /// machine but those in `refuse`. Returns every call it saw.
-    fn placing_hub(m: &Machine, answers: Vec<Result<Value, String>>, refuse: &'static [&'static str]) -> Arc<Mutex<Vec<HubCall>>> {
+    pub(super) fn placing_hub(m: &Machine, answers: Vec<Result<Value, String>>, refuse: &'static [&'static str]) -> Arc<Mutex<Vec<HubCall>>> {
         let calls = Arc::new(Mutex::new(vec![]));
         let (seen, answers) = (calls.clone(), Mutex::new(answers.into_iter()));
         m.set_hub(Arc::new(move |call| {

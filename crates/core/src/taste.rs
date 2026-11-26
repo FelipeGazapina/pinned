@@ -1092,7 +1092,7 @@ fn too_many_proposed() -> String {
 }
 
 /// Profile names match trimmed and without case, as `Tastes::set_worker_profiles` compares them.
-fn same_name(a: &str, b: &str) -> bool {
+pub(crate) fn same_name(a: &str, b: &str) -> bool {
     a.trim().to_lowercase() == b.trim().to_lowercase()
 }
 

@@ -4020,7 +4020,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -11079,6 +11079,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -11087,7 +11092,8 @@
               "tools",
               "access",
               "delivers",
-              "by"
+              "by",
+              "prompt"
             ]
           },
           "ProfileAccess": {
@@ -17867,7 +17873,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -24755,6 +24761,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -34882,6 +34893,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -34890,7 +34906,8 @@
               "tools",
               "access",
               "delivers",
-              "by"
+              "by",
+              "prompt"
             ]
           },
           "ProfileAccess": {
@@ -35559,7 +35576,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -45435,6 +45452,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -46056,7 +46078,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -68771,6 +68793,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -68779,7 +68806,8 @@
               "tools",
               "access",
               "delivers",
-              "by"
+              "by",
+              "prompt"
             ]
           },
           "ProfileAccess": {
@@ -69662,6 +69690,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -85472,7 +85505,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -91177,7 +91210,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
