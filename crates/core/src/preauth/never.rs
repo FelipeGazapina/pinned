@@ -22,7 +22,8 @@ pub struct AskCtx<'a> {
     pub worktree: &'a Path,
     /// The session's scratch dir. Writes there are fine.
     pub scratch: Option<&'a Path>,
-    /// Temp folders a delete may run strictly below. Empty holds every delete there.
+    /// Temp folders a delete may run strictly below, none of which holds the worktree. Empty holds
+    /// every delete there.
     pub temp: &'a [PathBuf],
     pub home: &'a Path,
     /// The session's Claude home, `CLAUDE_CONFIG_DIR`, when it is known. pinned runs an added
@@ -158,7 +159,7 @@ fn parts(p: &Path) -> VecDeque<Part> {
 /// that doesn't exist yet too: the part that exists resolves, the rest is appended. A dangling
 /// symlink resolves to where it points, since a write through it creates that file. Walking one
 /// component at a time also puts a `..` after a missing component in the right place.
-fn walk(abs: &Path) -> PathBuf {
+pub(super) fn walk(abs: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     let mut todo = parts(abs);
     let mut hops = 0;
@@ -196,7 +197,7 @@ fn comps(text: &str) -> Vec<String> {
     text.split(['/', '\\']).filter(|c| !c.is_empty() && *c != ".").map(str::to_ascii_lowercase).collect()
 }
 
-fn path_comps(p: &Path) -> Vec<String> {
+pub(super) fn path_comps(p: &Path) -> Vec<String> {
     p.components().filter_map(|c| match c {
         Component::Normal(n) => Some(n.to_string_lossy().to_ascii_lowercase()),
         _ => None,
@@ -911,6 +912,13 @@ const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash", "fish"];
 /// Programs that run what they read, so downloaded text must not reach them.
 const RUNNERS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "python", "python3", "python2", "node", "deno", "bun", "perl", "ruby", "php", "eval", "source", "."];
 
+/// Programs that can make or move a link, besides the [`RUNNERS`] and any `python*`.
+const LINKERS: &[&str] = &["ln", "mv", "cp", "install", "rsync"];
+
+/// What on a line points git at a repository other than the one in its folder, `env` moving it
+/// included, lowercase.
+const REPO_NAMED: &[&str] = &["--git-dir", "--work-tree", "git_dir=", "git_work_tree=", "core.worktree=", "env -c", "--chdir"];
+
 fn is_assign(t: &str) -> bool {
     let Some((name, _)) = t.split_once('=') else { return false };
     let mut chars = name.chars();
@@ -1038,8 +1046,10 @@ fn commands(words: &[Word]) -> Vec<Cmd> {
     if wrapper {
         for j in i + 1..words.len() {
             let t = words[j].text.as_str();
-            // `xargs git rm`: that `rm` is git's subcommand. After `-u`, `git` names a user instead.
-            let gits_rm = t == "rm" && words[j - 1].text == "git" && words[j - 2].text != "-u";
+            // `xargs git rm`: that `rm` is git's subcommand, which git's own check sees to. After a
+            // `-u` or `-g` option, `git` names a user or a group, so the `rm` is the program.
+            let names_owner = |t: &str| matches!(t, "--user" | "--group") || (t.starts_with('-') && !t.starts_with("--") && t.ends_with(['u', 'g']));
+            let gits_rm = t == "rm" && words[j - 1].text == "git" && !names_owner(&words[j - 2].text);
             if t.starts_with('-') || is_assign(t) || gits_rm {
                 continue;
             }
@@ -1073,6 +1083,13 @@ struct Scan<'c, 'a> {
     scratch: Option<PathBuf>,
     /// The temp roots, canonical.
     temp: Vec<PathBuf>,
+    /// The first delete the temp roots let through.
+    let_through: Option<String>,
+    /// A command on the line can make or move a link, so a path in temp may lead anywhere by the time
+    /// it is deleted.
+    relinks: bool,
+    /// The line holds one of [`REPO_NAMED`].
+    repo_named: bool,
     /// The session's Claude home, canonical.
     claude: Option<PathBuf>,
     hits: Vec<NeverHit>,
@@ -1084,7 +1101,7 @@ const DEV_OK: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin
 
 impl<'c, 'a> Scan<'c, 'a> {
     fn new(ctx: &'c AskCtx<'a>) -> Self {
-        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, temp: vec![], claude: None, hits: vec![], tagged: false, pushed: false };
+        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, temp: vec![], let_through: None, relinks: false, repo_named: false, claude: None, hits: vec![], tagged: false, pushed: false };
         scan.work = walk(&scan.abs(ctx.worktree));
         scan.scratch = ctx.scratch.map(|s| walk(&scan.abs(s)));
         scan.temp = ctx.temp.iter().map(|t| walk(&scan.abs(t))).collect();
@@ -1108,13 +1125,17 @@ impl<'c, 'a> Scan<'c, 'a> {
         !(p.starts_with(&self.work) || self.scratch.as_ref().is_some_and(|s| p.starts_with(s)))
     }
 
-    /// Whether `p` is strictly below a temp root and does not hold the worktree. A name right under
-    /// any root that starts with `pinned` or `claude` is theirs (pinned's guard settings, Claude
-    /// Code's scratchpads), even when another root sits inside it.
+    /// Whether `p` is a temp root or below one, and not in the worktree.
+    fn in_temp(&self, p: &Path) -> bool {
+        self.temp.iter().any(|root| p.starts_with(root)) && !p.starts_with(&self.work)
+    }
+
+    /// Whether `p` is strictly below a temp root. A name right under any root that starts with
+    /// `pinned` or `claude` is theirs (pinned's guard settings, Claude Code's scratchpads), even when
+    /// another root sits inside it.
     fn scrap(&self, p: &Path) -> bool {
         let mut names = self.temp.iter().filter_map(|root| p.strip_prefix(root).ok()).map(|below| below.components().next()).peekable();
         names.peek().is_some()
-            && !path_comps(&self.work).starts_with(&path_comps(p))
             && names.all(|name| {
                 name.is_some_and(|name| {
                     let name = name.as_os_str().to_string_lossy().to_ascii_lowercase();
@@ -1230,6 +1251,8 @@ impl<'c, 'a> Scan<'c, 'a> {
             return;
         }
         self.production(line);
+        let lower = line.to_ascii_lowercase();
+        self.repo_named |= REPO_NAMED.iter().any(|name| lower.contains(name));
         let claude_home = self.ctx.claude_home.map(|c| c.to_string_lossy().into_owned());
         let segs = lex(line, &self.home(), claude_home.as_deref());
         let mut frames = vec![Frame { cwd, fetched: false }];
@@ -1243,10 +1266,14 @@ impl<'c, 'a> Scan<'c, 'a> {
         }
     }
 
-    /// After the whole line: a tag made and pushed in one line is a release.
+    /// After the whole line: a tag made and pushed in one line is a release, and no temp delete is
+    /// trusted beside a command that can make or move a link.
     fn finish_line(&mut self) {
         if self.tagged && self.pushed {
             self.hit(NeverItem::Release, "git tag, then git push");
+        }
+        if let Some(why) = self.let_through.take().filter(|_| self.relinks) {
+            self.hit(NeverItem::DeleteOutside, format!("{why}, on a line that can make a link"));
         }
     }
 
@@ -1369,14 +1396,29 @@ impl<'c, 'a> Scan<'c, 'a> {
     fn delete(&mut self, cwd: &Option<PathBuf>, targets: &[&Word], risky: bool, what: &str) {
         for w in targets {
             let t = self.tgt(cwd, w);
+            let why = format!("{what} {}", short(&w.text));
             let bad = match &t.path {
                 _ if t.top_var => true,
                 None => true,
-                Some(_) if t.top_glob => risky,
-                Some(p) => (self.outside(p) && !self.temp_delete(w, p)) || (risky && w.var_at.is_none() && w.glob_at.is_none() && *p == self.work),
+                Some(p) => {
+                    // For a glob that starts the path, `p` is the cwd, which may still hold a link.
+                    let p = walk(p);
+                    let outside = self.outside(&p);
+                    // `shred` overwrites the file itself, which a hard link in temp may share with one elsewhere.
+                    let temp = outside && !what.ends_with("shred") && self.temp_delete(w, &p);
+                    if temp {
+                        self.let_through.get_or_insert_with(|| why.clone());
+                    }
+                    match (t.top_glob, outside) {
+                        // Such a glob is held when forced or recursive, and in temp unless a temp delete may take it.
+                        (true, _) => risky || (outside && !temp && self.in_temp(&p)),
+                        (false, true) => !temp,
+                        (false, false) => risky && w.var_at.is_none() && w.glob_at.is_none() && p == self.work,
+                    }
+                }
             };
             if bad {
-                self.hit(NeverItem::DeleteOutside, format!("{what} {}", short(&w.text)));
+                self.hit(NeverItem::DeleteOutside, why);
             }
         }
     }
@@ -1391,6 +1433,7 @@ impl<'c, 'a> Scan<'c, 'a> {
         if RUNNERS.contains(&prog) && (pipe_fetch || c.args.iter().any(|w| w.fetch)) {
             self.hit(NeverItem::NetworkInstall, format!("{prog} runs downloaded code"));
         }
+        self.relinks |= LINKERS.contains(&prog) || RUNNERS.contains(&prog) || prog.starts_with("python");
         match prog {
             "rm" | "rmdir" | "unlink" | "shred" => {
                 let risky = c.has("rRf", &["recursive", "force"]);
@@ -1435,6 +1478,9 @@ impl<'c, 'a> Scan<'c, 'a> {
             "cp" | "install" | "mv" | "ln" | "tee" | "touch" | "mkdir" | "truncate" | "mkfifo" | "sed" | "dd" | "curl" | "wget" => {
                 let words = self.write_args(c);
                 self.write_words(cwd, words);
+                if matches!(prog, "mv" | "ln") {
+                    self.bring_into_temp(cwd, c);
+                }
             }
             "npm" | "pnpm" | "yarn" | "bun" | "npx" | "bunx" | "cargo" | "pip" | "pip3" | "pip2" | "pipx" | "python" | "python3" | "python2" | "uv" | "uvx" | "poetry" | "brew" | "apt" | "apt-get" | "aptitude"
             | "dnf" | "yum" | "apk" | "zypper" | "pacman" | "gem" | "go" | "conda" | "mamba" | "micromamba" | "rustup" | "volta" | "asdf" | "mise" | "composer" | "bundle" | "dotnet" => {
@@ -1470,6 +1516,7 @@ impl<'c, 'a> Scan<'c, 'a> {
 
     fn find(&mut self, cwd: &Option<PathBuf>, c: &Cmd, nest: u8) {
         let mut deletes = c.args.iter().any(|w| w.text == "-delete");
+        let mut shreds = false;
         for (k, w) in c.args.iter().enumerate() {
             if !matches!(w.text.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
                 continue;
@@ -1480,6 +1527,7 @@ impl<'c, 'a> Scan<'c, 'a> {
             }
             let sub = Cmd::new(&inner, false);
             deletes |= matches!(sub.prog.as_str(), "rm" | "rmdir" | "unlink" | "shred" | "mv");
+            shreds |= sub.prog == "shred";
             self.cmd(cwd, &sub, nest, false);
         }
         if deletes {
@@ -1488,7 +1536,7 @@ impl<'c, 'a> Scan<'c, 'a> {
             if starts.is_empty() {
                 starts.push(&dot);
             }
-            self.delete(cwd, &starts, false, "find -delete");
+            self.delete(cwd, &starts, false, if shreds { "find -exec shred" } else { "find -delete" });
         }
     }
 
@@ -1526,17 +1574,20 @@ impl<'c, 'a> Scan<'c, 'a> {
         }
         match sub {
             "push" => self.git_push(&rest),
-            "clean" => {
+            // Both delete in the repository they run in. `git rm` refuses a path outside it.
+            "clean" | "rm" => {
                 let mut dir = cwd.clone();
                 for d in dirs {
                     let t = self.tgt(&dir, d);
                     dir = if t.top_var || t.top_glob { None } else { t.path };
                 }
-                if dir.as_deref().is_none_or(|d| self.outside(d)) {
-                    self.hit(NeverItem::DeleteOutside, "git clean outside the worktree");
+                if dir.as_deref().is_none_or(|d| self.outside(&walk(d))) || (sub == "rm" && self.repo_named) {
+                    self.hit(NeverItem::DeleteOutside, format!("git {sub} outside the worktree"));
                 }
-                let pos = rest.positionals();
-                self.delete(&dir, &pos, false, "git clean");
+                if sub == "clean" {
+                    let pos = rest.positionals();
+                    self.delete(&dir, &pos, false, "git clean");
+                }
             }
             "config" => {
                 let read = rest.has("l", &["get", "get-all", "get-regexp", "list", "get-urlmatch", "show-origin", "show-scope", "name-only"]);
@@ -1728,6 +1779,42 @@ impl<'c, 'a> Scan<'c, 'a> {
             "curl" => c.value('o', "output").into_iter().collect(),
             "wget" => c.value('O', "output-document").into_iter().chain(c.value('P', "directory-prefix")).collect(),
             _ => vec![],
+        }
+    }
+
+    /// Holds an `mv` or `ln` that brings into a temp folder what a delete may not take where it is:
+    /// deleting it there afterwards would run unasked.
+    fn bring_into_temp(&mut self, cwd: &Option<PathBuf>, c: &Cmd) {
+        if self.temp.is_empty() {
+            return;
+        }
+        let pos = c.positionals();
+        let (sources, dest) = match (c.value('t', "target-directory"), pos.split_last()) {
+            (Some(dir), _) => (pos.iter().copied().filter(|w| w.text != dir.text).collect(), dir),
+            (None, Some((last, rest))) if !rest.is_empty() => (rest.to_vec(), (*last).clone()),
+            // A lone `ln` source is linked into the cwd.
+            (None, _) => (pos, Word { text: ".".into(), ..Word::default() }),
+        };
+        let t = self.tgt(cwd, &dest);
+        let dest = t.path.filter(|_| !t.top_var && !t.top_glob).map(|p| walk(&p));
+        // A relative symlink points from the folder it is made in.
+        let base = match &dest {
+            Some(d) if c.prog == "ln" && c.has("s", &["symbolic"]) => if d.is_dir() { Some(d.clone()) } else { d.parent().map(Path::to_owned) },
+            _ => cwd.clone(),
+        };
+        let into_temp = dest.as_deref().map(|d| self.in_temp(d));
+        // The sources `xargs` reads can't be known.
+        if c.stdin_args && into_temp == Some(true) {
+            self.hit(NeverItem::DeleteOutside, format!("xargs {} into a temp folder: sources unknown", c.prog));
+        }
+        for w in sources {
+            let t = self.tgt(&base, w);
+            let from = t.path.filter(|_| !t.top_var).map(|p| walk(&p));
+            let free = from.as_deref().is_some_and(|p| !self.outside(p) || self.temp_delete(w, p));
+            // To a place the shell computes, only a source known to be elsewhere is held.
+            if !free && into_temp.unwrap_or(from.is_some()) {
+                self.hit(NeverItem::DeleteOutside, format!("{} {} into a temp folder", c.prog, short(&w.text)));
+            }
         }
     }
 

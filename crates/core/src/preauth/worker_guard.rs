@@ -6,10 +6,16 @@
 //!
 //! Three classes are held for the owner, checked in this order:
 //! 1. a delete outside the worktree, as the never list finds it (the session's scratch folder,
-//!    `<claude tmp>/<slug>/<session_id>`, counts as inside). A delete strictly below a temp folder
-//!    (`$TMPDIR`, and `/tmp` on Unix) runs too, unless a name right under that folder starts with
-//!    `pinned` or `claude`, it holds the worktree, the path holds a variable, or a glob is more than
-//!    a plain last name;
+//!    `<claude tmp>/<slug>/<session_id>`, counts as inside). A `git clean` or `git rm` is such a
+//!    delete when it runs outside, and so is a `git rm` on a line that names a repository to git or
+//!    moves it with `env`. A delete strictly below a temp folder (`$TMPDIR`, and `/tmp` on Unix)
+//!    runs, unless one of these holds: a name right under that folder starts with `pinned` or
+//!    `claude`; the path holds a variable; a glob is more than a plain last name, or sits right in
+//!    that folder; the program is `shred`; or the line also runs `ln`, `mv`, `cp`, `install`,
+//!    `rsync`, a shell or another interpreter. A temp folder that holds the home, the worktree, the
+//!    session's start folder or its Claude home does not count. An `mv` or `ln` into a temp folder
+//!    is held too, unless its source is in the worktree or the scratch folder, or is one a temp
+//!    delete may take;
 //! 2. a force-push, as the never list finds it, a branch delete by push included;
 //! 3. dropping a database: `dropdb`, or a SQL client named in a command whose text drops a
 //!    database, a schema or a table, or truncates one.
@@ -27,7 +33,7 @@
 //! mode is `bypassPermissions`): the prompt showed. Launch 3, `--permission-mode auto`: the prompt
 //! showed. So `bypassPermissions` and `auto` ask too.
 
-use super::never::{never, Ask, AskCtx, NeverItem};
+use super::never::{never, path_comps, walk, Ask, AskCtx, NeverItem};
 use super::team_hook::repo_top;
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
@@ -56,29 +62,29 @@ pub struct GuardEnv {
     pub claude_home: Option<PathBuf>,
     /// Where Claude Code keeps each session's scratchpad.
     pub claude_tmp: PathBuf,
-    /// The temp folders a delete may run strictly below.
+    /// The temp folders. A delete may run strictly below those that hold nothing of the session's.
     pub temp: Vec<PathBuf>,
 }
 
 impl GuardEnv {
     fn from_process(headless: bool) -> GuardEnv {
-        let home = crate::machine::home();
         GuardEnv {
             headless,
             project_dir: std::env::var("CLAUDE_PROJECT_DIR").ok().filter(|v| !v.is_empty()).map(PathBuf::from),
+            home: crate::machine::home(),
             claude_home: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).filter(|p| p.is_absolute()),
             claude_tmp: crate::machine::claude_tmp(),
-            temp: temp_roots(std::iter::once(std::env::temp_dir()).chain(cfg!(unix).then(|| PathBuf::from("/tmp"))), &home),
-            home,
+            temp: std::iter::once(std::env::temp_dir()).chain(cfg!(unix).then(|| PathBuf::from("/tmp"))).collect(),
         }
     }
 }
 
-/// The `roots` a delete may run strictly below: each an absolute folder that does not hold `home`.
-fn temp_roots(roots: impl IntoIterator<Item = PathBuf>, home: &Path) -> Vec<PathBuf> {
-    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_owned());
-    let home = real(home);
-    roots.into_iter().filter(|root| root.is_absolute() && !home.starts_with(real(root))).collect()
+/// The `roots` a delete may run strictly below: each an absolute folder that holds none of `keep`,
+/// in any case of its letters.
+fn temp_roots(roots: &[PathBuf], keep: &[&Path]) -> Vec<PathBuf> {
+    let real = |p: &Path| path_comps(&walk(p));
+    let keep: Vec<Vec<String>> = keep.iter().map(|p| real(p)).collect();
+    roots.iter().filter(|root| root.is_absolute() && !keep.iter().any(|kept| kept.starts_with(&real(root)))).cloned().collect()
 }
 
 /// Runs inside the hook process. Prints an ask or a deny, or nothing so the call runs as before.
@@ -104,7 +110,10 @@ pub fn decide(payload: &str, env: &GuardEnv) -> Option<String> {
     // A session id is one plain name; anything else would point the scratch folder elsewhere.
     let session = hook["session_id"].as_str().filter(|id| Path::new(id).components().eq([Component::Normal(id.as_ref())]));
     let scratch = session.map(|id| env.claude_tmp.join(crate::machine::claude_slug(&start)).join(id));
-    let ctx = AskCtx { worktree: &worktree, scratch: scratch.as_deref(), temp: &env.temp, home: &env.home, claude_home: env.claude_home.as_deref(), cwd: &cwd, default_branch: "main", current_branch: None };
+    let mut keep = vec![env.home.as_path(), &worktree, &start];
+    keep.extend(env.claude_home.as_deref());
+    let temp = temp_roots(&env.temp, &keep);
+    let ctx = AskCtx { worktree: &worktree, scratch: scratch.as_deref(), temp: &temp, home: &env.home, claude_home: env.claude_home.as_deref(), cwd: &cwd, default_branch: "main", current_branch: None };
     let label = match never(&ctx, &Ask::Bash { command }) {
         Some(hit) if matches!(hit.item, NeverItem::DeleteOutside | NeverItem::ForcePush) => hit.item.label(),
         _ if drops_database(command) => DROP_DATABASE,
@@ -296,6 +305,156 @@ mod tests {
         assert!(decide(&climbing, &f.env).is_some(), "a session id is no path");
     }
 
+    /// Each command asks the owner about a delete.
+    #[cfg(unix)]
+    fn asks(f: &Fx, env: &GuardEnv, commands: &[&str]) {
+        let asked = ("ask".to_owned(), "pinned holds this command for the owner (delete outside the worktree).".to_owned());
+        for command in commands {
+            let command = sub(f, command);
+            assert_eq!(held(decide(&bash(f, &command, Some("default")), env)), Some(asked.clone()), "{command}");
+        }
+    }
+
+    #[cfg(unix)]
+    fn runs(f: &Fx, env: &GuardEnv, commands: &[&str]) {
+        for command in commands {
+            let command = sub(f, command);
+            assert_eq!(decide(&bash(f, &command, Some("default")), env), None, "{command}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_git_rm_is_a_delete_in_the_repository_it_runs_in() {
+        let f = fx(false);
+        asks(&f, &f.env, &[
+            "cd {elsewhere} && git ls-files -z | xargs -0 git rm -q -f",
+            "cd {elsewhere} && env git rm -r -f .",
+            "git -C {elsewhere} rm -f x",
+            "cd {elsewhere} && git rm -q x",
+            "cd {elsewhere} && nice git rm -r .",
+            "cd \"$D\" && git rm -r .",
+            "env git --work-tree={elsewhere} --git-dir={elsewhere}/.git rm -r -f .",
+            "GIT_WORK_TREE={elsewhere} git rm -r .",
+            "sudo -g git rm -rf {home}",
+            "env -C {elsewhere} git rm -r -f sub",
+            "env --chdir={elsewhere} git rm -r -f sub",
+        ]);
+        runs(&f, &f.env, &[
+            "git ls-files -z | xargs -0 git rm -q -f",
+            "git rm -q old.rs",
+            "cd sub && env git rm -r old",
+            "git -C {work} rm -f x",
+            "git rm -q \"$f\"",
+        ]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_temp_delete_is_held_when_its_line_can_make_or_move_a_link() {
+        let f = fx(false);
+        asks(&f, &f.env, &[
+            "ln -s {home} {tmp}/x/a && rm -rf {tmp}/x/a/*",
+            "ln -s {work}/sub {tmp}/x/a && rm -rf {tmp}/x/a/*",
+            "rm -rf {tmp}/x/a/*; ln -s {work}/sub {tmp}/x/a",
+            "mv sub {tmp}/x/m && rm -rf {tmp}/x/m",
+            "cp -R sub {tmp}/x/c && rm -rf {tmp}/x/c",
+            "install -d {tmp}/x/i && rm -rf {tmp}/x/i",
+            "rsync -a sub/ {tmp}/x/r/ && rm -rf {tmp}/x/r",
+            "sh make.sh && rm -f {tmp}/x/b",
+            "bash make.sh; rm -f {tmp}/x/b",
+            "zsh make.sh && find {tmp}/x/b -delete",
+            "bash -c 'rm -rf {tmp}/x/b'",
+            "python make.py && rm -f {tmp}/x/b",
+            "python3.12 make.py && rm -f {tmp}/x/b",
+            "node make.js && rm -f {tmp}/x/b",
+            "perl make.pl && rm -f {tmp}/x/b",
+            "ruby make.rb && rm -f {tmp}/x/b",
+            "eval make && rm -f {tmp}/x/b",
+            "source env.sh && rm -f {tmp}/x/b",
+            ". env.sh && rm -f {tmp}/x/b",
+            "cd {tmp}/x && mv {work}/sub a && rm a*",
+        ]);
+        runs(&f, &f.env, &[
+            "ln -s sub link && rm -rf target",
+            "cp a b && rm -rf {scratch}/x",
+            "echo hi > {tmp}/x/log && rm -f {tmp}/x/log",
+        ]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_move_or_link_that_brings_outside_data_into_temp_is_held() {
+        let f = fx(false);
+        asks(&f, &f.env, &[
+            "mv {elsewhere} {tmp}/x/o",
+            "mv a {elsewhere}/b {tmp}/x",
+            "mv -t {tmp}/x {elsewhere}/f",
+            "ln -s {home} {tmp}/x/a",
+            "ln {elsewhere}/f {tmp}/x/h",
+            "ln -s ../../elsewhere {tmp}/x/a",
+            "cd {tmp}/x && ln -s {home}",
+            "mv {elsewhere} \"$TMPDIR/o\"",
+            "mv \"$d\" {tmp}/x/",
+            "echo {elsewhere} | xargs -I {} mv {} {tmp}/x/",
+            "mv {tmp}/pinned-1-a {tmp}/x/p",
+            "mv {tmp}/* {tmp}/x/",
+        ]);
+        runs(&f, &f.env, &[
+            "mv sub {tmp}/x/m",
+            "ln -s {work}/sub {tmp}/x/a",
+            "ln -s b {tmp}/x/a",
+            "mv {tmp}/x/a.log {tmp}/x/b.log",
+            "mv {tmp}/x/*.log {tmp}/x/old",
+            "mv {scratch}/a {tmp}/x/",
+            "mv -t {tmp}/x sub/a.log",
+            "mv a b",
+            "mv {elsewhere}/f {work}/",
+            "for f in *.js; do mv \"$f\" \"${f%.js}.ts\"; done",
+            "cp -R {elsewhere} {tmp}/x/copy",
+        ]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shred_never_takes_the_temp_allowance() {
+        let f = fx(false);
+        asks(&f, &f.env, &["shred -u {tmp}/x/a", "shred {tmp}/x/a", "find {tmp}/x -type f -exec shred -u {} +"]);
+        runs(&f, &f.env, &["shred -u secret.bin", "find {tmp}/x -type f -delete"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_temp_root_that_holds_the_worktree_or_the_claude_home_is_dropped() {
+        let f = fx(false);
+        std::fs::create_dir_all(f.temp.join("proj/wt/.git")).unwrap();
+        // `TMPDIR` is the folder that holds the worktree.
+        let worktree = GuardEnv { project_dir: Some(f.temp.join("proj/wt")), temp: vec![f.temp.join("proj")], ..f.env.clone() };
+        asks(&f, &worktree, &["rm -rf {tmp}/proj/other"]);
+        let claude = GuardEnv { claude_home: Some(f.temp.join("accounts/claude")), ..f.env.clone() };
+        asks(&f, &claude, &["rm -f {tmp}/x/a.log"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_relative_glob_in_a_temp_root_is_held() {
+        let f = fx(false);
+        asks(&f, &f.env, &[
+            "cd {tmp} && rm -f pinned*",
+            "cd {tmp} && rm pinned*",
+            "cd {tmp} && find pinned* -delete",
+            "cd {tmp}/claude-501 && rm x*",
+            "cd {tmp}/x && find .* -delete",
+            "cd {tmp}/x && shred *",
+        ]);
+        runs(&f, &f.env, &["cd {tmp}/x && rm *.log", "rm *.log"]);
+        // Claude Code's scratchpads sit in a temp folder, and the session's own still counts as inside.
+        let claude_tmp = f.temp.join("claude-501");
+        let own = claude_tmp.join(crate::machine::claude_slug(&f.work)).join("s1");
+        let env = GuardEnv { claude_tmp, ..f.env.clone() };
+        runs(&f, &env, &[&format!("cd {} && rm *.o", own.display())]);
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_worker_cleans_temp_files_and_the_rest_stays_held() {
@@ -336,15 +495,10 @@ mod tests {
         let nested = GuardEnv { temp: vec![f.temp.join("claude-501"), f.temp.clone()], ..f.env.clone() };
         let command = sub(&f, "rm -rf {tmp}/claude-501/s2");
         assert_eq!(held(decide(&bash(&f, &command, Some("default")), &nested)), Some(asked.clone()), "{command}");
-        // A worktree under a temp root: what holds it stays held.
+        // A worktree under a temp root: nothing under that root is a temp file.
         std::fs::create_dir_all(f.temp.join("proj/wt/.git")).unwrap();
         let inside = GuardEnv { project_dir: Some(f.temp.join("proj/wt")), ..f.env.clone() };
-        for command in ["rm -rf {tmp}/proj", "rm -rf {tmp}/proj/*"] {
-            let command = sub(&f, command);
-            assert_eq!(held(decide(&bash(&f, &command, Some("default")), &inside)), Some(asked.clone()), "{command}");
-        }
-        let command = sub(&f, "rm -rf {tmp}/proj/other");
-        assert_eq!(decide(&bash(&f, &command, Some("default")), &inside), None, "{command}");
+        asks(&f, &inside, &["rm -rf {tmp}/proj", "rm -rf {tmp}/proj/*", "rm -rf {tmp}/proj/other"]);
     }
 
     #[test]
@@ -352,7 +506,7 @@ mod tests {
         let f = fx(false);
         let above_home = f.home.parent().unwrap().to_owned();
         let roots = [f.temp.clone(), above_home, f.home.clone(), PathBuf::from("tmp")];
-        assert_eq!(temp_roots(roots, &f.home), [f.temp]);
+        assert_eq!(temp_roots(&roots, &[&f.home]), [f.temp]);
     }
 
     #[test]
