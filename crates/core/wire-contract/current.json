@@ -28092,6 +28092,33 @@
                   }
                 ]
               },
+              "turns": {
+                "description": "How many turns the conversation finished, once its transcript logged one.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tokens_in": {
+                "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
               "branch": {
                 "description": "The git branch of the conversation's last message.",
                 "type": [
@@ -38779,6 +38806,33 @@
                     "type": "null"
                   }
                 ]
+              },
+              "turns": {
+                "description": "How many turns the conversation finished, once its transcript logged one.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tokens_in": {
+                "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
               },
               "branch": {
                 "description": "The git branch of the conversation's last message.",
@@ -66627,6 +66681,33 @@
               }
             ]
           },
+          "turns": {
+            "description": "How many turns the conversation finished, once its transcript logged one.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          },
+          "tokens_in": {
+            "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "tokens_out": {
+            "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
           "branch": {
             "description": "The git branch of the conversation's last message.",
             "type": [
@@ -67265,6 +67346,33 @@
                 "type": "null"
               }
             ]
+          },
+          "turns": {
+            "description": "How many turns the conversation finished, once its transcript logged one.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          },
+          "tokens_in": {
+            "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "tokens_out": {
+            "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
           },
           "branch": {
             "description": "The git branch of the conversation's last message.",
@@ -71970,6 +72078,33 @@
                     "type": "null"
                   }
                 ]
+              },
+              "turns": {
+                "description": "How many turns the conversation finished, once its transcript logged one.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tokens_in": {
+                "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
               },
               "branch": {
                 "description": "The git branch of the conversation's last message.",
@@ -76875,6 +77010,33 @@
                     "type": "null"
                   }
                 ]
+              },
+              "turns": {
+                "description": "How many turns the conversation finished, once its transcript logged one.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tokens_in": {
+                "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
               },
               "branch": {
                 "description": "The git branch of the conversation's last message.",

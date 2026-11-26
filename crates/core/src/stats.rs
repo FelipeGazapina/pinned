@@ -1,6 +1,7 @@
+use crate::usage::{self, MessageId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 
@@ -31,6 +32,12 @@ pub struct Tally {
     pub costs: BTreeMap<u64, f64>,
     pub active_ms: u64,
     pub turns: u32,
+    /// Each message's token counts so far, by id and request, so a message counts once however
+    /// many lines repeat it (`usage::add_line`).
+    seen: HashMap<MessageId, ((), [u64; 5])>,
+    /// The tokens of the messages counted: input, cache reads, 5-minute and 1-hour cache writes,
+    /// and output. Empty until a message with usage was read.
+    tokens: HashMap<(), [u64; 5]>,
     /// The git branch of the conversation's last message.
     pub branch: Option<String>,
     /// The last pull request the conversation opened or worked on.
@@ -91,6 +98,9 @@ impl Tally {
     pub fn scan(&mut self, bytes: &[u8]) {
         let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
         for raw in bytes[..whole].split(|b| *b == b'\n') {
+            if let Some((id, _, tokens)) = usage::counted_message(raw) {
+                usage::add_line(&mut self.seen, &mut self.tokens, id, (), tokens.counts());
+            }
             let Ok(line) = serde_json::from_slice::<Line>(raw) else { continue };
             match (line.kind.as_deref(), line.subtype.as_deref()) {
                 (Some("cost-state"), _) => {
@@ -134,6 +144,12 @@ impl Tally {
             cost_usd: (!self.costs.is_empty()).then(|| self.costs.values().sum()),
         }
     }
+
+    /// The tokens in and out of the messages counted so far, as `usage::TaskUsage` counts them:
+    /// input, cache reads and cache writes in, output out. `None` until a message with usage was read.
+    pub fn tokens(&self) -> Option<(u64, u64)> {
+        self.tokens.get(&()).map(|[input, cached, five, hour, output]| (input + cached + five + hour, *output))
+    }
 }
 
 /// The title of the prompt on a user line, as the thread shows that prompt: `None` when the line
@@ -161,6 +177,19 @@ mod tests {
     const COST_A3: &str = r#"{"type":"cost-state","sessionId":"s","startTime":100,"totalCostUSD":1.0,"hasUnknownModelCost":false}"#;
     const TURN_60S: &str = r#"{"type":"system","subtype":"turn_duration","durationMs":60000,"uuid":"t1"}"#;
     const TURN_90S: &str = r#"{"type":"system","subtype":"turn_duration","durationMs":90000,"uuid":"t2"}"#;
+    const OPUS: &str = "claude-opus-5-5";
+    /// Tokens in of one `reply`: 5 input, 300 cache reads, 40 5-minute and 2 1-hour cache writes.
+    const IN: u64 = 347;
+
+    /// An assistant line of message `id` in request `request`, which used `IN` tokens in and `output` out.
+    fn reply(id: &str, request: &str, model: &str, output: u64) -> String {
+        serde_json::json!({
+            "type": "assistant", "isSidechain": false, "requestId": request, "timestamp": "2026-11-09T12:10:00.000Z",
+            "message": { "id": id, "model": model, "role": "assistant", "content": [{ "type": "text", "text": "ok" }],
+                "usage": { "input_tokens": 5, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 42, "cache_creation": { "ephemeral_5m_input_tokens": 40, "ephemeral_1h_input_tokens": 2 }, "output_tokens": output } },
+        })
+        .to_string()
+    }
 
     fn tally_of(lines: &[&str]) -> Tally {
         let mut t = Tally::default();
@@ -237,6 +266,63 @@ mod tests {
         assert_eq!(t.pr, Some(PrLink { number: 92, url: "https://github.com/o/app/pull/92".into() }));
         assert_eq!(t.last_at, Some(1794226200));
         assert_eq!(t.stats(), ThreadStats { active_ms: None, cost_usd: Some(0.25) });
+    }
+
+    #[test]
+    fn tokens_in_are_input_cache_reads_and_cache_writes_and_tokens_out_are_output() {
+        let t = tally_of(&[&reply("m1", "r1", OPUS, 7), &reply("m2", "r2", OPUS, 30)]);
+        assert_eq!(t.tokens(), Some((2 * IN, 37)));
+    }
+
+    #[test]
+    fn a_message_repeated_over_several_lines_counts_once_at_its_largest() {
+        let t = tally_of(&[&reply("m1", "r1", OPUS, 1), &reply("m1", "r1", OPUS, 40), &reply("m1", "r1", OPUS, 12)]);
+        assert_eq!(t.tokens(), Some((IN, 40)));
+    }
+
+    #[test]
+    fn every_claude_process_in_the_transcript_adds_its_messages_and_a_copied_one_adds_nothing() {
+        let t = tally_of(&[COST_A1, &reply("m1", "r1", OPUS, 10), COST_B1, &reply("m1", "r1", OPUS, 10), &reply("m2", "r2", OPUS, 20)]);
+        assert_eq!(t.tokens(), Some((2 * IN, 30)));
+        assert_eq!(t.stats(), ThreadStats { active_ms: None, cost_usd: Some(2.25) });
+    }
+
+    #[test]
+    fn synthetic_and_model_less_lines_add_no_tokens() {
+        let no_model = r#"{"type":"assistant","requestId":"r4","message":{"id":"m4","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+        let user = r#"{"type":"user","requestId":"r6","message":{"id":"m6","model":"claude-opus-5-5","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+        let ignored = [reply("m3", "r3", "<synthetic>", 99), reply("m5", "r5", "", 99), no_model.into(), user.into()];
+        assert_eq!(tally_of(&ignored.iter().map(String::as_str).collect::<Vec<_>>()).tokens(), None);
+        let counted = reply("m1", "r1", OPUS, 10);
+        assert_eq!(tally_of(&[&ignored[0], &counted, &ignored[2]]).tokens(), Some((IN, 10)));
+    }
+
+    #[test]
+    fn turns_count_each_turn_duration() {
+        let t = tally_of(&[TURN_60S, &reply("m1", "r1", OPUS, 10), TURN_90S]);
+        assert_eq!(t.turns, 2);
+    }
+
+    #[test]
+    fn a_transcript_with_no_usage_has_no_tokens() {
+        assert_eq!(tally_of(&[COST_A1, TURN_60S]).tokens(), None);
+        assert_eq!(Tally::default().tokens(), None);
+    }
+
+    #[test]
+    fn advance_counts_the_tokens_a_file_gained_after_a_partial_line() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let (first, second) = (reply("m1", "r1", OPUS, 10), reply("m2", "r2", OPUS, 20));
+        write!(file, "{first}\n{}", &second[..40]).unwrap();
+        let mut t = Tally::default();
+        t.advance(file.path()).unwrap();
+        assert_eq!(t.tokens(), Some((IN, 10)));
+
+        writeln!(file, "{}", &second[40..]).unwrap();
+        t.advance(file.path()).unwrap();
+        assert_eq!(t.tokens(), Some((2 * IN, 30)));
+        t.advance(file.path()).unwrap();
+        assert_eq!(t.tokens(), Some((2 * IN, 30)), "nothing new adds nothing");
     }
 
     #[test]
