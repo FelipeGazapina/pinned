@@ -998,6 +998,7 @@ impl Delegates {
                 });
                 with_moved(&mut body, task);
                 with_placement(&mut body, task);
+                with_profile(&mut body, task);
                 body
             }
         };
@@ -1810,6 +1811,7 @@ fn status_json(task: &Task) -> Value {
     }
     with_moved(&mut body, task);
     with_placement(&mut body, task);
+    with_profile(&mut body, task);
     if let Some(review) = &task.review {
         body["review"] = json!(review);
     }
@@ -1859,6 +1861,13 @@ fn with_moved(body: &mut Value, task: &Task) {
 fn with_placement(body: &mut Value, task: &Task) {
     if let Some(placed) = &task.placement {
         body["placement"] = json!(placed);
+    }
+}
+
+/// Names the worker profile the task runs as.
+fn with_profile(body: &mut Value, task: &Task) {
+    if let Some(profile) = &task.profile {
+        body["profile"] = json!(profile);
     }
 }
 

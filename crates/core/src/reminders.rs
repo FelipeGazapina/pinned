@@ -568,6 +568,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 25] {
                     "args": { "type": "object", "description": "The action's arguments, as its args schema in actions describes them." },
                     "request_id": { "type": "string", "description": "A new id per act, such as a UUID. Repeating it answers the first outcome instead of running again." },
                     "machine": { "type": "string", "description": "For an action on a machine: the machine's id or name from machines, when it is not this session's own." },
+                    "reason": { "type": "string", "description": "For a confirm action: one short sentence, up to 200 characters, on why you ask. The user reads it before approving." },
                 },
                 "required": ["action"],
             },
@@ -1191,6 +1192,7 @@ mod tests {
                 "limitMs".into(),
                 "mode".into(),
                 "planStep".into(),
+                "profile".into(),
                 "role".into(),
                 "runtimeMode".into(),
                 "target".into(),
@@ -1506,7 +1508,7 @@ fn restore_var(name: &str, value: Option<String>) {
     #[test]
     fn the_taste_tools_offer_no_review_setting() {
         let taste = |name: &str| project_tools().into_iter().find(|(audience, tool)| *audience == Audience::TasteChat && tool["name"] == name).unwrap().1;
-        let owners = ["review_diffs", "second_opinion", "escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas", "manage_only"];
+        let owners = ["review_diffs", "second_opinion", "escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas", "manage_only", "claude_memory", "worker_claude_memory"];
         let set = taste("taste_set");
         let patch = set["inputSchema"]["properties"]["patch"]["properties"].as_object().unwrap();
         assert!(!owners.iter().any(|name| patch.contains_key(*name)), "taste_set still offers a review setting: {set}");

@@ -15,7 +15,7 @@ const ORCHESTRATOR_PROMPT: &str = "You are this project's Capitão in pinned: th
 const WORKER_PROMPT: &str = "You are a worker in pinned, started by another session of this project. Do the task you were given fully and verify it. Stay within your granted tools when the brief names any; when you need more, say NEEDS followed by the tools and keep working with what you have. An explore-only brief means investigate and report, changing nothing. When a part of the task stands on its own, you may hand it to a worker of your own with the delegate_task tool: you get a message when it finishes or needs input, and agents lists your workers. End with a concise report of what changed and how you verified it, which the session that started you reads. Save durable facts about the project you learn with memory_save. Never reply with only \"ok\": reply once your answer is final, and say what you did or found. Name a task or a file instead of pasting its contents. Never give rm a path built from $(…) or backticks: run the command first, then rm the literal paths it prints. When your brief seats you in a room, speak with room_post, catch up with room_read, and finish with room_done and a short summary. A reply that stays only in this session is invisible to the room. End your turn after you post. The next messages arrive on their own. Do not poll.";
 /// The Captain's line on doing a task itself, which a manage-only session replaces.
 const STEP_IN: &str = "Step in and do the task yourself only when reassigning won't fix it, and say so when you do.";
-const MANAGE_ONLY_LINE: &str = "This session is manage-only: pinned started it without the Edit, Write and NotebookEdit tools, so you cannot edit files. Re-brief or reassign a stuck or failed worker; never take its task over yourself.";
+const MANAGE_ONLY_LINE: &str = "This session is manage-only: pinned started it without the Edit, Write and NotebookEdit tools, so you cannot edit files. Your tools are for reading and checking a worker's result: use Bash only to read, run tests and checks, and merge (git log, git diff, gh, cargo test, node --test), never to write or change a file (no sed -i, no redirect into a file, no heredoc into a file, no tee, no git commit). Re-brief or reassign a stuck or failed worker; never take its task over yourself.";
 /// The tools a Captain starts without when its project's Manage only is on.
 pub const MANAGE_ONLY_TOOLS: [&str; 3] = ["Edit", "Write", "NotebookEdit"];
 /// U8's reviewer, which `Machine::review_turn_end` starts on a worker's change.
@@ -221,6 +221,9 @@ pub enum ProjectTool {
         request_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         machine: Option<String>,
+        /// Why the session asks, for an act held for the owner.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 }
 /// Set to `1` in the environment of a worker box's node, by the box's `box.env`.
@@ -680,7 +683,7 @@ mod tests {
     #[test]
     fn the_manage_only_captain_prompt_trades_stepping_in_for_reassigning() {
         let prompt = manage_only_prompt();
-        let line = "This session is manage-only: pinned started it without the Edit, Write and NotebookEdit tools, so you cannot edit files. Re-brief or reassign a stuck or failed worker; never take its task over yourself.";
+        let line = "This session is manage-only: pinned started it without the Edit, Write and NotebookEdit tools, so you cannot edit files. Your tools are for reading and checking a worker's result: use Bash only to read, run tests and checks, and merge (git log, git diff, gh, cargo test, node --test), never to write or change a file (no sed -i, no redirect into a file, no heredoc into a file, no tee, no git commit). Re-brief or reassign a stuck or failed worker; never take its task over yourself.";
         assert_eq!(prompt.matches(line).count(), 1, "{prompt}");
         assert!(!prompt.contains("Step in and do the task yourself"), "{prompt}");
         assert!(prompt.ends_with(&format!("propose a test or a repo rule that stops it happening again. {PLAN_PARAGRAPH}")), "{prompt}");

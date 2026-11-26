@@ -2303,11 +2303,16 @@ impl Machine {
         [self.accounts.env(account), env].concat()
     }
 
-    /// What a headless delegate driver starts with: its account's env, pinned's socket and its task.
-    fn delegate_env(&self, account: &Account, task: &str) -> ChildEnv<'static> {
+    /// What a headless delegate driver starts with: its account's env, pinned's socket and its task,
+    /// and, for a Claude Code worker whose project turned Claude Code's memory off, the variable
+    /// that does it.
+    fn delegate_env(&self, account: &Account, task: &str, claude_memory: bool) -> ChildEnv<'static> {
         let mut env = self.accounts.env(account);
         env.push((SOCK_ENV.to_owned(), self.launch.sock.display().to_string()));
         env.push((TASK_ENV.to_owned(), task.to_owned()));
+        if !claude_memory && account.provider == Provider::Claude {
+            env.push((AUTO_MEMORY_OFF.0.to_owned(), AUTO_MEMORY_OFF.1.to_owned()));
+        }
         let strip: &'static [&'static str] = if account.auth == Auth::OpenCodeGo { &crate::opencode_go::STRIP_ENV } else { &[] };
         ChildEnv::new(strip, env)
     }
@@ -2772,7 +2777,9 @@ impl Machine {
         let Some((fresh, orchestrates)) = starting else {
             return self.tab(tab, |t| t.cwd.display().to_string());
         };
-        let tastes = (fresh.is_some() || orchestrates).then(|| self.tastes());
+        // A worker's start reads its project's Claude Code memory switch too.
+        let reads_memory = self.tab(tab, |t| t.program == Program::Agent && t.account.provider == Provider::Claude && role_of(&t.env).is_some_and(|(role, _)| role != Role::Orchestrator))?;
+        let tastes = (fresh.is_some() || orchestrates || reads_memory).then(|| self.tastes());
         let defaults = fresh.zip(tastes.as_ref()).map(|((account, cwd), tastes)| self.session_defaults(tastes, &account, &cwd));
         let mut dropped = None;
         let prepared = self.tab(tab, |t| {
@@ -2860,11 +2867,14 @@ impl Machine {
             args.extend(["--append-system-prompt".to_owned(), prompt.join("\n\n")]);
         }
         self.save_sessions();
-        let env = self.launch_env(&account, env);
+        let first_run = program == Program::Agent && account.provider == Provider::Claude;
+        let mut env = self.launch_env(&account, env);
+        if first_run && !tastes.as_ref().map_or(true, |tastes| claude_memory_on(tastes, &env, &cwd)) {
+            env.push((AUTO_MEMORY_OFF.0.to_owned(), AUTO_MEMORY_OFF.1.to_owned()));
+        }
         let plugin_dirs = self.shared_plugin_dirs(&account);
         let mcp = if program == Program::Agent { self.session_mcp(&account, &cwd) } else { None };
         let own_settings = self.launch.session_settings(program, &account, &cwd, &args, &env);
-        let first_run = program == Program::Agent && account.provider == Provider::Claude;
         if first_run {
             self.seed_first_run(&account, &cwd);
         }
@@ -4338,8 +4348,8 @@ impl Machine {
             ProjectTool::MemorySetWeight { id, weight } => self.memories.set_weight(&self.project_of_tab(tab)?, id, weight).map(|m| format!("Set the weight of #{} {} to {}.", m.id, pinned_lines::quoted(&m.title, memory::MEMORY_TITLE_CHARS), m.weight)),
             ProjectTool::Actions { search } => text_json(json!({ "actions": surface::listing(search.as_deref()) })),
             ProjectTool::Convex { ask } => self.convex(tab, ask),
-            ProjectTool::Act { action, args, request_id, machine } => {
-                let act = surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine };
+            ProjectTool::Act { action, args, request_id, machine, reason } => {
+                let act = surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine, reason };
                 match self.call_hub(HubCall::Act { act }) {
                     Ok(answer) => text_json(answer),
                     Err(e) => Err(Self::why_no_hub(&e).map_or(e, |why| format!("{why}, and act writes its audit trail there"))),
@@ -5925,6 +5935,8 @@ impl Machine {
         self.delegates.describe(&task.id, delegator.clone(), effort);
         self.delegates.note_parent(&task.id, session);
         self.delegates.set_remote(&task.id, RemoteTarget { machine: String::new(), name: place, tab: None, looked: None, waiting: None });
+        // The request already carries what its profile set, and an older machine refuses a name.
+        request.profile = None;
         let asked = HubCall::Delegate { tab: tab.clone(), task: task.id.clone(), request: Box::new(request), repo, access: ceiling, delegator, limits: held };
         let begun = Instant::now();
         match self.call_hub(asked.clone()) {
@@ -6686,7 +6698,8 @@ impl Machine {
                 reminders: self.launch.reminders,
             },
         );
-        let child = self.delegate_env(&account, &task.id);
+        let claude_memory = account.provider != Provider::Claude || self.tastes().resolve(&captain_scope(&history::project_of(&cwd))).worker_claude_memory;
+        let child = self.delegate_env(&account, &task.id, claude_memory);
         let id = task.id.clone();
         let me = self.me.clone();
         let path_env = self.launch.path_env.clone();
@@ -8570,6 +8583,24 @@ fn names_account(model: &taste::ModelRef, account: &Account) -> bool {
 
 /// The taste a Capitão in `folder` follows: its project's, or every Capitão's when the folder has
 /// no origin to name the project by.
+/// The variable that turns Claude Code's own auto-memory off: its `MEMORY.md` index and the
+/// section of its system prompt that carries it. pinned never sets it to anything but 1.
+const AUTO_MEMORY_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
+
+/// Whether a Claude Code session with `env` in `cwd` keeps Claude Code's auto-memory, by the
+/// switch of its role: the global Orchestrator's own scope, a Captain's project, or the project
+/// of a worker or reviewer. A session with no role keeps it.
+fn claude_memory_on(tastes: &Tastes, env: &[(String, String)], cwd: &Path) -> bool {
+    if global::is_global(env) {
+        return tastes.orchestrator.claude_memory;
+    }
+    match role_of(env) {
+        Some((Role::Orchestrator, _)) => tastes.resolve(&captain_scope(cwd)).claude_memory,
+        Some((Role::Worker | Role::Reviewer, project)) => tastes.resolve(&captain_scope(&project)).worker_claude_memory,
+        None => true,
+    }
+}
+
 fn captain_scope(folder: &Path) -> TasteScope {
     git_remote(folder).and_then(|remote| repo_key(&remote)).map_or(TasteScope::Captains, |repo| TasteScope::Project { repo })
 }
@@ -11192,7 +11223,7 @@ pub(crate) mod tests {
     #[test]
     fn a_headless_delegate_starts_only_with_what_its_kind_sets() {
         let m = machine();
-        assert_starts_with_only(&m.delegate_env(&Account::builtin(Provider::Cursor), "task-9"), &[("PINNED_ACCOUNT", "cursor"), ("PINNED_SOCK", "k"), ("PINNED_TASK", "task-9")]);
+        assert_starts_with_only(&m.delegate_env(&Account::builtin(Provider::Cursor), "task-9", true), &[("PINNED_ACCOUNT", "cursor"), ("PINNED_SOCK", "k"), ("PINNED_TASK", "task-9")]);
     }
 
     #[test]
@@ -11711,7 +11742,7 @@ pub(crate) mod tests {
         assert_eq!(go_settings(&m.accounts.child_env(&claude).of(&parent)), BTreeMap::new(), "the status probe");
         assert_eq!(go_settings(&ChildEnv::none().of(&parent)), BTreeMap::new(), "the limits probe");
         assert_eq!(go_settings(&crate::setup_token::child_env(&m.accounts.env(&claude)).of(&parent)), BTreeMap::new(), "setup-token");
-        assert_eq!(go_settings(&m.delegate_env(&claude, "task-1").of(&parent)), BTreeMap::new(), "a delegate driver");
+        assert_eq!(go_settings(&m.delegate_env(&claude, "task-1", true).of(&parent)), BTreeMap::new(), "a delegate driver");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -13118,7 +13149,7 @@ exec sleep 30
     fn a_model_claudes_menu_adds_reaches_the_picker_and_delegate_task_and_outlives_a_restart() {
         let dir = std::env::temp_dir().join(format!("pinned-model-menu-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/web-sweep/screens/claude-2.1.321-model-menu.txt")).unwrap();
+        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-screens/claude-2.1.321-model-menu.txt")).unwrap();
         let lines: Vec<String> = menu.replace("Fable 5.2", "Fable 5.3").lines().map(String::from).collect();
         let picker = |m: &Machine| -> Vec<String> {
             let accounts = m.call(Call::ListAccounts).unwrap();
@@ -13769,8 +13800,16 @@ while True:
         claude
     }
 
+    /// A taste file that turns Manage only off for the Captains, for a test whose Captain keeps the
+    /// file-editing tools. Manage only is on by default.
     #[cfg(unix)]
-    fn started(claude: &Path, tab: &str) -> Vec<String> {
+    fn captains_may_edit(config: &Path) {
+        std::fs::create_dir_all(config).unwrap();
+        std::fs::write(config.join("taste.json"), json!({ "captains": { "manage_only": false } }).to_string()).unwrap();
+    }
+
+    #[cfg(unix)]
+    pub(super) fn started(claude: &Path, tab: &str) -> Vec<String> {
         let file = PathBuf::from(format!("{}.{tab}", claude.display()));
         wait_for("claude to start", || file.exists());
         let text = std::fs::read_to_string(&file).unwrap();
@@ -14344,6 +14383,7 @@ while True:
     fn a_stopped_capitao_starts_on_the_message_and_one_without_a_conversation_restarts_on_it() {
         let dir = temp("enqueue-start");
         let (project, config) = (dir.join("site"), dir.join("config"));
+        captains_may_edit(&config);
         std::fs::create_dir_all(&project).unwrap();
         let claude = recording_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
@@ -14372,6 +14412,7 @@ while True:
     fn a_restored_capitao_resumes_its_conversation_on_the_message() {
         let dir = temp("enqueue-resume");
         let (project, config) = (dir.join("site"), dir.join("config"));
+        captains_may_edit(&config);
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&config).unwrap();
         let path = project.display().to_string();
@@ -15279,6 +15320,7 @@ while True:
     #[cfg(unix)]
     fn with_auto_merge_on_a_capitao_and_the_global_orchestrator_hear_the_approval_profile() {
         let dir = temp("auto-merge");
+        captains_may_edit(&dir.join("config"));
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
         let claude = recording_claude(&dir);
@@ -15348,6 +15390,7 @@ while True:
     #[cfg(unix)]
     fn an_orchestrator_cannot_edit_and_starts_with_one_prompt() {
         let dir = temp("orchestrator-args");
+        captains_may_edit(&dir.join("config"));
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(dir.join("config")).unwrap();
@@ -15379,6 +15422,7 @@ while True:
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config.clone()), None, |_| {});
         let account = json!({
             "orchestrator": { "strategy": "strongest_first", "ladder": [{ "model": "claude-opus-5-5" }], "parallel": 6, "autonomy": "report_at_end", "review_diffs": false, "second_opinion": true },
+            "captains": { "manage_only": false },
             "projects": { "github.com/acme/site": { "parallel": 4, "autonomy": "report_at_end", "context": ["Deploys go through the VPS."], "tier": "mid", "budget_cents": 200 } },
         });
         let asked = Arc::new(AtomicU32::new(0));
@@ -15434,13 +15478,13 @@ Have another model review a risky change before it goes ahead.";
         }
         let claude = recording_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
-        let answer = Arc::new(Mutex::new(json!({ "projects": { "github.com/acme/site": { "manage_only": true } } })));
+        let answer = Arc::new(Mutex::new(json!({ "captains": { "manage_only": false }, "projects": { "github.com/acme/site": { "manage_only": true } } })));
         let current = answer.clone();
         m.set_hub(Arc::new(move |call| match call {
             HubCall::GetTastes => Ok(current.lock().unwrap().clone()),
             _ => Err("not this test's".into()),
         }));
-        let line = "This session is manage-only: pinned started it without the Edit, Write and NotebookEdit tools, so you cannot edit files. Re-brief or reassign a stuck or failed worker; never take its task over yourself.";
+        let line = "This session is manage-only: pinned started it without the Edit, Write and NotebookEdit tools, so you cannot edit files. Your tools are for reading and checking a worker's result: use Bash only to read, run tests and checks, and merge (git log, git diff, gh, cargo test, node --test), never to write or change a file (no sed -i, no redirect into a file, no heredoc into a file, no tee, no git commit). Re-brief or reassign a stuck or failed worker; never take its task over yourself.";
         let step_in = "Step in and do the task yourself";
         let refuses = |args: &[String]| args.windows(5).any(|w| w == ["--disallowedTools", "Edit", "Write", "NotebookEdit", "--append-system-prompt"]);
         let open = |repo: &Path| m.call(Call::OpenOrchestrator { path: repo.display().to_string() }).unwrap().as_str().unwrap().to_owned();
@@ -15470,6 +15514,93 @@ Have another model review a risky change before it goes ahead.";
         m.start_claude(&global_tab, 80, 24).unwrap();
         let args = started(&claude, &global_tab);
         assert!(!args.iter().any(|a| a == "--disallowedTools" || a.contains(line)), "{args:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A `claude` that writes whether `CLAUDE_CODE_DISABLE_AUTO_MEMORY` reached it, to a file named for its tab.
+    #[cfg(unix)]
+    fn memory_claude(dir: &Path) -> PathBuf {
+        let claude = dir.join("claude");
+        let script = "#!/bin/sh\nprintf '%s' \"${CLAUDE_CODE_DISABLE_AUTO_MEMORY-unset}\" > \"$0.mem.tmp.$PINNED_TAB\" && mv \"$0.mem.tmp.$PINNED_TAB\" \"$0.mem.$PINNED_TAB\"\nexec sleep 30\n";
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    /// What `CLAUDE_CODE_DISABLE_AUTO_MEMORY` was in the session `tab` started, "unset" when it was not there.
+    #[cfg(unix)]
+    fn memory_var(claude: &Path, tab: &str) -> String {
+        let file = PathBuf::from(format!("{}.mem.{tab}", claude.display()));
+        wait_for("claude to start", || file.exists());
+        let text = std::fs::read_to_string(&file).unwrap();
+        let _ = std::fs::remove_file(file);
+        text
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_session_starts_without_claude_codes_memory_when_its_roles_switch_is_off() {
+        let dir = temp("claude-memory");
+        let (site, api) = (dir.join("site"), dir.join("api"));
+        for (repo, name) in [(&site, "site"), (&api, "api")] {
+            std::fs::create_dir_all(repo).unwrap();
+            git(repo, &["init", "-q"]);
+            git(repo, &["remote", "add", "origin", &format!("git@github.com:acme/{name}.git")]);
+        }
+        let claude = memory_claude(&dir);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let answer = Arc::new(Mutex::new(json!({})));
+        let current = answer.clone();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::GetTastes => Ok(current.lock().unwrap().clone()),
+            _ => Err("not this test's".into()),
+        }));
+        let open = |repo: &Path| m.call(Call::OpenOrchestrator { path: repo.display().to_string() }).unwrap().as_str().unwrap().to_owned();
+        let worker = |repo: &Path| m.add_tab(repo.to_owned(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, repo), false, None);
+        // Every start is a relaunch of the tab, a fresh worker's too.
+        let var = |tab: &str| {
+            m.relaunch(tab, 80, 24).unwrap();
+            memory_var(&claude, tab)
+        };
+        let (site_captain, api_captain) = (open(&site), open(&api));
+        let global = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
+
+        // The default changes nothing: pinned never sets the variable to 0 either.
+        assert_eq!([var(&site_captain), var(&worker(&site)), var(&global)], ["unset", "unset", "unset"]);
+
+        // A project's Captain switch reaches its Captain, a resumed one too, and no one else.
+        *answer.lock().unwrap() = json!({ "projects": { "github.com/acme/site": { "claude_memory": false } } });
+        assert_eq!(var(&site_captain), "1");
+        m.tab(&site_captain, |t| (t.claude_session, t.launch) = (Some("s1".into()), vec!["--resume".into(), "s1".into()])).unwrap();
+        assert_eq!(var(&site_captain), "1", "a resumed Captain");
+        assert_eq!([var(&api_captain), var(&worker(&site)), var(&worker(&api)), var(&global)], ["unset"; 4], "another project's Captain, any worker, and the global Orchestrator");
+
+        // A project's worker switch reaches its workers and not its Captain.
+        *answer.lock().unwrap() = json!({ "projects": { "github.com/acme/site": { "worker_claude_memory": false } } });
+        assert_eq!([var(&worker(&site)), var(&worker(&api)), var(&site_captain)], ["1", "unset", "unset"]);
+
+        // Captains (all) reaches a project that sets nothing, a project's own value beats it, and
+        // neither is the global Orchestrator's.
+        *answer.lock().unwrap() = json!({ "captains": { "claude_memory": false, "worker_claude_memory": false }, "projects": { "github.com/acme/site": { "claude_memory": true, "worker_claude_memory": true } } });
+        assert_eq!([var(&api_captain), var(&worker(&api)), var(&site_captain), var(&worker(&site)), var(&global)], ["1", "1", "unset", "unset", "unset"]);
+
+        // The orchestrator's scope is the global Orchestrator's own.
+        *answer.lock().unwrap() = json!({ "orchestrator": { "claude_memory": false } });
+        assert_eq!([var(&global), var(&api_captain), var(&worker(&api))], ["1", "unset", "unset"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_headless_claude_worker_gets_the_switch_off_and_no_other_driver_does() {
+        let dir = temp("claude-memory-headless");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let has = |env: ChildEnv<'static>| env.set.iter().any(|(k, _)| k == "CLAUDE_CODE_DISABLE_AUTO_MEMORY");
+        let value = |env: ChildEnv<'static>| env.set.into_iter().find(|(k, _)| k == "CLAUDE_CODE_DISABLE_AUTO_MEMORY").map(|(_, v)| v);
+        assert_eq!(value(m.delegate_env(&Account::builtin(Provider::Claude), "task-1", false)), Some("1".to_owned()));
+        assert!(!has(m.delegate_env(&Account::builtin(Provider::Claude), "task-1", true)), "left alone when on");
+        assert!(!has(m.delegate_env(&Account::builtin(Provider::Cursor), "task-1", false)), "a no-op for Cursor");
+        assert!(!has(m.delegate_env(&Account::builtin(Provider::Codex), "task-1", false)), "a no-op for Codex");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -15626,7 +15757,7 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2,"review_diffs":false,"second_opinion":true}"#), Err(both.into()));
         assert_eq!(tool(&chat, r#""name":"taste_reset","scope":"captains","field":"review_diffs""#), Err(one.into()));
         assert_eq!(tool(&chat, r#""name":"taste_reset","scope":"project:github.com/acme/site","field":"second_opinion""#), Err(other.into()));
-        for (name, value) in [("escalate_breaking_change", "false"), ("escalate_process_failure", "false"), ("escalate_over_lines", "750"), ("escalate_areas", r#"["Billing"]"#), ("manage_only", "true")] {
+        for (name, value) in [("escalate_breaking_change", "false"), ("escalate_process_failure", "false"), ("escalate_over_lines", "750"), ("escalate_areas", r#"["Billing"]"#), ("manage_only", "true"), ("claude_memory", "false"), ("worker_claude_memory", "false")] {
             let refused = Err(format!("{name} is changed only by the user, on the Way of working page; nothing changed"));
             for scope in ["captains", "project:github.com/acme/site"] {
                 assert_eq!(tool(&chat, &format!(r#""name":"taste_set","scope":"{scope}","patch":{{"{name}":{value}}}"#)), refused, "{name} alone on {scope}");
@@ -15641,7 +15772,8 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!((&got["effective"]["review_diffs"], &got["effective"]["second_opinion"]), (&json!(true), &json!(false)), "taste_get still shows both");
         let escalation = ["escalate_breaking_change", "escalate_process_failure", "escalate_over_lines", "escalate_areas"].map(|name| got["effective"][name].clone());
         assert_eq!(escalation, [json!(true), json!(true), json!(500), json!(["Release and version bumps", "CI and deploy config", "Sign-in, tokens and secrets"])], "taste_get shows the escalation settings");
-        assert_eq!(got["effective"]["manage_only"], json!(false), "taste_get shows Manage only");
+        assert_eq!(got["effective"]["manage_only"], json!(true), "taste_get shows Manage only, on by default");
+        assert_eq!((&got["effective"]["claude_memory"], &got["effective"]["worker_claude_memory"]), (&json!(true), &json!(true)), "taste_get shows the Claude Code memory switches");
         let set: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2}"#).unwrap()).unwrap();
         assert_eq!(set["effective"]["parallel"], json!(2), "a field the agent may change still changes");
 
@@ -15696,10 +15828,15 @@ Have another model review a risky change before it goes ahead.";
         let reset = m.reset_local_taste_field(&TasteScope::Captains, TasteField::EscalateAreas).unwrap();
         assert_eq!(reset.captains.escalate_areas.len(), 3, "the Captains get the default areas back");
 
-        let set = m.set_local_taste(&site, TastePatch { manage_only: Some(true), ..TastePatch::default() }).unwrap();
-        assert!(set.resolve(&site).manage_only, "the page's own set turns Manage only on");
+        let set = m.set_local_taste(&site, TastePatch { manage_only: Some(false), ..TastePatch::default() }).unwrap();
+        assert!(!set.resolve(&site).manage_only, "the page's own set turns Manage only off");
         let reset = m.reset_local_taste_field(&site, TasteField::ManageOnly).unwrap();
-        assert!(!reset.resolve(&site).manage_only, "a reset inherits the Captains' Manage only");
+        assert!(reset.resolve(&site).manage_only, "a reset inherits the Captains' Manage only, on by default");
+
+        let set = m.set_local_taste(&site, TastePatch { claude_memory: Some(false), worker_claude_memory: Some(false), ..TastePatch::default() }).unwrap().resolve(&site);
+        assert_eq!((set.claude_memory, set.worker_claude_memory), (false, false), "the page's own set turns both Claude Code memory switches off");
+        let reset = m.reset_local_taste_field(&site, TasteField::ClaudeMemory).unwrap().resolve(&site);
+        assert_eq!((reset.claude_memory, reset.worker_claude_memory), (true, false), "a reset inherits the Captains' switch and leaves the other");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -15732,6 +15869,7 @@ Have another model review a risky change before it goes ahead.";
     fn a_resumed_orchestrator_starts_with_its_role_again() {
         let dir = temp("orchestrator-resume");
         let (project, config) = (dir.join("app"), dir.join("config"));
+        captains_may_edit(&config);
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&config).unwrap();
         let path = project.display().to_string();
@@ -15998,7 +16136,7 @@ Have another model review a risky change before it goes ahead.";
     #[cfg(unix)]
     fn the_tier_cap_holds_a_model_claudes_menu_added_at_its_familys_tier() {
         let (m, dir, captain) = limited_captain("limits-learned", TastePatch { tier: Some(taste::Tier::Low), ..TastePatch::default() });
-        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/web-sweep/screens/claude-2.1.321-model-menu.txt")).unwrap();
+        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-screens/claude-2.1.321-model-menu.txt")).unwrap();
         let lines = menu.replace("Fable 5.2", "Fable 5.3").replace("Haiku 5.5", "Haiku 6").lines().map(String::from).collect();
         m.call(Call::LearnModelMenu { lines }).unwrap();
         assert_eq!(
@@ -19401,6 +19539,7 @@ Have another model review a risky change before it goes ahead.";
     fn a_global_orchestrators_name_with_brackets_and_a_line_break_leads_each_captain_line_cleaned() {
         let dir = temp("orchestrator-name-prompt");
         let (project, config) = (dir.join("site"), dir.join("config"));
+        captains_may_edit(&config);
         std::fs::create_dir_all(&project).unwrap();
         let claude = recording_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
@@ -20976,7 +21115,7 @@ Have another model review a risky change before it goes ahead.";
     /// A Captain on `m-book` (MacBook) in a project with a GitHub origin, whose account prefers
     /// `m-mini` for heavy work.
     #[cfg(unix)]
-    fn placing_captain(name: &str) -> (Arc<Machine>, PathBuf, String) {
+    pub(super) fn placing_captain(name: &str) -> (Arc<Machine>, PathBuf, String) {
         let policy = crate::placement::Placement { prefer: vec!["m-mini".into(), "m-vps".into()], ..Default::default() };
         let (m, dir, captain) = limited_captain(name, TastePatch { placement: Some(policy), ..TastePatch::default() });
         for args in [&["init", "-q"][..], &["remote", "add", "origin", "https://github.com/acme/app.git"]] {
@@ -20988,7 +21127,7 @@ Have another model review a risky change before it goes ahead.";
 
     /// A hub that answers each `Place` with the next of `answers` and starts a worker on any
     /// machine but those in `refuse`. Returns every call it saw.
-    fn placing_hub(m: &Machine, answers: Vec<Result<Value, String>>, refuse: &'static [&'static str]) -> Arc<Mutex<Vec<HubCall>>> {
+    pub(super) fn placing_hub(m: &Machine, answers: Vec<Result<Value, String>>, refuse: &'static [&'static str]) -> Arc<Mutex<Vec<HubCall>>> {
         let calls = Arc::new(Mutex::new(vec![]));
         let (seen, answers) = (calls.clone(), Mutex::new(answers.into_iter()));
         m.set_hub(Arc::new(move |call| {

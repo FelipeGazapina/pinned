@@ -135,6 +135,7 @@ pub fn owner_only(op: &Op, locked: bool) -> bool {
             | TeamOp::Projects
             | TeamOp::Groups
             | TeamOp::Bots
+            | TeamOp::BotWorkflow { .. }
             | TeamOp::Runs
             | TeamOp::Calls
             | TeamOp::GiveBack { .. }
@@ -189,6 +190,7 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
         TeamOp::JoinGroup { handle } => json(groups::join_group(hub, s, &handle).await?),
         TeamOp::LeaveGroup { handle } => json(groups::leave_group(hub, s, &handle).await?),
         TeamOp::Bots => json(bots::bots(hub, s).await?),
+        TeamOp::BotWorkflow { workflow } => json(bots::bot_workflow(hub, s, &workflow).await?),
         TeamOp::SaveBot { bot, connector } => json(bots::save_bot(hub, s, bot, connector).await?),
         TeamOp::TurnBotOn { workflow, on } => json(bots::turn_bot_on(hub, s, &workflow, on).await?),
         TeamOp::DeleteBot { workflow } => json(bots::delete_bot(hub, s, &workflow).await?),

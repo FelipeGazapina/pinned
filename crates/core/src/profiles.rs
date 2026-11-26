@@ -7,7 +7,6 @@
 //!
 //! Owners: U5 (the lists, `profile_propose`), U6 (`delegate_task` with `profile`).
 
-use crate::delegate::Request;
 use crate::taste::{ModelRef, SkillRef, Tastes};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -44,7 +43,13 @@ pub struct WorkerProfile {
     pub delivers: String,
     #[serde(default)]
     pub by: ProfileAuthor,
+    /// Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.
+    #[serde(default)]
+    pub prompt: String,
 }
+
+/// The most characters a profile's `prompt` may have.
+pub const MAX_PROMPT: usize = 8000;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -99,21 +104,22 @@ impl WorkerProfile {
         if self.model.as_ref().is_some_and(|m| m.model.trim().is_empty()) {
             return Err(format!("{}'s model needs a name", self.name.trim()));
         }
+        if self.prompt.chars().count() > MAX_PROMPT {
+            return Err(format!("{}'s prompt is over {MAX_PROMPT} characters", self.name.trim()));
+        }
         Ok(())
     }
 }
 
-/// `delegate_task`'s `profile`, which `parse_request` calls. U6 turns it on.
-pub fn admit(request: &Request) -> Result<(), String> {
-    match request.profile {
-        Some(_) => Err("profile is not available in this build".into()),
-        None => Ok(()),
-    }
-}
-
-/// `delegate_task`'s schema for `profile`, offered once U6 turns it on.
+/// `delegate_task`'s schema for `profile`.
 pub fn delegate_property() -> Option<(&'static str, serde_json::Value)> {
-    None
+    Some((
+        "profile",
+        serde_json::json!({
+            "type": "string",
+            "description": "One of the user's worker profiles, by name: taste_get lists them under worker_profiles, this project's first, then the account's. The profile fills in the model, effort and tools this call leaves out, makes the worker read-only when the profile is read-only, and puts the profile's prompt ahead of task. An unknown name is refused with the names available.",
+        }),
+    ))
 }
 
 #[cfg(test)]
@@ -122,7 +128,7 @@ mod tests {
     use serde_json::json;
 
     fn profile(name: &str) -> WorkerProfile {
-        WorkerProfile { name: name.into(), skills: vec![], tools: vec!["Read".into()], access: ProfileAccess::ReadOnly, model: None, effort: None, delivers: "A report.".into(), by: ProfileAuthor::User }
+        WorkerProfile { name: name.into(), skills: vec![], tools: vec!["Read".into()], access: ProfileAccess::ReadOnly, model: None, effort: None, delivers: "A report.".into(), by: ProfileAuthor::User, prompt: String::new() }
     }
 
     #[test]
@@ -159,5 +165,25 @@ mod tests {
         assert_eq!(tastes, before);
         tastes.set_worker_profiles(Some("github.com/acme/site"), vec![]).unwrap();
         assert!(tastes.worker_profiles.projects.is_empty());
+    }
+
+    #[test]
+    fn a_profile_without_a_prompt_reads_empty_and_one_over_the_cap_is_refused() {
+        let bare: WorkerProfile = serde_json::from_value(json!({ "name": "scout", "access": "read_only" })).unwrap();
+        assert_eq!(bare.prompt, "");
+        let profiles = WorkerProfiles { account: vec![WorkerProfile { prompt: "You map code.\nYou never edit it.".into(), ..profile("scout") }], ..WorkerProfiles::default() };
+        let value = serde_json::to_value(&profiles).unwrap();
+        assert_eq!(value["account"][0]["prompt"], "You map code.\nYou never edit it.");
+        assert_eq!(serde_json::from_value::<WorkerProfiles>(value).unwrap(), profiles);
+        let mut tastes = Tastes::default();
+        tastes.set_worker_profiles(None, vec![profile("fixer")]).unwrap();
+        let before = tastes.clone();
+        let long = WorkerProfile { prompt: "é".repeat(MAX_PROMPT + 1), ..profile("scout") };
+        assert_eq!(tastes.set_worker_profiles(None, vec![long.clone()]), Err("scout's prompt is over 8000 characters".into()));
+        assert_eq!(tastes, before);
+        tastes.worker_profiles.account.push(long);
+        assert_eq!(tastes.check(), Err("scout's prompt is over 8000 characters".into()), "so an import refuses it too");
+        let most = WorkerProfile { prompt: "é".repeat(MAX_PROMPT), ..profile("scout") };
+        assert!(before.clone().set_worker_profiles(None, vec![most]).is_ok(), "the cap counts characters, not bytes");
     }
 }

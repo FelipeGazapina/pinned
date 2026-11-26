@@ -229,11 +229,12 @@ function patchWorkerSteps(tab, rows) {
   }
 }
 
-/** The thread's workers in one block: how many are done, at work and waiting on the user, then a row
- * each. Away from the turn that started them, it lists only the workers not done yet but still counts them all. */
+/** The thread's workers in one block: how many are finished, at work and waiting on the user, then a row
+ * each. In the turn that started them it lists every worker, failed ones with their error. Away from
+ * that turn it lists only the unfinished ones (needs and working), but still counts them all. */
 function workersBlockHtml(tab, t, home = true) {
   const all = workersNow(tab);
-  const rows = all.filter((row) => home || row.state !== "done");
+  const rows = all.filter((row) => home || !FINISHED_STATES.has(row.state));
   if (!rows.length) return "";
   const s = workersSummary(all);
   const working = s.working ? `<span class="workers-working">${s.working} working${s.since ? ` · ${tickerHtml(s.since, workersClock(tab, all))}` : ""}</span>` : "";

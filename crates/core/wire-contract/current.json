@@ -4047,7 +4047,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -10821,6 +10821,18 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -10960,7 +10972,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "ReviewerPatch": {
@@ -11106,6 +11120,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -11114,7 +11133,8 @@
               "tools",
               "access",
               "delivers",
-              "by"
+              "by",
+              "prompt"
             ]
           },
           "ProfileAccess": {
@@ -11176,7 +11196,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "captains": {
@@ -11219,7 +11241,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "projects": {
@@ -11454,9 +11478,19 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
+                "type": "boolean",
+                "default": true
               }
             },
             "required": [
@@ -11481,7 +11515,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "Reviewer": {
@@ -12075,6 +12111,13 @@
               },
               "machine": {
                 "description": "The machine a `Call` runs on, an id or a name; the session's own when absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "description": "Why the session asks, for an act held for the owner.",
                 "type": [
                   "string",
                   "null"
@@ -12894,6 +12937,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -17921,7 +17981,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -24529,6 +24589,18 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -24663,7 +24735,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "ReviewerPatch": {
@@ -24809,6 +24883,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -24874,7 +24953,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "captains": {
@@ -24917,7 +24998,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "projects": {
@@ -25142,9 +25225,19 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
+                "type": "boolean",
+                "default": true
               }
             }
           },
@@ -25720,6 +25813,13 @@
               },
               "machine": {
                 "description": "The machine a `Call` runs on, an id or a name; the session's own when absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "description": "Why the session asks, for an act held for the owner.",
                 "type": [
                   "string",
                   "null"
@@ -26512,6 +26612,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -34620,6 +34737,18 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -34790,7 +34919,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "ReviewerPatch": {
@@ -34936,6 +35067,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -34944,7 +35080,8 @@
               "tools",
               "access",
               "delivers",
-              "by"
+              "by",
+              "prompt"
             ]
           },
           "ProfileAccess": {
@@ -35006,7 +35143,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "captains": {
@@ -35049,7 +35188,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "projects": {
@@ -35284,9 +35425,19 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
+                "type": "boolean",
+                "default": true
               }
             },
             "required": [
@@ -35311,7 +35462,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "Reviewer": {
@@ -35613,7 +35766,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -36486,6 +36639,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, for an act held for the owner.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -37301,6 +37461,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -45178,6 +45355,18 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -45343,7 +45532,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "ReviewerPatch": {
@@ -45489,6 +45680,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -45554,7 +45750,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "captains": {
@@ -45597,7 +45795,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "projects": {
@@ -45822,9 +46022,19 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
+                "type": "boolean",
+                "default": true
               }
             }
           },
@@ -46110,7 +46320,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -46971,6 +47181,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, for an act held for the owner.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -47759,6 +47976,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -50308,6 +50542,13 @@
               "string",
               "null"
             ]
+          },
+          "reason": {
+            "description": "Why the session asks, on one line, secrets masked and cut at 200 characters. Absent when it gave none.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -50419,6 +50660,13 @@
           },
           "outcome": {
             "description": "What running it came to: `done`, or `failed: <error>`. Absent until decided.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Why the session asks, on one line, secrets masked and cut at 200 characters. Absent when it gave none.",
             "type": [
               "string",
               "null"
@@ -67998,7 +68246,9 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": false
+              "manage_only": true,
+              "claude_memory": true,
+              "worker_claude_memory": true
             }
           },
           "captains": {
@@ -68041,7 +68291,9 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": false
+              "manage_only": true,
+              "claude_memory": true,
+              "worker_claude_memory": true
             }
           },
           "projects": {
@@ -68276,9 +68528,19 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
+                "type": "boolean",
+                "default": true
               }
             },
             "required": [
@@ -68303,7 +68565,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "Strategy": {
@@ -68616,6 +68880,18 @@
                 }
               },
               "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
                 "type": [
                   "boolean",
                   "null"
@@ -68869,6 +69145,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -68877,7 +69158,8 @@
               "tools",
               "access",
               "delivers",
-              "by"
+              "by",
+              "prompt"
             ]
           },
           "ProfileAccess": {
@@ -68943,7 +69225,9 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": false
+              "manage_only": true,
+              "claude_memory": true,
+              "worker_claude_memory": true
             }
           },
           "captains": {
@@ -68986,7 +69270,9 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": false
+              "manage_only": true,
+              "claude_memory": true,
+              "worker_claude_memory": true
             }
           },
           "projects": {
@@ -69211,9 +69497,19 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
+                "type": "boolean",
+                "default": true
               }
             }
           },
@@ -69531,6 +69827,18 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -69760,6 +70068,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -76039,6 +76352,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, on one line, secrets masked and cut at 200 characters. Absent when it gave none.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -80845,6 +81165,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, on one line, secrets masked and cut at 200 characters. Absent when it gave none.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -85597,7 +85924,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -91329,7 +91656,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"

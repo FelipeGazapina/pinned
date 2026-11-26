@@ -143,6 +143,11 @@ pub fn held(policy: &pinned_core::teams::TeamPolicy, limits: BotLimits) -> BotLi
     BotLimits { usd: limits.usd.min(most.usd), minutes: limits.minutes.min(most.minutes) }
 }
 
+/// The team workflow of bot `id`, for its page. A member reads it; the team's settings do not.
+pub async fn bot_workflow(hub: &Arc<Hub>, scope: &Scope, id: &str) -> Result<Connector, String> {
+    workflow(hub, &scope.team, id).await
+}
+
 /// Every workflow of the team's account as a bot: its `team_bots` row, or `CallRules::default()`
 /// and the hub's `TeamPolicy` limits when it has none, with `name` from the workflow.
 pub async fn bots(hub: &Arc<Hub>, scope: &Scope) -> Result<Vec<Bot>, String> {

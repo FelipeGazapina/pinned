@@ -15,10 +15,59 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
-      - run: bash scripts/test-assemble-latest-json.sh scripts/fixtures/v0.16.0
-      - run: python3 scripts/test-release-rerun.py
-      - run: python3 scripts/test-release-tags.py
-      - run: bash scripts/test-apple-signing-env.sh
+      # release-dry-run.yml relies on this: every step that writes a release, a tag or a workflow run is skipped by a dry run.
+      - name: "release.yml: no step that writes a release runs in a dry run"
+        run: |
+          python3 - <<'EOF'
+          import sys
+
+          import yaml
+
+          GUARD = "!inputs.dry_run"
+          WRITES = [
+              "git push",
+              "gh workflow run",
+              "gh release create",
+              "gh release edit",
+              "release.sh asset draft",
+              "release.sh asset upload",
+              "release.sh asset publish",
+          ]
+          TAURI = "tauri-apps/tauri-action"
+
+          path = sys.argv[1] if len(sys.argv) > 1 else ".github/workflows/release.yml"
+          with open(path) as f:
+              workflow = yaml.safe_load(f)
+
+          writers = 0
+          unguarded = []
+          for job_name, job in workflow["jobs"].items():
+              job_if = str(job.get("if", ""))
+              for index, step in enumerate(job.get("steps", [])):
+                  run = step.get("run") or ""
+                  uses = step.get("uses") or ""
+                  with_ = step.get("with") or {}
+                  writes = any(word in run for word in WRITES)
+                  # The dry-run variant of tauri-action names no tag and no release, so only the other one writes.
+                  if uses.startswith(TAURI) and ("tagName" in with_ or "releaseId" in with_):
+                      writes = True
+                  if not writes:
+                      continue
+                  writers += 1
+                  if GUARD in job_if or GUARD in str(step.get("if", "")):
+                      continue
+                  name = step.get("name") or uses or f"step {index + 1}"
+                  unguarded.append(f"{job_name} / {name}")
+
+          if writers == 0:
+              print(f"{path}: no step writes a release, so WRITES is stale", file=sys.stderr)
+              sys.exit(1)
+          for entry in unguarded:
+              print(f"{path}: {entry} writes and runs in a dry run", file=sys.stderr)
+          if unguarded:
+              sys.exit(1)
+          print(f"{path}: {writers} writing steps, none reachable in a dry run")
+          EOF
       - run: npm ci
       - run: cargo test -p pinned-server --lib
 

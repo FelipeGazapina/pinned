@@ -122,6 +122,8 @@ create table if not exists agent_confirmations (id uuid primary key, account uui
   target text, result jsonb, unique (account, machine, tab, action, request_id));
 -- Why this act waits, when the hub says more than the action's own text: a schedule act's reason.
 alter table agent_confirmations add column if not exists about text;
+-- Why the session asks, as it said in `act`: one line, secrets masked, at most 200 characters.
+alter table agent_confirmations add column if not exists reason text;
 -- A scheduled task per row, as the `schedule::Task` it is (without its hub-computed last run), and
 -- the columns the scheduler reads. `next_at` is unix seconds, computed on every save.
 create table if not exists tasks (id uuid primary key, account uuid not null references accounts on delete cascade,
@@ -592,7 +594,7 @@ pub struct Held {
 }
 
 const CONFIRMATION_COLUMNS: &str = "c.id, extract(epoch from c.created_at)::bigint, c.machine, coalesce(m.name, ''), c.tab, c.title, c.role, c.action, c.args,
-  c.request_id, c.approved, extract(epoch from c.decided_at)::bigint, c.outcome, c.session, c.target, c.result, c.about";
+  c.request_id, c.approved, extract(epoch from c.decided_at)::bigint, c.outcome, c.session, c.target, c.result, c.about, c.reason";
 
 fn held(r: &tokio_postgres::Row) -> Held {
     let role: String = r.get(6);
@@ -614,6 +616,7 @@ fn held(r: &tokio_postgres::Row) -> Held {
         decision: decided_at.and(r.get::<_, Option<bool>>(10)).map(|approved| if approved { Decision::Approved } else { Decision::Denied }),
         decided_at,
         outcome: r.get(12),
+        reason: r.get(17),
     };
     Held { confirmation, session: r.get(13), result: r.get::<_, Option<Value>>(15).unwrap_or(Value::Null) }
 }
@@ -974,6 +977,13 @@ fn stored_task(account: Uuid, id: Uuid, value: Value) -> Result<Task, String> {
         eprintln!("pinned-server: account {account}'s task {id} does not read as a task");
         format!("task {id} could not be read")
     })
+}
+
+/// A run's `task_runs` columns: its task's id, its state as `RunState` serializes it, and the run.
+fn run_row(run: &TaskRun) -> Result<(Uuid, String, Value), String> {
+    let task = Uuid::parse_str(&run.task).map_err(|_| format!("{} is not a task id", run.task))?;
+    let value = serde_json::to_value(run).map_err(|e| e.to_string())?;
+    Ok((task, value["state"].as_str().unwrap_or_default().to_owned(), value))
 }
 
 fn stored_marks(account: Uuid, value: Value) -> Result<SessionMarks, String> {
@@ -2199,6 +2209,61 @@ impl Db {
             .collect())
     }
 
+    /// The enabled tasks of every account whose action is a workflow and whose `next_at` is at or
+    /// before `now`, soonest first, at most `limit`: each with its account and its stored `next_at`.
+    /// A task that does not read is skipped and logged by its ids. Prompt and paused tasks are never read.
+    pub async fn due_workflow_tasks(&self, now: i64, limit: i64) -> Result<Vec<(Uuid, Task, i64)>, String> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "select id, account, task, next_at from tasks where enabled and next_at is not null and next_at <= $1
+                 and task->'action'->>'kind' = 'workflow' order by next_at limit $2",
+                &[&now, &limit],
+            )
+            .await
+            .map_err(err)?;
+        Ok(rows.into_iter().filter_map(|r| stored_task(r.get(1), r.get(0), r.get(2)).ok().map(|task| (r.get(1), task, r.get(3)))).collect())
+    }
+
+    /// Claims the occurrence `run` (its task, at its `due_at`) for this hub, in one transaction: it
+    /// inserts the occurrence's row and moves the task's `next_at` from `due_at` to `next_at`. False
+    /// when the row was there already (another pass or another hub claimed it), or the task no longer
+    /// waits on that `due_at` (edited or paused meanwhile); then nothing changed. A task deleted
+    /// meanwhile fails the insert on its foreign key, and nothing changes either.
+    pub async fn claim_task_run(&self, account: Uuid, run: &TaskRun, next_at: Option<i64>) -> Result<bool, String> {
+        let (task, state, value) = run_row(run)?;
+        let mut held = self.transaction_client().await?;
+        let tx = held.as_mut().expect("opened above").transaction().await.map_err(err)?;
+        let inserted = tx
+            .execute("insert into task_runs (task, account, due_at, state, run) values ($1, $2, $3, $4, $5) on conflict do nothing", &[&task, &account, &run.due_at, &state, &value])
+            .await
+            .map_err(err)?;
+        if inserted == 0 {
+            return Ok(false);
+        }
+        let moved = tx
+            .execute("update tasks set next_at = $4 where id = $1 and account = $2 and enabled and next_at = $3", &[&task, &account, &run.due_at, &next_at])
+            .await
+            .map_err(err)?;
+        if moved == 0 {
+            return Ok(false);
+        }
+        tx.commit().await.map_err(err)?;
+        Ok(true)
+    }
+
+    /// Writes `run`, an occurrence's final run, over the row its claim inserted.
+    pub async fn record_task_run(&self, account: Uuid, run: &TaskRun) -> Result<(), String> {
+        let (task, state, value) = run_row(run)?;
+        self.client()
+            .await?
+            .execute("update task_runs set state = $4, run = $5 where account = $1 and task = $2 and due_at = $3", &[&account, &task, &run.due_at, &state, &value])
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
     pub async fn release_protection(&self, account: Uuid) -> Result<bool, String> {
         let row = self.client().await?.query_opt("select release_protection from accounts where id = $1", &[&account]).await.map_err(err)?;
         Ok(row.is_some_and(|r| r.get(0)))
@@ -2244,9 +2309,9 @@ impl Db {
         let request_id = asked.request_id.as_deref();
         let inserted = client
             .query_opt(
-                "insert into agent_confirmations (id, account, machine, tab, session, role, title, action, args, request_id, target, about) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                "insert into agent_confirmations (id, account, machine, tab, session, role, title, action, args, request_id, target, about, reason) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                  on conflict (account, machine, tab, action, request_id) do nothing returning id",
-                &[&id, &account, &machine, &asked.tab, &session, &asked.role.name(), &asked.title, &asked.action, &asked.args, &request_id, &asked.target, &Some(asked.about.as_str()).filter(|about| !about.is_empty())],
+                &[&id, &account, &machine, &asked.tab, &session, &asked.role.name(), &asked.title, &asked.action, &asked.args, &request_id, &asked.target, &Some(asked.about.as_str()).filter(|about| !about.is_empty()), &asked.reason],
             )
             .await
             .map_err(err)?;
