@@ -72,6 +72,7 @@ const TEAMS_TEXT = {
     { id: "upstash", name: "Upstash key", about: "Opens the boxes the bots work in" },
     { id: "claude", name: "Claude token for boxes", about: "Signs the bots in to Claude inside the box" },
     { id: "github", name: "GitHub token", about: "Clones the team's repositories" },
+    { id: "linear", name: "Linear key", about: "Optional: starts bots when a Linear issue gets their label", optional: true },
   ],
   connected: "Connected",
   connectNow: "Connect now",
@@ -83,6 +84,7 @@ const TEAMS_TEXT = {
     upstash: { title: "Connect the Upstash key", fields: [{ id: "key", label: "Upstash Box key", placeholder: "box_…" }, { id: "claude_token", label: "Claude token", placeholder: "sk-ant-oat01-…", note: CLAUDE_SOURCE }], about: "Create the Box API key in the Box tab of the Upstash console. The Claude token comes from claude setup-token." },
     claude: { title: "Connect the Claude token for boxes", fields: [{ id: "name", label: "Name", placeholder: "team", plain: true, value: "team" }, { id: "token", label: "Claude token", placeholder: "sk-ant-oat01-…", note: CLAUDE_SOURCE }], about: "Run claude setup-token in a terminal and paste what it prints. Connect the Upstash key first." },
     github: { title: "Connect the GitHub token", fields: [{ id: "token", label: "GitHub token", placeholder: "ghp_…" }], about: "A token that can read the repositories the bots clone." },
+    linear: { title: "Connect the Linear key", fields: [{ id: "key", label: "Linear API key", placeholder: "lin_api_…" }], about: "A personal API key from Linear's Settings, Security & access, made for the team's own Linear user." },
   },
   save: "Connect",
   sending: "Connecting…",
@@ -404,14 +406,16 @@ resetWizard([]);
 const teamWizardTeamName = () => (teamWizard.team?.name ?? teamWizard.name).trim() || "the team";
 const teamWizardCreds = () => teamWizard.team?.credential ?? {};
 const teamWizardOwner = () => (teamWizard.team?.role ?? "owner") === "owner";
-const connectedCount = () => TEAMS_TEXT.creds.filter((c) => teamWizardCreds()[c.id]).length;
+/** The keys every bot needs; an optional one, such as Linear, is not counted. */
+const requiredCreds = () => TEAMS_TEXT.creds.filter((c) => !c.optional);
+const connectedCount = () => requiredCreds().filter((c) => teamWizardCreds()[c.id]).length;
 
 function teamWizardStepSub(n) {
   const t = TEAMS_TEXT;
   if (n >= teamWizard.step) return t.steps[n - 1].hint;
   if (n === 1) return teamWizardTeamName();
   if (n === 2) return t.readyProjects(teamWizard.attached.size).replace(/\.$/, "");
-  if (n === 3) return `${connectedCount()} of ${t.creds.length} connected`;
+  if (n === 3) return `${connectedCount()} of ${requiredCreds().length} connected`;
   if (n === 4) return teamWizard.invites.length ? `${teamWizard.invites.length} ${teamWizard.invites.length === 1 ? "code" : "codes"} made` : "No codes made";
   return "";
 }
@@ -492,7 +496,7 @@ function teamWizardBodyHtml() {
     return `${kicker}<h2>${t.peopleTitle}</h2>${teamWizardInvitesHtml()}<p class="tm-note">${t.inviteAbout}</p>`;
   }
   const people = teamWizard.invites.slice(0, 2).map(() => `<span class="tm-avatar big ghost" aria-hidden="true">+</span>`).join("");
-  const summary = t.readyProjects(teamWizard.attached.size) + t.readyAi(connectedCount(), t.creds.length) + t.readyInvites(teamWizard.invites.length);
+  const summary = t.readyProjects(teamWizard.attached.size) + t.readyAi(connectedCount(), requiredCreds().length) + t.readyInvites(teamWizard.invites.length);
   return `<div class="tm-faces">${teamsAvatar(teamsPerson(), "big", TEAM_HUES[0])}${people}</div>
     <h2>${t.readyTitle(team)}</h2><p class="tm-lede big">${teamsEsc(summary)}</p><p class="tm-note">${t.readyNoBot}</p>
     <div class="tm-actions">${tmButton('data-tm="first-bot"', t.firstBot, "primary")}${tmButton('data-tm="open-team"', t.openTeam)}</div>`;
@@ -503,7 +507,7 @@ function teamWizardNavHtml() {
   const step = teamWizard.step;
   if (teamWizard.connect) return `<div class="tm-actions">${tmButton('data-tm="connect-done"', t.connectDone, "primary")}<span class="tm-hint">${t.connectDoneHint}</span></div>`;
   if (step > 4) return "";
-  const label = step === 3 && teamWizardOwner() && connectedCount() < t.creds.length ? t.connectLater : t.next[step - 1];
+  const label = step === 3 && teamWizardOwner() && connectedCount() < requiredCreds().length ? t.connectLater : t.next[step - 1];
   return `${tmError(teamWizard.error)}<div class="tm-actions">${tmButton('data-tm="next"', teamWizard.busy ? t.working : label, "primary", teamWizard.busy)}<span class="tm-hint">${t.nextHints[step - 1]}</span></div>`;
 }
 
@@ -605,6 +609,7 @@ async function teamWizardNext() {
 function credentialCall(cred, v) {
   if (cred === "upstash") return { cmd: "connect_upstash", key: v.key, claude_token: v.claude_token };
   if (cred === "claude") return { cmd: "set_box_claude_token", name: v.name, token: v.token };
+  if (cred === "linear") return { cmd: "connect_linear", key: v.key };
   return { cmd: "connect_github", token: v.token };
 }
 

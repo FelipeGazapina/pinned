@@ -51,7 +51,7 @@ impl Crew {
     /// The owner gives the team its Upstash key and Claude token.
     fn give_keys(&self) {
         let connected = self.hub_op(&self.ana, json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
-        assert_eq!(connected, json!({ "upstash": true, "claude": true, "github": false, "slack": false }), "which keys are set, never a hint");
+        assert_eq!(connected, json!({ "upstash": true, "claude": true, "github": false, "slack": false, "linear": false }), "which keys are set, never a hint");
     }
 
     fn connector(&self, name: &str, machine: Value) -> Value {

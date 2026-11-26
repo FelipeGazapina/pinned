@@ -1237,7 +1237,7 @@ fn a_team_whose_keys_cant_be_opened_shows_its_owner_the_held_line_until_they_rea
 
     wait_for("the owner to see the held line", || line_held(&crew, &crew.ana).is_ok_and(|held| held != Value::Null));
     let shown = listed(&crew, &crew.ana).unwrap();
-    assert_eq!(shown["credential"], json!({ "upstash": false, "claude": false, "github": false, "slack": false }), "a read that failed shows no key as set");
+    assert_eq!(shown["credential"], json!({ "upstash": false, "claude": false, "github": false, "slack": false, "linear": false }), "a read that failed shows no key as set");
     let held = shown["line_held"].clone();
     assert_eq!(held["why"], json!("settings_unread"), "the owner sees why, as a fixed class");
     let since = held["since"].as_i64().unwrap();

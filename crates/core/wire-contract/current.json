@@ -70003,7 +70003,7 @@
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Team",
-        "description": "A team as one of its members sees it, with that member's role.\n\n`{\"id\":\"6f1c…\",\"name\":\"Acme\",\"owner\":\"0b7e…\",\"role\":\"owner\",\"credential\":{\"upstash\":false,\"claude\":false,\"github\":false,\"slack\":false}}`",
+        "description": "A team as one of its members sees it, with that member's role.\n\n`{\"id\":\"6f1c…\",\"name\":\"Acme\",\"owner\":\"0b7e…\",\"role\":\"owner\",\"credential\":{\"upstash\":false,\"claude\":false,\"github\":false,\"slack\":false,\"linear\":false}}`",
         "type": "object",
         "properties": {
           "id": {
@@ -70025,7 +70025,8 @@
               "upstash": false,
               "claude": false,
               "github": false,
-              "slack": false
+              "slack": false,
+              "linear": false
             }
           },
           "line_held": {
@@ -70057,7 +70058,7 @@
             ]
           },
           "CredentialState": {
-            "description": "Which of the team's keys are set, never a value.\n\n`{\"upstash\":true,\"claude\":true,\"github\":false,\"slack\":false}`",
+            "description": "Which of the team's keys are set, never a value.\n\n`{\"upstash\":true,\"claude\":true,\"github\":false,\"slack\":false,\"linear\":false}`",
             "type": "object",
             "properties": {
               "upstash": {
@@ -70075,13 +70076,19 @@
               "slack": {
                 "type": "boolean",
                 "default": false
+              },
+              "linear": {
+                "description": "The team's own Linear key, which its bots' Linear triggers read with.",
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
               "upstash",
               "claude",
               "github",
-              "slack"
+              "slack",
+              "linear"
             ]
           },
           "LineHeld": {
@@ -70113,7 +70120,7 @@
       "accept": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Team",
-        "description": "A team as one of its members sees it, with that member's role.\n\n`{\"id\":\"6f1c…\",\"name\":\"Acme\",\"owner\":\"0b7e…\",\"role\":\"owner\",\"credential\":{\"upstash\":false,\"claude\":false,\"github\":false,\"slack\":false}}`",
+        "description": "A team as one of its members sees it, with that member's role.\n\n`{\"id\":\"6f1c…\",\"name\":\"Acme\",\"owner\":\"0b7e…\",\"role\":\"owner\",\"credential\":{\"upstash\":false,\"claude\":false,\"github\":false,\"slack\":false,\"linear\":false}}`",
         "type": "object",
         "properties": {
           "id": {
@@ -70135,7 +70142,8 @@
               "upstash": false,
               "claude": false,
               "github": false,
-              "slack": false
+              "slack": false,
+              "linear": false
             }
           },
           "line_held": {
@@ -70166,7 +70174,7 @@
             ]
           },
           "CredentialState": {
-            "description": "Which of the team's keys are set, never a value.\n\n`{\"upstash\":true,\"claude\":true,\"github\":false,\"slack\":false}`",
+            "description": "Which of the team's keys are set, never a value.\n\n`{\"upstash\":true,\"claude\":true,\"github\":false,\"slack\":false,\"linear\":false}`",
             "type": "object",
             "properties": {
               "upstash": {
@@ -70182,6 +70190,11 @@
                 "default": false
               },
               "slack": {
+                "type": "boolean",
+                "default": false
+              },
+              "linear": {
+                "description": "The team's own Linear key, which its bots' Linear triggers read with.",
                 "type": "boolean",
                 "default": false
               }
