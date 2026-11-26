@@ -1771,18 +1771,22 @@ async function openDelegated(task, tab = active) {
 
 /** T3 Code's "Fork from this response": a new thread beside this one whose claude carries on from here. */
 async function forkFrom(id) {
-  const tab = active;
-  const line = id.replace(/:\d+$/, "");
   try {
-    const created = await callOn(tab.machine, { cmd: "fork", tab: tab.view.id, through: line });
-    await refreshTabs(tab.machine);
-    const fork = tabByKey(keyOf(tab.machine, created));
-    if (!fork) return;
-    activate(fork);
-    await startTab(fork);
+    await forkTab(active, id);
   } catch (e) {
     showComposerNote(String(e), true);
   }
+}
+
+/** Forks `tab` through the response `id`, then opens and starts the new thread. A failure throws. */
+async function forkTab(tab, id) {
+  const line = id.replace(/:\d+$/, "");
+  const created = await callOn(tab.machine, { cmd: "fork", tab: tab.view.id, through: line });
+  await refreshTabs(tab.machine);
+  const fork = tabByKey(keyOf(tab.machine, created));
+  if (!fork) return;
+  activate(fork);
+  await startTab(fork);
 }
 
 /** The conversation a fork was copied from: its thread when one is open, or that session resumed in a new one. */
