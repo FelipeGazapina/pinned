@@ -1159,11 +1159,23 @@ test("a team's bot page draws the bot even though the team refuses get_settings"
   assert.ok(a.control("run-now"), "Run now is there");
 });
 
-test("a bot page still draws the bot when its workflow and its runs fail to load", async () => {
+test("a bot page still draws the bot when its workflow and its runs fail to load, and says so instead of showing them empty", async () => {
   const a = app({ answers: botAnswers({ bot_workflow: new Error("unknown op bot_workflow"), runs: new Error("runs failed") }) });
   await openBot(a);
   assert.ok(text(a.page()).includes("Test publisher"), text(a.page()));
-  assert.ok(!text(a.page()).includes("Could not load"), text(a.page()));
+  assert.ok(text(a.page()).includes("Could not load the steps."), text(a.page()));
+  assert.ok(text(a.page()).includes("Could not load the runs."), text(a.page()));
+  assert.ok(!text(a.page()).includes("No runs yet."), text(a.page()));
+  assert.ok(!text(a.page()).includes("no steps written"), text(a.page()));
+  assert.deepEqual(a.control("run-now"), { disabled: true }, "Run now is not offered while the runs are unknown");
+});
+
+test("a member whose team list fails to load sees the load error and Try again, not a note about who can turn the bot on", async () => {
+  const a = app({ team: MEMBER_TEAM, email: "bruno@acme.dev", answers: botAnswers({ bots: [bot({ on: false, on_by: null })], members: new Error("The hub did not answer.") }) });
+  await openBot(a);
+  assert.ok(text(a.page()).includes("Could not load: The hub did not answer."), text(a.page()));
+  assert.ok(a.control("reload"));
+  assert.ok(!text(a.page()).includes("Ask someone in @publish"), text(a.page()));
 });
 
 test("an on bot in a team with no Claude token says it needs the AI account", async () => {
