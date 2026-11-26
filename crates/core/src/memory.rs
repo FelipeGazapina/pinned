@@ -313,8 +313,9 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Memory> {
 }
 
 /// How many places a search moves a memory up (below zero, down): `3 * log10(weight)` rounded, so
-/// 10 is up 3 and 0.1 is down 3, plus 1 while a recent use still has a share of at least half: one
-/// use today does, a use a year ago does not. Clamped to `MAX_LIFT` either way.
+/// 10 is up 3 and 0.1 is down 3, plus 1 while a recent use still has a share of at least a quarter:
+/// one use lifts it 1 place for 30 days, many uses for up to 60, and a year-old use does not.
+/// Clamped to `MAX_LIFT` either way.
 fn lift(m: &Memory, now: i64) -> i64 {
     let weight = (3.0 * m.weight.log10()).round() as i64;
     let used = match m.last_used {
@@ -322,7 +323,7 @@ fn lift(m: &Memory, now: i64) -> i64 {
             let hits = m.hits as f64;
             let age = (now - at).max(0) as f64;
             let share = hits / (hits + 1.0) * 0.5f64.powf(age / USE_HALF_LIFE.as_secs_f64());
-            i64::from(share >= 0.5)
+            i64::from(share >= 0.25)
         }
         _ => 0,
     };
@@ -896,6 +897,15 @@ mod tests {
         store.db.execute("UPDATE memories SET hits = 1000000 WHERE id = 3", []).unwrap();
         assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1000)), ["#1 One", "#3 Three", "#2 Two", "#4 Four", "#5 Five"], "a million uses, still one place");
         assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1000 + YEAR)), ["#1 One", "#2 Two", "#3 Three", "#4 Four", "#5 Five"], "a year later, none");
+    }
+
+    #[test]
+    fn one_use_lifts_a_memory_for_thirty_days() {
+        const DAY: i64 = 24 * 3600;
+        let store = five_matches();
+        store.used(&[3], 1000).unwrap();
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1000 + 29 * DAY)), ["#1 One", "#3 Three", "#2 Two", "#4 Four", "#5 Five"], "29 days later, one place");
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1000 + 31 * DAY)), ["#1 One", "#2 Two", "#3 Three", "#4 Four", "#5 Five"], "31 days later, none");
     }
 
     #[test]
