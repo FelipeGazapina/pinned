@@ -10,33 +10,6 @@
 const tasteUi = { saved: null, draft: null, scope: { kind: "captains" }, projects: null, skills: new Map(), error: null, saving: false, toast: false, flash: new Set(), note: "", area: "", adding: false, chatting: false };
 let tasteToastTimer = 0;
 
-const TASTE_FIELD_LABELS = {
-  strategy: "Strategy",
-  ladder: "Model ladder",
-  hard_model: "Hard work model",
-  parallel: "Workers at once",
-  autonomy: "Autonomy",
-  review_diffs: "Review each diff",
-  second_opinion: "Second opinion",
-  skills: "Skills",
-  context: "Context",
-  tier: "Model tier",
-  default_model: "Default model",
-  default_effort: "Default effort",
-  max_effort: "Most effort",
-  budget_cents: "Budget per worker",
-  time_limit_min: "Time limit per worker",
-  box_budget_cents: "Box budget",
-  box_size: "Default box size",
-  boxes_at_once: "Boxes at once",
-  escalate_breaking_change: "Breaks an older version",
-  escalate_process_failure: "The process did not work as designed",
-  escalate_over_lines: "Too big to merge unseen",
-  escalate_areas: "Always send to me",
-  manage_only: "Manage only",
-  claude_memory: "Claude Code memory",
-  worker_claude_memory: "Claude Code memory for workers",
-};
 const TASTE_TIER_ABOUT = { low: "Haiku and flash models", mid: "Sonnet, GLM and the like", high: "Opus and pro models" };
 
 const tasteShown = () => tasteResolve(tasteUi.draft, tasteUi.scope);
@@ -449,7 +422,7 @@ function tasteRender() {
     ${delegationSectionHtml()}
   </div></div>${tasteFootHtml()}`);
   tasteUi.flash = new Set();
-  const back = focused && [...pageView.querySelectorAll("button, select, input")].find((el) => tasteFocusKey(el) === focused);
+  const back = focused && [...pageView.querySelectorAll("button, select, input, textarea")].find((el) => tasteFocusKey(el) === focused);
   back?.focus({ preventScroll: true });
 }
 

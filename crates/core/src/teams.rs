@@ -582,6 +582,9 @@ pub enum TeamOp {
     LeaveGroup { handle: String },
     /// `Vec<Bot>`.
     Bots,
+    /// `Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a
+    /// team's settings stay out of reach (`GetSettings` does not run on a team).
+    BotWorkflow { workflow: String },
     /// `SavedBot`. Saves the bot, as a draft. With `connector`, the team's workflow itself (the
     /// `Connector` `HubCall::SaveConnector` takes) is saved with it: the one way a member changes a
     /// team's workflows. The bot then is that workflow's. A new workflow has an empty `id`, which
@@ -710,6 +713,7 @@ mod tests {
             json!({ "op": "join_group", "handle": "design" }),
             json!({ "op": "leave_group", "handle": "design" }),
             json!({ "op": "bots" }),
+            json!({ "op": "bot_workflow", "workflow": "c1" }),
             json!({ "op": "save_bot", "bot": bot }),
             json!({ "op": "turn_bot_on", "workflow": "c1", "on": true }),
             json!({ "op": "delete_bot", "workflow": "c1" }),

@@ -264,6 +264,64 @@ test("an extend_box amount under one cent reads as less than US$ 0.01, never US$
   assert.deepEqual(titles, ["Add less than US$ 0.01 to the budget of box site", "Add US$ 0.01 to the budget of box site"]);
 });
 
+const setTaste = {
+  ...removeImac,
+  id: "c-t",
+  action: "set_taste",
+  about: "Changes fields of one scope of the account's way of working.",
+  args: { scope: { kind: "captains" }, patch: { parallel: 3, autonomy: "ask_first" } },
+  reason: "Workers keep timing out on site.",
+};
+const TASTES = { orchestrator: { parallel: 1 }, captains: { parallel: 5, autonomy: "decide_and_tell", ladder: [{ model: "glm-5.3" }] }, projects: {} };
+const tasteApp = () => app({ answer: async (call) => (call.cmd === "get_tastes" ? TASTES : null), extra: read("taste.js") });
+
+test("a waiting way of working change reads as its scope, a row per field from now to next, and its reason, in place of its arguments", async () => {
+  const { context, calls, state } = tasteApp();
+  context.onAgentConfirmations([setTaste]);
+  assert.match(context.asksHtml(), /Workers at once:<\/span> unknown → 3/, "until the tastes are read, the value now is unknown");
+  await flush();
+  assert.equal(
+    tight(context.asksHtml()),
+    `<div class="agent-confirm" data-confirmation="c-t" role="group" aria-label="Approve set_taste?"><span class="dot"></span><div class="texts">` +
+      `<b class="title" title="Changes fields of one scope of the account&#39;s way of working.">Change the way of working of Captains (all)</b>` +
+      `<ul class="agent-taste"><li aria-label="Workers at once: from 5 to 3"><span class="label">Workers at once:</span> 5 → 3</li>` +
+      `<li aria-label="Autonomy: from Decide and tell to Ask first"><span class="label">Autonomy:</span> Decide and tell → Ask first</li></ul>` +
+      `<p class="agent-reason">Reason: Workers keep timing out on site.</p>` +
+      `<span class="who">Asked by “Clean up old machines” · Worker on MacBook · 5m ago</span>` +
+      `<div class="actions start"><button type="button" class="primary" data-agent="approve">Approve</button><button type="button" class="outline" data-agent="deny">Deny</button></div></div></div>`,
+  );
+  assert.ok(!context.asksHtml().includes("<pre"), "no raw arguments");
+  assert.deepEqual(here(calls), [{ cmd: "get_tastes" }], "a push listing a way of working change reads the tastes once");
+  context.onAgentConfirmations([removeImac]);
+  await flush();
+  assert.equal(calls.length, 1, "a push without one reads nothing");
+  context.resetAgentSurface();
+  assert.equal(state("agentTastes"), null, "signing out forgets the tastes");
+});
+
+test("a push with no way of working change reads no tastes, and an audit row's summary still titles the scope", async () => {
+  const { context, calls } = tasteApp();
+  context.onAgentConfirmations([removeImac, createInvite]);
+  await flush();
+  assert.deepEqual(here(calls), []);
+  const summary = JSON.stringify({ field: "parallel", scope: { kind: "project", repo: "github.com/acme/site" } });
+  assert.equal(context.agentActionTitle("reset_taste_field", summary), "Change the way of working of Captain site");
+  assert.equal(context.agentActionTitle("set_taste", `{"patch":{"context":["${"a".repeat(990)}…`), "Change the way of working", "a cut summary names no scope");
+});
+
+test("agent text on a way of working change is escaped, and any other action keeps its arguments and shows its reason", async () => {
+  const evil = "<img src=x onerror=alert(1)>";
+  const { context } = tasteApp();
+  const hostile = { ...setTaste, args: { scope: { kind: "project", repo: `github.com/acme/${evil}` }, patch: { ladder: [{ model: `glm${evil}` }] } }, reason: `Cheaper. ${evil}` };
+  context.onAgentConfirmations([hostile, { ...removeImac, reason: "It is gone." }]);
+  await flush();
+  const html = context.asksHtml();
+  assert.ok(!html.includes("<img"), `agent text is escaped: ${html}`);
+  assert.match(html, /<li aria-label="Model ladder: from glm-5\.3 to glm&#60;img src=x onerror=alert\(1\)&#62;"><span class="label">Model ladder:<\/span> glm-5\.3 → glm&#60;img src=x onerror=alert\(1\)&#62;<\/li>/);
+  assert.match(html, /<p class="agent-reason">Reason: Cheaper\. &#60;img src=x onerror=alert\(1\)&#62;<\/p>/);
+  assert.match(html, /<pre class="args">\{\n {2}&#34;id&#34;: &#34;imac-id&#34;\n\}<\/pre>\s*<p class="agent-reason">Reason: It is gone\.<\/p>\s*<span class="who">/);
+});
+
 test("each confirm action an agent asks for reads as words in the item", () => {
   const { context } = app();
   const actions = ["remove_account", "sign_in", "disconnect_linear", "disconnect_github", "disconnect_upstash", "set_box_access", "remove_box_claude_token", "answer_box", "revoke_invite", "approve_agent", "revoke_agent", "connect_vercel", "set_box_claude_token", "pair_code"];

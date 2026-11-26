@@ -12,7 +12,7 @@ const taste = () => {
   const context = {};
   vm.createContext(context);
   vm.runInContext(
-    `${read("taste.js")}\nthis.api = { TASTE_PRESETS, tasteProfile, tasteResolve, tasteBrief, tasteSetField, tasteResetField, tasteBoxSize, tasteApplyProfile, tasteSaveCalls, tasteRebase, tasteCost, tasteSpeed, tasteModelTier, tasteCatalog, tasteProjectTabs, placementMachines, placementAdd, placementRemove, placementMove, placementRows, placementLoad };`,
+    `${read("taste.js")}\nthis.api = { TASTE_PRESETS, tasteProfile, tasteResolve, tasteBrief, tasteSetField, tasteResetField, tasteBoxSize, tasteApplyProfile, tasteSaveCalls, tasteRebase, tasteSetProfiles, tasteCost, tasteSpeed, tasteModelTier, tasteCatalog, tasteProjectTabs, placementMachines, placementAdd, placementRemove, placementMove, placementRows, placementLoad, tasteProposal, tasteValueText };`,
     context,
   );
   return context.api;
@@ -362,6 +362,135 @@ test("the box size is the project's, else the account's, else small; the account
   assert.deepEqual(here(tasteSaveCalls(account, tasteResetField(account, captains, "box_size"))), [{ cmd: "reset_taste_field", scope: captains, field: "box_size" }]);
 });
 
+test("an agent's change of the Captains reads as each field's label, its value now and the proposed one, in the page's words", () => {
+  const { tasteProposal } = taste();
+  const proposal = tasteProposal(defaults(), "set_taste", { scope: captains, patch: { parallel: 3, autonomy: "ask_first" } });
+  assert.deepEqual(here(proposal), {
+    scope: "Captains (all)",
+    rows: [
+      { field: "parallel", label: "Workers at once", now: "5", next: "3" },
+      { field: "autonomy", label: "Autonomy", now: "Decide and tell", next: "Ask first" },
+    ],
+  });
+  assert.equal(tasteProposal(defaults(), "set_taste", { scope: { kind: "orchestrator" }, patch: {} }).scope, "the Orchestrator");
+});
+
+test("a project's change shows the value it has now, its own or the Captains' it inherits", () => {
+  const { tasteProposal } = taste();
+  const asked = { scope: site, patch: { parallel: 3 } };
+  assert.deepEqual(here(tasteProposal(defaults(), "set_taste", asked)), { scope: "Captain site", rows: [{ field: "parallel", label: "Workers at once", now: "5", next: "3" }] });
+  assert.equal(tasteProposal(defaults({ [SITE]: { parallel: 4 } }), "set_taste", asked).rows[0].now, "4");
+});
+
+test("a reset reads as what the project inherits from the Captains, or the built-in default for the Captains", () => {
+  const { tasteProposal } = taste();
+  const tastes = defaults({ [SITE]: { parallel: 4 } });
+  assert.deepEqual(here(tasteProposal(tastes, "reset_taste_field", { scope: site, field: "parallel" }).rows), [{ field: "parallel", label: "Workers at once", now: "4", next: "Inherits 5 from Captains (all)" }]);
+  assert.deepEqual(here(tasteProposal(tastes, "reset_taste_field", { scope: captains, field: "parallel" }).rows), [{ field: "parallel", label: "Workers at once", now: "5", next: "Built-in default" }]);
+});
+
+test("a field the page has no words for shows by its JSON name and value, and without tastes the value now is unknown", () => {
+  const { tasteProposal } = taste();
+  assert.deepEqual(here(tasteProposal(defaults(), "set_taste", { scope: captains, patch: { bogus: { deep: [1] } } }).rows), [{ field: "bogus", label: "bogus", now: "Not set", next: '{"deep":[1]}' }]);
+  assert.deepEqual(here(tasteProposal(defaults(), "set_taste", { scope: captains, patch: { toString: 1 } }).rows), [{ field: "toString", label: "toString", now: "Not set", next: "1" }], "a key inherited by every object is still only a name");
+  assert.deepEqual(here(tasteProposal(null, "set_taste", { scope: captains, patch: { parallel: 3 } }).rows), [{ field: "parallel", label: "Workers at once", now: "unknown", next: "3" }]);
+  assert.deepEqual(here(tasteProposal(null, "reset_taste_field", { scope: site, field: "parallel" }).rows), [{ field: "parallel", label: "Workers at once", now: "unknown", next: "Inherits from Captains (all)" }]);
+});
+
+test("args it can't read give no rows and never throw: no scope, an unknown scope, no patch, a patch that is no object, no field", () => {
+  const { tasteProposal } = taste();
+  const none = (action, args) => here(tasteProposal(defaults(), action, args));
+  assert.deepEqual(none("set_taste", { patch: { parallel: 3 } }), { scope: null, rows: [] });
+  assert.deepEqual(none("set_taste", { scope: { kind: "team" }, patch: { parallel: 3 } }), { scope: null, rows: [] });
+  assert.deepEqual(none("set_taste", { scope: { kind: "project" }, patch: { parallel: 3 } }), { scope: null, rows: [] });
+  assert.deepEqual(none("set_taste", null), { scope: null, rows: [] });
+  assert.deepEqual(none("set_taste", { scope: captains }), { scope: "Captains (all)", rows: [] });
+  assert.deepEqual(none("set_taste", { scope: captains, patch: "parallel" }), { scope: "Captains (all)", rows: [] });
+  assert.deepEqual(none("set_taste", { scope: captains, patch: [3] }), { scope: "Captains (all)", rows: [] });
+  assert.deepEqual(none("reset_taste_field", { scope: captains }), { scope: "Captains (all)", rows: [] });
+});
+
+test("each value reads as the page words it, and one it doesn't know as its JSON", () => {
+  const { tasteValueText } = taste();
+  const cases = [
+    ["strategy", "strongest_first", "Strongest first"],
+    ["strategy", "bogus", '"bogus"'],
+    ["ladder", [{ model: "glm-5.3" }, { model: "kimi", provider: "opencode" }], "glm-5.3, kimi through opencode"],
+    ["ladder", "glm-5.3", '"glm-5.3"'],
+    ["hard_model", null, "The top rung of the ladder"],
+    ["hard_model", { model: "claude-opus-5-5" }, "claude-opus-5-5"],
+    ["parallel", 3, "3"],
+    ["parallel", "3", '"3"'],
+    ["tier", "mid", "Mid"],
+    ["default_effort", null, "The model's own"],
+    ["default_effort", "high", "high"],
+    ["max_effort", "max", "max"],
+    ["budget_cents", 250, "US$ 2.50"],
+    ["budget_cents", 0, "No cap"],
+    ["box_budget_cents", 500, "US$ 5.00"],
+    ["time_limit_min", 90, "1 h 30 min"],
+    ["box_size", null, "Small (built-in)"],
+    ["box_size", "large", "Large"],
+    ["skills", [{ name: "tdd", enabled: true }, { name: "docs", enabled: false }], "tdd, docs (off)"],
+    ["skills", [], "None"],
+    ["context", ["Ship on Fridays.", "Small PRs."], "Ship on Fridays. · Small PRs."],
+    ["context", [], "None"],
+    ["review_diffs", false, "Off"],
+    ["manage_only", true, "On"],
+    ["escalate_over_lines", 750, "750"],
+    ["default_model", null, "The CLI's own"],
+    ["default_model", { model: "claude-haiku-5-5" }, "claude-haiku-5-5"],
+  ];
+  for (const [field, value, words] of cases) assert.equal(tasteValueText(field, value), words, `${field}: ${JSON.stringify(value)}`);
+});
+
+
+const scout = { name: "scout", skills: [], tools: ["Read"], access: "read_only", delivers: "A map.", by: "user", prompt: "You map code." };
+const fixer = { name: "fixer", skills: [{ name: "tdd", enabled: true }], tools: [], access: "edit", model: { model: "glm-5.3" }, effort: "high", delivers: "", by: "user", prompt: "" };
+const profiled = (projects = {}) => ({ ...defaults(), worker_profiles: { account: [scout], projects, proposed: [{ ...fixer, name: "tester", by: "orchestrator" }] } });
+
+test("an unchanged draft sends no set_worker_profiles, and a hub without profiles none at all", () => {
+  const { tasteSaveCalls, tasteSetField } = taste();
+  const saved = profiled({ [SITE]: [fixer] });
+  assert.deepEqual(here(tasteSaveCalls(saved, JSON.parse(JSON.stringify(saved)))), []);
+  assert.deepEqual(here(tasteSaveCalls(defaults(), tasteSetField(defaults(), captains, "parallel", 4))), [{ cmd: "set_taste", scope: captains, patch: { parallel: 4 } }]);
+});
+
+test("a changed account list saves after the set_taste calls, and a changed project list names its project", () => {
+  const { tasteSaveCalls, tasteSetField, tasteSetProfiles } = taste();
+  const saved = profiled({ [SITE]: [fixer] });
+  let draft = tasteSetField(saved, captains, "parallel", 4);
+  draft = tasteSetProfiles(draft, null, [scout, { ...fixer, name: "builder" }]);
+  draft = tasteSetProfiles(draft, "github.com/acme/api", [scout]);
+  draft = tasteSetProfiles(draft, SITE, []);
+  assert.deepEqual(here(draft.worker_profiles.projects), { "github.com/acme/api": [scout] }, "an emptied project has no list");
+  assert.deepEqual(here(tasteSaveCalls(saved, draft)), [
+    { cmd: "set_taste", scope: captains, patch: { parallel: 4 } },
+    { cmd: "set_worker_profiles", profiles: [scout, { ...fixer, name: "builder" }] },
+    { cmd: "set_worker_profiles", project: "github.com/acme/api", profiles: [scout] },
+    { cmd: "set_worker_profiles", project: SITE, profiles: [] },
+  ]);
+});
+
+test("an emptied project list that was never saved sends nothing", () => {
+  const { tasteSaveCalls, tasteSetProfiles } = taste();
+  const saved = profiled();
+  assert.deepEqual(here(tasteSaveCalls(saved, tasteSetProfiles(tasteSetProfiles(saved, SITE, [fixer]), SITE, []))), []);
+  assert.deepEqual(here(tasteSaveCalls(saved, { ...saved, worker_profiles: { ...saved.worker_profiles, projects: { [SITE]: [] } } })), [], "a missing list and an empty one are the same");
+});
+
+test("a rebase keeps an unsaved profile edit over the profiles another device saved", () => {
+  const { tasteRebase, tasteSetField, tasteSetProfiles } = taste();
+  const saved = profiled();
+  const draft = tasteSetProfiles(saved, null, [{ ...scout, prompt: "You map code, and only that." }]);
+  const fresh = tasteSetProfiles(tasteSetField(saved, captains, "parallel", 6), SITE, [fixer]);
+  const rebased = tasteRebase(saved, draft, fresh);
+  assert.deepEqual(here(rebased.worker_profiles.account), [{ ...scout, prompt: "You map code, and only that." }]);
+  assert.deepEqual(here(rebased.worker_profiles.projects), { [SITE]: [fixer] });
+  assert.equal(rebased.captains.parallel, 6);
+  assert.deepEqual(here(rebased.worker_profiles.proposed), here(saved.worker_profiles.proposed));
+});
+
 /** Tastes from a hub that has the default model, unset everywhere. */
 const modelled = (projects = {}) => ({ ...defaults(projects), orchestrator: { ...fixture.presets.balanced, default_model: null }, captains: { ...fixture.presets.balanced, default_model: null } });
 
@@ -412,4 +541,13 @@ test("the Claude Code memory switches leave the profile as it was, and a profile
   assert.deepEqual([tasteProfile(applied.captains), applied.captains.claude_memory, applied.captains.worker_claude_memory], ["aggressive", false, false]);
   const project = tasteApplyProfile(remembering({ [SITE]: { claude_memory: false } }), site, "aggressive");
   assert.equal(project.projects[SITE].claude_memory, false, "a project's own stays");
+});
+
+test("an agent's change of the Claude Code memory switches reads as their labels and On or Off", () => {
+  const { tasteProposal } = taste();
+  const proposal = tasteProposal(remembering(), "set_taste", { scope: captains, patch: { claude_memory: false, worker_claude_memory: false } });
+  assert.deepEqual(here(proposal.rows), [
+    { field: "claude_memory", label: "Claude Code memory", now: "On", next: "Off" },
+    { field: "worker_claude_memory", label: "Claude Code memory for workers", now: "On", next: "Off" },
+  ]);
 });

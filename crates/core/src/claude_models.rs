@@ -211,7 +211,7 @@ mod tests {
     use super::*;
 
     fn screen(name: &str) -> Vec<String> {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/web-sweep/screens").join(name);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-screens").join(name);
         std::fs::read_to_string(path).unwrap().lines().map(String::from).collect()
     }
 

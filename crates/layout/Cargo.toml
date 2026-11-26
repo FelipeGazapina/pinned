@@ -1,0 +1,7 @@
+[package]
+name = "pinned-layout"
+version.workspace = true
+edition = "2021"
+
+# No dependencies: the app's build script runs this crate, so it must build in a moment.
+[dependencies]

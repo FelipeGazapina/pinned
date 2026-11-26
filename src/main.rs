@@ -420,8 +420,8 @@ fn notify(app: &AppHandle, message: &str) {
     let _ = app.notification().builder().title("Reminder").body(message).show();
 }
 
-/// Debug builds run the script `PINNED_PROBE` names in the main window once it has loaded, so
-/// scripts/native-probe can check what only the native window does.
+/// Debug builds run the script `PINNED_PROBE` names in the main window once it has loaded, so a
+/// probe can check what only the native window does.
 #[cfg(debug_assertions)]
 fn run_probe(app: &tauri::App) {
     let Some(script) = std::env::var_os("PINNED_PROBE").and_then(|path| std::fs::read_to_string(path).ok()) else { return };

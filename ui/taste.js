@@ -15,6 +15,33 @@ const TASTE_ESCALATION = ["escalate_breaking_change", "escalate_process_failure"
 const TASTE_FIELDS = [...TASTE_KNOBS, "skills", "context", ...TASTE_LIMITS, ...TASTE_ESCALATION, "manage_only", "claude_memory", "worker_claude_memory", "default_model"];
 /** The Captains' fields a save clears with a reset, since a null in a patch means "not set". */
 const TASTE_CAPTAINS_CLEARED = ["box_size", "default_model"];
+const TASTE_FIELD_LABELS = {
+  strategy: "Strategy",
+  ladder: "Model ladder",
+  hard_model: "Hard work model",
+  parallel: "Workers at once",
+  autonomy: "Autonomy",
+  review_diffs: "Review each diff",
+  second_opinion: "Second opinion",
+  skills: "Skills",
+  context: "Context",
+  tier: "Model tier",
+  default_model: "Default model",
+  default_effort: "Default effort",
+  max_effort: "Most effort",
+  budget_cents: "Budget per worker",
+  time_limit_min: "Time limit per worker",
+  box_budget_cents: "Box budget",
+  box_size: "Default box size",
+  boxes_at_once: "Boxes at once",
+  escalate_breaking_change: "Breaks an older version",
+  escalate_process_failure: "The process did not work as designed",
+  escalate_over_lines: "Too big to merge unseen",
+  escalate_areas: "Always send to me",
+  manage_only: "Manage only",
+  claude_memory: "Claude Code memory",
+  worker_claude_memory: "Claude Code memory for workers",
+};
 /** The most changed lines the escalation limit may be, as Rust's `MAX_ESCALATE_OVER_LINES`. */
 const TASTE_MAX_ESCALATE_LINES = 100000;
 const TASTE_MAX_PARALLEL = 100;
@@ -220,9 +247,22 @@ function tasteApplyProfile(tastes, scope, profile) {
 /** The fields of `now` that differ from `was`'s, as one patch. */
 const tasteChanged = (was, now) => Object.fromEntries(TASTE_FIELDS.filter((field) => now[field] != null && !tasteSame(now[field], was[field])).map((field) => [field, now[field]]));
 
+/** The tastes with the account's worker profiles, or `repo`'s, set to `profiles`. A project with
+ * none has no list, as Rust's `Tastes::set_worker_profiles` leaves it. */
+function tasteSetProfiles(tastes, repo, profiles) {
+  const lists = tastes.worker_profiles;
+  if (repo == null) return { ...tastes, worker_profiles: { ...lists, account: profiles } };
+  const projects = { ...lists.projects };
+  if (profiles.length) projects[repo] = profiles;
+  else delete projects[repo];
+  return { ...tastes, worker_profiles: { ...lists, projects } };
+}
+
 /** The calls that turn `saved` into `draft`, in order: the orchestrator, the Captains, then each
- * project, whose dropped fields reset before its changed ones are set. Each sends only the fields
- * the draft changed, so a change made elsewhere to another field stands. */
+ * project, whose dropped fields reset before its changed ones are set, then the worker profiles
+ * that changed, the account's before each project's. Each sends only the fields the draft
+ * changed, so a change made elsewhere to another field stands. A hub that predates worker
+ * profiles sends none, so none are saved. */
 function tasteSaveCalls(saved, draft) {
   const calls = [];
   for (const kind of ["orchestrator", "captains"]) {
@@ -241,6 +281,13 @@ function tasteSaveCalls(saved, draft) {
     const patch = tasteChanged(was, now);
     if (Object.keys(patch).length) calls.push({ cmd: "set_taste", scope, patch });
   }
+  const [had, lists] = [saved.worker_profiles ?? {}, draft.worker_profiles];
+  if (lists == null) return calls;
+  if (!tasteSame(had.account ?? [], lists.account)) calls.push({ cmd: "set_worker_profiles", profiles: lists.account });
+  for (const repo of [...new Set([...Object.keys(had.projects ?? {}), ...Object.keys(lists.projects ?? {})])].sort()) {
+    const profiles = lists.projects?.[repo] ?? [];
+    if (!tasteSame(had.projects?.[repo] ?? [], profiles)) calls.push({ cmd: "set_worker_profiles", project: repo, profiles });
+  }
   return calls;
 }
 
@@ -249,6 +296,7 @@ function tasteSaveCalls(saved, draft) {
 function tasteRebase(saved, draft, fresh) {
   return tasteSaveCalls(saved, draft).reduce((next, call) => {
     if (call.cmd === "reset_taste_field") return tasteResetField(next, call.scope, call.field);
+    if (call.cmd === "set_worker_profiles") return next.worker_profiles ? tasteSetProfiles(next, call.project, call.profiles) : next;
     const { placement, boxes_at_once, ...fields } = call.patch;
     const set = Object.keys(fields).length ? tasteSetFields(next, call.scope, fields) : next;
     return { ...set, ...(placement ? { placement } : {}), ...(boxes_at_once != null ? { boxes_at_once } : {}) };
@@ -347,4 +395,63 @@ function tasteProjectTabs(projectViews, repos) {
   for (const p of projectViews) if (p.repo && !names.has(p.repo)) names.set(p.repo, p.name);
   for (const repo of repos) if (!names.has(repo)) names.set(repo, repo.split("/").pop());
   return [...names].map(([repo, name]) => ({ repo, name })).sort((a, b) => a.name.localeCompare(b.name) || a.repo.localeCompare(b.repo));
+}
+
+const tasteIsRef = (ref) => typeof ref?.model === "string" && (ref.provider == null || typeof ref.provider === "string");
+const tasteIsCount = (n) => Number.isInteger(n) && n >= 0;
+const tasteOnOff = (v) => (typeof v === "boolean" ? (v ? "On" : "Off") : undefined);
+/** Each field's value in the page's words, or undefined for a value of a type or id it doesn't know. */
+const TASTE_VALUE_WORDS = {
+  strategy: (v) => TASTE_STRATEGIES.find((s) => s.id === v)?.label,
+  autonomy: (v) => TASTE_AUTONOMIES.find((a) => a.id === v)?.label,
+  ladder: (v) => (Array.isArray(v) && v.every(tasteIsRef) ? v.map(tasteModelName).join(", ") : undefined),
+  hard_model: (v) => (v === null ? "The top rung of the ladder" : tasteIsRef(v) ? tasteModelName(v) : undefined),
+  parallel: (v) => (tasteIsCount(v) ? String(v) : undefined),
+  tier: (v) => (TASTE_TIERS.includes(v) ? `${v[0].toUpperCase()}${v.slice(1)}` : undefined),
+  default_model: (v) => (v === null ? "The CLI's own" : tasteIsRef(v) ? tasteModelName(v) : undefined),
+  default_effort: (v) => (v === null ? "The model's own" : TASTE_EFFORTS.includes(v) ? v : undefined),
+  max_effort: (v) => (TASTE_EFFORTS.includes(v) ? v : undefined),
+  budget_cents: (v) => (tasteIsCount(v) ? tasteMoney(v) : undefined),
+  box_budget_cents: (v) => (tasteIsCount(v) ? tasteMoney(v) : undefined),
+  time_limit_min: (v) => (tasteIsCount(v) ? tasteMinutes(v) : undefined),
+  box_size: (v) => (v === null ? "Small (built-in)" : TASTE_BOX_SIZES.includes(v) ? tasteBoxSizeName(v) : undefined),
+  skills: (v) => (Array.isArray(v) && v.every((s) => typeof s?.name === "string") ? v.map((s) => (s.enabled ? s.name : `${s.name} (off)`)).join(", ") || "None" : undefined),
+  context: (v) => (Array.isArray(v) && v.every((note) => typeof note === "string") ? v.join(" · ") || "None" : undefined),
+  review_diffs: tasteOnOff,
+  second_opinion: tasteOnOff,
+  escalate_breaking_change: tasteOnOff,
+  escalate_process_failure: tasteOnOff,
+  manage_only: tasteOnOff,
+  claude_memory: tasteOnOff,
+  worker_claude_memory: tasteOnOff,
+};
+
+/** One value of `field` as the Way of working page words it, not escaped. A field or value it
+ * doesn't know reads as its JSON, so nothing an agent proposes is hidden. */
+function tasteValueText(field, value) {
+  const words = Object.hasOwn(TASTE_VALUE_WORDS, field) ? TASTE_VALUE_WORDS[field](value) : undefined;
+  return words ?? JSON.stringify(value) ?? "Not set";
+}
+
+/** An agent's `set_taste` or `reset_taste_field` as its card shows it: the scope in words ("the
+ * Orchestrator", "Captains (all)" or "Captain <the repo's last segment>"), null when `args.scope`
+ * is missing or unknown, and one row per field, `{ field, label, now, next }`, with the scope's
+ * current value and the proposed one in the page's words. `tastes` is get_tastes' answer, or null
+ * before it arrives. Args it can't read give no rows. */
+function tasteProposal(tastes, action, args) {
+  const at = args?.scope;
+  const name = at?.kind === "project" && typeof at.repo === "string" ? at.repo.split("/").pop() : "";
+  const scope = at?.kind === "orchestrator" ? "the Orchestrator" : at?.kind === "captains" ? "Captains (all)" : name ? `Captain ${name}` : null;
+  if (!scope) return { scope, rows: [] };
+  const patch = action === "set_taste" ? args.patch : action === "reset_taste_field" && typeof args.field === "string" ? { [args.field]: null } : null;
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return { scope, rows: [] };
+  const shown = tastes && tasteResolve(tastes, at);
+  const now = (field) => (tastes ? tasteValueText(field, field === "placement" || field === "boxes_at_once" ? tastes[field] : shown?.[field]) : "unknown");
+  const next = (field) =>
+    action === "set_taste" ? tasteValueText(field, patch[field])
+      : at.kind !== "project" ? "Built-in default"
+      : tastes ? `Inherits ${tasteValueText(field, tastes.captains?.[field])} from Captains (all)`
+      : "Inherits from Captains (all)";
+  const label = (field) => (Object.hasOwn(TASTE_FIELD_LABELS, field) ? TASTE_FIELD_LABELS[field] : field);
+  return { scope, rows: Object.keys(patch).map((field) => ({ field, label: label(field), now: now(field), next: next(field) })) };
 }

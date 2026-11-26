@@ -4020,7 +4020,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -11093,6 +11093,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -11101,7 +11106,8 @@
               "tools",
               "access",
               "delivers",
-              "by"
+              "by",
+              "prompt"
             ]
           },
           "ProfileAccess": {
@@ -12082,6 +12088,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, for an act held for the owner.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -12897,6 +12910,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -17897,7 +17927,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -24799,6 +24829,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -25728,6 +25763,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, for an act held for the owner.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -26516,6 +26558,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -28138,6 +28197,33 @@
                     "type": "null"
                   }
                 ]
+              },
+              "turns": {
+                "description": "How many turns the conversation finished, once its transcript logged one.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tokens_in": {
+                "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
               },
               "branch": {
                 "description": "The git branch of the conversation's last message.",
@@ -34927,6 +35013,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -34935,7 +35026,8 @@
               "tools",
               "access",
               "delivers",
-              "by"
+              "by",
+              "prompt"
             ]
           },
           "ProfileAccess": {
@@ -35620,7 +35712,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -36493,6 +36585,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, for an act held for the owner.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -37308,6 +37407,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -38850,6 +38966,33 @@
                     "type": "null"
                   }
                 ]
+              },
+              "turns": {
+                "description": "How many turns the conversation finished, once its transcript logged one.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tokens_in": {
+                "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
               },
               "branch": {
                 "description": "The git branch of the conversation's last message.",
@@ -45483,6 +45626,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -46118,7 +46266,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -46979,6 +47127,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, for an act held for the owner.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -47767,6 +47922,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -50316,6 +50488,13 @@
               "string",
               "null"
             ]
+          },
+          "reason": {
+            "description": "Why the session asks, on one line, secrets masked and cut at 200 characters. Absent when it gave none.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -50427,6 +50606,13 @@
           },
           "outcome": {
             "description": "What running it came to: `done`, or `failed: <error>`. Absent until decided.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Why the session asks, on one line, secrets masked and cut at 200 characters. Absent when it gave none.",
             "type": [
               "string",
               "null"
@@ -66721,6 +66907,33 @@
               }
             ]
           },
+          "turns": {
+            "description": "How many turns the conversation finished, once its transcript logged one.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          },
+          "tokens_in": {
+            "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "tokens_out": {
+            "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
           "branch": {
             "description": "The git branch of the conversation's last message.",
             "type": [
@@ -67359,6 +67572,33 @@
                 "type": "null"
               }
             ]
+          },
+          "turns": {
+            "description": "How many turns the conversation finished, once its transcript logged one.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          },
+          "tokens_in": {
+            "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
+          },
+          "tokens_out": {
+            "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0
           },
           "branch": {
             "description": "The git branch of the conversation's last message.",
@@ -68807,6 +69047,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -68815,7 +69060,8 @@
               "tools",
               "access",
               "delivers",
-              "by"
+              "by",
+              "prompt"
             ]
           },
           "ProfileAccess": {
@@ -69724,6 +69970,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -72107,6 +72358,33 @@
                     "type": "null"
                   }
                 ]
+              },
+              "turns": {
+                "description": "How many turns the conversation finished, once its transcript logged one.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tokens_in": {
+                "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
               },
               "branch": {
                 "description": "The git branch of the conversation's last message.",
@@ -75976,6 +76254,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, on one line, secrets masked and cut at 200 characters. Absent when it gave none.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -77012,6 +77297,33 @@
                     "type": "null"
                   }
                 ]
+              },
+              "turns": {
+                "description": "How many turns the conversation finished, once its transcript logged one.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "tokens_in": {
+                "description": "The tokens the conversation's own transcript sent, cache reads and writes included, once a\nmessage there reported its usage. Its workers' and subagents' are not in it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "description": "The tokens the replies in the conversation's own transcript came to, known with `tokens_in`.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
               },
               "branch": {
                 "description": "The git branch of the conversation's last message.",
@@ -80751,6 +81063,13 @@
               },
               "outcome": {
                 "description": "What running it came to: `done`, or `failed: <error>`. Absent until decided.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "description": "Why the session asks, on one line, secrets masked and cut at 200 characters. Absent when it gave none.",
                 "type": [
                   "string",
                   "null"
@@ -85480,7 +85799,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -91185,7 +91504,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"

@@ -2,8 +2,25 @@ fn main() {
     // The web UI is embedded at build time, so a change there must rebuild the app.
     println!("cargo:rerun-if-changed=ui");
     println!("cargo:rerun-if-changed=src/dictation-helper.swift");
+    check_layout();
     build_dictation_helper();
     tauri_build::build()
+}
+
+/// The repo's file layout (crates/layout): a file in the wrong place, unwired or misnamed stops the
+/// build; a module or script no test reaches only warns.
+fn check_layout() {
+    for path in ["Cargo.toml", "src", "crates"] {
+        println!("cargo:rerun-if-changed={path}");
+    }
+    let report = pinned_layout::check(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+    println!("cargo:warning=pinned: {}", report.coverage_line());
+    if !report.warnings.is_empty() {
+        println!("cargo:warning=pinned: {} files have no tests; `cargo run -p pinned-layout` lists them", report.warnings.len());
+    }
+    if !report.errors.is_empty() {
+        panic!("the file layout is broken (`cargo run -p pinned-layout` for the whole report):\n{}", report.errors_text());
+    }
 }
 
 /// Compiles the on-device dictation sidecar (macOS Speech framework) with swiftc.

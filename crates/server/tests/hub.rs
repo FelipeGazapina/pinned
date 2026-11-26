@@ -1225,6 +1225,45 @@ fn an_agents_act_with_a_review_setting_changes_nothing_and_an_allowed_field_alon
 }
 
 #[test]
+fn an_agents_way_of_working_proposal_keeps_its_reason_and_leaves_its_audit_rows() {
+    let hub = TestHub::start("act_reason");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "act-reason-mac");
+    let captains = json!({ "kind": "captains" });
+    let reason = "Workers keep timing out on site.";
+    let asked = |client: &mut Client, id: &Value| client.hub(json!({ "cmd": "confirmations" })).unwrap().as_array().unwrap().iter().find(|c| &c["id"] == id).cloned().unwrap();
+    let rows = |client: &mut Client, request: &str| -> Vec<(String, String, String)> {
+        let trail = client.hub(json!({ "cmd": "agent_audit" })).unwrap();
+        trail.as_array().unwrap().iter().filter(|r| r["request_id"] == request).map(|r| (r["action"].as_str().unwrap().to_owned(), r["outcome"].as_str().unwrap().to_owned(), r["detail"].as_str().unwrap().to_owned())).collect()
+    };
+    let row = |outcome: &str, detail: &str| ("set_taste".to_owned(), outcome.to_owned(), detail.to_owned());
+    // The Captains' own choice first: a taste that is exactly the Balanced preset with 3 workers reads as one stored on
+    // the old parallel defaults (`Tastes::take_raised_defaults`), and would load with 5 again.
+    ana.client.hub(json!({ "cmd": "set_taste", "scope": captains, "patch": { "autonomy": "ask_first" } })).unwrap();
+
+    let held = session_tool(&ana.dir, &ana.tab, json!({ "name": "act", "action": "set_taste", "args": { "scope": captains, "patch": { "parallel": 3 } }, "reason": reason, "request_id": "r-reason" })).unwrap();
+    assert_eq!(held["outcome"], "pending", "a proposal waits for the owner: {held}");
+    assert_eq!(asked(&mut ana.client, &held["id"])["reason"], reason, "the held proposal keeps its reason");
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": held["id"], "approve": true })).unwrap()["outcome"], "done");
+    assert_eq!(ana.client.hub(json!({ "cmd": "get_tastes" })).unwrap()["captains"]["parallel"], 3, "the approved proposal lands");
+    let trail = rows(&mut ana.client, "r-reason");
+    for expected in [row("pending", &format!("Reason: {reason}")), row("approved", ""), row("done", "")] {
+        assert!(trail.contains(&expected), "{expected:?} in {trail:?}");
+    }
+    assert_eq!(trail.len(), 3, "{trail:?}");
+
+    let bare = act(&ana.dir, &ana.tab, "set_taste", json!({ "scope": captains, "patch": { "parallel": 4 } })).unwrap();
+    assert_eq!(bare["outcome"], "pending", "{bare}");
+    let listed = asked(&mut ana.client, &bare["id"]);
+    assert!(listed.get("reason").is_none(), "an act without a reason holds none: {listed}");
+    let trail = ana.client.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let pending: Vec<&Value> = trail.as_array().unwrap().iter().filter(|r| r["outcome"] == "pending" && r["request_id"].is_null()).collect();
+    assert_eq!(pending.iter().map(|r| r["detail"].as_str().unwrap()).collect::<Vec<_>>(), [""], "its pending row says nothing more: {pending:?}");
+}
+
+#[test]
 fn a_review_setting_held_before_the_refusal_fails_when_the_owner_approves_it() {
     let hub = TestHub::start("held_review");
     let url = hub.url.clone();
@@ -1237,7 +1276,7 @@ fn a_review_setting_held_before_the_refusal_fails_when_the_owner_approves_it() {
     let other = "second_opinion is changed only by the user, on the Way of working page; nothing changed";
     // Asks an app from before the refusal held, straight into the table, as the hub held them then.
     let hold = |request: &str, action: &str, args: Value| {
-        let asked = Confirmation { id: String::new(), at: 1, machine: machine.clone(), machine_name: "held-review-mac".into(), tab: tab.clone(), title: "Way of working".into(), role: ActorRole::Session, action: action.into(), about: String::new(), args, target: None, request_id: Some(request.into()), decision: None, decided_at: None, outcome: None };
+        let asked = Confirmation { id: String::new(), at: 1, machine: machine.clone(), machine_name: "held-review-mac".into(), tab: tab.clone(), title: "Way of working".into(), role: ActorRole::Session, action: action.into(), about: String::new(), args, target: None, request_id: Some(request.into()), decision: None, decided_at: None, outcome: None, reason: None };
         let (account_id, machine_id) = (uuid::Uuid::parse_str(&owner.id).unwrap(), uuid::Uuid::parse_str(&machine).unwrap());
         hub.runtime.block_on(hub.hub().db.hold_confirmation(account_id, machine_id, None, &asked)).unwrap().0.to_string()
     };
@@ -11884,7 +11923,7 @@ fn another_accounts_box_row_never_joins_an_accounts_machine() {
     assert!(!row.dedicated, "bob's box row made ana's machine a box's");
 }
 
-// ---- Scheduled tasks (0.18.2 Ideas+Tasks PR 4): stored and edited, nothing fires them yet ----
+// ---- Scheduled tasks (0.18.2 Ideas+Tasks PR 4): stored and edited; the hub's scheduler fires the due workflow tasks ----
 
 /// A task body as an app or an agent sends it: a weekday-morning prompt to the Orchestrator in São Paulo.
 fn task_body(title: &str) -> Value {
@@ -11915,7 +11954,9 @@ impl Schedules {
         let (_, _, bob) = signed_in(&url, "bob@example.test");
         let tab = json!({ "id": "tab-agent", "cwd": "/a/app", "bypass": false, "running": true, "status": "working", "title": "Planner", "message": null, "resume_at": null, "opened": 1, "session": "agent-conv" });
         let (machine, machine_token) = account::register_machine(&url, &ana_token, "ana-mac", "linux").unwrap();
-        let raw = RawMachine::start_with(&url, &machine_token, vec![json!({ "kind": "tabs", "tabs": [tab] })], |_| RawReply::Ok(Value::Null));
+        // A Run now, as the scheduler sends it, starts a session in the tab `tab-run`.
+        let answer = |call: &Value| RawReply::Ok(if call["cmd"] == "run_now" { json!("tab-run") } else { Value::Null });
+        let raw = RawMachine::start_with(&url, &machine_token, vec![json!({ "kind": "tabs", "tabs": [tab] })], answer);
         ana.wait("ana-mac's tabs", |f| f["type"] == "event" && f["event"]["kind"] == "tabs");
         Schedules { _hub: hub, ana, bob, raw, machine: machine.id }
     }
@@ -11986,7 +12027,7 @@ fn a_task_is_created_listed_edited_paused_and_deleted_and_a_dry_run_stores_nothi
     let resumed = s.ana.hub(json!({ "cmd": "pause_schedule", "id": id, "paused": false })).unwrap();
     assert_eq!(resumed["enabled"], true);
     assert!(resumed["next_at"].as_i64().is_some());
-    assert_eq!(s.ana.hub(json!({ "cmd": "schedule_runs", "id": id, "limit": 5 })), Ok(json!([])), "nothing fires it yet");
+    assert_eq!(s.ana.hub(json!({ "cmd": "schedule_runs", "id": id, "limit": 5 })), Ok(json!([])), "it was never due, and the scheduler fires no prompt task");
 
     assert_eq!(s.ana.hub(json!({ "cmd": "delete_schedule", "id": id })), Ok(Value::Null));
     assert_eq!(s.titles(), Vec::<String>::new());
@@ -12467,6 +12508,177 @@ fn a_worker_target_is_refused_until_held_steps_land() {
         ok["target"] = target;
         assert!(save_schedule(&mut s.ana, ok).is_ok());
     }
+}
+
+/// The workflow `name` of `client`'s account, which a Run now starts on any of its machines.
+fn scheduled_workflow(client: &mut Client, name: &str) -> String {
+    let connector = json!({
+        "name": name, "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" }, "folder": "/a/app", "model": "",
+        "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "Check the build.",
+    });
+    client.hub(json!({ "cmd": "save_connector", "connector": connector })).unwrap()["id"].as_str().unwrap().to_owned()
+}
+
+/// A task body that runs `workflow` every day at 09:00.
+fn workflow_task(title: &str, workflow: &str) -> Value {
+    let mut body = task_body(title);
+    body["schedule"] = json!({ "kind": "cron", "expr": "0 9 * * *" });
+    body["action"] = json!({ "kind": "workflow", "id": workflow });
+    body
+}
+
+/// Saves `body` as `client`'s user and sets its `next_at` to `ago` seconds ago, as a hub that was
+/// down since would find it: its id and that `next_at`.
+fn saved_due(hub: &TestHub, client: &mut Client, body: Value, ago: i64) -> (String, i64) {
+    let id = save_schedule(client, body).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    let due = pinned_core::schedule::now() - ago;
+    admin_on(&hub.database, &format!("update tasks set next_at = {due} where id = '{id}'"));
+    (id, due)
+}
+
+/// One pass of the hub's scheduler, as its loop runs one.
+fn scheduler_pass(hub: &TestHub) {
+    hub.runtime.block_on(pinned_server::scheduler::pass(hub.hub())).unwrap();
+}
+
+/// Task `id`'s runs as `client`'s app lists them, newest first.
+fn task_runs(client: &mut Client, id: &str) -> Vec<Value> {
+    client.hub(json!({ "cmd": "schedule_runs", "id": id })).unwrap().as_array().unwrap().clone()
+}
+
+/// How many `task_runs` rows task `id` has.
+fn run_rows(hub: &TestHub, id: &str) -> i64 {
+    count_on(&hub.database, &format!("select count(*) from task_runs where task = '{id}'"))
+}
+
+#[test]
+fn the_scheduler_starts_a_due_workflow_task_and_records_its_run() {
+    let mut s = Schedules::start("sched_fire");
+    let workflow = scheduled_workflow(&mut s.ana, "Nightly");
+    let (id, due) = saved_due(&s._hub, &mut s.ana, workflow_task("Morning check", &workflow), 60);
+    let from = s.ana.frames.len();
+    scheduler_pass(&s._hub);
+    wait_for("the run recorded done", || task_runs(&mut s.ana, &id)[0]["state"] == "done");
+
+    let calls: Vec<Value> = s.raw.calls.lock().unwrap().iter().filter(|c| c["cmd"] == "run_now").cloned().collect();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    let prompt = calls[0]["run"]["args"].as_array().unwrap().last().unwrap().as_str().unwrap().to_owned();
+    assert!(prompt.contains("Run now by the scheduled task \"Morning check\", at "), "{prompt}");
+    let runs = task_runs(&mut s.ana, &id);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!((&runs[0]["due_at"], &runs[0]["machine"], &runs[0]["tab"]), (&json!(due), &json!(s.machine), &json!("tab-run")));
+    assert!(runs[0]["started_at"].as_i64().is_some_and(|at| at >= due), "{}", runs[0]);
+    assert!(s.task(&id)["next_at"].as_i64().unwrap() > pinned_core::schedule::now(), "the next run is ahead");
+    let done = |f: &Value| f["type"] == "settings" && f["settings"]["schedules"].as_array().is_some_and(|tasks| tasks.iter().any(|t| t["id"] == id.as_str() && t["last_run"]["state"] == "done"));
+    wait_frame(&mut s.ana, from, "the settings with the run", done);
+}
+
+#[test]
+fn the_scheduler_claims_each_occurrence_once() {
+    let mut s = Schedules::start("sched_claim");
+    let workflow = scheduled_workflow(&mut s.ana, "Nightly");
+    let (raced, _) = saved_due(&s._hub, &mut s.ana, workflow_task("Raced", &workflow), 60);
+    let (taken, _) = saved_due(&s._hub, &mut s.ana, workflow_task("Taken", &workflow), 60);
+    // Another hub on the database claimed this occurrence already.
+    admin_on(&s._hub.database, &format!("insert into task_runs (task, account, due_at, state, run) select id, account, next_at, 'due', jsonb_build_object('task', id::text, 'due_at', next_at, 'state', 'due') from tasks where id = '{taken}'"));
+    let hub = s._hub.hub();
+    let (one, two) = s._hub.runtime.block_on(async { tokio::join!(pinned_server::scheduler::pass(hub), pinned_server::scheduler::pass(hub)) });
+    assert_eq!((one, two), (Ok(()), Ok(())));
+    wait_for("the raced run recorded", || task_runs(&mut s.ana, &raced)[0]["state"] == "done");
+    assert_eq!(run_rows(&s._hub, &raced), 1);
+    assert_eq!(s.raw.calls("run_now"), 1, "one start, and none for the occurrence another hub claimed");
+    assert_eq!(run_rows(&s._hub, &taken), 1);
+    assert_eq!(task_runs(&mut s.ana, &taken)[0]["state"], "due", "the other hub's row is left as it wrote it");
+}
+
+#[test]
+fn the_scheduler_records_a_run_that_could_not_start_as_failed_and_moves_the_task_on() {
+    let mut s = Schedules::start("sched_failed");
+    // Bob's workflow is no workflow of ana's account, and bob has no machine online.
+    let bobs = scheduled_workflow(&mut s.bob, "Bob's nightly");
+    let (unknown, _) = saved_due(&s._hub, &mut s.ana, workflow_task("Not ours", &bobs), 60);
+    let (offline, _) = saved_due(&s._hub, &mut s.bob, workflow_task("Offline", &bobs), 60);
+    scheduler_pass(&s._hub);
+    wait_for("both runs recorded", || task_runs(&mut s.ana, &unknown)[0]["state"] == "failed" && task_runs(&mut s.bob, &offline)[0]["state"] == "failed");
+    let detail = task_runs(&mut s.ana, &unknown)[0]["detail"].as_str().unwrap().to_owned();
+    assert!(detail.contains(&format!("this account has no workflow {bobs}")), "{detail}");
+    let detail = task_runs(&mut s.bob, &offline)[0]["detail"].as_str().unwrap().to_owned();
+    assert!(detail.contains("no machine of the account is online"), "{detail}");
+    let now = pinned_core::schedule::now();
+    assert!(s.task(&unknown)["next_at"].as_i64().unwrap() > now);
+    let bobs_task = s.bob.hub(json!({ "cmd": "list_schedules" })).unwrap()[0].clone();
+    assert!(bobs_task["id"] == offline.as_str() && bobs_task["next_at"].as_i64().unwrap() > now, "{bobs_task}");
+    assert_eq!(s.raw.calls("run_now"), 0);
+
+    scheduler_pass(&s._hub);
+    assert_eq!((run_rows(&s._hub, &unknown), run_rows(&s._hub, &offline)), (1, 1), "a failed run is not tried again");
+}
+
+#[test]
+fn the_scheduler_runs_a_task_ten_days_late_once() {
+    let mut s = Schedules::start("sched_late");
+    let workflow = scheduled_workflow(&mut s.ana, "Nightly");
+    let (id, due) = saved_due(&s._hub, &mut s.ana, workflow_task("Daily", &workflow), 10 * 86_400);
+    scheduler_pass(&s._hub);
+    wait_for("the late run recorded", || task_runs(&mut s.ana, &id)[0]["state"] == "done");
+    scheduler_pass(&s._hub);
+    let runs = task_runs(&mut s.ana, &id);
+    assert_eq!((runs.len(), &runs[0]["due_at"]), (1, &json!(due)), "one run for the stored next_at, none per missed day: {runs:?}");
+    assert_eq!(s.raw.calls("run_now"), 1);
+    assert!(s.task(&id)["next_at"].as_i64().unwrap() > pinned_core::schedule::now());
+}
+
+#[test]
+fn the_scheduler_skips_a_task_that_says_skip_once_past_its_grace() {
+    let mut s = Schedules::start("sched_skip");
+    let workflow = scheduled_workflow(&mut s.ana, "Nightly");
+    let mut body = workflow_task("Skippable", &workflow);
+    body["on_missed"] = json!("skip");
+    let (id, due) = saved_due(&s._hub, &mut s.ana, body, 2 * 3600);
+    scheduler_pass(&s._hub);
+    let runs = task_runs(&mut s.ana, &id);
+    assert_eq!((runs.len(), &runs[0]["state"], &runs[0]["due_at"]), (1, &json!("skipped"), &json!(due)), "{runs:?}");
+    assert!(runs[0]["detail"].as_str().unwrap().contains("grace window of 15 minutes"), "{}", runs[0]);
+    assert_eq!(s.raw.calls("run_now"), 0);
+    assert!(s.task(&id)["next_at"].as_i64().unwrap() > pinned_core::schedule::now());
+}
+
+#[test]
+fn the_scheduler_leaves_paused_and_prompt_tasks_alone() {
+    let mut s = Schedules::start("sched_untouched");
+    let workflow = scheduled_workflow(&mut s.ana, "Nightly");
+    let mut paused = workflow_task("Paused", &workflow);
+    paused["enabled"] = json!(false);
+    let (paused, paused_due) = saved_due(&s._hub, &mut s.ana, paused, 60);
+    let (prompt, prompt_due) = saved_due(&s._hub, &mut s.ana, task_body("Prompt"), 60);
+    scheduler_pass(&s._hub);
+    assert_eq!((run_rows(&s._hub, &paused), run_rows(&s._hub, &prompt)), (0, 0));
+    assert_eq!((&s.task(&paused)["next_at"], &s.task(&prompt)["next_at"]), (&json!(paused_due), &json!(prompt_due)), "next_at is left as it was");
+    assert_eq!(s.raw.calls("run_now"), 0);
+}
+
+#[test]
+fn the_scheduler_gets_no_agents_workflow_task_until_the_user_approves_it() {
+    let mut s = Schedules::start("sched_agent_workflow");
+    let workflow = scheduled_workflow(&mut s.ana, "Nightly");
+    let dry = s.act("save_schedule", json!({ "task": workflow_task("Agent's nightly", &workflow), "dry_run": true })).unwrap();
+    assert_eq!(dry["outcome"], "done", "a dry run stores nothing, so it needs no OK: {dry}");
+    let held = s.act("save_schedule", json!({ "task": workflow_task("Agent's nightly", &workflow) })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert_eq!(s.titles(), Vec::<String>::new(), "nothing is stored before the user decides");
+    let about = s.about(&held);
+    assert!(about.contains(&format!("would start workflow {workflow} on its schedule")), "{about}");
+    assert_eq!(s.approve(&held), "done");
+    let id = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(s.task(&id)["enabled"], true);
+    assert_eq!(s.task(&id)["created_by"]["kind"], "agent");
+
+    // Pausing its own task goes at once; starting it again waits for the user again.
+    assert_eq!(s.act("pause_schedule", json!({ "id": id, "paused": true })).unwrap()["outcome"], "done");
+    let held = s.act("pause_schedule", json!({ "id": id, "paused": false })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert!(s.about(&held).contains(&format!("workflow {workflow}")), "{}", s.about(&held));
+    assert_eq!(s.task(&id)["enabled"], false, "still paused until the user approves");
 }
 
 /// How many ends the hub holds, for every account or only `account`, as Postgres has them.
@@ -14209,11 +14421,11 @@ fn act_cannot_set_the_reviewer_or_worker_profiles_for_any_role_and_the_user_can(
     let before = ana.hub(json!({ "cmd": "get_tastes" })).unwrap();
     assert_eq!(before["worker_profiles"]["proposed"], json!([]));
     let mut proposed = propose("tab-captain", json!({ "name": "  tester ", "access": "read_only", "by": "user" })).unwrap();
-    assert_eq!(proposed["worker_profiles"]["proposed"], json!([{ "name": "tester", "skills": [], "tools": [], "access": "read_only", "delivers": "", "by": "orchestrator" }]), "the hub writes who proposed it");
+    assert_eq!(proposed["worker_profiles"]["proposed"], json!([{ "name": "tester", "skills": [], "tools": [], "access": "read_only", "delivers": "", "by": "orchestrator", "prompt": "" }]), "the hub writes who proposed it");
     proposed["worker_profiles"]["proposed"] = json!([]);
     assert_eq!(proposed, before, "nothing outside proposed changed");
     let replaced = propose("tab-global", json!({ "name": "Tester", "delivers": "A list." })).unwrap();
-    assert_eq!(replaced["worker_profiles"]["proposed"], json!([{ "name": "Tester", "skills": [], "tools": [], "access": "edit", "delivers": "A list.", "by": "orchestrator" }]), "a proposal of the same name is replaced");
+    assert_eq!(replaced["worker_profiles"]["proposed"], json!([{ "name": "Tester", "skills": [], "tools": [], "access": "edit", "delivers": "A list.", "by": "orchestrator", "prompt": "" }]), "a proposal of the same name is replaced");
     assert_eq!(propose("tab-captain", json!({ "name": "x", "delivers": "a\nb" })), Err("what x delivers fits one line".into()));
     for n in 2..=20 {
         propose("tab-captain", json!({ "name": format!("p{n}") })).unwrap();

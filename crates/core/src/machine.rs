@@ -64,6 +64,8 @@ const CARD_CANCEL: &str = "cancelled from the card";
 pub const STARTING_LIMIT: Duration = Duration::from_secs(10 * 60);
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
 const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
+/// How often the transcripts of tabs that work are read for their turns and tokens, between turn ends.
+const COUNTS_EVERY: Duration = Duration::from_secs(3);
 const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
 /// The most items a `Call::Thread` with a limit asks for that a machine reads back.
 const THREAD_PAGE_MAX: usize = 5000;
@@ -838,6 +840,9 @@ struct Tab {
     left_session: Option<String>,
     /// `claude_session`'s transcript as read so far, which starts over whenever the session changes.
     tally: Tally,
+    /// Held through each read of the transcript into `tally`, so a slower read never writes an
+    /// older tally over a newer one. Never lock it while holding the tabs lock.
+    tally_read: Arc<Mutex<()>>,
     last_found_transcript: Option<PathBuf>,
     /// A turn is running, or died on an error: the session has work left if pinned quits now.
     interrupted: bool,
@@ -1015,6 +1020,9 @@ impl Tab {
             interrupted: self.interrupted,
             cut_by_sleep: self.cut_by_sleep,
             stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
+            turns: Some(self.tally.turns).filter(|n| *n > 0),
+            tokens_in: self.tally.tokens().map(|(tokens_in, _)| tokens_in),
+            tokens_out: self.tally.tokens().map(|(_, tokens_out)| tokens_out),
             branch: self.tally.branch.clone(),
             pr: self.tally.pr.clone(),
             last_message_at: self.tally.last_at,
@@ -1505,6 +1513,7 @@ impl Machine {
         });
         machine.reconcile_rooms();
         machine.start_auto_archive();
+        machine.start_live_counts();
         machine
     }
 
@@ -3722,6 +3731,12 @@ impl Machine {
         });
     }
 
+    /// Starts reading the transcripts of tabs that work every `COUNTS_EVERY`, so their turns and
+    /// tokens show while a turn runs.
+    fn start_live_counts(&self) {
+        self.every(COUNTS_EVERY, Machine::count_working_tabs);
+    }
+
     /// Hands `text` from the global orchestrator `sender` to the Capitão of the project at `path`,
     /// opening the Capitão when the project has none. It is typed now when the Capitão is idle,
     /// becomes its first prompt when it is stopped or has no conversation yet, and otherwise waits
@@ -4331,8 +4346,8 @@ impl Machine {
             ProjectTool::MemoryForget { id } => self.memories.forget(&self.project_of_tab(tab)?, id).map(|m| format!("Forgot #{} {}.", m.id, pinned_lines::quoted(&m.title, memory::MEMORY_TITLE_CHARS))),
             ProjectTool::Actions { search } => text_json(json!({ "actions": surface::listing(search.as_deref()) })),
             ProjectTool::Convex { ask } => self.convex(tab, ask),
-            ProjectTool::Act { action, args, request_id, machine } => {
-                let act = surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine };
+            ProjectTool::Act { action, args, request_id, machine, reason } => {
+                let act = surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine, reason };
                 match self.call_hub(HubCall::Act { act }) {
                     Ok(answer) => text_json(answer),
                     Err(e) => Err(Self::why_no_hub(&e).map_or(e, |why| format!("{why}, and act writes its audit trail there"))),
@@ -5918,6 +5933,8 @@ impl Machine {
         self.delegates.describe(&task.id, delegator.clone(), effort);
         self.delegates.note_parent(&task.id, session);
         self.delegates.set_remote(&task.id, RemoteTarget { machine: String::new(), name: place, tab: None, looked: None, waiting: None });
+        // The request already carries what its profile set, and an older machine refuses a name.
+        request.profile = None;
         let asked = HubCall::Delegate { tab: tab.clone(), task: task.id.clone(), request: Box::new(request), repo, access: ceiling, delegator, limits: held };
         let begun = Instant::now();
         match self.call_hub(asked.clone()) {
@@ -7474,6 +7491,7 @@ impl Machine {
             claude_session,
             left_session: None,
             tally: Tally::default(),
+            tally_read: Arc::default(),
             last_found_transcript: None,
             interrupted: false,
             resume_at: None,
@@ -7662,12 +7680,32 @@ impl Machine {
         });
     }
 
+    /// Reads what the transcripts of tabs that work gained, one tab after another, and sends the
+    /// tabs once when a tab's turns or tokens moved.
+    fn count_working_tabs(&self) {
+        let counts = |t: &Tab| (t.tally.turns, t.tally.tokens());
+        let working: Vec<(TabId, _)> = {
+            let tabs = self.tabs.lock().unwrap();
+            tabs.iter().filter(|(_, t)| t.status == Some(AgentStatus::Working) && t.claude_session.is_some()).map(|(id, t)| (id.clone(), counts(t))).collect()
+        };
+        let mut moved = false;
+        for (id, before) in working {
+            self.read_stats(&id);
+            moved |= self.tab(&id, |t| counts(t) != before).unwrap_or(false);
+        }
+        if moved {
+            self.emit_tabs();
+        }
+    }
+
     /// Reads what the tab's transcript gained since the last read, outside the tabs lock, saves the
     /// session's figures, and returns the turns counted so far. `None` when the tab has no
-    /// transcript to read.
+    /// transcript to read. One read of a tab waits for another to end.
     fn read_stats(&self, tab: &str) -> Option<u32> {
-        let (session, mut tally, account) = self.tab(tab, |t| Some((t.claude_session.clone()?, t.tally.clone(), t.account.clone()))).ok()??;
-        let file = self.find_transcript(&account, &session)?;
+        let tally_read = self.tab(tab, |t| t.tally_read.clone()).ok()?;
+        let _one_read = tally_read.lock().unwrap();
+        let (session, mut tally, account, kept) = self.tab(tab, |t| Some((t.claude_session.clone()?, t.tally.clone(), t.account.clone(), t.last_found_transcript.clone()))).ok()??;
+        let file = self.kept_transcript(tab, &account, &session, kept, || self.find_transcript(&account, &session))?;
         tally.advance(&file).ok()?;
         let turns = tally.turns;
         // Held from before the session is checked, so a save before its drop lands after this one.
@@ -9908,6 +9946,63 @@ pub(crate) mod tests {
         m.nudge_thread_watchers(&mut looks);
         assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })]);
         assert_eq!(texts_from(&m, &tab, assistant_line("ready").len() as u64), vec!["after"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_tick_reads_working_tabs_counts_and_sends_the_tabs_only_when_they_moved() {
+        use std::io::Write;
+        let (root, m, heard, tab, dir) = watching("live-counts");
+        let idle = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s2".into()));
+        let reply = |id: &str, output: u64| format!("{}\n", json!({ "type": "assistant", "requestId": format!("r-{id}"), "message": { "id": id, "model": "claude-opus-5-5", "content": [], "usage": { "input_tokens": 10, "cache_read_input_tokens": 100, "output_tokens": output } } }));
+        let append = |file: &Path, line: String| std::fs::OpenOptions::new().append(true).create(true).open(file).unwrap().write_all(line.as_bytes()).unwrap();
+        append(&dir.join("s1.jsonl"), reply("m1", 5));
+        append(&dir.join("s2.jsonl"), reply("m9", 7));
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Working)).unwrap();
+        let counts = |id: &str| m.tabs().into_iter().find(|v| v.id == id).map(|v| (v.turns, v.tokens_in, v.tokens_out)).unwrap();
+        let tabs_sent = || heard.lock().unwrap().iter().filter(|event| event["kind"] == "tabs").count();
+        let projects = root.join("config/accounts/work/projects");
+        let scans = || thread::PROJECT_SCANS.lock().unwrap().iter().filter(|path| path.as_path() == projects).count();
+        let before = scans();
+
+        m.count_working_tabs();
+        assert_eq!(counts(&tab), (None, Some(110), Some(5)));
+        heard.lock().unwrap().clear();
+        append(&dir.join("s1.jsonl"), reply("m2", 40));
+        m.count_working_tabs();
+        assert_eq!(counts(&tab), (None, Some(220), Some(45)), "what the running turn wrote shows with no turn end");
+        assert_eq!(tabs_sent(), 1, "a tick that moved a count sends the tabs once");
+
+        heard.lock().unwrap().clear();
+        m.count_working_tabs();
+        assert_eq!(tabs_sent(), 0, "a tick with nothing new sends nothing");
+        assert_eq!(counts(&idle), (None, None, None), "a tab that is not working is not read");
+        assert_eq!(scans(), before + 1, "later ticks read the transcript the first one found");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_tick_that_moves_only_working_tabs_counts_writes_no_session_cost() {
+        let (root, m, _heard, tab, dir) = watching("live-counts-save");
+        let reply = |id: &str, at: &str| json!({ "type": "assistant", "timestamp": at, "requestId": format!("r-{id}"), "message": { "id": id, "model": "claude-opus-5-5", "content": [], "usage": { "input_tokens": 10, "output_tokens": 5 } } });
+        let transcript = dir.join("s1.jsonl");
+        let saved = root.join("config").join(session_costs::FILE);
+        std::fs::write(&transcript, format!("{}\n{}\n", reply("m1", "2026-11-20T10:00:00Z"), json!({ "type": "system", "subtype": "turn_duration", "durationMs": 60_000 }))).unwrap();
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Working)).unwrap();
+        m.count_working_tabs();
+        assert!(saved.exists(), "the first figures are saved");
+        std::fs::remove_file(&saved).unwrap();
+
+        append(&transcript, &[reply("m2", "2026-11-20T10:00:03Z")]);
+        m.count_working_tabs();
+        assert_eq!(m.view(&tab).unwrap().tokens_out, Some(10));
+        assert!(!saved.exists(), "new tokens and a newer last message alone write nothing");
+
+        append(&transcript, &[json!({ "type": "system", "subtype": "turn_duration", "durationMs": 30_000 })]);
+        m.count_working_tabs();
+        let records: Vec<session_costs::Record> = serde_json::from_slice(&std::fs::read(&saved).expect("a new turn writes")).unwrap();
+        assert_eq!((records[0].turns, records[0].active_ms, records[0].last_at), (2, Some(90_000), 1_795_168_803));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -13052,7 +13147,7 @@ exec sleep 30
     fn a_model_claudes_menu_adds_reaches_the_picker_and_delegate_task_and_outlives_a_restart() {
         let dir = std::env::temp_dir().join(format!("pinned-model-menu-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/web-sweep/screens/claude-2.1.321-model-menu.txt")).unwrap();
+        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-screens/claude-2.1.321-model-menu.txt")).unwrap();
         let lines: Vec<String> = menu.replace("Fable 5.2", "Fable 5.3").lines().map(String::from).collect();
         let picker = |m: &Machine| -> Vec<String> {
             let accounts = m.call(Call::ListAccounts).unwrap();
@@ -13704,7 +13799,7 @@ while True:
     }
 
     #[cfg(unix)]
-    fn started(claude: &Path, tab: &str) -> Vec<String> {
+    pub(super) fn started(claude: &Path, tab: &str) -> Vec<String> {
         let file = PathBuf::from(format!("{}.{tab}", claude.display()));
         wait_for("claude to start", || file.exists());
         let text = std::fs::read_to_string(&file).unwrap();
@@ -16025,7 +16120,7 @@ Have another model review a risky change before it goes ahead.";
     #[cfg(unix)]
     fn the_tier_cap_holds_a_model_claudes_menu_added_at_its_familys_tier() {
         let (m, dir, captain) = limited_captain("limits-learned", TastePatch { tier: Some(taste::Tier::Low), ..TastePatch::default() });
-        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/web-sweep/screens/claude-2.1.321-model-menu.txt")).unwrap();
+        let menu = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-screens/claude-2.1.321-model-menu.txt")).unwrap();
         let lines = menu.replace("Fable 5.2", "Fable 5.3").replace("Haiku 5.5", "Haiku 6").lines().map(String::from).collect();
         m.call(Call::LearnModelMenu { lines }).unwrap();
         assert_eq!(
@@ -20995,7 +21090,7 @@ Have another model review a risky change before it goes ahead.";
     /// A Captain on `m-book` (MacBook) in a project with a GitHub origin, whose account prefers
     /// `m-mini` for heavy work.
     #[cfg(unix)]
-    fn placing_captain(name: &str) -> (Arc<Machine>, PathBuf, String) {
+    pub(super) fn placing_captain(name: &str) -> (Arc<Machine>, PathBuf, String) {
         let policy = crate::placement::Placement { prefer: vec!["m-mini".into(), "m-vps".into()], ..Default::default() };
         let (m, dir, captain) = limited_captain(name, TastePatch { placement: Some(policy), ..TastePatch::default() });
         for args in [&["init", "-q"][..], &["remote", "add", "origin", "https://github.com/acme/app.git"]] {
@@ -21007,7 +21102,7 @@ Have another model review a risky change before it goes ahead.";
 
     /// A hub that answers each `Place` with the next of `answers` and starts a worker on any
     /// machine but those in `refuse`. Returns every call it saw.
-    fn placing_hub(m: &Machine, answers: Vec<Result<Value, String>>, refuse: &'static [&'static str]) -> Arc<Mutex<Vec<HubCall>>> {
+    pub(super) fn placing_hub(m: &Machine, answers: Vec<Result<Value, String>>, refuse: &'static [&'static str]) -> Arc<Mutex<Vec<HubCall>>> {
         let calls = Arc::new(Mutex::new(vec![]));
         let (seen, answers) = (calls.clone(), Mutex::new(answers.into_iter()));
         m.set_hub(Arc::new(move |call| {

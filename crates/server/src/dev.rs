@@ -73,7 +73,6 @@ pub fn check(db_url: &str, listen: &str, public_url: &str, env: &dyn Fn(&str) ->
 }
 
 /// `debug` is whether this binary was built with debug assertions (`cargo build` without `--release`).
-/// `scripts/teams-dev/check-bin.sh` looks for this text, so a change here changes it too.
 fn check_build(debug: bool) -> Result<(), String> {
     if debug {
         Ok(())

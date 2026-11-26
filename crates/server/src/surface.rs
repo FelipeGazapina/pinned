@@ -7,6 +7,7 @@ use crate::db::{Audit, Held};
 use crate::hub::{Account, Hub};
 use pinned_core::surface::{self, ActAnswer, Action, ActorRole, AgentAct, AuditOutcome, Class, Confirmation, Decided, Decision, Parsed, Side};
 use pinned_core::connectors::{Connector, Placement, RunsOn};
+use pinned_core::pinned_lines;
 use pinned_core::schedule::{self, Actor};
 use pinned_core::taste;
 use pinned_core::wire::{Call, HubCall, RunStarted, ToClient};
@@ -95,6 +96,17 @@ fn json<T: serde::Serialize>(value: T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|e| e.to_string())
 }
 
+/// How many characters of a session's reason the owner reads, before the "…" `flat` adds.
+const REASON_CHARS: usize = 200;
+
+/// Why a session asks, as a held act keeps it: on one line, without invisible characters, secrets
+/// masked, then cut at `REASON_CHARS`, so a cut never leaves part of a key unmasked. None when
+/// nothing is left.
+fn held_reason(reason: Option<&str>) -> Option<String> {
+    let masked = surface::mask_secrets(&pinned_lines::flat(reason?, usize::MAX));
+    Some(pinned_lines::flat(&masked, REASON_CHARS)).filter(|reason| !reason.is_empty())
+}
+
 /// Runs `act` for the session in tab `act.tab` of `origin`, a machine of `account`, or holds it
 /// for the user's approval. Every outcome but a repeat or a busy refusal writes one audit row.
 /// `boxed`: whether the connection the act came on signed in as a box (`box_gate::is_box`).
@@ -173,6 +185,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, boxed: bo
             decision: None,
             decided_at: None,
             outcome: None,
+            reason: held_reason(act.reason.as_deref()),
         };
         // An extend is held only while its turn's locks are: nothing was done, so no row.
         if let Some(turn) = &turn {
@@ -195,7 +208,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, boxed: bo
             return json(ActAnswer::Pending { id: id.to_string(), next: surface::PENDING_NEXT.into() });
         }
         note_task(&trail, &act.action, &act.args, &Value::Null, String::new());
-        trail.write(AuditOutcome::Pending, "").await?;
+        trail.write(AuditOutcome::Pending, &asked.reason.as_deref().map(|reason| format!("Reason: {reason}")).unwrap_or_default()).await?;
         push_confirmations(hub, account).await;
         return json(ActAnswer::Pending { id: id.to_string(), next: surface::PENDING_NEXT.into() });
     }
@@ -726,9 +739,10 @@ async fn waiting(hub: &Hub, account: &Account) -> Result<Vec<Confirmation>, Stri
 
 /// Why an agent's schedule act waits for the user although its action is a Write, or None when it
 /// runs at once. Every rule of when an agent's schedule act waits lives here:
-/// - a save that carries approvals (`schedule::save_needs_ok`), as a dry run never does;
+/// - a save that carries approvals, or whose action is a workflow (`schedule::save_needs_ok`), as a
+///   dry run never does;
 /// - an edit, a pause or a start again, or a delete of a task the user created;
-/// - starting a task that carries approvals again, whoever created it.
+/// - starting again a task that carries approvals or whose action is a workflow, whoever created it.
 ///
 /// It fails closed: a task id it cannot read, or a task the account does not hold, is an error that
 /// refuses the act, never a "no". It reads ids with `hub::task_key`, as `Hub::schedule_call` does.
@@ -846,5 +860,21 @@ mod tests {
             assert_eq!(refuse_review_setting(&HubCall::ResetTasteField { scope: scope.clone(), field }), refused, "a reset of {name}");
         }
         assert_eq!(refuse_review_setting(&set(TastePatch { parallel: Some(2), ..TastePatch::default() })), Ok(()), "parallel alone is allowed");
+    }
+
+    #[test]
+    fn a_held_reason_is_one_line_cut_at_200_characters_with_secrets_masked() {
+        assert_eq!(held_reason(Some("  Workers keep\ntiming out\r\n on site.\u{200B}  ")).as_deref(), Some("Workers keep timing out on site."));
+        let long = held_reason(Some(&"a".repeat(300))).unwrap();
+        assert_eq!(long, format!("{}…", "a".repeat(200)));
+        assert_eq!(long.chars().count(), 201);
+        let token = format!("ghp_{}", "x".repeat(32));
+        assert_eq!(token.len(), 36);
+        assert_eq!(held_reason(Some(&format!("Use {token} to push."))).as_deref(), Some("Use [hidden] to push."));
+        let cut = format!("{} {token}", "a".repeat(190));
+        assert_eq!(held_reason(Some(&cut)), Some(format!("{} [hidden]", "a".repeat(190))), "a key the cut would split is masked first");
+        assert_eq!(held_reason(Some(" \n\t\u{200B} ")), None);
+        assert_eq!(held_reason(Some("")), None);
+        assert_eq!(held_reason(None), None);
     }
 }
