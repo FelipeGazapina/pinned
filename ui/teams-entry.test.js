@@ -403,13 +403,14 @@ async function atStep3(team = ACME, extra = {}) {
   return a;
 }
 
-test("step 3 is the team's AI account: three rows with the state of Team.credential, and no plan choice", async () => {
+test("step 3 is the team's AI account: three rows with the state of Team.credential, an optional Linear row, and no plan choice", async () => {
   const a = await atStep3(created({ credential: { upstash: true, claude: false, github: false, slack: false } }));
   const t = text(a.page());
   assert.match(t, /The team has its own AI account/);
   assert.match(t, /Upstash key Opens the boxes the bots work in Connected/);
   assert.match(t, /Claude token for boxes Signs the bots in to Claude inside the box Connect now/);
   assert.match(t, /GitHub token Clones the team's repositories Connect now/);
+  assert.match(t, /Linear key Optional: starts bots when a Linear issue gets their label Connect now/);
   assert.match(t, /No rush: you can connect later\. Until then you can set up bots and groups, but no bot runs\./);
   assert.ok(!/API key|team plan/i.test(t));
   assert.match(a.page(), /data-tm="connect" data-cred="claude"/);
@@ -450,19 +451,24 @@ test("Connect now opens a password form per credential and sends the personal ca
   await submit("claude", { name: "team", token: "sk-ant-oat01-SECRET3" });
   done.cred = { upstash: true, claude: true, github: true };
   await submit("github", { token: "ghp_SECRET4" });
+  assert.match(a.page(), />Continue</, "the three a bot needs are connected: Linear is optional");
+  done.cred = { upstash: true, claude: true, github: true, linear: true };
+  await submit("linear", { key: "lin_api_SECRET5" });
 
   const hubs = a.frames.filter((f) => f.op.op === "hub");
   assert.deepEqual(hubs, [
     { cmd: "team", team: "t1", op: { op: "hub", call: { cmd: "connect_upstash", key: "box_SECRET1", claude_token: "sk-ant-oat01-SECRET2" } } },
     { cmd: "team", team: "t1", op: { op: "hub", call: { cmd: "set_box_claude_token", name: "team", token: "sk-ant-oat01-SECRET3" } } },
     { cmd: "team", team: "t1", op: { op: "hub", call: { cmd: "connect_github", token: "ghp_SECRET4" } } },
+    { cmd: "team", team: "t1", op: { op: "hub", call: { cmd: "connect_linear", key: "lin_api_SECRET5" } } },
   ]);
   assert.ok(!/SECRET/.test(a.page()), "a key is never drawn again");
   assert.ok(!a.shown.some((h) => /SECRET/.test(h)), "nor was it ever drawn");
   const t = text(a.page());
   assert.match(t, /Upstash key[^|]*Connected/);
   assert.match(t, /GitHub token[^|]*Connected/);
-  assert.match(a.page(), />Continue</, "all three connected: no more Connect later");
+  assert.match(t, /Linear key[^|]*Connected/);
+  assert.match(a.page(), />Continue</, "all connected: no more Connect later");
 });
 
 const KEY_ADVICE = "The bot can do whatever the team's keys allow, so connect keys with the least access the bot needs.";

@@ -99,6 +99,10 @@ fn answer(mut stream: TcpStream) {
                 "history": { "nodes": [{ "id": "h-tf", "createdAt": at, "actor": { "id": "u-ana", "name": "Ana" },
                     "fromState": { "name": "Backlog" }, "toState": { "name": "Ready to Dev" }, "fromAssignee": null, "toAssignee": null }] } }] } } })
         }
+        // A labeled issue the team's own Linear poller finds (`ta_poll`), made just now.
+        ("linear", _) if key.ends_with("ta_poll") && body.contains("labels: { some") => json!({ "data": { "issues": { "nodes": [{
+            "id": "eng-1", "identifier": "ENG-1", "title": "Fix page 1", "description": null, "url": "https://linear.example.test/acme/issue/ENG-1",
+            "createdAt": chrono::Utc::now().to_rfc3339(), "history": { "nodes": [] } }] } } }),
         ("linear", _) if body.contains("viewer") => json!({ "data": { "viewer": { "name": "Acme bot", "email": "", "organization": { "name": "Acme" } } } }),
         ("linear", _) if body.contains("issues(") => json!({ "data": { "issues": { "nodes": [] } } }),
         ("linear", _) if body.contains("issueUpdate") => json!({ "data": { "issueUpdate": { "success": true } } }),
@@ -152,6 +156,13 @@ pub(crate) struct Crew {
 
 impl Crew {
     pub(crate) fn new(name: &str) -> Crew {
+        let crew = Crew::without_linear(name);
+        crew.hub_call(json!({ "cmd": "connect_linear", "key": format!("lin-{name}") }));
+        crew
+    }
+
+    /// `new` with Linear not connected yet.
+    fn without_linear(name: &str) -> Crew {
         standins();
         let patient = TeamPolicy { escalate_after_secs: 3600, give_up_after_secs: 7200, ..TeamPolicy::default() };
         // A box that fails to boot cools its bot down for an hour; these tests start the next event right after.
@@ -167,11 +178,10 @@ impl Crew {
         let folder = temp(&format!("teams-admission-{name}"));
         let crew = Crew { hub, team, ana, bob, folder, name: name.to_owned() };
         crew.hub_call(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN }));
-        // A team takes no key from a member's app yet: the stand-ins' keys go straight in.
+        // A team keeps no model gateway key yet, and the stand-in's Slack token goes straight in.
         let hub = crew.hub.hub().clone();
         crew.hub.runtime.block_on(async {
             let connectors = hub.connectors(&hub.account(team).await.unwrap()).await.unwrap();
-            connectors.connect_linear(&format!("lin-{name}")).await.unwrap();
             connectors.connect_vercel(&format!("ver-{name}")).await.unwrap();
             connectors.connect_slack(&format!("xoxb-dev-{name}")).await.unwrap();
         });
@@ -434,6 +444,29 @@ fn an_admitted_event_asks_the_model_once_and_moves_its_issue_once() {
     assert_eq!(crew.found(crew.labeled(&id, 1)), Ok(()));
     assert_eq!(crew.runs(), vec![("working".to_owned(), "trigger:linear_label".to_owned())]);
     assert_eq!(crew.outside(1), vec!["model".to_owned(), "linear move".to_owned()]);
+}
+
+/// The owner connects the team's own Linear key, which no member can, and the team's poller then
+/// starts the on bot's run for a labeled issue with that key.
+#[test]
+fn the_owner_connects_the_teams_linear_and_its_labeled_issue_starts_the_bot() {
+    let crew = Crew::without_linear("ta_poll");
+    let id = crew.on_bot("Pages");
+    let linear = json!({ "cmd": "connect_linear", "key": "lin-ta_poll" });
+
+    assert_eq!(crew.call(&crew.bob, TeamOp::Hub { call: linear.clone() }), Err("only the team's owner runs connect_linear on the team".to_owned()));
+    let credential = crew.call(&crew.ana, TeamOp::Hub { call: linear }).unwrap();
+    assert_eq!(credential, json!({ "upstash": true, "claude": true, "github": false, "slack": true, "linear": true }), "the answer says which keys are set, never a value");
+    let listed = crew.call(&crew.bob, TeamOp::List).unwrap();
+    assert_eq!(listed.as_array().unwrap().iter().find(|t| t["id"] == crew.team.to_string()).unwrap()["credential"]["linear"], true, "a member sees it is set");
+
+    wait_for("the team's poller starts the bot's run", || !crew.live_of(&id).is_empty());
+    assert_eq!(crew.runs(), vec![("working".to_owned(), "trigger:linear_label".to_owned())]);
+    let polled = CALLS.lock().unwrap().iter().any(|c| c.service == "linear" && c.key == "lin-ta_poll" && c.body.contains("labels: { some"));
+    assert!(polled, "the poller read Linear with the team's own key");
+
+    let off = crew.call(&crew.ana, TeamOp::Hub { call: json!({ "cmd": "disconnect_linear" }) }).unwrap();
+    assert_eq!(off["linear"], false);
 }
 
 #[test]

@@ -35,7 +35,7 @@ pub(super) fn make_team(client: &mut Client, name: &str) -> String {
 }
 
 pub(super) fn credential(upstash: bool, claude: bool) -> Value {
-    json!({ "upstash": upstash, "claude": claude, "github": false, "slack": false })
+    json!({ "upstash": upstash, "claude": claude, "github": false, "slack": false, "linear": false })
 }
 
 #[test]
