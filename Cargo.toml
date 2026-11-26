@@ -1,18 +1,20 @@
 [workspace]
-members = [".", "crates/core", "crates/server", "crates/dev"]
+members = [".", "crates/core", "crates/server", "crates/dev", "crates/layout"]
 
 # scripts/release.sh bumps every `version = ` line in this file, this one included.
 [workspace.package]
-version = "0.18.10"
+version = "0.18.11"
 
 [package]
 name = "pinned"
-version = "0.18.10"
+version = "0.18.11"
 edition = "2021"
 default-run = "pinned"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# The build checks the repo's file layout before it builds the app.
+pinned-layout = { path = "crates/layout" }
 
 [dependencies]
 pinned-core = { path = "crates/core" }

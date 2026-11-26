@@ -3405,7 +3405,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinned"
-version = "0.18.10"
+version = "0.18.11"
 dependencies = [
  "block2",
  "dunce",
@@ -3415,6 +3415,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-web-kit",
  "pinned-core",
+ "pinned-layout",
  "rustls",
  "serde",
  "serde_json",
@@ -3431,7 +3432,7 @@ dependencies = [
 
 [[package]]
 name = "pinned-core"
-version = "0.18.10"
+version = "0.18.11"
 dependencies = [
  "apple-native-keyring-store",
  "base64 0.22.1",
@@ -3465,14 +3466,18 @@ dependencies = [
 
 [[package]]
 name = "pinned-dev"
-version = "0.18.10"
+version = "0.18.11"
 dependencies = [
  "libc",
 ]
 
 [[package]]
+name = "pinned-layout"
+version = "0.18.11"
+
+[[package]]
 name = "pinned-server"
-version = "0.18.10"
+version = "0.18.11"
 dependencies = [
  "argon2",
  "axum",
@@ -3486,6 +3491,7 @@ dependencies = [
  "minisign",
  "minisign-verify",
  "pinned-core",
+ "pinned-layout",
  "rand_core 0.6.4",
  "reqwest",
  "rustls",
