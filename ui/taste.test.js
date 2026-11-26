@@ -515,3 +515,39 @@ test("a default model saves with the Captains, clears with a reset, and a projec
   assert.deepEqual(here(tasteSetField(own, site, "default_model", null).projects), {}, "null on a project inherits");
   assert.deepEqual(here(tasteSaveCalls(own, tasteResetField(own, site, "default_model"))), [{ cmd: "reset_taste_field", scope: site, field: "default_model" }]);
 });
+
+const remembering = (projects = {}) => ({ ...defaults(projects), orchestrator: { ...fixture.presets.balanced, claude_memory: true, worker_claude_memory: true }, captains: { ...fixture.presets.balanced, claude_memory: true, worker_claude_memory: true } });
+
+test("the Claude Code memory switches save with their scope, and a project's Reset makes them inherit again", () => {
+  const { tasteSaveCalls, tasteSetField, tasteResetField, tasteResolve } = taste();
+  const saved = remembering();
+  for (const field of ["claude_memory", "worker_claude_memory"]) {
+    assert.deepEqual(here(tasteSaveCalls(saved, tasteSetField(saved, captains, field, false))), [{ cmd: "set_taste", scope: { kind: "captains" }, patch: { [field]: false } }]);
+    const draft = tasteSetField(saved, site, field, false);
+    assert.deepEqual(here(draft.projects), { [SITE]: { [field]: false } });
+    assert.equal(tasteResolve(draft, site)[field], false);
+    const stored = remembering({ [SITE]: { [field]: false } });
+    const back = tasteResetField(stored, site, field);
+    assert.equal(tasteResolve(back, site)[field], true);
+    assert.deepEqual(here(tasteSaveCalls(stored, back)), [{ cmd: "reset_taste_field", scope: site, field }]);
+  }
+});
+
+test("the Claude Code memory switches leave the profile as it was, and a profile leaves them alone", () => {
+  const { tasteProfile, tasteApplyProfile } = taste();
+  const off = { claude_memory: false, worker_claude_memory: false };
+  for (const id of ["economical", "balanced", "aggressive"]) assert.equal(tasteProfile({ ...fixture.presets[id], ...off }), id);
+  const applied = tasteApplyProfile({ ...remembering(), captains: { ...fixture.presets.economical, ...off } }, captains, "aggressive");
+  assert.deepEqual([tasteProfile(applied.captains), applied.captains.claude_memory, applied.captains.worker_claude_memory], ["aggressive", false, false]);
+  const project = tasteApplyProfile(remembering({ [SITE]: { claude_memory: false } }), site, "aggressive");
+  assert.equal(project.projects[SITE].claude_memory, false, "a project's own stays");
+});
+
+test("an agent's change of the Claude Code memory switches reads as their labels and On or Off", () => {
+  const { tasteProposal } = taste();
+  const proposal = tasteProposal(remembering(), "set_taste", { scope: captains, patch: { claude_memory: false, worker_claude_memory: false } });
+  assert.deepEqual(here(proposal.rows), [
+    { field: "claude_memory", label: "Claude Code memory", now: "On", next: "Off" },
+    { field: "worker_claude_memory", label: "Claude Code memory for workers", now: "On", next: "Off" },
+  ]);
+});

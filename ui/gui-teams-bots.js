@@ -43,6 +43,7 @@ const TB_TEXT = {
     doesManual: "What it does, only when someone runs it",
     doesOn: (when) => `What it does, ${when}`,
     noSteps: "This bot has no steps written in its workflow.",
+    stepsFailed: "Could not load the steps.",
     calls: "Who it calls",
     moments: {
       before_irreversible: "Before something that can't be undone",
@@ -76,6 +77,7 @@ const TB_TEXT = {
     deleteKeep: "Keep it",
     runs: "Latest runs",
     noRuns: "No runs yet.",
+    runsFailed: "Could not load the runs.",
   },
 
   run: {
@@ -545,25 +547,34 @@ async function tbLoadBot(quiet = false) {
   }
   const id = ui.id;
   try {
-    const [bots, members, groups, projects, runs, calls, settings] = await Promise.all([
+    // A read that fails is not an empty answer: runs and the workflow say so on the page, and a failed
+    // team list fails the page. A quiet reload that fails keeps what the page already showed for this bot.
+    const soft = (p) => p.then((v) => ({ ok: true, v }), () => ({ ok: false }));
+    const [bots, members, groups, projects, runs, calls, workflow] = await Promise.all([
       tbCall({ op: "bots" }),
       tbCall({ op: "members" }),
       tbCall({ op: "groups" }),
       tbCall({ op: "projects" }),
-      tbCall({ op: "runs" }),
+      soft(tbCall({ op: "runs" })),
       tbCall({ op: "calls" }).catch(() => []),
-      tbCall({ op: "hub", call: { cmd: "get_settings" } }),
+      soft(tbCall({ op: "bot_workflow", workflow: id })),
     ]);
     if (ui.id !== id) return;
     const list = (v) => (Array.isArray(v) ? v : []);
+    const prev = ui.data?.id === id ? ui.data : null;
+    const runsLoaded = runs.ok || !!prev;
+    const workflowLoaded = workflow.ok || !!prev;
     ui.data = {
+      id,
       bot: list(bots).find((b) => b.workflow === id) ?? null,
       members: list(members),
       groups: list(groups),
       projects: list(projects),
-      runs: list(runs).filter((r) => r.workflow === id).sort((a, b) => b.started_at - a.started_at),
+      runs: runs.ok ? list(runs.v).filter((r) => r.workflow === id).sort((a, b) => b.started_at - a.started_at) : prev?.runs ?? [],
+      runsFailed: !runsLoaded,
       calls: list(calls),
-      workflow: list(settings?.connectors).find((c) => c.id === id) ?? null,
+      workflow: workflow.ok ? workflow.v : prev?.workflow ?? null,
+      workflowFailed: !workflowLoaded,
     };
     ui.state = "ready";
     if (!quiet) ui.error = "";
@@ -587,7 +598,7 @@ function tbBotHtml(ui, team) {
   const t = TB_TEXT.bot;
   if (ui.state === "error") return `${tbError(TB_TEXT.loadFailed(ui.error))}<div class="tb-actions">${tbButton('data-tb="reload"', TB_TEXT.retry)}</div>`;
   if (!ui.data) return `<p class="tb-hint" role="status">${TB_TEXT.loading}</p>`;
-  const { bot, members, groups, projects, runs, calls, workflow } = ui.data;
+  const { bot, members, groups, projects, runs, calls, workflow, runsFailed, workflowFailed } = ui.data;
   if (!bot) return `<div class="tb-empty"><h2>${tbEsc(t.notFound)}</h2></div>`;
   const rules = tbRules(bot);
   const owner = bot.owner ? tbMemberName(members, bot.owner) : tbOwnerOf(members) ? tbPerson(tbOwnerOf(members).email) : "";
@@ -606,7 +617,7 @@ function tbBotHtml(ui, team) {
     ? tbRunLink(running.id, tbEsc(t.follow), "tb-btn follow")
     : ui.busy === "run"
       ? tbButton("disabled", t.starting, "secondary", true)
-      : `<button type="button" class="tb-btn primary" data-tb="run-now"${bot.on ? "" : ` disabled title="${tbEsc(t.runNowDraft)}"`}>${tbEsc(t.runNow)}</button>`;
+      : `<button type="button" class="tb-btn primary" data-tb="run-now"${bot.on && !runsFailed ? "" : ` disabled title="${tbEsc(bot.on ? t.runsFailed : t.runNowDraft)}"`}>${tbEsc(t.runNow)}</button>`;
   const toggle = bot.on
     ? tbButton(`data-tb="toggle" aria-pressed="true"`, ui.busy === "toggle" ? t.switching : t.turnOff, "secondary", ui.busy === "toggle")
     : tbButton(`data-tb="toggle" aria-pressed="false"`, ui.busy === "toggle" ? t.switching : t.turnOn, "secondary", ui.busy === "toggle" || !may);
@@ -656,13 +667,13 @@ function tbBotHtml(ui, team) {
         <div class="tb-sub">${tbEsc(t.of(project, owner))}${bot.once ? ` <span class="tb-tag">${tbEsc(t.once)}</span>` : ""}</div></div></div>
       <div class="tb-actions">${runBtn}${toggle}</div>
     </div>
-    ${tbError(ui.error && ui.state === "ready" ? ui.error : "")}${offNote}${notice}${needKeys && !bot.on ? tbNeedKeysHtml(team, members) : ""}
-    <section class="tb-section"><h2>${tbEsc(manual ? t.doesManual : firesOn ? t.doesOn(firesOn) : t.does)}</h2>${stepRows.length ? `<ol class="tb-steps">${stepRows.join("")}</ol>` : `<p class="tb-hint">${tbEsc(t.noSteps)}</p>`}</section>
+    ${tbError(ui.error && ui.state === "ready" ? ui.error : "")}${offNote}${notice}${needKeys ? tbNeedKeysHtml(team, members) : ""}
+    <section class="tb-section"><h2>${tbEsc(manual ? t.doesManual : firesOn ? t.doesOn(firesOn) : t.does)}</h2>${stepRows.length ? `<ol class="tb-steps">${stepRows.join("")}</ol>` : `<p class="tb-hint">${tbEsc(workflowFailed ? t.stepsFailed : t.noSteps)}</p>`}</section>
     <section class="tb-section"><h2>${tbEsc(t.calls)}</h2><div class="tb-card">${moments.map(moment).join("")}</div><p class="tb-foot">${tbEsc(t.callsNote)}</p></section>
     <section class="tb-section" data-limits><h2>${tbEsc(t.limits)}</h2><div class="tb-card"><div class="tb-row" data-limit="time"><span>${tbEsc(t.time)}</span><span class="tb-value">${tbEsc(t.timeValue(bot.limits?.minutes ?? TB_POLICY.minutes))}</span></div></div><p class="tb-foot">${tbEsc(t.maxLife)}</p></section>
     <section class="tb-section tb-guard"><h2>${tbEsc(t.asks)}</h2>${tbAsksHtml()}</section>
     ${skippedHtml}
-    <section class="tb-section"><h2>${tbEsc(t.runs)}</h2>${runRows.length ? `<div class="tb-list">${runRows.join("")}</div>` : `<p class="tb-hint">${tbEsc(t.noRuns)}</p>`}</section>
+    <section class="tb-section"><h2>${tbEsc(t.runs)}</h2>${runRows.length ? `<div class="tb-list">${runRows.join("")}</div>` : `<p class="tb-hint">${tbEsc(runsFailed ? t.runsFailed : t.noRuns)}</p>`}</section>
     ${del}`;
 }
 

@@ -309,6 +309,8 @@ function tastePaceHtml(t) {
     ${tasteToggleHtml(t, "review_diffs", "Review each diff before accepting", "The Captain reads the worker's diff before merging it in.")}
     ${tasteToggleHtml(t, "second_opinion", "Second opinion on risky changes", "Another model reviews the change before it goes ahead.")}
     ${tasteUi.scope.kind !== "orchestrator" && t.manage_only != null ? tasteToggleHtml(t, "manage_only", "Manage only", "The Captain starts without Claude Code's Edit, Write and NotebookEdit tools and hands every change to a worker. On by default. Applies from its next start. Bash stays, for reading and checking.") : ""}
+    ${t.claude_memory != null ? tasteToggleHtml(t, "claude_memory", TASTE_FIELD_LABELS.claude_memory, tasteUi.scope.kind === "orchestrator" ? "The Orchestrator loads Claude Code's own memory (MEMORY.md) and may write to it. Off saves tokens; pinned's project memory stays. Applies from its next start." : "The Captain loads Claude Code's own memory (MEMORY.md) and may write to it. Off saves tokens; pinned's project memory stays. Applies from its next start.") : ""}
+    ${tasteUi.scope.kind !== "orchestrator" && t.worker_claude_memory != null ? tasteToggleHtml(t, "worker_claude_memory", TASTE_FIELD_LABELS.worker_claude_memory, "Workers load Claude Code's own memory (MEMORY.md). Off saves tokens; pinned's project memory stays. Applies to workers started after the change.") : ""}
   </section>`;
 }
 

@@ -10794,6 +10794,18 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -10933,7 +10945,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "ReviewerPatch": {
@@ -11155,7 +11169,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": true
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "captains": {
@@ -11198,7 +11214,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": true
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "projects": {
@@ -11436,6 +11454,16 @@
                 "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
                 "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
+                "type": "boolean",
+                "default": true
               }
             },
             "required": [
@@ -11460,7 +11488,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "Reviewer": {
@@ -12880,6 +12910,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -24488,6 +24535,18 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -24622,7 +24681,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "ReviewerPatch": {
@@ -24838,7 +24899,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": true
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "captains": {
@@ -24881,7 +24944,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": true
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "projects": {
@@ -25107,6 +25172,16 @@
               },
               "manage_only": {
                 "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
                 "type": "boolean",
                 "default": true
               }
@@ -26483,6 +26558,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -34591,6 +34683,18 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -34761,7 +34865,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "ReviewerPatch": {
@@ -34983,7 +35089,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": true
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "captains": {
@@ -35026,7 +35134,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": true
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "projects": {
@@ -35264,6 +35374,16 @@
                 "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
                 "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
+                "type": "boolean",
+                "default": true
               }
             },
             "required": [
@@ -35288,7 +35408,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "Reviewer": {
@@ -37285,6 +37407,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -45162,6 +45301,18 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -45327,7 +45478,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "ReviewerPatch": {
@@ -45543,7 +45696,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": true
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "captains": {
@@ -45586,7 +45741,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": true
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "projects": {
@@ -45812,6 +45969,16 @@
               },
               "manage_only": {
                 "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
                 "type": "boolean",
                 "default": true
               }
@@ -47755,6 +47922,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -67964,7 +68148,9 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": true
+              "manage_only": true,
+              "claude_memory": true,
+              "worker_claude_memory": true
             }
           },
           "captains": {
@@ -68007,7 +68193,9 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": true
+              "manage_only": true,
+              "claude_memory": true,
+              "worker_claude_memory": true
             }
           },
           "projects": {
@@ -68245,6 +68433,16 @@
                 "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
                 "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
+                "type": "boolean",
+                "default": true
               }
             },
             "required": [
@@ -68269,7 +68467,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "Strategy": {
@@ -68582,6 +68782,18 @@
                 }
               },
               "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
                 "type": [
                   "boolean",
                   "null"
@@ -68915,7 +69127,9 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": true
+              "manage_only": true,
+              "claude_memory": true,
+              "worker_claude_memory": true
             }
           },
           "captains": {
@@ -68958,7 +69172,9 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": true
+              "manage_only": true,
+              "claude_memory": true,
+              "worker_claude_memory": true
             }
           },
           "projects": {
@@ -69184,6 +69400,16 @@
               },
               "manage_only": {
                 "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
+                "type": "boolean",
+                "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
                 "type": "boolean",
                 "default": true
               }
@@ -69499,6 +69725,18 @@
                 }
               },
               "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
                 "type": [
                   "boolean",
                   "null"
