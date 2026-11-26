@@ -24,6 +24,9 @@ const COMPACTION: [(&str, &str, bool); 2] = [("PreCompact", "compacting", true),
 pub const GLOBAL_SETTINGS: &str = "claude-settings-global.json";
 /// A worker tab's own settings file, beside the shared one: its Bash calls go to the worker guard first.
 pub const WORKER_SETTINGS: &str = "claude-settings-worker.json";
+/// A manage-only Captain's own settings file, beside the shared one: its Bash calls go to the Captain
+/// guard first.
+pub const CAPTAIN_SETTINGS: &str = "claude-settings-captain.json";
 /// The file tools the global orchestrator keeps, each held to its folders by the guard hook.
 const GUARDED: &str = "Read|Write|Edit|MultiEdit|Grep|Glob|LS";
 
@@ -39,8 +42,8 @@ const RECALL_WAIT: Duration = Duration::from_millis(300);
 const HAND_OVER_WAIT: Duration = Duration::from_secs(10);
 
 /// Claude Code settings layered onto the harnessed session via `--settings`, so the user's
-/// own ~/.claude/settings.json stays untouched. A worker tab loads the worker file and the global
-/// orchestrator its own instead.
+/// own ~/.claude/settings.json stays untouched. A worker tab loads the worker file, a manage-only
+/// Captain the Captain file and the global orchestrator its own instead.
 pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
     std::fs::write(path, serde_json::to_vec_pretty(&settings(exe))?)
 }
@@ -61,9 +64,21 @@ pub fn write_worker_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
     std::fs::write(path, serde_json::to_vec_pretty(&with_worker_guard(settings(exe), exe))?)
 }
 
-/// `settings` with the worker guard's Bash entry last in `PreToolUse`, so a team box's hook stays first.
-fn with_worker_guard(mut settings: serde_json::Value, exe: &Path) -> serde_json::Value {
-    let entry = serde_json::json!({ "matcher": "Bash", "hooks": [subcommand(exe, &[crate::preauth::worker_guard::SUBCOMMAND])] });
+/// A manage-only Captain's settings (`CAPTAIN_SETTINGS`): every session's, with each Bash call sent to
+/// the Captain guard, which denies a command that changes a file or the checkout.
+pub fn write_captain_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
+    let settings = with_bash_guard(settings(exe), exe, crate::preauth::captain_guard::SUBCOMMAND);
+    std::fs::write(path, serde_json::to_vec_pretty(&settings)?)
+}
+
+/// `settings` with the worker guard's Bash entry.
+fn with_worker_guard(settings: serde_json::Value, exe: &Path) -> serde_json::Value {
+    with_bash_guard(settings, exe, crate::preauth::worker_guard::SUBCOMMAND)
+}
+
+/// `settings` with a Bash entry running `guard` last in `PreToolUse`, so a team box's hook stays first.
+fn with_bash_guard(mut settings: serde_json::Value, exe: &Path, guard: &str) -> serde_json::Value {
+    let entry = serde_json::json!({ "matcher": "Bash", "hooks": [subcommand(exe, &[guard])] });
     match settings["hooks"]["PreToolUse"].as_array_mut() {
         Some(entries) => entries.push(entry),
         None => settings["hooks"]["PreToolUse"] = serde_json::json!([entry]),
@@ -931,6 +946,27 @@ mod tests {
         );
         let _ = std::fs::remove_file(shared_file);
         let _ = std::fs::remove_file(worker_file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_manage_only_captains_settings_send_bash_to_the_captain_guard_and_keep_every_other_key() {
+        let exe = Path::new("/Applications/pinned.app/Contents/MacOS/pinned");
+        let (shared_file, captain_file) = (std::env::temp_dir().join(format!("pinned-shared-beside-captain-{}.json", std::process::id())), std::env::temp_dir().join(format!("pinned-captain-settings-{}.json", std::process::id())));
+        write_settings(&shared_file, exe).unwrap();
+        write_captain_settings(&captain_file, exe).unwrap();
+        let read = |file: &Path| serde_json::from_slice::<serde_json::Value>(&std::fs::read(file).unwrap()).unwrap();
+        let (shared, mut captain) = (read(&shared_file), read(&captain_file));
+        let guard = serde_json::json!({ "matcher": "Bash", "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' captain-guard" }] });
+        assert_eq!(captain["hooks"]["PreToolUse"], serde_json::json!([guard]));
+        captain["hooks"].as_object_mut().unwrap().remove("PreToolUse");
+        assert_eq!(captain, shared, "every other key is the shared file's");
+
+        let team = with_bash_guard(settings_for(exe, true), exe, crate::preauth::captain_guard::SUBCOMMAND);
+        let team_guard = serde_json::json!({ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' team-guard" }] });
+        assert_eq!(team["hooks"]["PreToolUse"], serde_json::json!([team_guard, guard]), "a team box's hook stays first, unchanged");
+        let _ = std::fs::remove_file(shared_file);
+        let _ = std::fs::remove_file(captain_file);
     }
 
     #[test]
