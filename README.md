@@ -118,10 +118,10 @@ about the code. Agents save to it and search it with the `memory_save`, `memory_
 `memory_forget` and `memory_set_weight` tools. When you send a prompt, pinned also adds the few
 memories that match it best. A thread without a project has no memory.
 
-Each memory has a weight, 1 by default, from 0.1 to 10. Among memories that match about equally,
-the heavier one ranks higher. Each time pinned adds a memory to a prompt, that counts as a use,
-and a memory used recently also ranks a little higher among close matches. That lift fades over
-the following weeks. Searching does not count as a use. Agents change a weight with
+Each memory has a weight, 1 by default, from 0.1 to 10. A heavier memory moves up to 3 places in
+search results, and a lighter one down up to 3; a memory recall used recently moves up 1 place.
+How well it matches the words still decides the rest. Each time pinned adds a memory to a prompt,
+that counts as a use. Searching does not count as a use. Agents change a weight with
 `memory_set_weight`.
 
 Search matches words and meaning, so a question in Portuguese finds a memory written in

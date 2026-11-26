@@ -22,7 +22,7 @@ pub struct Memory {
     /// Unix seconds.
     pub created: i64,
     pub updated: i64,
-    /// How much it counts among memories that match a search about equally: 0.1 to 10, 1 by default.
+    /// How far a search moves it: 0.1 to 10, 1 by default. A heavier one moves up to 3 places.
     #[serde(default = "default_weight")]
     pub weight: f64,
     /// How many times recall put it in a prompt.
@@ -99,9 +99,9 @@ const RECALL_TEXT_CHARS: usize = 400;
 const RETRY: Duration = Duration::from_secs(600);
 /// Reciprocal Rank Fusion's constant, as in the paper and in coffee-fueled-dev/agent.
 const RRF_K: f64 = 60.0;
-/// The most a memory's recent use lifts its score: 25%, less than a weight of 2 does.
-const USE_BOOST: f64 = 0.25;
-/// How fast that lift fades: by half for each 30 days since recall last used the memory.
+/// The most places a memory's weight, and its recent use, can move it in a search.
+const MAX_LIFT: i64 = 3;
+/// How fast a recent use fades: its share halves for each 30 days since recall last used the memory.
 const USE_HALF_LIFE: Duration = Duration::from_secs(30 * 24 * 3600);
 /// The weights a memory may have, both ends included.
 const WEIGHTS: std::ops::RangeInclusive<f64> = 0.1..=10.0;
@@ -250,8 +250,8 @@ impl Store {
         };
         let rankings = [words, meaning];
         let mut found: HashMap<i64, Memory> = rankings.iter().flatten().map(|&id| Ok((id, self.get(id)?))).collect::<Result<_, String>>()?;
-        let best = fuse(&rankings, limit, |id| standing(&found[&id], now));
-        Ok(best.into_iter().filter_map(|id| found.remove(&id)).collect())
+        let best = lift_places(&fuse(&rankings), |id| lift(&found[&id], now));
+        Ok(best.into_iter().take(limit).filter_map(|id| found.remove(&id)).collect())
     }
 
     fn recent(&self, limit: usize) -> Result<Vec<Memory>, String> {
@@ -306,24 +306,27 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Memory> {
         created: r.get(4)?,
         updated: r.get(5)?,
         weight: r.get(6)?,
-        hits: r.get(7)?,
+        // A count past u32 reads as u32::MAX, so a huge count cannot fail a search.
+        hits: r.get::<_, i64>(7)?.clamp(0, i64::from(u32::MAX)) as u32,
         last_used: r.get(8)?,
     })
 }
 
-/// What a memory's fused score is multiplied by: its weight, times up to `USE_BOOST` more for
-/// recent use. Many uses near the full lift, and it halves every `USE_HALF_LIFE` since the last.
-/// At the defaults it is exactly 1, so the fused order stands.
-fn standing(m: &Memory, now: i64) -> f64 {
+/// How many places a search moves a memory up (below zero, down): `3 * log10(weight)` rounded, so
+/// 10 is up 3 and 0.1 is down 3, plus 1 while a recent use still has a share of at least half: one
+/// use today does, a use a year ago does not. Clamped to `MAX_LIFT` either way.
+fn lift(m: &Memory, now: i64) -> i64 {
+    let weight = (3.0 * m.weight.log10()).round() as i64;
     let used = match m.last_used {
         Some(at) if m.hits > 0 => {
             let hits = m.hits as f64;
             let age = (now - at).max(0) as f64;
-            hits / (hits + 1.0) * 0.5f64.powf(age / USE_HALF_LIFE.as_secs_f64())
+            let share = hits / (hits + 1.0) * 0.5f64.powf(age / USE_HALF_LIFE.as_secs_f64());
+            i64::from(share >= 0.5)
         }
-        _ => 0.0,
+        _ => 0,
     };
-    m.weight * (1.0 + USE_BOOST * used)
+    (weight + used).clamp(-MAX_LIFT, MAX_LIFT)
 }
 
 fn to_blob(vector: &[f32]) -> Vec<u8> {
@@ -373,18 +376,34 @@ fn fold(word: &str) -> String {
         .collect()
 }
 
-/// Reciprocal Rank Fusion: each ranking gives an id `1 / (60 + rank)`, and the sums, each times
-/// its id's `standing`, order the ids.
-fn fuse(rankings: &[Vec<i64>], limit: usize, standing: impl Fn(i64) -> f64) -> Vec<i64> {
+/// Reciprocal Rank Fusion: each ranking gives an id `1 / (60 + rank)`, and the sums order the ids,
+/// a tie going to the newer memory.
+fn fuse(rankings: &[Vec<i64>]) -> Vec<i64> {
     let mut scores: HashMap<i64, f64> = HashMap::new();
     for ranking in rankings {
         for (rank, id) in ranking.iter().enumerate() {
             *scores.entry(*id).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
         }
     }
-    let mut ids: Vec<(f64, i64)> = scores.into_iter().map(|(id, score)| (score * standing(id), id)).collect();
+    let mut ids: Vec<(f64, i64)> = scores.into_iter().map(|(id, score)| (score, id)).collect();
     ids.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)));
-    ids.into_iter().take(limit).map(|(_, id)| id).collect()
+    ids.into_iter().map(|(_, id)| id).collect()
+}
+
+/// Moves each id `lift` places from its position in `base`: sorted by the place it would land,
+/// base position less lift, a lifted id first on a tie, then by base position. So a lift of 3
+/// passes at most 3 ids above it.
+fn lift_places(base: &[i64], lift_of: impl Fn(i64) -> i64) -> Vec<i64> {
+    let mut placed: Vec<(i64, i64, usize, i64)> = base
+        .iter()
+        .enumerate()
+        .map(|(at, &id)| {
+            let by = lift_of(id);
+            (at as i64 - by, -by, at, id)
+        })
+        .collect();
+    placed.sort_unstable();
+    placed.into_iter().map(|(.., id)| id).collect()
 }
 
 /// Builds the vector model. The first time, that downloads it, which can take minutes.
@@ -658,9 +677,12 @@ mod tests {
 
     #[test]
     fn word_and_vector_rankings_are_fused_by_reciprocal_rank() {
-        assert_eq!(fuse(&[vec![1, 2, 3], vec![3, 1]], 3, |_| 1.0), [1, 3, 2]);
-        assert_eq!(fuse(&[vec![4], vec![]], 8, |_| 1.0), [4]);
-        assert_eq!(fuse(&[vec![5, 6], vec![6, 5]], 8, |_| 1.0), [6, 5], "a tie goes to the newer memory");
+        assert_eq!(fuse(&[vec![1, 2, 3], vec![3, 1]]), [1, 3, 2]);
+        assert_eq!(fuse(&[vec![4], vec![]]), [4]);
+        assert_eq!(fuse(&[vec![5, 6], vec![6, 5]]), [6, 5], "a tie goes to the newer memory");
+        assert_eq!(lift_places(&[1, 2, 3, 4, 5], |id| if id == 5 { 3 } else { 0 }), [1, 5, 2, 3, 4], "a lift of 3 passes 3 ids");
+        assert_eq!(lift_places(&[1, 2, 3, 4, 5], |id| if id == 1 { -3 } else { 0 }), [2, 3, 4, 1, 5], "a lift of -3 sinks 3 ids");
+        assert_eq!(lift_places(&[1, 2, 3, 4, 5], |id| if id == 5 { 3 } else if id == 4 { 1 } else { 0 }), [1, 5, 2, 4, 3], "a tie goes to the lifted id");
 
         let store = Store::open(Path::new(":memory:")).unwrap();
         let vectors = Topics("topics-1");
@@ -827,8 +849,77 @@ mod tests {
         assert_eq!(titles(store.search("deploys", None, 0.0, 8, 0)), ["#2 Docs", "#1 Hub"], "a use later than now counts as now");
     }
 
+    /// Five memories whose texts hold the first five, four, three, two and one words of `FIVE`, all
+    /// of one length: a search for `FIVE` ranks them One to Five, each a place below the last.
+    const FIVE: &str = "alpha beta gamma delta epsilon";
+
+    fn five_matches() -> Store {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        for (title, text) in [("One", "alpha beta gamma delta epsilon"), ("Two", "alpha beta gamma delta zulu"), ("Three", "alpha beta gamma zulu yankee"), ("Four", "alpha beta zulu yankee xray"), ("Five", "alpha zulu yankee xray whisky")] {
+            store.save(&draft(title, text), None, None, 1).unwrap();
+        }
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1)), ["#1 One", "#2 Two", "#3 Three", "#4 Four", "#5 Five"]);
+        store
+    }
+
     #[test]
-    fn use_never_outranks_a_match_by_words_and_meaning_or_a_heavier_weight() {
+    fn a_heavy_memory_moves_up_three_places_and_no_more() {
+        let store = five_matches();
+        assert_eq!(store.set_weight(5, 10.0).map(|m| m.weight), Ok(10.0));
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1)), ["#1 One", "#5 Five", "#2 Two", "#3 Three", "#4 Four"], "fifth to second");
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 2, 1)), ["#1 One", "#5 Five"], "the limit applies after the lift");
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 1, 1)), ["#1 One"]);
+    }
+
+    #[test]
+    fn a_light_memory_sinks_exactly_three_places() {
+        let store = five_matches();
+        assert_eq!(store.set_weight(1, 0.1).map(|m| m.weight), Ok(0.1));
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1)), ["#2 Two", "#3 Three", "#4 Four", "#1 One", "#5 Five"], "first to fourth");
+    }
+
+    #[test]
+    fn a_memory_past_limit_plus_three_places_never_enters_at_any_weight() {
+        let store = five_matches();
+        store.set_weight(5, 10.0).unwrap();
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 1, 1)), ["#1 One"], "fifth is four places below a limit of one");
+        store.set_weight(4, 10.0).unwrap();
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 1, 1)), ["#4 Four"], "fourth is three places below, so the lift brings it in");
+    }
+
+    #[test]
+    fn a_recent_use_moves_a_memory_exactly_one_place_however_many_uses() {
+        const YEAR: i64 = 365 * 24 * 3600;
+        let store = five_matches();
+        store.used(&[3], 1000).unwrap();
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1000)), ["#1 One", "#3 Three", "#2 Two", "#4 Four", "#5 Five"], "third to second");
+        store.db.execute("UPDATE memories SET hits = 1000000 WHERE id = 3", []).unwrap();
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1000)), ["#1 One", "#3 Three", "#2 Two", "#4 Four", "#5 Five"], "a million uses, still one place");
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1000 + YEAR)), ["#1 One", "#2 Two", "#3 Three", "#4 Four", "#5 Five"], "a year later, none");
+    }
+
+    #[test]
+    fn a_use_count_past_u32_does_not_fail_a_search() {
+        let store = two_deploys();
+        store.db.execute("UPDATE memories SET hits = 5000000000, last_used = 1 WHERE id = 1", []).unwrap();
+        assert_eq!(titles(store.search("deploys", None, 0.0, 8, 1)), ["#1 Hub", "#2 Docs"]);
+    }
+
+    #[test]
+    fn a_one_word_match_passes_a_two_word_match_only_by_its_lift() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store.save(&draft("Hub", "The hub deploys from version tags."), None, None, 1).unwrap();
+        store.save(&draft("Notes", "Deploys are logged in the chat."), None, None, 1).unwrap();
+        assert_eq!(titles(store.search("deploys tags", None, 0.0, 8, 1)), ["#1 Hub", "#2 Notes"]);
+        store.set_weight(2, 10.0).unwrap();
+        assert_eq!(titles(store.search("deploys tags", None, 0.0, 8, 1)), ["#2 Notes", "#1 Hub"], "weight 10 lifts it three places");
+        store.set_weight(2, 1.0).unwrap();
+        store.used(&[2], 1).unwrap();
+        assert_eq!(titles(store.search("deploys tags", None, 0.0, 8, 1)), ["#2 Notes", "#1 Hub"], "a recent use lifts it one place");
+    }
+
+    #[test]
+    fn a_recent_use_lifts_a_memory_one_place_among_words_and_meaning() {
         let store = Store::open(Path::new(":memory:")).unwrap();
         let vectors = Topics("topics-1");
         for (title, text) in [("Railway", "The service deploys from the railway-hub branch."), ("Hub logs", "The hub writes JSON logs; hub errors go to Sentry.")] {
@@ -836,11 +927,14 @@ mod tests {
         }
         store.db.execute("UPDATE memories SET hits = 1000000, last_used = 5 WHERE id = 2", []).unwrap();
         assert_eq!(titles(store.search("onde publica o hub?", None, 0.5, 8, 5)), ["#2 Hub logs", "#1 Railway"], "by words alone, the used one leads, as it would unused");
-        assert_eq!(titles(store.search("onde publica o hub?", Some(&vectors), 0.5, 8, 5)), ["#1 Railway", "#2 Hub logs"]);
+        assert_eq!(titles(store.search("onde publica o hub?", Some(&vectors), 0.5, 8, 5)), ["#2 Hub logs", "#1 Railway"], "by words and meaning, one place up");
+    }
 
+    #[test]
+    fn a_weight_of_ten_lifts_more_places_than_a_use() {
         let store = two_deploys();
         store.db.execute("UPDATE memories SET hits = 1000000, last_used = 5 WHERE id = 1", []).unwrap();
-        store.set_weight(2, 2.0).unwrap();
+        store.set_weight(2, 10.0).unwrap();
         assert_eq!(titles(store.search("deploys", None, 0.0, 8, 5)), ["#2 Docs", "#1 Hub"]);
     }
 

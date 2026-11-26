@@ -540,7 +540,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 25] {
         })),
         (Audience::Everyone, serde_json::json!({
             "name": "memory_set_weight",
-            "description": "Set how much a memory counts, by its id: a weight from 0.1 to 10, 1 by default. Among memories that match about equally, the heavier one is recalled first.",
+            "description": "Set how much a memory counts, by its id: a weight from 0.1 to 10, 1 by default. A heavier memory moves up to 3 places in search results, and a lighter one down up to 3; a memory recall used recently moves up 1 place. How well it matches the words still decides the rest.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

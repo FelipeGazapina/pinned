@@ -486,8 +486,9 @@ pub enum Call {
     },
     /// The `memory::Memory` removed.
     MemoryForget { path: String, id: i64 },
-    /// The `memory::Memory` with its new weight, from 0.1 to 10. Among memories that match a search
-    /// about equally, the heavier comes first.
+    /// The `memory::Memory` with its new weight, from 0.1 to 10. A heavier memory moves up to 3 places
+    /// in search results, and a lighter one down up to 3; a memory recall used recently moves up 1 place.
+    /// How well it matches the words still decides the rest.
     MemorySetWeight { path: String, id: i64, weight: f64 },
     /// `memory::Status`: how many memories the project has and whether search also matches by meaning.
     MemoryStatus { path: String },

@@ -1448,7 +1448,7 @@
                 ]
               },
               {
-                "description": "The `memory::Memory` with its new weight, from 0.1 to 10. Among memories that match a search\nabout equally, the heavier comes first.",
+                "description": "The `memory::Memory` with its new weight, from 0.1 to 10. A heavier memory moves up to 3 places\nin search results, and a lighter one down up to 3; a memory recall used recently moves up 1 place.\nHow well it matches the words still decides the rest.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -15409,7 +15409,7 @@
                 ]
               },
               {
-                "description": "The `memory::Memory` with its new weight, from 0.1 to 10. Among memories that match a search\nabout equally, the heavier comes first.",
+                "description": "The `memory::Memory` with its new weight, from 0.1 to 10. A heavier memory moves up to 3 places\nin search results, and a lighter one down up to 3; a memory recall used recently moves up 1 place.\nHow well it matches the words still decides the rest.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -56950,7 +56950,7 @@
             "format": "int64"
           },
           "weight": {
-            "description": "How much it counts among memories that match a search about equally: 0.1 to 10, 1 by default.",
+            "description": "How far a search moves it: 0.1 to 10, 1 by default. A heavier one moves up to 3 places.",
             "type": "number",
             "format": "double",
             "default": 1.0
@@ -57013,7 +57013,7 @@
             "format": "int64"
           },
           "weight": {
-            "description": "How much it counts among memories that match a search about equally: 0.1 to 10, 1 by default.",
+            "description": "How far a search moves it: 0.1 to 10, 1 by default. A heavier one moves up to 3 places.",
             "type": "number",
             "format": "double",
             "default": 1.0
@@ -83325,7 +83325,7 @@
                 ]
               },
               {
-                "description": "The `memory::Memory` with its new weight, from 0.1 to 10. Among memories that match a search\nabout equally, the heavier comes first.",
+                "description": "The `memory::Memory` with its new weight, from 0.1 to 10. A heavier memory moves up to 3 places\nin search results, and a lighter one down up to 3; a memory recall used recently moves up 1 place.\nHow well it matches the words still decides the rest.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -89084,7 +89084,7 @@
                 ]
               },
               {
-                "description": "The `memory::Memory` with its new weight, from 0.1 to 10. Among memories that match a search\nabout equally, the heavier comes first.",
+                "description": "The `memory::Memory` with its new weight, from 0.1 to 10. A heavier memory moves up to 3 places\nin search results, and a lighter one down up to 3; a memory recall used recently moves up 1 place.\nHow well it matches the words still decides the rest.",
                 "type": "object",
                 "properties": {
                   "cmd": {
