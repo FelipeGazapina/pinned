@@ -306,7 +306,7 @@ pub(super) struct Segment {
     /// Parentheses and substitutions the segment sits in. A `cd` inside doesn't leave them.
     pub(super) depth: usize,
     /// After a `|`.
-    piped: bool,
+    pub(super) piped: bool,
     /// Here-document and here-string bodies.
     pub(super) heredoc: Vec<String>,
 }
@@ -348,6 +348,7 @@ struct Lexer<'h> {
     i: usize,
     home: &'h str,
     claude_home: Option<&'h str>,
+    tmpdir: Option<&'h str>,
     out: Vec<Segment>,
     next_id: usize,
     pending: Vec<Pending>,
@@ -357,8 +358,8 @@ fn blank(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\r')
 }
 
-pub(super) fn lex(src: &str, home: &str, claude_home: Option<&str>) -> Vec<Segment> {
-    let mut lx = Lexer::new(src, home, claude_home, 0);
+pub(super) fn lex(src: &str, home: &str, claude_home: Option<&str>, tmpdir: Option<&str>) -> Vec<Segment> {
+    let mut lx = Lexer::new(src, home, claude_home, tmpdir, 0);
     lx.list(0, false);
     lx.out
 }
@@ -368,16 +369,17 @@ fn is_fetch(seg: &Segment) -> bool {
 }
 
 impl<'h> Lexer<'h> {
-    fn new(src: &str, home: &'h str, claude_home: Option<&'h str>, next_id: usize) -> Self {
-        Lexer { c: src.chars().collect(), i: 0, home, claude_home, out: vec![], next_id, pending: vec![] }
+    fn new(src: &str, home: &'h str, claude_home: Option<&'h str>, tmpdir: Option<&'h str>, next_id: usize) -> Self {
+        Lexer { c: src.chars().collect(), i: 0, home, claude_home, tmpdir, out: vec![], next_id, pending: vec![] }
     }
 
-    /// The value of a variable the lexer knows: `HOME`, and `CLAUDE_CONFIG_DIR` when the session's
-    /// Claude home is known.
+    /// The value of a variable the lexer knows: `HOME`, `CLAUDE_CONFIG_DIR` when the session's
+    /// Claude home is known, and `TMPDIR` when the caller passes it.
     fn known(&self, name: &str) -> Option<&'h str> {
         match name {
             "HOME" => Some(self.home),
             "CLAUDE_CONFIG_DIR" => self.claude_home,
+            "TMPDIR" => self.tmpdir,
             _ => None,
         }
     }
@@ -498,7 +500,7 @@ impl<'h> Lexer<'h> {
             }
             if !p.quoted {
                 // An unquoted body runs its `$(...)` and backticks, and nothing else of it.
-                let mut sub = Lexer::new(&body, self.home, self.claude_home, self.next_id);
+                let mut sub = Lexer::new(&body, self.home, self.claude_home, self.tmpdir, self.next_id);
                 let mut w = WordBuilder::default();
                 sub.dq(&mut w, d + 1, false);
                 self.next_id = sub.next_id;
@@ -884,7 +886,7 @@ impl<'h> Lexer<'h> {
                 c => inner.push(c),
             }
         }
-        let mut sub = Lexer::new(&inner, self.home, self.claude_home, self.next_id);
+        let mut sub = Lexer::new(&inner, self.home, self.claude_home, self.tmpdir, self.next_id);
         sub.list(d + 1, false);
         self.next_id = sub.next_id;
         w.word.fetch |= sub.out.iter().any(is_fetch);
@@ -946,12 +948,14 @@ pub(super) struct Cmd {
     pub(super) args: Vec<Word>,
     /// Its targets come from a pipe (`xargs`).
     pub(super) stdin_args: bool,
+    /// The program word names a path or a command from a variable, a substitution or a brace expansion.
+    pub(super) var: bool,
 }
 
 impl Cmd {
     fn new(words: &[Word], stdin_args: bool) -> Cmd {
         let prog = words[0].text.rsplit('/').next().unwrap_or("").to_owned();
-        Cmd { prog, args: words[1..].to_vec(), stdin_args }
+        Cmd { prog, args: words[1..].to_vec(), stdin_args, var: words[0].var_at.is_some() }
     }
 
     fn flag_texts(&self) -> impl Iterator<Item = &str> {
@@ -1000,7 +1004,7 @@ impl Cmd {
     }
 
     /// The value of `-X value`, `-Xvalue` or `-abX value`, or the long form's.
-    fn value(&self, short: char, long: &str) -> Option<Word> {
+    pub(super) fn value(&self, short: char, long: &str) -> Option<Word> {
         if let Some(v) = self.long_value(long) {
             return Some(v);
         }
@@ -1068,15 +1072,26 @@ impl Cmd {
 
 /// The commands a segment runs: its program, and when it is a wrapper, every later word as a program
 /// too, since a wrapper's options (`timeout 30`, `nice -n 5`, `xargs -I {}`) can't be told from its command.
-pub(super) fn commands(words: &[Word]) -> Vec<Cmd> {
+///
+/// `strict` reads a program name without case (macOS folds the case of a file name, so `GIT` is git)
+/// and takes the command of `time -p` after its flag.
+pub(super) fn commands(words: &[Word], strict: bool) -> Vec<Cmd> {
     let mut i = 0;
     while i < words.len() && (is_assign(&words[i].text) || KEYWORDS.contains(&words[i].text.as_str())) {
-        i += 1;
+        let posix_time = strict && words[i].text == "time" && words.get(i + 1).is_some_and(|w| w.text == "-p");
+        i += if posix_time { 2 } else { 1 };
     }
     if i >= words.len() {
         return vec![];
     }
-    let first = Cmd::new(&words[i..], false);
+    let cmd = |words: &[Word], stdin: bool| {
+        let mut c = Cmd::new(words, stdin);
+        if strict {
+            c.prog.make_ascii_lowercase();
+        }
+        c
+    };
+    let first = cmd(&words[i..], false);
     let wrapper = WRAPPERS.contains(&first.prog.as_str());
     let stdin = first.prog == "xargs";
     let mut out = vec![first];
@@ -1086,7 +1101,7 @@ pub(super) fn commands(words: &[Word]) -> Vec<Cmd> {
             if t.starts_with('-') || is_assign(t) {
                 continue;
             }
-            out.push(Cmd::new(&words[j..], stdin));
+            out.push(cmd(&words[j..], stdin));
         }
     }
     out
@@ -1182,7 +1197,7 @@ pub(super) fn git_sub(c: &Cmd) -> Option<(Vec<&Word>, &str, Cmd)> {
                 i += 1;
             }
             _ if t.starts_with('-') => i += 1,
-            _ => return Some((dirs, t, Cmd { prog: "git".into(), args: c.args[i + 1..].to_vec(), stdin_args: false })),
+            _ => return Some((dirs, t, Cmd { prog: "git".into(), args: c.args[i + 1..].to_vec(), stdin_args: false, var: false })),
         }
     }
     None
@@ -1285,7 +1300,7 @@ impl<'c, 'a> Scan<'c, 'a> {
         }
         self.production(line);
         let claude_home = self.ctx.claude_home.map(|c| c.to_string_lossy().into_owned());
-        let segs = lex(line, &self.home(), claude_home.as_deref());
+        let segs = lex(line, &self.home(), claude_home.as_deref(), None);
         let mut frames = vec![Frame { cwd, fetched: false }];
         for seg in &segs {
             while frames.len() <= seg.depth {
@@ -1322,7 +1337,7 @@ impl<'c, 'a> Scan<'c, 'a> {
             self.secret_word(&cwd, w);
         }
 
-        let cmds = commands(&seg.words);
+        let cmds = commands(&seg.words, false);
         for c in &cmds {
             self.cmd(&cwd, c, nest, prior_fetch);
         }
