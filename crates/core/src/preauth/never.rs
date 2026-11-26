@@ -380,6 +380,8 @@ impl<'h> Lexer<'h> {
             "HOME" => Some(self.home),
             "CLAUDE_CONFIG_DIR" => self.claude_home,
             "TMPDIR" => self.tmpdir,
+            // `${TMPDIR:-anything}` is the hook's TMPDIR when it is set.
+            _ if name.starts_with("TMPDIR:-") => self.tmpdir,
             _ => None,
         }
     }
@@ -899,10 +901,10 @@ impl<'h> Lexer<'h> {
 // ---------------------------------------------------------------------------------------------
 // Commands
 
-const KEYWORDS: &[&str] = &["if", "then", "else", "elif", "fi", "while", "until", "do", "done", "for", "case", "esac", "select", "function", "time", "!", "{", "}", "[[", "coproc"];
+pub(super) const KEYWORDS: &[&str] = &["if", "then", "else", "elif", "fi", "while", "until", "do", "done", "for", "case", "esac", "select", "function", "time", "!", "{", "}", "[[", "coproc"];
 
 /// Programs that run the rest of their line as a command. Every later word is a candidate command.
-const WRAPPERS: &[&str] = &[
+pub(super) const WRAPPERS: &[&str] = &[
     "sudo", "doas", "env", "command", "exec", "nohup", "nice", "ionice", "timeout", "xargs", "stdbuf", "setsid", "caffeinate", "builtin", "watch", "unbuffer", "parallel", "arch", "chronic",
 ];
 
@@ -911,7 +913,7 @@ pub(super) const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash", 
 /// Programs that run what they read, so downloaded text must not reach them.
 const RUNNERS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "python", "python3", "python2", "node", "deno", "bun", "perl", "ruby", "php", "eval", "source", "."];
 
-fn is_assign(t: &str) -> bool {
+pub(super) fn is_assign(t: &str) -> bool {
     let Some((name, _)) = t.split_once('=') else { return false };
     let mut chars = name.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -948,14 +950,12 @@ pub(super) struct Cmd {
     pub(super) args: Vec<Word>,
     /// Its targets come from a pipe (`xargs`).
     pub(super) stdin_args: bool,
-    /// The program word names a path or a command from a variable, a substitution or a brace expansion.
-    pub(super) var: bool,
 }
 
 impl Cmd {
     fn new(words: &[Word], stdin_args: bool) -> Cmd {
         let prog = words[0].text.rsplit('/').next().unwrap_or("").to_owned();
-        Cmd { prog, args: words[1..].to_vec(), stdin_args, var: words[0].var_at.is_some() }
+        Cmd { prog, args: words[1..].to_vec(), stdin_args }
     }
 
     fn flag_texts(&self) -> impl Iterator<Item = &str> {
@@ -1072,26 +1072,16 @@ impl Cmd {
 
 /// The commands a segment runs: its program, and when it is a wrapper, every later word as a program
 /// too, since a wrapper's options (`timeout 30`, `nice -n 5`, `xargs -I {}`) can't be told from its command.
-///
-/// `strict` reads a program name without case (macOS folds the case of a file name, so `GIT` is git)
-/// and takes the command of `time -p` after its flag.
-pub(super) fn commands(words: &[Word], strict: bool) -> Vec<Cmd> {
+/// The captain's guard reads its wrappers with `captain_guard::captain_commands` instead.
+pub(super) fn commands(words: &[Word]) -> Vec<Cmd> {
     let mut i = 0;
     while i < words.len() && (is_assign(&words[i].text) || KEYWORDS.contains(&words[i].text.as_str())) {
-        let posix_time = strict && words[i].text == "time" && words.get(i + 1).is_some_and(|w| w.text == "-p");
-        i += if posix_time { 2 } else { 1 };
+        i += 1;
     }
     if i >= words.len() {
         return vec![];
     }
-    let cmd = |words: &[Word], stdin: bool| {
-        let mut c = Cmd::new(words, stdin);
-        if strict {
-            c.prog.make_ascii_lowercase();
-        }
-        c
-    };
-    let first = cmd(&words[i..], false);
+    let first = Cmd::new(&words[i..], false);
     let wrapper = WRAPPERS.contains(&first.prog.as_str());
     let stdin = first.prog == "xargs";
     let mut out = vec![first];
@@ -1101,7 +1091,7 @@ pub(super) fn commands(words: &[Word], strict: bool) -> Vec<Cmd> {
             if t.starts_with('-') || is_assign(t) {
                 continue;
             }
-            out.push(cmd(&words[j..], stdin));
+            out.push(Cmd::new(&words[j..], stdin));
         }
     }
     out
@@ -1136,7 +1126,7 @@ struct Scan<'c, 'a> {
     pushed: bool,
 }
 
-fn resolve(cwd: &Option<PathBuf>, raw: &str) -> Option<PathBuf> {
+pub(super) fn resolve(cwd: &Option<PathBuf>, raw: &str) -> Option<PathBuf> {
     if raw.is_empty() {
         return None;
     }
@@ -1197,7 +1187,7 @@ pub(super) fn git_sub(c: &Cmd) -> Option<(Vec<&Word>, &str, Cmd)> {
                 i += 1;
             }
             _ if t.starts_with('-') => i += 1,
-            _ => return Some((dirs, t, Cmd { prog: "git".into(), args: c.args[i + 1..].to_vec(), stdin_args: false, var: false })),
+            _ => return Some((dirs, t, Cmd { prog: "git".into(), args: c.args[i + 1..].to_vec(), stdin_args: false })),
         }
     }
     None
@@ -1337,7 +1327,7 @@ impl<'c, 'a> Scan<'c, 'a> {
             self.secret_word(&cwd, w);
         }
 
-        let cmds = commands(&seg.words, false);
+        let cmds = commands(&seg.words);
         for c in &cmds {
             self.cmd(&cwd, c, nest, prior_fetch);
         }
