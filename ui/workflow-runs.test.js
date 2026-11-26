@@ -341,6 +341,12 @@ test("a tab that has moved on to another conversation refuses both actions and f
   assert.deepEqual(same.did, [["fork", "local:tab-4", "L:2"]], "the run's own conversation still forks");
 });
 
+test("a failed run with no session id forks a tab that has a conversation, instead of saying it moved on", async () => {
+  const { did, sessionLine } = await press("workflow-run-fork", [failedHere], { thread: { ...settled(), session: "ses_2" } });
+  assert.deepEqual(did, [["fork", "local:tab-4", "L:2"]]);
+  assert.notEqual(sessionLine.textContent, "That session has moved on to another conversation since this run.");
+});
+
 test("every value of the answer is escaped, as text and inside attributes", async () => {
   const title = "<img src=x onerror=alert(1)>";
   const hostile = {

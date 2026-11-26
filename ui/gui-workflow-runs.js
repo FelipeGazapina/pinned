@@ -141,7 +141,7 @@ async function workflowRunTurns(button) {
   if (t.error) return { why: `Couldn't read that session: ${t.error}` };
   // A read already in flight returns at once from fetchThread, with the thread still unloaded.
   if (!t.loaded) return { why: "Still reading that session. Try again in a moment." };
-  if (t.session && t.session !== button.dataset.session) return { why: "That session has moved on to another conversation since this run." };
+  if (button.dataset.session && t.session && t.session !== button.dataset.session) return { why: "That session has moved on to another conversation since this run." };
   const turns = turnsFor(t);
   if (!turns.some((turn) => turn.user)) return { why: "That session has no conversation yet." };
   if (turnLive(tab)) return { why: "That session is working. Try again once it stops." };
