@@ -2,19 +2,22 @@
 //! "Ready" columns are queues and "In" columns are an agent working the card now. Three agents
 //! work the board, each in a seat: the Builder opens one pull request per card, the Reviewer runs
 //! the tests and passes the card or sends it back, and the Approver scores the merge against the
-//! board's bar. The seat's role brings the soul; its worker profile brings the model, effort and
-//! access. A person adds and queues cards, decides what an agent cannot, and merges: no agent
-//! moves a card to Done.
+//! board's bar: at the bar pinned merges the PR, below it a person decides. The seat's role brings
+//! the soul; its worker profile brings the model, effort and access. A person adds and queues
+//! cards, decides what an agent cannot, and merges what the Approver did not.
 //!
 //! ```text
 //! Backlog          → Ready to dev                          a person queues it
 //! Ready to dev     → In dev                                pinned, when the Builder is free
 //! In dev           → Ready to review                       the Builder opened the PR
 //! Ready to review  → In review                             pinned, when the Reviewer is free
-//! In review        → In review (the Approver's turn)       the Reviewer passed it
-//! In review        → Ready to deploy                       the Approver scored the bar, or no Approver sits
-//! In review        → Ready to dev                          a send-back: a bug, a failing test, or a score the Builder can lift
+//! In review        → Ready to deploy                       the Reviewer passed it
+//! In review        → Ready to dev                          a send-back: a bug or a failing test
+//! Ready to deploy  → Approving                             pinned, when the Approver is free
+//! Approving        → Done                                  the Approver scored the bar and pinned merged the PR
+//! Approving        → Ready to deploy                       below the bar, or the merge failed: a person decides
 //! Ready to deploy  → Done                                  a person merged the PR
+//! Ready to deploy  → Ready to dev                          a person's send-back
 //! ```
 //!
 //! Each pick into In dev starts a round. A send-back once `round` reached `round_limit` lands the
@@ -35,7 +38,7 @@ pub const TITLE_CHARS: usize = 200;
 /// The longest brief, request, report or reason, in characters.
 pub const TEXT_CHARS: usize = 8000;
 
-/// `"backlog"`, `"ready_to_dev"`, `"in_dev"`, `"ready_to_review"`, `"in_review"`, `"ready_to_deploy"`, `"done"`
+/// `"backlog"`, `"ready_to_dev"`, `"in_dev"`, `"ready_to_review"`, `"in_review"`, `"ready_to_deploy"`, `"approving"`, `"done"`
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Column {
@@ -45,11 +48,12 @@ pub enum Column {
     ReadyToReview,
     InReview,
     ReadyToDeploy,
+    Approving,
     Done,
 }
 
 impl Column {
-    pub const ALL: [Column; 7] = [Column::Backlog, Column::ReadyToDev, Column::InDev, Column::ReadyToReview, Column::InReview, Column::ReadyToDeploy, Column::Done];
+    pub const ALL: [Column; 8] = [Column::Backlog, Column::ReadyToDev, Column::InDev, Column::ReadyToReview, Column::InReview, Column::ReadyToDeploy, Column::Approving, Column::Done];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -59,6 +63,7 @@ impl Column {
             Column::ReadyToReview => "Ready to review",
             Column::InReview => "In review",
             Column::ReadyToDeploy => "Ready to deploy",
+            Column::Approving => "Approving",
             Column::Done => "Done",
         }
     }
@@ -84,20 +89,28 @@ impl Agent {
         }
     }
 
-    /// The queue the agent picks cards from. The Approver has none of its own: it scores a card
-    /// the Reviewer passed, while the card stays in In review.
+    /// The queue the agent picks cards from.
     pub fn queue(self) -> Column {
         match self {
             Agent::Builder => Column::ReadyToDev,
             Agent::Reviewer => Column::ReadyToReview,
-            Agent::Approver => Column::InReview,
+            Agent::Approver => Column::ReadyToDeploy,
+        }
+    }
+
+    /// The column the agent works a card in.
+    pub fn works_in(self) -> Column {
+        match self {
+            Agent::Builder => Column::InDev,
+            Agent::Reviewer => Column::InReview,
+            Agent::Approver => Column::Approving,
         }
     }
 }
 
 /// One agent's seat on the board: who it is (`soul`), how it runs (`profile`, a name from
 /// `BoardSetup::profiles`) and the team bot whose runs work its cards. With no bot the seat is
-/// empty: its queue waits, and an empty Approver seat lets a passed card go to Ready to deploy.
+/// empty: its queue waits, and with no Approver a person merges every card in Ready to deploy.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 pub struct Seat {
     pub profile: String,
@@ -234,9 +247,6 @@ pub struct Verdict {
     pub reason: String,
     #[serde(default)]
     pub hints: Vec<String>,
-    /// Whether more work by the Builder can reach the bar; false sends it to a person.
-    #[serde(default)]
-    pub reachable: bool,
     pub at: i64,
 }
 
@@ -269,7 +279,8 @@ pub struct Card {
     #[serde(default)]
     pub project: String,
     pub column: Column,
-    /// The agent the card waits for or is worked by; none in Backlog, Ready to deploy and Done.
+    /// The agent the card waits for or is worked by; none in Backlog and Done, and none in Ready
+    /// to deploy when no Approver sits.
     #[serde(default)]
     pub turn: Option<Agent>,
     /// The team run working the card now.
@@ -313,7 +324,7 @@ pub enum CardAct {
     SendBack { request: String },
     /// A card waiting on a person in review goes to Ready to deploy.
     Pass,
-    /// The person merged its PR: Ready to deploy to Done.
+    /// The person merged its PR: Ready to deploy, or Approving with no run, to Done.
     Merged,
 }
 
@@ -332,14 +343,12 @@ pub enum Report {
         #[serde(default)]
         request: String,
     },
-    /// The Approver's score on the merge.
+    /// The Approver's score on the merge: at the bar pinned merges the PR.
     Scored {
         score: u8,
         reason: String,
         #[serde(default)]
         hints: Vec<String>,
-        #[serde(default)]
-        reachable: bool,
     },
     /// The agent cannot go on: a person decides.
     Stuck { why: String },
@@ -477,10 +486,11 @@ impl Card {
                 }
                 self.person = None;
                 self.run = None;
-                self.go(Column::ReadyToDeploy, None, by, "passed by a person", at);
+                self.go(Column::ReadyToDeploy, setup.approver.bot.as_ref().map(|_| Agent::Approver), by, "passed by a person", at);
             }
             CardAct::Merged => {
-                if self.column != Column::ReadyToDeploy {
+                let approved = self.column == Column::Approving && self.run.is_none();
+                if self.column != Column::ReadyToDeploy && !approved {
                     return Err(format!("only a card in Ready to deploy is merged; this one is in {}", self.column.name()));
                 }
                 if self.pr.is_none() {
@@ -503,19 +513,15 @@ impl Card {
         (self.column == turn.queue()).then_some(turn)
     }
 
-    /// Pinned gave the card to `run` of the agent whose turn it is: a queue moves to its In
-    /// column, and a pick into In dev starts a round.
+    /// Pinned gave the card to `run` of the agent whose turn it is: a queue moves to the column
+    /// the agent works in, and a pick into In dev starts a round.
     pub fn pick(&mut self, run: &str, at: i64) -> Result<Agent, String> {
         let agent = self.up_for().ok_or("no agent may pick this card now")?;
-        let to = match agent {
-            Agent::Builder => {
-                self.round += 1;
-                Column::InDev
-            }
-            Agent::Reviewer | Agent::Approver => Column::InReview,
-        };
+        if agent == Agent::Builder {
+            self.round += 1;
+        }
         self.run = Some(run.into());
-        self.go(to, Some(agent), By::Pinned, format!("picked by the {}", agent.name()), at);
+        self.go(agent.works_in(), Some(agent), By::Pinned, format!("picked by the {}", agent.name()), at);
         Ok(agent)
     }
 
@@ -564,16 +570,14 @@ impl Card {
                 }
                 let request = text("the request", &request, TEXT_CHARS)?;
                 self.run = None;
-                if !passed {
+                if passed {
+                    self.go(Column::ReadyToDeploy, setup.approver.bot.as_ref().map(|_| Agent::Approver), by, "passed review", at);
+                } else {
                     let ask = if request.is_empty() { self.report.clone() } else { request };
                     self.send_back(by, ask, setup.max_rounds, at);
-                } else if setup.approver.bot.is_some() {
-                    self.go(Column::InReview, Some(Agent::Approver), by, "passed review; the Approver scores it", at);
-                } else {
-                    self.go(Column::ReadyToDeploy, None, by, "passed review", at);
                 }
             }
-            Report::Scored { score, reason, hints, reachable } => {
+            Report::Scored { score, reason, hints } => {
                 if score > 100 {
                     return Err("a score is from 0 to 100".into());
                 }
@@ -583,16 +587,17 @@ impl Card {
                 }
                 let hints: Vec<String> = hints.iter().map(|h| h.trim().to_owned()).filter(|h| !h.is_empty()).collect();
                 let bar = setup.merge_bar;
-                self.verdict = Some(Verdict { score, bar, reason: reason.clone(), hints: hints.clone(), reachable, at });
+                self.verdict = Some(Verdict { score, bar, reason: reason.clone(), hints: hints.clone(), at });
                 self.run = None;
                 if score >= bar {
-                    self.go(Column::ReadyToDeploy, None, by, format!("scored {score}/{bar}"), at);
-                } else if reachable && !hints.is_empty() {
-                    let ask = format!("The Approver scored {score}/{bar}: {reason}\nTo reach {bar}:\n{}", hints.iter().map(|h| format!("- {h}")).collect::<Vec<_>>().join("\n"));
-                    self.send_back(by, ask, setup.max_rounds, at);
+                    self.log.push(CardMove { from: self.column, to: self.column, by, what: format!("approved at {score}/{bar}; pinned merges the PR"), at });
                 } else {
-                    self.person = Some(format!("The Approver scored {score}/{bar} and sees no path the Builder can take: {reason}"));
-                    self.go(Column::InReview, Some(Agent::Approver), by, format!("scored {score}/{bar}; a person decides"), at);
+                    let mut why = format!("The Approver scored {score}/{bar} and did not approve the merge: {reason}");
+                    if !hints.is_empty() {
+                        why += &format!("\nTo reach {bar}:\n{}", hints.iter().map(|h| format!("- {h}")).collect::<Vec<_>>().join("\n"));
+                    }
+                    self.person = Some(why);
+                    self.go(Column::ReadyToDeploy, Some(Agent::Approver), by, format!("scored {score}/{bar}; a person decides"), at);
                 }
             }
             Report::Stuck { why } => {
@@ -603,6 +608,27 @@ impl Card {
                 self.run = None;
                 self.person = Some(format!("The {} is stuck: {why}", agent.name()));
                 self.go(agent.queue(), Some(agent), by, "stuck", at);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the Approver approved the card's merge and pinned is to merge its PR now.
+    pub fn approved(&self) -> bool {
+        self.column == Column::Approving && self.run.is_none() && self.verdict.as_ref().is_some_and(|v| v.score >= v.bar)
+    }
+
+    /// Pinned's merge of an approved card's PR: done, or back to Ready to deploy for a person.
+    pub fn merge_ended(&mut self, merged: Result<(), String>, at: i64) -> Result<(), String> {
+        if !self.approved() {
+            return Err("the card waits for no merge".into());
+        }
+        let number = self.pr.as_ref().map_or(0, |pr| pr.number);
+        match merged {
+            Ok(()) => self.go(Column::Done, None, By::Pinned, format!("merged PR #{number} on the Approver's approval"), at),
+            Err(e) => {
+                self.person = Some(format!("The Approver approved the merge, but pinned could not merge PR #{number}: {e}"));
+                self.go(Column::ReadyToDeploy, Some(Agent::Approver), By::Pinned, "the merge failed; a person decides", at);
             }
         }
         Ok(())
@@ -644,7 +670,7 @@ impl Card {
         out += match agent {
             Agent::Builder => "When the PR is open and its checks pass, report it: `pinned card built --pr <number> --url <link> --branch <branch>`.",
             Agent::Reviewer => "Run the tests, post your review on the PR, then report: `pinned card reviewed --pass --report \"<what you ran and what came out>\"`, or with a bug or a failing test `pinned card reviewed --send-back \"<what the Builder must fix>\" --report \"<…>\"`.",
-            Agent::Approver => "Post your verdict on the PR as one comment, then report it: `pinned card scored --score <0-100> --reason \"<one line>\"`, adding `--hint \"<step>\"` for each step that reaches the bar and `--reachable` when the Builder alone can reach it. Pinned sets the PR's pinned / approver check from your score.",
+            Agent::Approver => "Post your verdict on the PR as one comment, then report it: `pinned card scored --score <0-100> --reason \"<one line>\"`, adding `--hint \"<step>\"` for each step that reaches the bar. Pinned sets the PR's pinned / approver check from your score and, at the bar, merges the PR; below it a person decides.",
         };
         out += " If you cannot go on, `pinned card stuck \"<why>\"`.";
         out
@@ -685,7 +711,7 @@ pub fn with_profile(mut args: Vec<String>, profile: &WorkerProfile) -> Vec<Strin
 }
 
 pub const SUBCOMMAND: &str = "card";
-const USAGE: &str = "usage: pinned card built --pr <number> --url <link> --branch <branch> | reviewed (--pass | --send-back \"<request>\") --report \"<what ran>\" | scored --score <0-100> --reason \"<line>\" [--hint \"<step>\"]... [--reachable] | stuck \"<why>\"";
+const USAGE: &str = "usage: pinned card built --pr <number> --url <link> --branch <branch> | reviewed (--pass | --send-back \"<request>\") --report \"<what ran>\" | scored --score <0-100> --reason \"<line>\" [--hint \"<step>\"]... | stuck \"<why>\"";
 
 /// `pinned card <args>` read into the report it sends.
 pub fn parse_report(args: &[String]) -> Result<Report, String> {
@@ -698,7 +724,7 @@ pub fn parse_report(args: &[String]) -> Result<Report, String> {
     let mut rest = rest.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
-            "--pass" | "--reachable" => switches.push(arg.as_str()),
+            "--pass" => switches.push(arg.as_str()),
             "--hint" => hints.push(rest.next().ok_or(USAGE)?.clone()),
             "--pr" | "--url" | "--branch" | "--send-back" | "--report" | "--score" | "--reason" => {
                 if flags.insert(arg.as_str(), rest.next().ok_or(USAGE)?.clone()).is_some() {
@@ -719,7 +745,7 @@ pub fn parse_report(args: &[String]) -> Result<Report, String> {
             }
             Ok(Report::Reviewed { passed, report: get("--report")?, request })
         }
-        "scored" => Ok(Report::Scored { score: get("--score")?.parse().map_err(|_| USAGE)?, reason: get("--reason")?, hints, reachable: switches.contains(&"--reachable") }),
+        "scored" => Ok(Report::Scored { score: get("--score")?.parse().map_err(|_| USAGE)?, reason: get("--reason")?, hints }),
         _ => Err(USAGE.into()),
     }
 }
@@ -753,7 +779,7 @@ pub fn main(args: &[String]) -> i32 {
     outcome.code
 }
 
-const BUILDER_SOUL: &str = "You are the team's Builder. You turn a card into one pull request that does what the card asks, in the pattern the code already follows, with a test for each behaviour you change. A send-back is the Reviewer's or the Approver's request: fix what it names on the same branch and PR, and say on each thread what you changed. Never merge, deploy, delete or push to the default branch: a person does that.";
+const BUILDER_SOUL: &str = "You are the team's Builder. You turn a card into one pull request that does what the card asks, in the pattern the code already follows, with a test for each behaviour you change. A send-back is the Reviewer's or the Approver's request: fix what it names on the same branch and PR, and say on each thread what you changed. Never merge, deploy, delete or push to the default branch yourself.";
 
 const REVIEWER_SOUL: &str = "You are the team's Reviewer. You read the Builder's pull request against the card, run its tests and the checks a person would, and report what you ran and what came out. A bug or a failing test goes back to the Builder as a request it can act on, with the file and the failing case. You never change the code yourself.";
 
@@ -764,9 +790,9 @@ You do not fix the change, write a review or run the tests. You score from the R
 Start from the evidence: 95 to 100 trivial or fully proven; 85 to 94 a normal well-built change with tests that ran; 70 to 84 something important rests on a claim; 40 to 69 plausible but unproven, or more than asked; below 40 wrong or missing.
 
 Caps the Builder can lift: a failed check at most 30; no Reviewer report at most 75; a failing test in the report at most 30; an open finding unanswered at most 60; a changed behaviour without a test that ran at most 80; more than asked at most 70.
-Caps that need a person: release, CI and deploy config, sign-in, tokens and secrets at most 85; a new way for a bot to write outside pinned at most 85. Secrets, money, deletion, deploys and pushes to the default branch always go to a person.
+Caps that need a person: release, CI and deploy config, sign-in, tokens and secrets at most 85; a new way for a bot to write outside pinned at most 85. Secrets, money, deletion and deploys always go to a person.
 
-Below the bar, say how to get over it: one concrete step per cap the Builder can lift, as a hint, and mark it reachable. If a cap that needs a person holds it down, it is not reachable: say what the person should check first. Post the verdict on the PR as one comment: the score, the one-line reason, why this score, and the steps to reach the bar. The comment never approves, merges or requests changes.";
+At the bar, pinned merges the PR on your score. Below it, the card goes back to a person: give one concrete step per cap as a hint, and when a cap that needs a person holds it down, say what the person should check first. Post the verdict on the PR as one comment: the score, the one-line reason, why this score, and the steps to reach the bar. The comment never approves, merges or requests changes: pinned does what your score decides.";
 
 #[cfg(test)]
 mod tests {
@@ -815,17 +841,19 @@ mod tests {
         c.pick("r2", 5).unwrap();
         assert_eq!((c.column, c.turn), (Column::InReview, Some(Agent::Reviewer)));
         c.report("r2", pass(), &setup, 6).unwrap();
-        assert_eq!((c.column, c.up_for()), (Column::InReview, Some(Agent::Approver)), "the Approver scores it in review");
+        assert_eq!((c.column, c.up_for()), (Column::ReadyToDeploy, Some(Agent::Approver)), "Ready to deploy is the Approver's queue");
         c.pick("r3", 7).unwrap();
+        assert_eq!((c.column, c.approved()), (Column::Approving, false));
         assert!(c.brief(Agent::Approver, &setup).contains("212 passed"), "the Approver reads the Reviewer's report");
-        c.report("r3", Report::Scored { score: 93, reason: "tested, in pattern".into(), hints: vec![], reachable: false }, &setup, 8).unwrap();
-        assert_eq!((c.column, c.turn, c.verdict.as_ref().unwrap().bar), (Column::ReadyToDeploy, None, 90));
+        c.report("r3", Report::Scored { score: 93, reason: "tested, in pattern".into(), hints: vec![] }, &setup, 8).unwrap();
+        assert_eq!((c.column, c.approved(), c.verdict.as_ref().unwrap().bar), (Column::Approving, true, 90), "approved: pinned merges it");
         assert!(c.report("r3", built(12), &setup, 9).is_err(), "nobody's run works it now");
-        c.act(CardAct::Merged, "ana", &setup, 9).unwrap();
-        assert_eq!(c.column, Column::Done);
+        c.merge_ended(Ok(()), 9).unwrap();
+        assert_eq!((c.column, c.turn), (Column::Done, None));
+        assert_eq!(c.merge_ended(Ok(()), 10), Err("the card waits for no merge".into()));
         assert_eq!(c.act(CardAct::Queue, "ana", &setup, 10), Err("the card is done".into()));
         let path: Vec<_> = c.log.iter().map(|m| m.to.name()).collect();
-        assert_eq!(path, ["Backlog", "Ready to dev", "In dev", "Ready to review", "In review", "In review", "In review", "Ready to deploy", "Done"]);
+        assert_eq!(path, ["Backlog", "Ready to dev", "In dev", "Ready to review", "In review", "Ready to deploy", "Approving", "Approving", "Done"]);
     }
 
     #[test]
@@ -854,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn the_approver_sends_a_reachable_score_back_and_an_unreachable_one_to_a_person() {
+    fn below_the_bar_or_on_a_failed_merge_the_approver_hands_the_card_to_a_person_in_ready_to_deploy() {
         let setup = seated();
         let mut c = card();
         c.act(CardAct::Queue, "ana", &setup, 1).unwrap();
@@ -867,16 +895,18 @@ mod tests {
         };
         review(&mut c, 1);
         let hint = vec!["add a test for the Safari click handler".to_owned()];
-        c.report("a1", Report::Scored { score: 78, reason: "the click path is untested".into(), hints: hint, reachable: true }, &setup, 7).unwrap();
-        assert_eq!((c.column, c.up_for()), (Column::ReadyToDev, Some(Agent::Builder)));
-        assert!(c.requests[0].text.contains("To reach 90:\n- add a test for the Safari click handler"));
+        c.report("a1", Report::Scored { score: 78, reason: "the click path is untested".into(), hints: hint }, &setup, 7).unwrap();
+        assert_eq!((c.column, c.turn, c.up_for()), (Column::ReadyToDeploy, Some(Agent::Approver), None));
+        assert_eq!(c.person.as_deref(), Some("The Approver scored 78/90 and did not approve the merge: the click path is untested\nTo reach 90:\n- add a test for the Safari click handler"));
+        c.act(CardAct::SendBack { request: "add the Safari click test".into() }, "ana", &setup, 8).unwrap();
+        assert_eq!((c.column, c.up_for()), (Column::ReadyToDev, Some(Agent::Builder)), "the person sends it to the Builder");
         review(&mut c, 2);
-        c.report("a2", Report::Scored { score: 80, reason: "it changes the sign-in flow".into(), hints: vec![], reachable: false }, &setup, 8).unwrap();
-        assert_eq!((c.column, c.up_for()), (Column::InReview, None));
-        assert!(c.person.as_deref().unwrap().contains("80/90"));
-        assert_eq!(c.act(CardAct::Merged, "ana", &setup, 9), Err("only a card in Ready to deploy is merged; this one is in In review".into()));
-        c.act(CardAct::Pass, "ana", &setup, 9).unwrap();
-        assert_eq!(c.column, Column::ReadyToDeploy);
+        c.report("a2", Report::Scored { score: 95, reason: "tested".into(), hints: vec![] }, &setup, 9).unwrap();
+        c.merge_ended(Err("GitHub answered 405: required check is failing".into()), 10).unwrap();
+        assert_eq!((c.column, c.up_for()), (Column::ReadyToDeploy, None));
+        assert!(c.person.as_deref().unwrap().contains("could not merge PR #12: GitHub answered 405"));
+        c.act(CardAct::Merged, "ana", &setup, 11).unwrap();
+        assert_eq!(c.column, Column::Done, "a person merges what pinned could not");
     }
 
     #[test]
@@ -890,7 +920,8 @@ mod tests {
         c.pick("v", 4).unwrap();
         c.report("v", pass(), &setup, 5).unwrap();
         assert_eq!((c.column, c.turn), (Column::ReadyToDeploy, None));
-        assert!(next_picks(&[c], &setup).is_empty(), "nobody merges but a person");
+        assert!(next_picks(&[c.clone()], &setup).is_empty(), "nobody merges but a person");
+        assert_eq!(c.merge_ended(Ok(()), 6), Err("the card waits for no merge".into()), "pinned merges only on an approval");
     }
 
     #[test]
@@ -959,8 +990,8 @@ mod tests {
         assert_eq!(parse_report(&args(&["reviewed", "--send-back", "fix x", "--report", "1 failed"])), Ok(Report::Reviewed { passed: false, report: "1 failed".into(), request: "fix x".into() }));
         assert!(parse_report(&args(&["reviewed", "--pass", "--send-back", "x", "--report", "r"])).is_err(), "pass or send back, not both");
         assert_eq!(
-            parse_report(&args(&["scored", "--score", "84", "--reason", "r", "--hint", "a", "--hint", "b", "--reachable"])),
-            Ok(Report::Scored { score: 84, reason: "r".into(), hints: vec!["a".into(), "b".into()], reachable: true })
+            parse_report(&args(&["scored", "--score", "84", "--reason", "r", "--hint", "a", "--hint", "b"])),
+            Ok(Report::Scored { score: 84, reason: "r".into(), hints: vec!["a".into(), "b".into()] })
         );
         assert_eq!(parse_report(&args(&["stuck", "no", "repo"])), Ok(Report::Stuck { why: "no repo".into() }));
         assert!(parse_report(&args(&["merged"])).is_err(), "no agent merges");
@@ -979,7 +1010,7 @@ mod tests {
         let act: CardAct = serde_json::from_value(json!({ "act": "send_back", "request": "x" })).unwrap();
         assert_eq!(act, CardAct::SendBack { request: "x".into() });
         let report: Report = serde_json::from_value(json!({ "kind": "scored", "score": 84, "reason": "r" })).unwrap();
-        assert_eq!(report, Report::Scored { score: 84, reason: "r".into(), hints: vec![], reachable: false });
+        assert_eq!(report, Report::Scored { score: 84, reason: "r".into(), hints: vec![] });
         assert!(Card::new("x".into(), "  ", "", "", "ana", 3, 0).is_err());
     }
 }

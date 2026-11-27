@@ -102,7 +102,8 @@ pub fn team_id(team: Option<String>) -> Result<Option<Uuid>, String> {
 /// Whether a client on a `locked` login unlocks with its password before `op`: a personal call
 /// needs what it needs on the person's own account (`surface::owner_only`), and the team asks too
 /// before anything that changes who is on it, its projects, groups, keys or bots, starts or steers
-/// a run, answers a call or talks in its chat. A stop, giving a run back and the reads do not ask.
+/// a run, answers a call or talks in its chat. A stop, giving a run back, moving a card on the
+/// board and the reads do not ask.
 /// Exhaustive on purpose: a new op does not compile until it is placed here.
 pub fn owner_only(op: &Op, locked: bool) -> bool {
     let team = match op {
@@ -128,11 +129,11 @@ pub fn owner_only(op: &Op, locked: bool) -> bool {
             | TeamOp::TakeOver { .. }
             | TeamOp::Chat { .. }
             | TeamOp::AddCard { .. }
-            | TeamOp::CardAct { .. }
             | TeamOp::SetBoardSetup { .. }
             | TeamOp::Hub { .. } => true,
-            // A stop, giving a run back, and what only reads.
-            TeamOp::List
+            // A stop, giving a run back, moving a card on the board, and what only reads.
+            TeamOp::CardAct { .. }
+            | TeamOp::List
             | TeamOp::Create { .. }
             | TeamOp::Members
             | TeamOp::Invites
@@ -614,6 +615,8 @@ mod tests {
             json!({ "op": "give_back", "run": "r1" }),
             json!({ "op": "run_log", "run": "r1" }),
             json!({ "op": "hub", "call": { "cmd": "box_status", "machine": "m1" } }),
+            json!({ "op": "card_act", "card": "k1", "act": { "act": "queue" } }),
+            json!({ "op": "card_act", "card": "k1", "act": { "act": "merged" } }),
         ];
         for op in reads {
             let op = Op::read(serde_json::from_value(op).unwrap()).unwrap();

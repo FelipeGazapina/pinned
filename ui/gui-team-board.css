@@ -23,7 +23,7 @@ body[data-mode="gui"][data-page="team-board"] #panel { visibility: hidden; }
 .wb-seat { display: flex; gap: 8px; align-items: center; }
 .wb-seat b { width: 84px; font-weight: 500; }
 
-.wb-columns { display: grid; grid-template-columns: repeat(7, minmax(168px, 1fr)); gap: 10px; overflow-x: auto; padding-bottom: 8px; align-items: start; }
+.wb-columns { display: grid; grid-template-columns: repeat(8, minmax(168px, 1fr)); gap: 10px; overflow-x: auto; padding-bottom: 8px; align-items: start; }
 .wb-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 10px; border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.035); min-height: 240px; }
 .wb-col[data-column^="ready_"] { background: rgb(var(--g-primary-rgb) / 0.06); }
 .wb-col-head { display: flex; flex-direction: column; gap: 4px; text-align: left; }
@@ -35,6 +35,7 @@ body[data-mode="gui"][data-page="team-board"] #panel { visibility: hidden; }
 .wb-who b { color: var(--g-fg); font-weight: 600; }
 .wb-profile { padding: 0 6px; border-radius: 5px; border: 1px solid var(--tc-edge); color: var(--g-fg); font-size: 11px; }
 .wb-bot { font-size: 11px; }
+.wb-rule { flex-basis: 100%; order: 1; font-size: 11px; }
 .wb-empty-seat { font-size: 11px; color: var(--g-warning-fg); }
 .wb-cards { display: flex; flex-direction: column; gap: 8px; }
 .wb-card { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--tc-line); border-radius: 10px; background: var(--g-raised); min-width: 0; }
@@ -49,7 +50,7 @@ body[data-mode="gui"][data-page="team-board"] #panel { visibility: hidden; }
 .wb-score[data-pass="true"] { background: color-mix(in srgb, var(--g-success) 16%, transparent); color: var(--g-success); }
 .wb-working { display: flex; align-items: center; gap: 2px; font-size: 12px; }
 .wb-next { color: var(--g-side-muted); }
-.wb-person { padding: 6px 8px; border-radius: 8px; background: rgb(var(--g-warning-rgb) / 0.12); color: var(--g-fg); font-size: 12px; overflow-wrap: anywhere; }
+.wb-person { padding: 6px 8px; border-radius: 8px; background: rgb(var(--g-warning-rgb) / 0.12); color: var(--g-fg); font-size: 12px; overflow-wrap: anywhere; white-space: pre-line; }
 .wb-request { font-size: 12px; color: var(--g-side-muted); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; }
 .wb-request span { color: var(--g-fg); font-weight: 500; }
 .wb-acts { display: flex; flex-wrap: wrap; gap: 6px; }

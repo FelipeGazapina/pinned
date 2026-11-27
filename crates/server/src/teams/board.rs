@@ -91,7 +91,7 @@ pub async fn card_report(hub: &Arc<Hub>, team: &Arc<Account>, machine: &str, rep
     let card = change(hub, team, parse_id(&card.id)?, |c| c.report(&run.id, report.clone(), &setup, now())).await?;
     if scored {
         let (hub, team, card) = (hub.clone(), team.clone(), card.clone());
-        tokio::spawn(async move { approver_check(&hub, &team, &card).await });
+        tokio::spawn(async move { approve(&hub, &team, &card).await });
     }
     Ok(card)
 }
@@ -194,21 +194,33 @@ async fn dispatch_now(hub: &Arc<Hub>, team: &Arc<Account>) -> Result<(), String>
 }
 
 /// Sets the `pinned / approver` status on the head of the card's PR from the Approver's verdict,
-/// with the team's own GitHub key. The PR's author cannot approve it, so the check is the verdict.
-async fn approver_check(hub: &Arc<Hub>, team: &Arc<Account>, card: &Card) {
-    let (Some(pr), Some(verdict)) = (&card.pr, &card.verdict) else { return };
-    let posted = async {
+/// with the team's own GitHub key (the PR's author cannot approve it, so the check is the
+/// verdict), then merges an approved card's PR at that head: the card goes to Done, or back to
+/// Ready to deploy for a person when the merge fails.
+async fn approve(hub: &Arc<Hub>, team: &Arc<Account>, card: &Card) {
+    let (Some(pr), Some(verdict), Ok(id)) = (&card.pr, &card.verdict, parse_id(&card.id)) else { return };
+    let approved = card.approved();
+    let merged = async {
         let token = hub.connectors(team).await?.github_token().ok_or("the team has no GitHub key")?;
         let repo = pr.url.strip_prefix("https://github.com/").and_then(|path| path.split("/pull/").next()).filter(|r| r.split('/').count() == 2).ok_or("the PR's link is not a GitHub pull request")?;
         let github = pinned_core::github::Client::new(&token);
         let pull = github.get(&format!("/repos/{repo}/pulls/{}", pr.number)).await?;
         let sha = pull["head"]["sha"].as_str().ok_or("the PR has no head commit")?;
-        let state = if verdict.score >= verdict.bar { "success" } else { "failure" };
+        let state = if approved { "success" } else { "failure" };
         let description: String = format!("{}/{}: {}", verdict.score, verdict.bar, verdict.reason).chars().take(140).collect();
         github.post(&format!("/repos/{repo}/statuses/{sha}"), &serde_json::json!({ "state": state, "context": "pinned / approver", "description": description })).await?;
+        if approved {
+            // At the head the Approver scored: a push after the score makes GitHub refuse the merge.
+            github.put(&format!("/repos/{repo}/pulls/{}/merge", pr.number), &serde_json::json!({ "sha": sha })).await?;
+        }
         Ok::<_, String>(())
-    };
-    if let Err(e) = posted.await {
+    }
+    .await;
+    if approved {
+        if let Err(e) = change(hub, team, id, |c| c.merge_ended(merged.clone(), now())).await {
+            eprintln!("pinned-server: team {}: card {} was not moved after its merge: {e}", team.id, card.id);
+        }
+    } else if let Err(e) = merged {
         eprintln!("pinned-server: team {}: the pinned / approver check of card {} was not set: {e}", team.id, card.id);
     }
 }

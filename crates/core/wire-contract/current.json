@@ -13802,7 +13802,7 @@
                 ]
               },
               {
-                "description": "The person merged its PR: Ready to deploy to Done.",
+                "description": "The person merged its PR: Ready to deploy, or Approving with no run, to Done.",
                 "type": "object",
                 "properties": {
                   "act": {
@@ -13861,7 +13861,7 @@
             ]
           },
           "Seat": {
-            "description": "One agent's seat on the board: who it is (`soul`), how it runs (`profile`, a name from\n`BoardSetup::profiles`) and the team bot whose runs work its cards. With no bot the seat is\nempty: its queue waits, and an empty Approver seat lets a passed card go to Ready to deploy.",
+            "description": "One agent's seat on the board: who it is (`soul`), how it runs (`profile`, a name from\n`BoardSetup::profiles`) and the team bot whose runs work its cards. With no bot the seat is\nempty: its queue waits, and with no Approver a person merges every card in Ready to deploy.",
             "type": "object",
             "properties": {
               "profile": {
@@ -13940,7 +13940,7 @@
                 ]
               },
               {
-                "description": "The Approver's score on the merge.",
+                "description": "The Approver's score on the merge: at the bar pinned merges the PR.",
                 "type": "object",
                 "properties": {
                   "kind": {
@@ -13962,18 +13962,13 @@
                       "type": "string"
                     },
                     "default": []
-                  },
-                  "reachable": {
-                    "type": "boolean",
-                    "default": false
                   }
                 },
                 "required": [
                   "kind",
                   "score",
                   "reason",
-                  "hints",
-                  "reachable"
+                  "hints"
                 ]
               },
               {
@@ -27774,7 +27769,7 @@
                 ]
               },
               {
-                "description": "The person merged its PR: Ready to deploy to Done.",
+                "description": "The person merged its PR: Ready to deploy, or Approving with no run, to Done.",
                 "type": "object",
                 "properties": {
                   "act": {
@@ -27831,7 +27826,7 @@
             ]
           },
           "Seat": {
-            "description": "One agent's seat on the board: who it is (`soul`), how it runs (`profile`, a name from\n`BoardSetup::profiles`) and the team bot whose runs work its cards. With no bot the seat is\nempty: its queue waits, and an empty Approver seat lets a passed card go to Ready to deploy.",
+            "description": "One agent's seat on the board: who it is (`soul`), how it runs (`profile`, a name from\n`BoardSetup::profiles`) and the team bot whose runs work its cards. With no bot the seat is\nempty: its queue waits, and with no Approver a person merges every card in Ready to deploy.",
             "type": "object",
             "properties": {
               "profile": {
@@ -27908,7 +27903,7 @@
                 ]
               },
               {
-                "description": "The Approver's score on the merge.",
+                "description": "The Approver's score on the merge: at the bar pinned merges the PR.",
                 "type": "object",
                 "properties": {
                   "kind": {
@@ -27930,10 +27925,6 @@
                       "type": "string"
                     },
                     "default": []
-                  },
-                  "reachable": {
-                    "type": "boolean",
-                    "default": false
                   }
                 },
                 "required": [
@@ -38952,7 +38943,7 @@
                 ]
               },
               {
-                "description": "The person merged its PR: Ready to deploy to Done.",
+                "description": "The person merged its PR: Ready to deploy, or Approving with no run, to Done.",
                 "type": "object",
                 "properties": {
                   "act": {
@@ -39011,7 +39002,7 @@
             ]
           },
           "Seat": {
-            "description": "One agent's seat on the board: who it is (`soul`), how it runs (`profile`, a name from\n`BoardSetup::profiles`) and the team bot whose runs work its cards. With no bot the seat is\nempty: its queue waits, and an empty Approver seat lets a passed card go to Ready to deploy.",
+            "description": "One agent's seat on the board: who it is (`soul`), how it runs (`profile`, a name from\n`BoardSetup::profiles`) and the team bot whose runs work its cards. With no bot the seat is\nempty: its queue waits, and with no Approver a person merges every card in Ready to deploy.",
             "type": "object",
             "properties": {
               "profile": {
@@ -39090,7 +39081,7 @@
                 ]
               },
               {
-                "description": "The Approver's score on the merge.",
+                "description": "The Approver's score on the merge: at the bar pinned merges the PR.",
                 "type": "object",
                 "properties": {
                   "kind": {
@@ -39112,18 +39103,13 @@
                       "type": "string"
                     },
                     "default": []
-                  },
-                  "reachable": {
-                    "type": "boolean",
-                    "default": false
                   }
                 },
                 "required": [
                   "kind",
                   "score",
                   "reason",
-                  "hints",
-                  "reachable"
+                  "hints"
                 ]
               },
               {
@@ -49791,7 +49777,7 @@
                 ]
               },
               {
-                "description": "The person merged its PR: Ready to deploy to Done.",
+                "description": "The person merged its PR: Ready to deploy, or Approving with no run, to Done.",
                 "type": "object",
                 "properties": {
                   "act": {
@@ -49848,7 +49834,7 @@
             ]
           },
           "Seat": {
-            "description": "One agent's seat on the board: who it is (`soul`), how it runs (`profile`, a name from\n`BoardSetup::profiles`) and the team bot whose runs work its cards. With no bot the seat is\nempty: its queue waits, and an empty Approver seat lets a passed card go to Ready to deploy.",
+            "description": "One agent's seat on the board: who it is (`soul`), how it runs (`profile`, a name from\n`BoardSetup::profiles`) and the team bot whose runs work its cards. With no bot the seat is\nempty: its queue waits, and with no Approver a person merges every card in Ready to deploy.",
             "type": "object",
             "properties": {
               "profile": {
@@ -49925,7 +49911,7 @@
                 ]
               },
               {
-                "description": "The Approver's score on the merge.",
+                "description": "The Approver's score on the merge: at the bar pinned merges the PR.",
                 "type": "object",
                 "properties": {
                   "kind": {
@@ -49947,10 +49933,6 @@
                       "type": "string"
                     },
                     "default": []
-                  },
-                  "reachable": {
-                    "type": "boolean",
-                    "default": false
                   }
                 },
                 "required": [
@@ -78101,7 +78083,7 @@
                 "$ref": "#/$defs/Column"
               },
               "turn": {
-                "description": "The agent the card waits for or is worked by; none in Backlog, Ready to deploy and Done.",
+                "description": "The agent the card waits for or is worked by; none in Backlog and Done, and none in Ready\nto deploy when no Approver sits.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Agent"
@@ -78211,7 +78193,7 @@
             ]
           },
           "Column": {
-            "description": "`\"backlog\"`, `\"ready_to_dev\"`, `\"in_dev\"`, `\"ready_to_review\"`, `\"in_review\"`, `\"ready_to_deploy\"`, `\"done\"`",
+            "description": "`\"backlog\"`, `\"ready_to_dev\"`, `\"in_dev\"`, `\"ready_to_review\"`, `\"in_review\"`, `\"ready_to_deploy\"`, `\"approving\"`, `\"done\"`",
             "type": "string",
             "enum": [
               "backlog",
@@ -78220,6 +78202,7 @@
               "ready_to_review",
               "in_review",
               "ready_to_deploy",
+              "approving",
               "done"
             ]
           },
@@ -78358,11 +78341,6 @@
                 },
                 "default": []
               },
-              "reachable": {
-                "description": "Whether more work by the Builder can reach the bar; false sends it to a person.",
-                "type": "boolean",
-                "default": false
-              },
               "at": {
                 "type": "integer",
                 "format": "int64"
@@ -78373,7 +78351,6 @@
               "bar",
               "reason",
               "hints",
-              "reachable",
               "at"
             ]
           },
@@ -83239,7 +83216,7 @@
                 "$ref": "#/$defs/Column"
               },
               "turn": {
-                "description": "The agent the card waits for or is worked by; none in Backlog, Ready to deploy and Done.",
+                "description": "The agent the card waits for or is worked by; none in Backlog and Done, and none in Ready\nto deploy when no Approver sits.",
                 "anyOf": [
                   {
                     "$ref": "#/$defs/Agent"
@@ -83337,7 +83314,7 @@
             ]
           },
           "Column": {
-            "description": "`\"backlog\"`, `\"ready_to_dev\"`, `\"in_dev\"`, `\"ready_to_review\"`, `\"in_review\"`, `\"ready_to_deploy\"`, `\"done\"`",
+            "description": "`\"backlog\"`, `\"ready_to_dev\"`, `\"in_dev\"`, `\"ready_to_review\"`, `\"in_review\"`, `\"ready_to_deploy\"`, `\"approving\"`, `\"done\"`",
             "type": "string",
             "enum": [
               "backlog",
@@ -83346,6 +83323,7 @@
               "ready_to_review",
               "in_review",
               "ready_to_deploy",
+              "approving",
               "done"
             ]
           },
@@ -83483,11 +83461,6 @@
                   "type": "string"
                 },
                 "default": []
-              },
-              "reachable": {
-                "description": "Whether more work by the Builder can reach the bar; false sends it to a person.",
-                "type": "boolean",
-                "default": false
               },
               "at": {
                 "type": "integer",

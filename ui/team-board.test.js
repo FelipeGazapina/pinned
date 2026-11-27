@@ -21,7 +21,7 @@ const SETUP = {
 const card = (over) => ({ id: "k1", title: "Fix Safari export", brief: "", project: "github.com/acme/site", column: "backlog", turn: null, run: null, person: null, round: 0, round_limit: 3, pr: null, requests: [], report: "", verdict: null, log: [], created_by: "a1", created_at: 1, ...over });
 
 /** The board page over a fake hub: `cards` is what `board` answers, and every op is kept in `sent`. */
-function board(cards) {
+function board(cards, setup = SETUP) {
   const sent = [];
   const listeners = {};
   const docListeners = {};
@@ -40,7 +40,7 @@ function board(cards) {
     teamsCurrent: () => TEAM,
     teamCall: async (op) => {
       sent.push(op);
-      if (op.op === "board") return { setup: SETUP, cards };
+      if (op.op === "board") return { setup, cards };
       if (op.op === "bots") return [{ workflow: "w-build", name: "Builder bot" }, { workflow: "w-review", name: "Reviewer bot" }];
       if (op.op === "members") return [{ account: "a1", email: "ana@acme.dev", role: "owner", groups: [] }];
       if (op.op === "card_act") return { ...cards.find((c) => c.id === op.card), column: "ready_to_dev", turn: "builder" };
@@ -73,9 +73,16 @@ test("each queue names the agent, worker profile and model that picks it up, and
   const html = b.html();
   assert.match(column(html, "ready_to_dev"), /Picked up by <b>Builder<\/b><span class="wb-profile" title="Worker profile">Implementer · claude-opus-5-5, high<\/span><span class="wb-bot">bot Builder bot<\/span>/);
   assert.match(column(html, "ready_to_review"), /Picked up by <b>Reviewer<\/b>.*Tester · claude-sonnet-5-5, high/);
-  assert.match(column(html, "in_review"), /then the <b>Approver<\/b> scores it \(bar 90\).*Judge · claude-opus-5-5, xhigh.*no bot seated: cards wait here/);
-  assert.match(column(html, "ready_to_deploy"), /Picked up by <b>a person<\/b>, who merges the PR/);
+  assert.match(column(html, "in_review"), /Worked by <b>Reviewer<\/b>.*Tester · claude-sonnet-5-5, high/);
+  assert.match(column(html, "ready_to_deploy"), /Picked up by <b>a person<\/b>, who merges the PR/, "no Approver sits");
+  assert.match(column(html, "approving"), /Worked by <b>Approver<\/b><span class="wb-rule">Scores the merge: at 90 or more pinned merges the PR, below it a person decides<\/span>.*Judge · claude-opus-5-5, xhigh.*no bot seated/);
   assert.match(column(html, "backlog"), /Fix Safari export/);
+});
+
+test("with an Approver seated, Ready to deploy is the Approver's queue", async () => {
+  const b = board([], { ...SETUP, approver: { ...SETUP.approver, bot: "w-review" } });
+  await b.show();
+  assert.match(column(b.html(), "ready_to_deploy"), /Picked up by <b>Approver<\/b><span class="wb-rule">Scores the merge.*Judge · claude-opus-5-5, xhigh.*bot Reviewer bot/);
 });
 
 test("queueing a backlog card sends the act and moves it to Ready to dev", async () => {
@@ -87,17 +94,18 @@ test("queueing a backlog card sends the act and moves it to Ready to dev", async
   assert.doesNotMatch(column(b.html(), "backlog"), /Fix Safari export/);
 });
 
-test("a card shows its PR, round, the Approver's score and why it waits on a person", async () => {
+test("a card the Approver did not approve shows its PR, round, score and why it waits on a person in Ready to deploy", async () => {
   const b = board([]);
   await b.show();
   const pr = { number: 12, url: "https://github.com/acme/site/pull/12", branch: "card/k1" };
-  await b.push({ kind: "card_changed", card: card({ column: "in_review", turn: "approver", round: 2, pr, verdict: { score: 80, bar: 90, reason: "touches sign-in", hints: [], reachable: false, at: 2 }, person: "The Approver scored 80/90 and sees no path the Builder can take: touches sign-in" }) });
-  const html = column(b.html(), "in_review");
+  await b.push({ kind: "card_changed", card: card({ column: "ready_to_deploy", turn: "approver", round: 2, pr, verdict: { score: 80, bar: 90, reason: "touches sign-in", hints: [], at: 2 }, person: "The Approver scored 80/90 and did not approve the merge: touches sign-in" }) });
+  const html = column(b.html(), "ready_to_deploy");
   assert.match(html, /PR #12/);
   assert.match(html, /round 2 of 3/);
   assert.match(html, /80\/90/);
-  assert.match(html, /sees no path the Builder can take/);
-  assert.match(html, /data-wb-act="pass"/);
+  assert.match(html, /did not approve the merge/);
+  assert.match(html, /data-wb-act="merged"/);
+  assert.match(html, /data-wb-act="send_back"/);
 });
 
 test("index.html loads gui-team-board.js and its styles", () => {

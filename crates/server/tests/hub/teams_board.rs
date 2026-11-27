@@ -1,6 +1,7 @@
 //! A team's work board end to end: a card a member queues is picked by the Builder's bot in a box,
 //! the box reports the PR, the Reviewer's bot sends it back once, the Builder pushes to the same
-//! PR, the Reviewer passes it, and a person merges it.
+//! PR, the Reviewer passes it, the Approver approves it in Approving, and when pinned cannot merge
+//! the PR (this team has no GitHub key) the card goes back to a person, who merges it.
 
 use super::*;
 use pinned_core::teams::{TeamOp, TeamPolicy};
@@ -76,12 +77,13 @@ fn built(pr: u64) -> Report {
 }
 
 #[test]
-fn a_card_goes_from_backlog_to_done_through_the_builder_and_reviewer_on_one_pr() {
+fn a_card_goes_from_backlog_to_done_through_the_builder_reviewer_and_approver_on_one_pr() {
     let b = Board::new("board_flow");
-    let (builder, reviewer) = (b.on_bot("Builder"), b.on_bot("Reviewer"));
+    let (builder, reviewer, approver) = (b.on_bot("Builder"), b.on_bot("Reviewer"), b.on_bot("Approver"));
     let mut setup = BoardSetup::default();
     setup.builder.bot = Some(builder);
     setup.reviewer.bot = Some(reviewer);
+    setup.approver.bot = Some(approver);
     assert_eq!(b.call(&b.bob, TeamOp::SetBoardSetup { setup: setup.clone() }), Err("only the team's owner does this".into()));
     b.call(&b.ana, TeamOp::SetBoardSetup { setup }).unwrap();
 
@@ -114,8 +116,16 @@ fn a_card_goes_from_backlog_to_done_through_the_builder_and_reviewer_on_one_pr()
     b.report(Report::Reviewed { passed: true, report: "212 passed".into(), request: String::new() }).unwrap();
     b.end_run(&run);
 
+    wait_for("the Approver to pick it", || b.card(&card.id).column == pinned_core::work_board::Column::Approving);
+    wait_for("its box", || b.hub.boxes.live().len() == 1);
+    let run = b.card(&card.id).run.unwrap();
+    b.report(Report::Scored { score: 93, reason: "tested, in pattern".into(), hints: vec![] }).unwrap();
+    b.end_run(&run);
+
+    wait_for("pinned to try the merge", || b.card(&card.id).person.is_some());
     let ready = b.card(&card.id);
     assert_eq!((ready.column, ready.pr.unwrap().number, ready.requests.len()), (pinned_core::work_board::Column::ReadyToDeploy, 12, 1));
+    assert_eq!(ready.person.as_deref(), Some("The Approver approved the merge, but pinned could not merge PR #12: the team has no GitHub key"));
     b.call(&b.bob, serde_json::from_value(json!({ "op": "card_act", "card": card.id, "act": { "act": "merged" } })).unwrap()).unwrap();
     assert_eq!(b.card(&card.id).column, pinned_core::work_board::Column::Done);
 }

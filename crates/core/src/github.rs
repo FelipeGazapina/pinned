@@ -98,6 +98,10 @@ impl Client {
         self.call("pinned", reqwest::Method::POST, path, Some(body)).await
     }
 
+    pub async fn put(&self, path: &str, body: &Value) -> Result<Value, Error> {
+        self.call("pinned", reqwest::Method::PUT, path, Some(body)).await
+    }
+
     /// `get` that names itself `agent` in the `User-Agent` header.
     pub async fn get_as(&self, agent: &str, path: &str) -> Result<Value, Error> {
         self.call(agent, reqwest::Method::GET, path, None).await

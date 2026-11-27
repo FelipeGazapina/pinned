@@ -1,6 +1,6 @@
 /** The team's work board: every piece of team work is a card that moves from Backlog to Done.
  * Each "Ready" column is a queue and names who picks its cards up: the agent's seat, its worker
- * profile and model, or a person for Ready to deploy. A card shows its round, its one PR, the
+ * profile and model, or a person for Ready to deploy when no Approver sits. A card shows its round, its one PR, the
  * Approver's score and, when it waits on a person, why, with the act that unblocks it. The owner
  * seats each agent's bot and profile under "Seats". The hub's rules are `work_board.rs`; this
  * page only draws them and sends a member's acts (`add_card`, `card_act`, `set_board_setup`). */
@@ -12,6 +12,7 @@ const WB_COLUMNS = [
   ["ready_to_review", "Ready to review"],
   ["in_review", "In review"],
   ["ready_to_deploy", "Ready to deploy"],
+  ["approving", "Approving"],
   ["done", "Done"],
 ];
 const WB_AGENTS = { builder: "Builder", reviewer: "Reviewer", approver: "Approver" };
@@ -41,21 +42,23 @@ function wbPicksUp(setup, column) {
   };
   if (column === "ready_to_dev" || column === "in_dev") return [seat("builder")];
   if (column === "ready_to_review") return [seat("reviewer")];
-  if (column === "in_review") return [seat("reviewer"), seat("approver")];
+  if (column === "in_review") return [seat("reviewer")];
+  if (column === "ready_to_deploy" || column === "approving") return [seat("approver")];
   return [];
 }
 
 function wbHeadHtml(setup, column, label, count) {
   const queue = column.startsWith("ready_");
   let who = "";
-  if (column === "ready_to_deploy") who = `<div class="wb-who" data-who="person">Picked up by <b>a person</b>, who merges the PR</div>`;
+  if (column === "ready_to_deploy" && !setup.approver?.bot) who = `<div class="wb-who" data-who="person">Picked up by <b>a person</b>, who merges the PR</div>`;
   else if (column === "backlog") who = `<div class="wb-who">A person queues a card</div>`;
   else if (column !== "done") {
     const seats = wbPicksUp(setup, column);
     const verb = queue ? "Picked up by" : "Worked by";
     who = seats
       .map((s, i) => {
-        const what = s.agent === "approver" ? `then the <b>Approver</b> scores it (bar ${setup.merge_bar})` : `${i ? "then " : `${verb} `}<b>${esc(wbName(s.agent))}</b>`;
+        const approver = s.agent === "approver" ? `<span class="wb-rule">Scores the merge: at ${setup.merge_bar} or more pinned merges the PR, below it a person decides</span>` : "";
+        const what = `${i ? "then " : `${verb} `}<b>${esc(wbName(s.agent))}</b>${approver}`;
         const bot = s.empty ? `<span class="wb-empty-seat">no bot seated: cards wait here</span>` : `<span class="wb-bot">bot ${esc(wbBotName(s.bot))}</span>`;
         return `<div class="wb-who" data-agent="${s.agent}">${what}<span class="wb-profile" title="Worker profile">${esc(s.line)}</span>${bot}</div>`;
       })
@@ -71,7 +74,7 @@ function wbActsHtml(card) {
   if (card.column === "backlog") acts.push(act("queue", "Queue", "tc-primary"));
   if (card.person) acts.push(act("resume", card.round >= card.round_limit && card.column === "ready_to_dev" ? "Give more rounds" : "Resume", "tc-primary"));
   if (card.person && card.column === "in_review") acts.push(act("pass", "Pass to deploy"));
-  if (card.column === "ready_to_deploy") acts.push(act("merged", "I merged it", "tc-primary"));
+  if (card.column === "ready_to_deploy" || (card.column === "approving" && !card.run)) acts.push(act("merged", "I merged it", "tc-primary"));
   if (["ready_to_review", "in_review", "ready_to_deploy"].includes(card.column)) acts.push(act("send_back", "Send back…", "tc-quiet"));
   return acts.length ? `<div class="tc-actions wb-acts">${acts.join("")}</div>` : "";
 }
@@ -82,7 +85,7 @@ function wbCardHtml(card, setup) {
   const v = card.verdict;
   const score = v ? `<span class="wb-score" data-pass="${v.score >= v.bar}" title="${esc(v.reason)}">${v.score}/${v.bar}</span>` : "";
   const working = card.run && card.turn ? `<div class="wb-working"><span class="tc-dot" data-tone="on"></span>${esc(wbName(card.turn))} is working</div>` : "";
-  const waitingFor = !card.run && !card.person && card.turn && card.column === "in_review" ? `<div class="wb-working wb-next">Next: the ${esc(wbName(card.turn))}</div>` : "";
+  const waitingFor = !card.run && !card.person && card.column === "approving" ? `<div class="wb-working wb-next">Approved: pinned is merging the PR</div>` : "";
   const person = card.person ? `<div class="wb-person" role="status">${esc(card.person)}</div>` : "";
   const last = card.requests.at(-1);
   const request = last && ["ready_to_dev", "in_dev"].includes(card.column) ? `<div class="wb-request"><span>${esc(last.by.kind === "agent" ? wbName(last.by.agent) : "A person")} asked:</span> ${esc(last.text)}</div>` : "";
@@ -130,7 +133,7 @@ function wbPageHtml() {
     const cards = view.cards.filter((c) => c.column === column);
     return `<section class="wb-col" data-column="${column}" aria-label="${esc(label)}">${wbHeadHtml(view.setup, column, label, cards.length)}<div class="wb-cards">${cards.map((c) => wbCardHtml(c, view.setup)).join("")}</div></section>`;
   }).join("");
-  return `<div class="wb-top"><div class="tc-title"><h1>Board</h1><p>Ready columns are queues. Each names who picks its cards up: the agent, its worker profile and model. A person merges.</p></div>${wbAddHtml()}${wbSeatsHtml(view.setup)}</div>
+  return `<div class="wb-top"><div class="tc-title"><h1>Board</h1><p>Ready columns are queues. Each names who picks its cards up: the agent, its worker profile and model. The Approver's score merges the PR at the bar; below it, a person decides.</p></div>${wbAddHtml()}${wbSeatsHtml(view.setup)}</div>
     <div class="wb-columns">${columns}</div>`;
 }
 
