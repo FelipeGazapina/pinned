@@ -156,7 +156,7 @@ fn parts(p: &Path) -> VecDeque<Part> {
 /// that doesn't exist yet too: the part that exists resolves, the rest is appended. A dangling
 /// symlink resolves to where it points, since a write through it creates that file. Walking one
 /// component at a time also puts a `..` after a missing component in the right place.
-fn walk(abs: &Path) -> PathBuf {
+pub(super) fn walk(abs: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     let mut todo = parts(abs);
     let mut hops = 0;
@@ -281,34 +281,34 @@ fn short(s: &str) -> String {
 // fails: what it can't follow it keeps as text, so the checks still see the words.
 
 #[derive(Clone, Debug, Default)]
-struct Word {
-    text: String,
+pub(super) struct Word {
+    pub(super) text: String,
     /// Byte offset of the first `$`, command substitution or brace expansion: the word names a path
     /// from there on that nobody can know before the shell runs.
-    var_at: Option<usize>,
+    pub(super) var_at: Option<usize>,
     /// Byte offset of the first unquoted `*`, `?` or `[`.
-    glob_at: Option<usize>,
+    pub(super) glob_at: Option<usize>,
     /// The word holds a command substitution that runs `curl` or `wget`.
-    fetch: bool,
+    pub(super) fetch: bool,
 }
 
 #[derive(Debug)]
-struct Redir {
-    write: bool,
-    target: Word,
+pub(super) struct Redir {
+    pub(super) write: bool,
+    pub(super) target: Word,
 }
 
 #[derive(Debug, Default)]
-struct Segment {
+pub(super) struct Segment {
     id: usize,
-    words: Vec<Word>,
-    redirs: Vec<Redir>,
+    pub(super) words: Vec<Word>,
+    pub(super) redirs: Vec<Redir>,
     /// Parentheses and substitutions the segment sits in. A `cd` inside doesn't leave them.
-    depth: usize,
+    pub(super) depth: usize,
     /// After a `|`.
-    piped: bool,
+    pub(super) piped: bool,
     /// Here-document and here-string bodies.
-    heredoc: Vec<String>,
+    pub(super) heredoc: Vec<String>,
 }
 
 struct Pending {
@@ -348,6 +348,7 @@ struct Lexer<'h> {
     i: usize,
     home: &'h str,
     claude_home: Option<&'h str>,
+    tmpdir: Option<&'h str>,
     out: Vec<Segment>,
     next_id: usize,
     pending: Vec<Pending>,
@@ -357,8 +358,8 @@ fn blank(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\r')
 }
 
-fn lex(src: &str, home: &str, claude_home: Option<&str>) -> Vec<Segment> {
-    let mut lx = Lexer::new(src, home, claude_home, 0);
+pub(super) fn lex(src: &str, home: &str, claude_home: Option<&str>, tmpdir: Option<&str>) -> Vec<Segment> {
+    let mut lx = Lexer::new(src, home, claude_home, tmpdir, 0);
     lx.list(0, false);
     lx.out
 }
@@ -368,16 +369,19 @@ fn is_fetch(seg: &Segment) -> bool {
 }
 
 impl<'h> Lexer<'h> {
-    fn new(src: &str, home: &'h str, claude_home: Option<&'h str>, next_id: usize) -> Self {
-        Lexer { c: src.chars().collect(), i: 0, home, claude_home, out: vec![], next_id, pending: vec![] }
+    fn new(src: &str, home: &'h str, claude_home: Option<&'h str>, tmpdir: Option<&'h str>, next_id: usize) -> Self {
+        Lexer { c: src.chars().collect(), i: 0, home, claude_home, tmpdir, out: vec![], next_id, pending: vec![] }
     }
 
-    /// The value of a variable the lexer knows: `HOME`, and `CLAUDE_CONFIG_DIR` when the session's
-    /// Claude home is known.
+    /// The value of a variable the lexer knows: `HOME`, `CLAUDE_CONFIG_DIR` when the session's
+    /// Claude home is known, and `TMPDIR` when the caller passes it.
     fn known(&self, name: &str) -> Option<&'h str> {
         match name {
             "HOME" => Some(self.home),
             "CLAUDE_CONFIG_DIR" => self.claude_home,
+            "TMPDIR" => self.tmpdir,
+            // `${TMPDIR:-anything}` is the hook's TMPDIR when it is set.
+            _ if name.starts_with("TMPDIR:-") => self.tmpdir,
             _ => None,
         }
     }
@@ -498,7 +502,7 @@ impl<'h> Lexer<'h> {
             }
             if !p.quoted {
                 // An unquoted body runs its `$(...)` and backticks, and nothing else of it.
-                let mut sub = Lexer::new(&body, self.home, self.claude_home, self.next_id);
+                let mut sub = Lexer::new(&body, self.home, self.claude_home, self.tmpdir, self.next_id);
                 let mut w = WordBuilder::default();
                 sub.dq(&mut w, d + 1, false);
                 self.next_id = sub.next_id;
@@ -884,7 +888,7 @@ impl<'h> Lexer<'h> {
                 c => inner.push(c),
             }
         }
-        let mut sub = Lexer::new(&inner, self.home, self.claude_home, self.next_id);
+        let mut sub = Lexer::new(&inner, self.home, self.claude_home, self.tmpdir, self.next_id);
         sub.list(d + 1, false);
         self.next_id = sub.next_id;
         w.word.fetch |= sub.out.iter().any(is_fetch);
@@ -897,19 +901,19 @@ impl<'h> Lexer<'h> {
 // ---------------------------------------------------------------------------------------------
 // Commands
 
-const KEYWORDS: &[&str] = &["if", "then", "else", "elif", "fi", "while", "until", "do", "done", "for", "case", "esac", "select", "function", "time", "!", "{", "}", "[[", "coproc"];
+pub(super) const KEYWORDS: &[&str] = &["if", "then", "else", "elif", "fi", "while", "until", "do", "done", "for", "case", "esac", "select", "function", "time", "!", "{", "}", "[[", "coproc"];
 
 /// Programs that run the rest of their line as a command. Every later word is a candidate command.
-const WRAPPERS: &[&str] = &[
+pub(super) const WRAPPERS: &[&str] = &[
     "sudo", "doas", "env", "command", "exec", "nohup", "nice", "ionice", "timeout", "xargs", "stdbuf", "setsid", "caffeinate", "builtin", "watch", "unbuffer", "parallel", "arch", "chronic",
 ];
 
-const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash", "fish"];
+pub(super) const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash", "fish"];
 
 /// Programs that run what they read, so downloaded text must not reach them.
 const RUNNERS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "python", "python3", "python2", "node", "deno", "bun", "perl", "ruby", "php", "eval", "source", "."];
 
-fn is_assign(t: &str) -> bool {
+pub(super) fn is_assign(t: &str) -> bool {
     let Some((name, _)) = t.split_once('=') else { return false };
     let mut chars = name.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -940,12 +944,12 @@ fn runs_release_script(c: &Cmd) -> bool {
     }
 }
 
-struct Cmd {
+pub(super) struct Cmd {
     /// The program's file name, without its directory.
-    prog: String,
-    args: Vec<Word>,
+    pub(super) prog: String,
+    pub(super) args: Vec<Word>,
     /// Its targets come from a pipe (`xargs`).
-    stdin_args: bool,
+    pub(super) stdin_args: bool,
 }
 
 impl Cmd {
@@ -959,14 +963,14 @@ impl Cmd {
     }
 
     /// Whether a flag is there: `shorts` among the letters of a `-abc` cluster, or one of `longs`.
-    fn has(&self, shorts: &str, longs: &[&str]) -> bool {
+    pub(super) fn has(&self, shorts: &str, longs: &[&str]) -> bool {
         self.flag_texts().any(|t| match t.strip_prefix("--") {
             Some(l) => longs.contains(&l.split('=').next().unwrap_or("")),
             None => t[1..].chars().any(|c| shorts.contains(c)),
         })
     }
 
-    fn positionals(&self) -> Vec<&Word> {
+    pub(super) fn positionals(&self) -> Vec<&Word> {
         let mut after = false;
         self.args
             .iter()
@@ -984,7 +988,7 @@ impl Cmd {
     }
 
     /// The value of `--long=value` or `--long value`.
-    fn long_value(&self, long: &str) -> Option<Word> {
+    pub(super) fn long_value(&self, long: &str) -> Option<Word> {
         let long_eq = format!("--{long}=");
         let long_flag = format!("--{long}");
         for (k, w) in self.args.iter().enumerate() {
@@ -1000,7 +1004,7 @@ impl Cmd {
     }
 
     /// The value of `-X value`, `-Xvalue` or `-abX value`, or the long form's.
-    fn value(&self, short: char, long: &str) -> Option<Word> {
+    pub(super) fn value(&self, short: char, long: &str) -> Option<Word> {
         if let Some(v) = self.long_value(long) {
             return Some(v);
         }
@@ -1017,11 +1021,59 @@ impl Cmd {
         // `-XPOST`, `-ofile`: the value is stuck to the flag.
         self.args.iter().find_map(|w| w.text.strip_prefix(&flag).filter(|v| !v.is_empty() && !w.text.starts_with("--")).map(|v| Word { text: v.to_owned(), ..Word::default() }))
     }
+
+    /// The words a file-writing command writes to.
+    pub(super) fn write_args(&self) -> Vec<Word> {
+        let pos = self.positionals();
+        let word = |t: &str| Word { text: t.to_owned(), ..Word::default() };
+        match self.prog.as_str() {
+            "cp" | "install" | "mv" | "ln" => {
+                let mut out = vec![];
+                let target = self.value('t', "target-directory");
+                if self.prog == "mv" {
+                    out.extend(pos.iter().map(|w| (*w).clone()));
+                } else if target.is_none() {
+                    out.extend(pos.last().map(|w| (*w).clone()));
+                }
+                out.extend(target);
+                out
+            }
+            "tee" | "touch" | "mkdir" | "truncate" | "mkfifo" => pos.iter().map(|w| (*w).clone()).collect(),
+            "sed" => {
+                if !self.has("i", &["in-place"]) {
+                    return vec![];
+                }
+                let script_given = self.has("ef", &["expression", "file"]);
+                pos.iter().skip(usize::from(!script_given)).map(|w| (*w).clone()).collect()
+            }
+            "dd" => self.args.iter().filter_map(|w| w.text.strip_prefix("of=").map(&word)).collect(),
+            "curl" => self.value('o', "output").into_iter().collect(),
+            "wget" => self.value('O', "output-document").into_iter().chain(self.value('P', "directory-prefix")).collect(),
+            _ => vec![],
+        }
+    }
+
+    /// The command lines the command runs itself: a shell's `-c` string, what `eval` joins, and
+    /// each line `watch` is given.
+    pub(super) fn scripts(&self) -> Vec<String> {
+        let prog = self.prog.as_str();
+        if SHELLS.contains(&prog) {
+            let flag = self.args.iter().position(|w| w.text.starts_with('-') && !w.text.starts_with("--") && w.text.contains('c'));
+            flag.and_then(|k| self.args.get(k + 1)).map(|w| w.text.clone()).into_iter().collect()
+        } else if prog == "eval" {
+            vec![self.args.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")]
+        } else if prog == "watch" {
+            self.args.iter().filter(|w| w.text.contains(' ')).map(|w| w.text.clone()).collect()
+        } else {
+            vec![]
+        }
+    }
 }
 
 /// The commands a segment runs: its program, and when it is a wrapper, every later word as a program
 /// too, since a wrapper's options (`timeout 30`, `nice -n 5`, `xargs -I {}`) can't be told from its command.
-fn commands(words: &[Word]) -> Vec<Cmd> {
+/// The captain's guard reads its wrappers with `captain_guard::captain_commands` instead.
+pub(super) fn commands(words: &[Word]) -> Vec<Cmd> {
     let mut i = 0;
     while i < words.len() && (is_assign(&words[i].text) || KEYWORDS.contains(&words[i].text.as_str())) {
         i += 1;
@@ -1049,8 +1101,8 @@ fn commands(words: &[Word]) -> Vec<Cmd> {
 // The scan
 
 /// Where a word points: the part of its path that is known, and whether the first component isn't.
-struct Tgt {
-    path: Option<PathBuf>,
+pub(super) struct Tgt {
+    pub(super) path: Option<PathBuf>,
     /// The first component holds a `$`, a substitution or a brace expansion.
     top_var: bool,
     /// The first component holds a glob. `path` is then the cwd.
@@ -1072,6 +1124,73 @@ struct Scan<'c, 'a> {
     hits: Vec<NeverHit>,
     tagged: bool,
     pushed: bool,
+}
+
+pub(super) fn resolve(cwd: &Option<PathBuf>, raw: &str) -> Option<PathBuf> {
+    if raw.is_empty() {
+        return None;
+    }
+    let p = Path::new(raw);
+    Some(walk(&if p.is_absolute() { p.to_owned() } else { cwd.as_ref()?.join(p) }))
+}
+
+/// Where `w`, named from `cwd`, points.
+pub(super) fn tgt(cwd: &Option<PathBuf>, w: &Word) -> Tgt {
+    let t = w.text.as_str();
+    let first = [w.var_at, w.glob_at].into_iter().flatten().min();
+    let Some(at) = first else {
+        return Tgt { path: resolve(cwd, t), top_var: false, top_glob: false };
+    };
+    let top_end = t.find('/').unwrap_or(t.len());
+    let top_var = w.var_at.is_some_and(|v| v < top_end);
+    let top_glob = !top_var && w.glob_at.is_some_and(|g| g < top_end);
+    if top_var {
+        return Tgt { path: None, top_var, top_glob: false };
+    }
+    if top_glob {
+        return Tgt { path: cwd.clone(), top_var, top_glob };
+    }
+    let head = &t[..at];
+    let dir = head.rfind('/').map(|k| &head[..=k]).unwrap_or("");
+    Tgt { path: resolve(cwd, dir), top_var: false, top_glob: false }
+}
+
+/// Where `c` leaves the shell when it is a `cd`, `pushd` or `popd`, and `None` for any other
+/// command. The inner `None` is a folder nobody can name from here.
+pub(super) fn chdir(cwd: &Option<PathBuf>, c: &Cmd, home: &Path) -> Option<Option<PathBuf>> {
+    match c.prog.as_str() {
+        "cd" | "pushd" => Some(match c.positionals().first() {
+            None => Some(walk(home)),
+            Some(w) if w.text == "-" => None,
+            Some(w) => tgt(cwd, w).path,
+        }),
+        "popd" => Some(None),
+        _ => None,
+    }
+}
+
+/// A git command split at its subcommand: the `-C` folders before it, the subcommand, and the
+/// subcommand with its own arguments.
+pub(super) fn git_sub(c: &Cmd) -> Option<(Vec<&Word>, &str, Cmd)> {
+    let mut dirs = vec![];
+    let mut i = 0;
+    while i < c.args.len() {
+        let t = c.args[i].text.as_str();
+        match t {
+            "-C" => {
+                dirs.extend(c.args.get(i + 1));
+                i += 2;
+            }
+            "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--super-prefix" | "--config-env" => i += 2,
+            _ if t.starts_with("-C") && !t.starts_with("--") => {
+                dirs.push(&c.args[i]);
+                i += 1;
+            }
+            _ if t.starts_with('-') => i += 1,
+            _ => return Some((dirs, t, Cmd { prog: "git".into(), args: c.args[i + 1..].to_vec(), stdin_args: false })),
+        }
+    }
+    None
 }
 
 const DEV_OK: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin", "/dev/tty", "/dev/zero"];
@@ -1105,34 +1224,6 @@ impl<'c, 'a> Scan<'c, 'a> {
         self.ctx.home.to_string_lossy().into_owned()
     }
 
-    fn resolve(&self, cwd: &Option<PathBuf>, raw: &str) -> Option<PathBuf> {
-        if raw.is_empty() {
-            return None;
-        }
-        let p = Path::new(raw);
-        Some(walk(&if p.is_absolute() { p.to_owned() } else { cwd.as_ref()?.join(p) }))
-    }
-
-    fn tgt(&self, cwd: &Option<PathBuf>, w: &Word) -> Tgt {
-        let t = w.text.as_str();
-        let first = [w.var_at, w.glob_at].into_iter().flatten().min();
-        let Some(at) = first else {
-            return Tgt { path: self.resolve(cwd, t), top_var: false, top_glob: false };
-        };
-        let top_end = t.find('/').unwrap_or(t.len());
-        let top_var = w.var_at.is_some_and(|v| v < top_end);
-        let top_glob = !top_var && w.glob_at.is_some_and(|g| g < top_end);
-        if top_var {
-            return Tgt { path: None, top_var, top_glob: false };
-        }
-        if top_glob {
-            return Tgt { path: cwd.clone(), top_var, top_glob };
-        }
-        let head = &t[..at];
-        let dir = head.rfind('/').map(|k| &head[..=k]).unwrap_or("");
-        Tgt { path: self.resolve(cwd, dir), top_var: false, top_glob: false }
-    }
-
     // -- text and tools -----------------------------------------------------------------------
 
     fn production(&mut self, text: &str) {
@@ -1155,7 +1246,7 @@ impl<'c, 'a> Scan<'c, 'a> {
         let raw = path.to_string_lossy();
         let expanded = expand_tilde(&raw, self.ctx.home);
         let cwd = Some(self.abs(Path::new(".")));
-        let resolved = self.resolve(&cwd, &expanded.to_string_lossy());
+        let resolved = resolve(&cwd, &expanded.to_string_lossy());
         self.secret_path(&raw, resolved.as_deref());
         self.write_path(&raw, resolved);
     }
@@ -1164,7 +1255,7 @@ impl<'c, 'a> Scan<'c, 'a> {
         let raw = path.to_string_lossy();
         let expanded = expand_tilde(&raw, self.ctx.home);
         let cwd = Some(self.abs(Path::new(".")));
-        let resolved = self.resolve(&cwd, &expanded.to_string_lossy());
+        let resolved = resolve(&cwd, &expanded.to_string_lossy());
         self.secret_path(&raw, resolved.as_deref());
     }
 
@@ -1199,7 +1290,7 @@ impl<'c, 'a> Scan<'c, 'a> {
         }
         self.production(line);
         let claude_home = self.ctx.claude_home.map(|c| c.to_string_lossy().into_owned());
-        let segs = lex(line, &self.home(), claude_home.as_deref());
+        let segs = lex(line, &self.home(), claude_home.as_deref(), None);
         let mut frames = vec![Frame { cwd, fetched: false }];
         for seg in &segs {
             while frames.len() <= seg.depth {
@@ -1244,14 +1335,8 @@ impl<'c, 'a> Scan<'c, 'a> {
             if c.prog == "curl" || c.prog == "wget" {
                 frames[d].fetched = true;
             }
-            if matches!(c.prog.as_str(), "cd" | "pushd") {
-                frames[d].cwd = match c.positionals().first() {
-                    None => Some(walk(Path::new(&self.home()))),
-                    Some(w) if w.text == "-" => None,
-                    Some(w) => self.tgt(&cwd, w).path,
-                };
-            } else if c.prog == "popd" {
-                frames[d].cwd = None;
+            if let Some(to) = chdir(&cwd, c, self.ctx.home) {
+                frames[d].cwd = to;
             }
         }
         if cmds.iter().any(|c| SHELLS.contains(&c.prog.as_str())) {
@@ -1277,7 +1362,7 @@ impl<'c, 'a> Scan<'c, 'a> {
                 return;
             }
             if w.var_at.is_none() && w.glob_at.is_none() && !t.starts_with('-') {
-                if let Some(p) = self.resolve(cwd, t) {
+                if let Some(p) = resolve(cwd, t) {
                     if let Some(what) = secret(&path_comps(&p)).or_else(|| self.claude_home_secret(&p)) {
                         self.hit(NeverItem::Secrets, format!("reads {what}: {}", short(t)));
                         return;
@@ -1291,7 +1376,7 @@ impl<'c, 'a> Scan<'c, 'a> {
         if DEV_OK.contains(&w.text.as_str()) {
             return;
         }
-        let t = self.tgt(cwd, w);
+        let t = tgt(cwd, w);
         let unresolved = t.top_var || t.path.is_none();
         let path = t.path;
         let mut text = w.text.clone();
@@ -1336,7 +1421,7 @@ impl<'c, 'a> Scan<'c, 'a> {
 
     fn delete(&mut self, cwd: &Option<PathBuf>, targets: &[&Word], risky: bool, what: &str) {
         for w in targets {
-            let t = self.tgt(cwd, w);
+            let t = tgt(cwd, w);
             let bad = match &t.path {
                 _ if t.top_var => true,
                 None => true,
@@ -1401,7 +1486,7 @@ impl<'c, 'a> Scan<'c, 'a> {
             "set" if c.args.is_empty() => self.hit(NeverItem::Secrets, "set prints the environment"),
             "export" | "declare" | "typeset" if (prog == "export" && c.args.is_empty()) || c.has("p", &[]) => self.hit(NeverItem::Secrets, format!("{prog} -p")),
             "cp" | "install" | "mv" | "ln" | "tee" | "touch" | "mkdir" | "truncate" | "mkfifo" | "sed" | "dd" | "curl" | "wget" => {
-                let words = self.write_args(c);
+                let words = c.write_args();
                 self.write_words(cwd, words);
             }
             "npm" | "pnpm" | "yarn" | "bun" | "npx" | "bunx" | "cargo" | "pip" | "pip3" | "pip2" | "pipx" | "python" | "python3" | "python2" | "uv" | "uvx" | "poetry" | "brew" | "apt" | "apt-get" | "aptitude"
@@ -1415,24 +1500,8 @@ impl<'c, 'a> Scan<'c, 'a> {
             }
             _ => {}
         }
-        if SHELLS.contains(&prog) {
-            for (k, w) in c.args.iter().enumerate() {
-                if w.text.starts_with('-') && !w.text.starts_with("--") && w.text.contains('c') {
-                    if let Some(script) = c.args.get(k + 1) {
-                        self.line(&script.text, cwd.clone(), nest + 1);
-                    }
-                    break;
-                }
-            }
-        }
-        if prog == "eval" {
-            let script = c.args.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+        for script in c.scripts() {
             self.line(&script, cwd.clone(), nest + 1);
-        }
-        if prog == "watch" {
-            for w in c.args.iter().filter(|w| w.text.contains(' ')) {
-                self.line(&w.text, cwd.clone(), nest + 1);
-            }
         }
     }
 
@@ -1463,31 +1532,7 @@ impl<'c, 'a> Scan<'c, 'a> {
     // -- git and gh ---------------------------------------------------------------------------
 
     fn git(&mut self, cwd: &Option<PathBuf>, c: &Cmd) {
-        let mut dirs = vec![];
-        let mut i = 0;
-        let mut sub_at = None;
-        while i < c.args.len() {
-            let t = c.args[i].text.as_str();
-            match t {
-                "-C" => {
-                    dirs.extend(c.args.get(i + 1));
-                    i += 2;
-                }
-                "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--super-prefix" | "--config-env" => i += 2,
-                _ if t.starts_with("-C") && !t.starts_with("--") => {
-                    dirs.push(&c.args[i]);
-                    i += 1;
-                }
-                _ if t.starts_with('-') => i += 1,
-                _ => {
-                    sub_at = Some(i);
-                    break;
-                }
-            }
-        }
-        let Some(at) = sub_at else { return };
-        let sub = c.args[at].text.as_str();
-        let rest = Cmd { prog: "git".into(), args: c.args[at + 1..].to_vec(), stdin_args: false };
+        let Some((dirs, sub, rest)) = git_sub(c) else { return };
         // `git diff --output=FILE` writes where it is told.
         if let Some(out) = rest.long_value("output") {
             self.write_words(cwd, vec![out]);
@@ -1497,7 +1542,7 @@ impl<'c, 'a> Scan<'c, 'a> {
             "clean" => {
                 let mut dir = cwd.clone();
                 for d in dirs {
-                    let t = self.tgt(&dir, d);
+                    let t = tgt(&dir, d);
                     dir = if t.top_var || t.top_glob { None } else { t.path };
                 }
                 if dir.as_deref().is_none_or(|d| self.outside(d)) {
@@ -1667,37 +1712,6 @@ impl<'c, 'a> Scan<'c, 'a> {
     }
 
     // -- writes and installs ------------------------------------------------------------------
-
-    /// The words a file-writing command writes to.
-    fn write_args(&self, c: &Cmd) -> Vec<Word> {
-        let pos = c.positionals();
-        let word = |t: &str| Word { text: t.to_owned(), ..Word::default() };
-        match c.prog.as_str() {
-            "cp" | "install" | "mv" | "ln" => {
-                let mut out = vec![];
-                let target = c.value('t', "target-directory");
-                if c.prog == "mv" {
-                    out.extend(pos.iter().map(|w| (*w).clone()));
-                } else if target.is_none() {
-                    out.extend(pos.last().map(|w| (*w).clone()));
-                }
-                out.extend(target);
-                out
-            }
-            "tee" | "touch" | "mkdir" | "truncate" | "mkfifo" => pos.iter().map(|w| (*w).clone()).collect(),
-            "sed" => {
-                if !c.has("i", &["in-place"]) {
-                    return vec![];
-                }
-                let script_given = c.has("ef", &["expression", "file"]);
-                pos.iter().skip(usize::from(!script_given)).map(|w| (*w).clone()).collect()
-            }
-            "dd" => c.args.iter().filter_map(|w| w.text.strip_prefix("of=").map(&word)).collect(),
-            "curl" => c.value('o', "output").into_iter().collect(),
-            "wget" => c.value('O', "output-document").into_iter().chain(c.value('P', "directory-prefix")).collect(),
-            _ => vec![],
-        }
-    }
 
     fn write_words(&mut self, cwd: &Option<PathBuf>, words: Vec<Word>) {
         for w in &words {

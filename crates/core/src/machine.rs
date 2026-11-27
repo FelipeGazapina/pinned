@@ -192,6 +192,7 @@ impl Launch {
         hooks::write_settings(&settings, exe)?;
         hooks::write_global_settings(&files.join(hooks::GLOBAL_SETTINGS), exe)?;
         hooks::write_worker_settings(&files.join(hooks::WORKER_SETTINGS), exe)?;
+        hooks::write_captain_settings(&files.join(hooks::CAPTAIN_SETTINGS), exe)?;
         let mcp_config = files.join("claude-mcp.json");
         reminders::write_mcp_config(&mcp_config, exe, true)?;
         let plugin_dir = files.join("plugin");
@@ -224,12 +225,15 @@ impl Launch {
 
     /// The settings file every Claude Code session started with `env` loads. The global
     /// orchestrator's own: no Bash, and its file tools held to its folders. A worker's own: its
-    /// Bash calls go to the worker guard first.
-    fn shared_settings(&self, env: &[(String, String)]) -> PathBuf {
+    /// Bash calls go to the worker guard first. A manage-only Captain's (`manage_only`): its Bash
+    /// calls go to the Captain guard first.
+    fn shared_settings(&self, env: &[(String, String)], manage_only: bool) -> PathBuf {
         if global::is_global(env) {
             self.settings.with_file_name(hooks::GLOBAL_SETTINGS)
         } else if env.iter().any(|(k, v)| k == ROLE_ENV && Role::parse(v) == Some(Role::Worker)) {
             self.settings.with_file_name(hooks::WORKER_SETTINGS)
+        } else if manage_only {
+            self.settings.with_file_name(hooks::CAPTAIN_SETTINGS)
         } else {
             self.settings.clone()
         }
@@ -239,13 +243,13 @@ impl Launch {
     /// plus the project MCP servers the person approved, so their approval dialog does not show
     /// again in a worktree or under an account that never trusted the main checkout. None when it
     /// carries no name, and the session loads the shared file as before.
-    fn session_settings(&self, program: Program, account: &Account, cwd: &Path, args: &[String], env: &[(String, String)]) -> Option<mcp::SessionSettings> {
+    fn session_settings(&self, program: Program, account: &Account, cwd: &Path, args: &[String], env: &[(String, String)], manage_only: bool) -> Option<mcp::SessionSettings> {
         let interactive = !args.iter().any(|a| a == "-p" || a == "--print");
         if program != Program::Agent || !account.provider.spec().harness || !interactive {
             return None;
         }
         let names = mcp::carried_approvals(cwd);
-        match mcp::SessionSettings::write(&self.shared_settings(env), &names) {
+        match mcp::SessionSettings::write(&self.shared_settings(env, manage_only), &names) {
             Ok(settings) => settings,
             Err(e) => {
                 eprintln!("pinned: a session in {} starts without its project's approved MCP servers: {e}", cwd.display());
@@ -268,7 +272,7 @@ impl Launch {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf], mcp: Option<&mcp::SessionFiles>, settings: Option<&mcp::SessionSettings>) -> CommandBuilder {
+    fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf], mcp: Option<&mcp::SessionFiles>, settings: Option<&mcp::SessionSettings>, manage_only: bool) -> CommandBuilder {
         let provider = account.provider;
         let spec = provider.spec();
         let mut cmd = crate::process::pty_command(self.bin(provider));
@@ -282,7 +286,7 @@ impl Launch {
                         cmd.args(configs);
                     }
                     cmd.arg("--settings");
-                    cmd.arg(settings.map_or_else(|| self.shared_settings(env), |own| own.file.clone()));
+                    cmd.arg(settings.map_or_else(|| self.shared_settings(env, manage_only), |own| own.file.clone()));
                     cmd.arg("--plugin-dir");
                     cmd.arg(&self.plugin_dir);
                     for dir in plugin_dirs {
@@ -2841,12 +2845,15 @@ impl Machine {
             prompt.extend(tastes.as_ref().map(|t| t.resolve(&TasteScope::Orchestrator).brief()));
             prompt.extend(tastes.as_ref().and_then(Tastes::boxes_brief));
         }
+        // A Claude Captain under Manage only: no file tools, and its Bash goes to the Captain guard.
+        let mut claude_manage_only = false;
         if let Some(role) = role {
             // A Captain's taste, read once so its refused tools and its prompt agree on Manage only.
             let scoped = tastes.as_ref().filter(|_| role == Role::Orchestrator).map(|t| t.resolve(&captain_scope(&cwd)));
             let manage_only = scoped.as_ref().is_some_and(|t| t.manage_only);
             let mut refused = role.disallowed_tools().to_vec();
-            if manage_only && account.provider == Provider::Claude {
+            claude_manage_only = manage_only && account.provider == Provider::Claude;
+            if claude_manage_only {
                 refused.extend(crate::agent::MANAGE_ONLY_TOOLS);
             }
             if !refused.is_empty() {
@@ -2874,11 +2881,11 @@ impl Machine {
         }
         let plugin_dirs = self.shared_plugin_dirs(&account);
         let mcp = if program == Program::Agent { self.session_mcp(&account, &cwd) } else { None };
-        let own_settings = self.launch.session_settings(program, &account, &cwd, &args, &env);
+        let own_settings = self.launch.session_settings(program, &account, &cwd, &args, &env, claude_manage_only);
         if first_run {
             self.seed_first_run(&account, &cwd);
         }
-        let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs, mcp.as_ref(), own_settings.as_ref());
+        let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs, mcp.as_ref(), own_settings.as_ref(), claude_manage_only);
         if let Err(error) = self.spawn_with(tab, cmd, pty::size(cols, rows), (mcp, own_settings)) {
             // The next start asks for the same again: with its arguments gone it would open a new
             // conversation in place of this one.
@@ -10948,7 +10955,7 @@ pub(crate) mod tests {
     fn claude_does_not_inherit_the_session_pinned_was_started_from() {
         std::env::set_var("CLAUDE_CODE_SESSION_ID", "outer-session");
         std::env::set_var("CLAUDECODE", "1");
-        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], &[], None, None);
+        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], &[], None, None, false);
         assert_eq!(cmd.get_env("CLAUDE_CODE_SESSION_ID"), None);
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
         assert_eq!(cmd.get_env("PINNED_TAB").and_then(|v| v.to_str()), Some("tab-1"));
@@ -11040,7 +11047,7 @@ pub(crate) mod tests {
     fn a_tab_command_starts_only_with_what_its_kind_sets() {
         let m = machine();
         let account = Account::builtin(Provider::Claude);
-        let cmd = parent::with(every_session_variable(), || m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None, None));
+        let cmd = parent::with(every_session_variable(), || m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None, None, false));
         let session: BTreeMap<&str, &str> = INHERITED_SESSION_ENV.iter().filter_map(|name| Some((*name, cmd.get_env(name)?.to_str()?))).collect();
         assert_eq!(session, BTreeMap::from([("PINNED_SOCK", "k"), ("PINNED_TAB", "tab-1"), ("PINNED_TUTORIAL_HELPER", "t"), ("PINNED_ACCOUNT", "claude")]));
     }
@@ -11142,13 +11149,13 @@ pub(crate) mod tests {
         assert_eq!(m.accounts.home(&account), own, "the home a resume and sync read");
         assert_eq!(m.find_transcript(&account, session), Some(transcript.clone()));
         assert_eq!(m.claude_config(&account), own.join(".claude.json"));
-        let cmd = m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None, None);
+        let cmd = m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None, None, false);
         assert_eq!(cmd.get_env("CLAUDE_CONFIG_DIR").and_then(|v| v.to_str()), own.to_str());
 
         let m = machine_started_with(root.path(), shell(&[("PINNED_ROLE", "worker")]));
         assert_eq!(m.accounts.home(&account), home().join(".claude"));
         assert_eq!(m.find_transcript(&account, session), None);
-        let cmd = m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None, None);
+        let cmd = m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None, None, false);
         assert_eq!(cmd.get_env("CLAUDE_CONFIG_DIR"), None);
     }
 
@@ -11253,7 +11260,7 @@ pub(crate) mod tests {
         let plugin = dir.join("toy@demo");
         std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
         std::fs::write(plugin.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#).unwrap();
-        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], std::slice::from_ref(&plugin), None, None);
+        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], std::slice::from_ref(&plugin), None, None, false);
         let args: Vec<String> = cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let flags: Vec<_> = args.windows(2).filter(|w| w[0] == "--plugin-dir").map(|w| w[1].as_str()).collect();
         assert_eq!(flags, vec!["p", plugin.to_str().unwrap()]);
@@ -11557,7 +11564,7 @@ pub(crate) mod tests {
     fn a_worker_tab_loads_the_worker_settings_and_every_other_session_keeps_its_file() {
         let launch = Launch { settings: Path::new("/run/pinned-1").join("claude-settings.json"), ..launch() };
         let app = Path::new("/work/app");
-        let file = |env: Vec<(String, String)>| launch.shared_settings(&env).file_name().unwrap().to_string_lossy().into_owned();
+        let file = |env: Vec<(String, String)>| launch.shared_settings(&env, false).file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(file(role_env(Role::Worker, app)), hooks::WORKER_SETTINGS);
         assert_eq!(file(role_env(Role::Orchestrator, app)), "claude-settings.json", "a Captain");
         assert_eq!(file(role_env(Role::Reviewer, app)), "claude-settings.json", "a reviewer");
@@ -15477,7 +15484,12 @@ Have another model review a risky change before it goes ahead.";
             git(repo, &["remote", "add", "origin", &format!("git@github.com:acme/{name}.git")]);
         }
         let claude = recording_claude(&dir);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let shared = dir.join("claude-settings.json");
+        hooks::write_settings(&shared, Path::new("/opt/pinned/bin/pinned")).unwrap();
+        hooks::write_captain_settings(&shared.with_file_name(hooks::CAPTAIN_SETTINGS), Path::new("/opt/pinned/bin/pinned")).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), settings: shared.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let captain_file = shared.with_file_name(hooks::CAPTAIN_SETTINGS).display().to_string();
+        let settings_of = |args: &[String]| args.windows(2).find(|w| w[0] == "--settings").map(|w| w[1].clone()).unwrap();
         let answer = Arc::new(Mutex::new(json!({ "captains": { "manage_only": false }, "projects": { "github.com/acme/site": { "manage_only": true } } })));
         let current = answer.clone();
         m.set_hub(Arc::new(move |call| match call {
@@ -15494,14 +15506,23 @@ Have another model review a risky change before it goes ahead.";
 
         let args = started(&claude, &site_tab);
         assert!(refuses(&args), "{args:?}");
+        assert_eq!(settings_of(&args), captain_file, "its Bash goes to the Captain guard");
         let prompt = args.last().unwrap();
         assert!(prompt.contains(line) && !prompt.contains(step_in), "{prompt}");
+        // A project's approved MCP servers give a session a settings file of its own, made from the Captain's.
+        std::fs::write(site.join(".mcp.json"), mcp_json(&["a"])).unwrap();
+        std::fs::create_dir_all(site.join(".claude")).unwrap();
+        std::fs::write(site.join(".claude/settings.local.json"), json!({ "enabledMcpjsonServers": ["a"] }).to_string()).unwrap();
         m.tab(&site_tab, |t| (t.claude_session, t.launch) = (Some("s1".into()), vec!["--resume".into(), "s1".into()])).unwrap();
         m.relaunch(&site_tab, 80, 24).unwrap();
         let args = started(&claude, &site_tab);
         assert!(args.windows(2).any(|w| w == ["--resume", "s1"]) && refuses(&args), "a resume refuses them too: {args:?}");
+        let own: Value = serde_json::from_slice(&std::fs::read(settings_of(&args)).unwrap()).unwrap();
+        assert_ne!(settings_of(&args), captain_file);
+        carries(&own, &serde_json::from_slice(&std::fs::read(&captain_file).unwrap()).unwrap(), &["a"]);
         let args = started(&claude, &api_tab);
         assert!(!args.iter().any(|a| a == "--disallowedTools"), "{args:?}");
+        assert_eq!(settings_of(&args), shared.display().to_string(), "with Manage only off it keeps the shared file");
         assert!(args.last().unwrap().contains(step_in) && !args.last().unwrap().contains(line), "{args:?}");
 
         // Captains (all) on reaches a project that sets nothing, and never the global orchestrator.
@@ -15510,10 +15531,12 @@ Have another model review a risky change before it goes ahead.";
         m.relaunch(&api_tab, 80, 24).unwrap();
         let args = started(&claude, &api_tab);
         assert!(refuses(&args) && args.last().unwrap().contains(line), "{args:?}");
+        assert_eq!(settings_of(&args), captain_file, "{args:?}");
         let global_tab = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
         m.start_claude(&global_tab, 80, 24).unwrap();
         let args = started(&claude, &global_tab);
         assert!(!args.iter().any(|a| a == "--disallowedTools" || a.contains(line)), "{args:?}");
+        assert_eq!(settings_of(&args), shared.with_file_name(hooks::GLOBAL_SETTINGS).display().to_string(), "{args:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
