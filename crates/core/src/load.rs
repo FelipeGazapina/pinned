@@ -172,6 +172,81 @@ pub fn sample(disk: &std::path::Path) -> Load {
     Load { cpus, cpu_percent: cpus.and_then(|cpus| load_average().map(|load| percent_of(load, cpus))), mem_total_mb, mem_available_mb, disk_total_mb, disk_free_mb }
 }
 
+/// The memory Keep memory free holds back on a machine of `total_mb`: `percent` of it, and never
+/// less than `placement::MIN_MEMORY_MB`. None when `percent` is 0, which turns the hold off.
+pub fn reserve_mb(total_mb: u64, percent: u32) -> Option<u64> {
+    (percent > 0).then(|| (total_mb * u64::from(percent) / 100).max(crate::placement::MIN_MEMORY_MB))
+}
+
+/// Why the machine named `name` starts no worker or Captain now: it has less memory free than
+/// Keep memory free, `percent` of it, holds back. `pinned_mb` is what pinned and its sessions
+/// hold, which the answer names. None when it has enough, or when it can't read its memory.
+pub fn memory_short(name: &str, load: &Load, pinned_mb: Option<u64>, percent: u32) -> Option<String> {
+    let (total, free) = (load.mem_total_mb?, load.mem_available_mb?);
+    let reserve = reserve_mb(total, percent)?;
+    if free >= reserve {
+        return None;
+    }
+    let gb = |mb: u64| format!("{:.1} GB", mb as f64 / 1024.0);
+    let pinned = pinned_mb.map(|mb| format!(", and pinned with its sessions and workers uses {}", gb(mb))).unwrap_or_default();
+    Some(format!(
+        "{name} has {} of its {} of memory free{pinned}. Keep memory free holds back {} ({percent}%), so no new worker or Captain starts there now. Wait for a worker to finish and try again, or lower Keep memory free in Settings › Way of working.",
+        gb(free),
+        gb(total),
+        gb(reserve),
+    ))
+}
+
+/// Resident MB of this process and every process under it: pinned's sessions, their workers and
+/// what they run. None where `ps` can't be read.
+pub fn pinned_mb() -> Option<u64> {
+    processes().map(|table| tree_mb(&table, std::process::id()))
+}
+
+/// One row of the process table: pid, parent pid, resident KB.
+type Process = (u32, u32, u64);
+
+/// Resident MB of `root` and every process under it in `table`.
+fn tree_mb(table: &[Process], root: u32) -> u64 {
+    let mut seen = vec![root];
+    let mut kb = 0;
+    let mut at = 0;
+    while let Some(&pid) = seen.get(at) {
+        at += 1;
+        for &(child, parent, rss) in table {
+            if child == pid {
+                kb += rss;
+            } else if parent == pid && !seen.contains(&child) {
+                seen.push(child);
+            }
+        }
+    }
+    kb / 1024
+}
+
+/// Every process with its parent and resident KB, as `ps` lists them.
+#[cfg(unix)]
+fn processes() -> Option<Vec<Process>> {
+    let out = crate::process::command("ps").args(["-A", "-o", "pid=,ppid=,rss="]).output().ok()?;
+    out.status.success().then(|| table_of(&String::from_utf8_lossy(&out.stdout)))
+}
+
+#[cfg(not(unix))]
+fn processes() -> Option<Vec<Process>> {
+    None
+}
+
+#[cfg(any(unix, test))]
+fn table_of(text: &str) -> Vec<Process> {
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace().map(str::parse::<u64>);
+            let (pid, ppid, rss) = (fields.next()?.ok()?, fields.next()?.ok()?, fields.next()?.ok()?);
+            Some((u32::try_from(pid).ok()?, u32::try_from(ppid).ok()?, rss))
+        })
+        .collect()
+}
+
 #[cfg(unix)]
 fn load_average() -> Option<f64> {
     let mut average = [0f64; 1];
@@ -322,10 +397,36 @@ mod tests {
     }
 
     #[test]
+    fn keep_memory_free_holds_a_percent_and_never_less_than_the_floor() {
+        assert_eq!((reserve_mb(32_768, 15), reserve_mb(8_192, 15), reserve_mb(32_768, 0)), (Some(4_915), Some(2_048), None));
+    }
+
+    #[test]
+    fn a_machine_short_of_memory_says_how_short_and_how_much_pinned_holds() {
+        let load = Load { mem_total_mb: Some(32_768), mem_available_mb: Some(1_024), ..Default::default() };
+        assert_eq!(
+            memory_short("mac", &load, Some(19_340), 15).as_deref(),
+            Some("mac has 1.0 GB of its 32.0 GB of memory free, and pinned with its sessions and workers uses 18.9 GB. Keep memory free holds back 4.8 GB (15%), so no new worker or Captain starts there now. Wait for a worker to finish and try again, or lower Keep memory free in Settings › Way of working.")
+        );
+        assert!(memory_short("mac", &load, None, 15).unwrap().starts_with("mac has 1.0 GB of its 32.0 GB of memory free. Keep"), "without pinned's own use");
+        assert_eq!(memory_short("mac", &Load { mem_available_mb: Some(5_000), ..load.clone() }, None, 15), None, "enough free");
+        assert_eq!(memory_short("mac", &load, None, 0), None, "0 turns it off");
+        assert_eq!(memory_short("mac", &Load { mem_total_mb: None, ..load }, None, 15), None, "a machine that can't read its memory is not held");
+    }
+
+    #[test]
+    fn pinned_counts_itself_and_every_process_under_it() {
+        let table = table_of("  10     1  2048\n  11    10  4096\n  12    11  1024\n  13     1  8192\nbad line\n");
+        assert_eq!((tree_mb(&table, 10), tree_mb(&table, 13), tree_mb(&table, 99)), (7, 8, 0));
+    }
+
+    #[test]
     fn this_machines_sample_reads_a_disk() {
         let load = sample(&std::env::temp_dir());
         assert!(load.cpus.is_some_and(|c| c > 0), "{load:?}");
         #[cfg(unix)]
         assert!(load.disk_total_mb.is_some_and(|total| total > 0) && load.disk_free_mb.is_some(), "{load:?}");
+        #[cfg(unix)]
+        assert!(pinned_mb().is_some_and(|mb| mb > 0), "the test process holds memory");
     }
 }

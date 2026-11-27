@@ -688,6 +688,41 @@ test("the user's Boxes at once saves with the Captains, 0 included", async () =>
   assert.match(boxesRow(p.html()), /value="8"/, "a number past the cap is the cap");
 });
 
+const memory = (keep_free_memory) => limited({ boxes_at_once: 8, box_cap: 8, keep_free_memory });
+const memoryRow = (html) => html.match(/<div class="taste-field taste-inline taste-memory">.*?<\/div>/s)?.[0];
+
+test("Keep memory free sits after Boxes at once, from 0 to 50 percent", async () => {
+  const p = page({ answer: () => memory(15) });
+  await p.show();
+  const html = p.html();
+  assert.equal(
+    memoryRow(html),
+    `<div class="taste-field taste-inline taste-memory"><label class="taste-label"><span>Keep memory free</span><input type="number" data-keep-free-memory min="0" max="50" step="1" value="15"> %</label><span class="taste-quiet">0 to 50, never less than 2 GB. A computer with less memory free than this starts no new worker or Captain, however many Workers at once allows, until some is freed. 0 turns it off.</span></div>`,
+  );
+  const at = (text) => html.indexOf(text);
+  assert.ok(at("<span>Boxes at once</span>") < at("<span>Keep memory free</span>") && at("<span>Keep memory free</span>") < at("<span>Model tier</span>"), "right after Boxes at once");
+});
+
+test("the user's Keep memory free saves with the Captains, 0 included, and holds to 50", async () => {
+  const p = page({ answer: (cmd, args) => (cmd === "set_taste" ? memory(args.patch.keep_free_memory) : memory(15)) });
+  await p.show();
+  p.pick("data-keep-free-memory", "0");
+  await p.settle();
+  assert.match(memoryRow(p.html()), /value="0"/);
+  p.calls.length = 0;
+  await p.click(/data-act="save"/);
+  assert.deepEqual(p.calls, [["set_taste", { scope: { kind: "captains" }, patch: { keep_free_memory: 0 } }]]);
+  p.pick("data-keep-free-memory", "80");
+  await p.settle();
+  assert.match(memoryRow(p.html()), /value="50"/, "a number past 50 is 50");
+});
+
+test("a hub that predates Keep memory free shows no row for it", async () => {
+  const p = page({ answer: () => boxes(8) });
+  await p.show();
+  assert.doesNotMatch(p.html(), /Keep memory free/);
+});
+
 test("a hub that predates Boxes at once shows no row for it", async () => {
   const p = page({ answer: () => limited() });
   await p.show();

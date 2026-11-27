@@ -2583,6 +2583,9 @@ impl Machine {
                 return Err(format!("the workflow's session runs with {} access, wider than your session's {}", access.as_str(), ceiling.as_str()));
             }
         }
+        if let Some(short) = self.memory_short() {
+            return Err(short);
+        }
         let id = self.open_run(run)?;
         let (cwd, account) = self.tab(&id, |t| (t.cwd.clone(), t.account.clone()))?;
         let project = history::project_of(&cwd);
@@ -3937,6 +3940,18 @@ impl Machine {
     }
 
     /// This machine's id and name on the hub, each its hostname until the hub's hello.
+    /// Why this machine starts no worker or Captain now: it has less memory free than Keep memory
+    /// free holds back, by the account's tastes as last kept on disk. Workers at once counts each
+    /// project on its own, so this is what holds the machine as a whole.
+    fn memory_short(&self) -> Option<String> {
+        let (_, name) = self.machine_ids();
+        let percent = self.local_tastes().keep_free_memory;
+        let load = crate::load::sample(&home());
+        // The process table is read only once memory is short, to say how much of it is pinned's.
+        crate::load::memory_short(&name, &load, None, percent)?;
+        crate::load::memory_short(&name, &load, crate::load::pinned_mb(), percent)
+    }
+
     fn machine_ids(&self) -> (String, String) {
         let host = crate::account::hostname();
         let id = Some(self.hub_id.lock().unwrap().clone()).filter(|id| !id.is_empty()).unwrap_or_else(|| host.clone());
@@ -4473,6 +4488,9 @@ impl Machine {
             if working >= limits.parallel as usize {
                 return Err(workers_full(working));
             }
+            if let Some(short) = self.memory_short() {
+                return Err(short);
+            }
         }
         self.enqueue_to_captain(path, text, request_id, &self.sender_of(caller), busy)
     }
@@ -4530,6 +4548,9 @@ impl Machine {
         let effort = limits.admit(&account, model.as_deref(), None, &self.claude_models())?;
         self.require_priced(&limits, model.as_deref())?;
         let caller_ref = Caller { tab: Some(caller.to_owned()), task: None };
+        if let Some(short) = self.memory_short() {
+            return Err(short);
+        }
         let title = title.unwrap_or_else(|| format!("Session in {}", cwd.file_name().map_or_else(|| cwd.display().to_string(), |name| name.to_string_lossy().into_owned())));
         let new = NewTask {
             parent: Parent::Tab(caller.to_owned()),
@@ -6607,6 +6628,12 @@ impl Machine {
         }
         let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
         self.ensure_parent(parent_tab.as_deref(), None)?;
+        // A repeated request answers with the task it started, so only a new one waits for memory.
+        if self.delegates.requested(&caller_key, client_request_id.as_deref()).is_none() {
+            if let Some(short) = self.memory_short() {
+                return Err(short);
+            }
+        }
         let isolated = request.isolation == Isolation::Worktree;
         let task = match self.delegates.claim(NewTask {
             parent,
