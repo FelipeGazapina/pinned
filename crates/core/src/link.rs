@@ -389,6 +389,7 @@ impl Link {
             Message::AskPeople { situation, question, choices, step } => {
                 HubCall::Team { team: None, op: crate::teams::TeamOp::AskPeople { situation, question, choices, step } }
             }
+            Message::CardReport { report } => HubCall::Team { team: None, op: crate::teams::TeamOp::CardReport { report } },
             _ => return Err("only a workflow session's callbacks go to the hub".into()),
         };
         match self.call_hub(call)? {

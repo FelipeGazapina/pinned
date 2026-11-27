@@ -1,5 +1,5 @@
 /** The team's left navigation, which takes the personal project list's place in the sidebar while a
- * team is current (`teamsCurrent()`): the team, Calls with the count asking me, Bots, Groups and the
+ * team is current (`teamsCurrent()`): the team, Calls with the count asking me, the Board, Bots, Groups and the
  * team's attached Projects (each with "Take out of the team" for the person who attached it and the
  * owner, asked in place), and the person at the bottom. gui-sidebar.js calls `tcNavDraw()` on every render. With no team
  * the nav is removed and the sidebar is the personal one. Team chat is not in this build, so there
@@ -49,9 +49,11 @@ function tcNavHtml(team, page) {
   const calls = tcNavOpens("team-calls")
     ? `<button type="button" class="nav-row tc-row${page === "team-calls" ? " active" : ""}" data-tc-nav="team-calls"><span class="label">Calls</span><span class="count"${open ? "" : " hidden"} title="${open} waiting on you">${open || ""}</span></button>`
     : "";
+  const board = tcNavOpens("team-board") ? `<button type="button" class="nav-row tc-row${page === "team-board" ? " active" : ""}" data-tc-nav="team-board"><span class="label">Board</span></button>` : "";
   return `<div class="tc-team"><span class="tc-mark tc-team-mark" aria-hidden="true">${esc(tcInitials(team.name))}</span><span class="tc-team-name">${esc(team.name)}</span></div>
     ${held}
     ${calls}
+    ${board}
     <div class="tc-section"><div class="tc-head">Bots</div>${bots}${row("team-bot-new", `<span class="label">Create a bot</span>`, { attrs: ' data-create="true"' })}</div>
     <div class="tc-section"><div class="tc-head">Groups</div>${groups}</div>
     ${me.owner && tcNavOpens("team-invites") ? `<div class="tc-section"><div class="tc-head">People</div>${row("team-invites", `<span class="label">Invite people</span>`)}</div>` : ""}

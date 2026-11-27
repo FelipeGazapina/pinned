@@ -13267,6 +13267,101 @@
                   "subject",
                   "usd"
                 ]
+              },
+              {
+                "description": "`work_board::BoardView`: the team's work board, its setup and its cards.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "board"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "`Card`: a new card in Backlog. `project` is one of the team's projects, by key.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "add_card"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "brief": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "project": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "op",
+                  "title",
+                  "brief",
+                  "project"
+                ]
+              },
+              {
+                "description": "`Card`: a person's act on card `card`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "card_act"
+                  },
+                  "card": {
+                    "type": "string"
+                  },
+                  "act": {
+                    "$ref": "#/$defs/CardAct"
+                  }
+                },
+                "required": [
+                  "op",
+                  "card",
+                  "act"
+                ]
+              },
+              {
+                "description": "Owner only: how the board runs, its profiles and who sits in each seat.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_board_setup"
+                  },
+                  "setup": {
+                    "$ref": "#/$defs/BoardSetup"
+                  }
+                },
+                "required": [
+                  "op",
+                  "setup"
+                ]
+              },
+              {
+                "description": "From a box's session only (`pinned card`): what the agent working a card reports about it.\nThe card is the one the run in this box works.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "card_report"
+                  },
+                  "report": {
+                    "$ref": "#/$defs/Report"
+                  }
+                },
+                "required": [
+                  "op",
+                  "report"
+                ]
               }
             ]
           },
@@ -13670,6 +13765,254 @@
                 "required": [
                   "channel",
                   "thread"
+                ]
+              }
+            ]
+          },
+          "CardAct": {
+            "description": "What a person does to a card.\n\n`{\"act\":\"queue\"}`, `{\"act\":\"send_back\",\"request\":\"Handle an empty list\"}`",
+            "oneOf": [
+              {
+                "description": "Backlog to Ready to dev.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "queue"
+                  }
+                },
+                "required": [
+                  "act"
+                ]
+              },
+              {
+                "description": "Lets agents pick a card that waited on a person again; at the round cap, with\n`max_rounds` more.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "resume"
+                  }
+                },
+                "required": [
+                  "act"
+                ]
+              },
+              {
+                "description": "Back to Ready to dev with the person's request, from review or Ready to deploy.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "send_back"
+                  },
+                  "request": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "act",
+                  "request"
+                ]
+              },
+              {
+                "description": "A card waiting on a person in review goes to Ready to deploy.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "pass"
+                  }
+                },
+                "required": [
+                  "act"
+                ]
+              },
+              {
+                "description": "A person merges its PR through pinned: Ready to deploy, or Approving with no run, to Done.\nThe hub merges the PR first and moves the card only once GitHub merged it.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "merged"
+                  }
+                },
+                "required": [
+                  "act"
+                ]
+              }
+            ]
+          },
+          "BoardSetup": {
+            "description": "How a team's board runs. Only the owner changes it.",
+            "type": "object",
+            "properties": {
+              "profiles": {
+                "description": "The team's worker profiles, which the seats name.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/WorkerProfile"
+                }
+              },
+              "builder": {
+                "$ref": "#/$defs/Seat"
+              },
+              "reviewer": {
+                "$ref": "#/$defs/Seat"
+              },
+              "approver": {
+                "$ref": "#/$defs/Seat"
+              },
+              "merge_bar": {
+                "description": "The score a merge needs.",
+                "type": "integer",
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255,
+                "default": 90
+              },
+              "max_rounds": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              }
+            },
+            "required": [
+              "profiles",
+              "builder",
+              "reviewer",
+              "approver",
+              "merge_bar",
+              "max_rounds"
+            ]
+          },
+          "Seat": {
+            "description": "One agent's seat on the board: who it is (`soul`), how it runs (`profile`, a name from\n`BoardSetup::profiles`) and the team bot whose runs work its cards. With no bot the seat is\nempty: its queue waits, and with no Approver a person merges every card in Ready to deploy.",
+            "type": "object",
+            "properties": {
+              "profile": {
+                "type": "string"
+              },
+              "bot": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "soul": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "profile",
+              "soul"
+            ]
+          },
+          "Report": {
+            "description": "What an agent's run reports about the card it works, from its box.\n\n`{\"kind\":\"built\",\"pr\":12,\"url\":\"https://github.com/acme/site/pull/12\",\"branch\":\"card/1a2b3c4d\"}`",
+            "oneOf": [
+              {
+                "description": "The Builder's PR is open with its checks passing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "built"
+                  },
+                  "pr": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "branch": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "pr",
+                  "url",
+                  "branch"
+                ]
+              },
+              {
+                "description": "The Reviewer ran the tests. Not passed sends `request` (or the report) to the Builder.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "reviewed"
+                  },
+                  "passed": {
+                    "type": "boolean"
+                  },
+                  "report": {
+                    "type": "string"
+                  },
+                  "request": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "passed",
+                  "report",
+                  "request"
+                ]
+              },
+              {
+                "description": "The Approver's score on the merge: at the bar pinned merges the PR.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "scored"
+                  },
+                  "score": {
+                    "type": "integer",
+                    "format": "uint8",
+                    "minimum": 0,
+                    "maximum": 255
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "hints": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "kind",
+                  "score",
+                  "reason",
+                  "hints"
+                ]
+              },
+              {
+                "description": "The agent cannot go on: a person decides.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "stuck"
+                  },
+                  "why": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "why"
                 ]
               }
             ]
@@ -26941,6 +27284,99 @@
                   "subject",
                   "usd"
                 ]
+              },
+              {
+                "description": "`work_board::BoardView`: the team's work board, its setup and its cards.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "board"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "`Card`: a new card in Backlog. `project` is one of the team's projects, by key.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "add_card"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "brief": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "project": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "op",
+                  "title"
+                ]
+              },
+              {
+                "description": "`Card`: a person's act on card `card`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "card_act"
+                  },
+                  "card": {
+                    "type": "string"
+                  },
+                  "act": {
+                    "$ref": "#/$defs/CardAct"
+                  }
+                },
+                "required": [
+                  "op",
+                  "card",
+                  "act"
+                ]
+              },
+              {
+                "description": "Owner only: how the board runs, its profiles and who sits in each seat.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_board_setup"
+                  },
+                  "setup": {
+                    "$ref": "#/$defs/BoardSetup"
+                  }
+                },
+                "required": [
+                  "op",
+                  "setup"
+                ]
+              },
+              {
+                "description": "From a box's session only (`pinned card`): what the agent working a card reports about it.\nThe card is the one the run in this box works.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "card_report"
+                  },
+                  "report": {
+                    "$ref": "#/$defs/Report"
+                  }
+                },
+                "required": [
+                  "op",
+                  "report"
+                ]
               }
             ]
           },
@@ -27323,6 +27759,249 @@
                 "required": [
                   "channel",
                   "thread"
+                ]
+              }
+            ]
+          },
+          "CardAct": {
+            "description": "What a person does to a card.\n\n`{\"act\":\"queue\"}`, `{\"act\":\"send_back\",\"request\":\"Handle an empty list\"}`",
+            "oneOf": [
+              {
+                "description": "Backlog to Ready to dev.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "queue"
+                  }
+                },
+                "required": [
+                  "act"
+                ]
+              },
+              {
+                "description": "Lets agents pick a card that waited on a person again; at the round cap, with\n`max_rounds` more.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "resume"
+                  }
+                },
+                "required": [
+                  "act"
+                ]
+              },
+              {
+                "description": "Back to Ready to dev with the person's request, from review or Ready to deploy.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "send_back"
+                  },
+                  "request": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "act",
+                  "request"
+                ]
+              },
+              {
+                "description": "A card waiting on a person in review goes to Ready to deploy.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "pass"
+                  }
+                },
+                "required": [
+                  "act"
+                ]
+              },
+              {
+                "description": "A person merges its PR through pinned: Ready to deploy, or Approving with no run, to Done.\nThe hub merges the PR first and moves the card only once GitHub merged it.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "merged"
+                  }
+                },
+                "required": [
+                  "act"
+                ]
+              }
+            ]
+          },
+          "BoardSetup": {
+            "description": "How a team's board runs. Only the owner changes it.",
+            "type": "object",
+            "properties": {
+              "profiles": {
+                "description": "The team's worker profiles, which the seats name.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/WorkerProfile"
+                }
+              },
+              "builder": {
+                "$ref": "#/$defs/Seat"
+              },
+              "reviewer": {
+                "$ref": "#/$defs/Seat"
+              },
+              "approver": {
+                "$ref": "#/$defs/Seat"
+              },
+              "merge_bar": {
+                "description": "The score a merge needs.",
+                "type": "integer",
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255,
+                "default": 90
+              },
+              "max_rounds": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              }
+            },
+            "required": [
+              "profiles",
+              "builder",
+              "reviewer",
+              "approver"
+            ]
+          },
+          "Seat": {
+            "description": "One agent's seat on the board: who it is (`soul`), how it runs (`profile`, a name from\n`BoardSetup::profiles`) and the team bot whose runs work its cards. With no bot the seat is\nempty: its queue waits, and with no Approver a person merges every card in Ready to deploy.",
+            "type": "object",
+            "properties": {
+              "profile": {
+                "type": "string"
+              },
+              "bot": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "soul": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "profile"
+            ]
+          },
+          "Report": {
+            "description": "What an agent's run reports about the card it works, from its box.\n\n`{\"kind\":\"built\",\"pr\":12,\"url\":\"https://github.com/acme/site/pull/12\",\"branch\":\"card/1a2b3c4d\"}`",
+            "oneOf": [
+              {
+                "description": "The Builder's PR is open with its checks passing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "built"
+                  },
+                  "pr": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "branch": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "pr",
+                  "url",
+                  "branch"
+                ]
+              },
+              {
+                "description": "The Reviewer ran the tests. Not passed sends `request` (or the report) to the Builder.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "reviewed"
+                  },
+                  "passed": {
+                    "type": "boolean"
+                  },
+                  "report": {
+                    "type": "string"
+                  },
+                  "request": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "passed",
+                  "report"
+                ]
+              },
+              {
+                "description": "The Approver's score on the merge: at the bar pinned merges the PR.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "scored"
+                  },
+                  "score": {
+                    "type": "integer",
+                    "format": "uint8",
+                    "minimum": 0,
+                    "maximum": 255
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "hints": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "kind",
+                  "score",
+                  "reason"
+                ]
+              },
+              {
+                "description": "The agent cannot go on: a person decides.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "stuck"
+                  },
+                  "why": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "why"
                 ]
               }
             ]
@@ -37791,6 +38470,101 @@
                   "subject",
                   "usd"
                 ]
+              },
+              {
+                "description": "`work_board::BoardView`: the team's work board, its setup and its cards.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "board"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "`Card`: a new card in Backlog. `project` is one of the team's projects, by key.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "add_card"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "brief": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "project": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "op",
+                  "title",
+                  "brief",
+                  "project"
+                ]
+              },
+              {
+                "description": "`Card`: a person's act on card `card`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "card_act"
+                  },
+                  "card": {
+                    "type": "string"
+                  },
+                  "act": {
+                    "$ref": "#/$defs/CardAct"
+                  }
+                },
+                "required": [
+                  "op",
+                  "card",
+                  "act"
+                ]
+              },
+              {
+                "description": "Owner only: how the board runs, its profiles and who sits in each seat.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_board_setup"
+                  },
+                  "setup": {
+                    "$ref": "#/$defs/BoardSetup"
+                  }
+                },
+                "required": [
+                  "op",
+                  "setup"
+                ]
+              },
+              {
+                "description": "From a box's session only (`pinned card`): what the agent working a card reports about it.\nThe card is the one the run in this box works.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "card_report"
+                  },
+                  "report": {
+                    "$ref": "#/$defs/Report"
+                  }
+                },
+                "required": [
+                  "op",
+                  "report"
+                ]
               }
             ]
           },
@@ -38161,6 +38935,254 @@
               "in_doubt",
               "on_limit",
               "on_failure"
+            ]
+          },
+          "CardAct": {
+            "description": "What a person does to a card.\n\n`{\"act\":\"queue\"}`, `{\"act\":\"send_back\",\"request\":\"Handle an empty list\"}`",
+            "oneOf": [
+              {
+                "description": "Backlog to Ready to dev.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "queue"
+                  }
+                },
+                "required": [
+                  "act"
+                ]
+              },
+              {
+                "description": "Lets agents pick a card that waited on a person again; at the round cap, with\n`max_rounds` more.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "resume"
+                  }
+                },
+                "required": [
+                  "act"
+                ]
+              },
+              {
+                "description": "Back to Ready to dev with the person's request, from review or Ready to deploy.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "send_back"
+                  },
+                  "request": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "act",
+                  "request"
+                ]
+              },
+              {
+                "description": "A card waiting on a person in review goes to Ready to deploy.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "pass"
+                  }
+                },
+                "required": [
+                  "act"
+                ]
+              },
+              {
+                "description": "A person merges its PR through pinned: Ready to deploy, or Approving with no run, to Done.\nThe hub merges the PR first and moves the card only once GitHub merged it.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "merged"
+                  }
+                },
+                "required": [
+                  "act"
+                ]
+              }
+            ]
+          },
+          "BoardSetup": {
+            "description": "How a team's board runs. Only the owner changes it.",
+            "type": "object",
+            "properties": {
+              "profiles": {
+                "description": "The team's worker profiles, which the seats name.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/WorkerProfile"
+                }
+              },
+              "builder": {
+                "$ref": "#/$defs/Seat"
+              },
+              "reviewer": {
+                "$ref": "#/$defs/Seat"
+              },
+              "approver": {
+                "$ref": "#/$defs/Seat"
+              },
+              "merge_bar": {
+                "description": "The score a merge needs.",
+                "type": "integer",
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255,
+                "default": 90
+              },
+              "max_rounds": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              }
+            },
+            "required": [
+              "profiles",
+              "builder",
+              "reviewer",
+              "approver",
+              "merge_bar",
+              "max_rounds"
+            ]
+          },
+          "Seat": {
+            "description": "One agent's seat on the board: who it is (`soul`), how it runs (`profile`, a name from\n`BoardSetup::profiles`) and the team bot whose runs work its cards. With no bot the seat is\nempty: its queue waits, and with no Approver a person merges every card in Ready to deploy.",
+            "type": "object",
+            "properties": {
+              "profile": {
+                "type": "string"
+              },
+              "bot": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "soul": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "profile",
+              "soul"
+            ]
+          },
+          "Report": {
+            "description": "What an agent's run reports about the card it works, from its box.\n\n`{\"kind\":\"built\",\"pr\":12,\"url\":\"https://github.com/acme/site/pull/12\",\"branch\":\"card/1a2b3c4d\"}`",
+            "oneOf": [
+              {
+                "description": "The Builder's PR is open with its checks passing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "built"
+                  },
+                  "pr": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "branch": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "pr",
+                  "url",
+                  "branch"
+                ]
+              },
+              {
+                "description": "The Reviewer ran the tests. Not passed sends `request` (or the report) to the Builder.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "reviewed"
+                  },
+                  "passed": {
+                    "type": "boolean"
+                  },
+                  "report": {
+                    "type": "string"
+                  },
+                  "request": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "passed",
+                  "report",
+                  "request"
+                ]
+              },
+              {
+                "description": "The Approver's score on the merge: at the bar pinned merges the PR.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "scored"
+                  },
+                  "score": {
+                    "type": "integer",
+                    "format": "uint8",
+                    "minimum": 0,
+                    "maximum": 255
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "hints": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "kind",
+                  "score",
+                  "reason",
+                  "hints"
+                ]
+              },
+              {
+                "description": "The agent cannot go on: a person decides.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "stuck"
+                  },
+                  "why": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "why"
+                ]
+              }
             ]
           },
           "Changes": {
@@ -48305,6 +49327,99 @@
                   "subject",
                   "usd"
                 ]
+              },
+              {
+                "description": "`work_board::BoardView`: the team's work board, its setup and its cards.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "board"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "`Card`: a new card in Backlog. `project` is one of the team's projects, by key.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "add_card"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "brief": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "project": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "op",
+                  "title"
+                ]
+              },
+              {
+                "description": "`Card`: a person's act on card `card`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "card_act"
+                  },
+                  "card": {
+                    "type": "string"
+                  },
+                  "act": {
+                    "$ref": "#/$defs/CardAct"
+                  }
+                },
+                "required": [
+                  "op",
+                  "card",
+                  "act"
+                ]
+              },
+              {
+                "description": "Owner only: how the board runs, its profiles and who sits in each seat.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_board_setup"
+                  },
+                  "setup": {
+                    "$ref": "#/$defs/BoardSetup"
+                  }
+                },
+                "required": [
+                  "op",
+                  "setup"
+                ]
+              },
+              {
+                "description": "From a box's session only (`pinned card`): what the agent working a card reports about it.\nThe card is the one the run in this box works.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "card_report"
+                  },
+                  "report": {
+                    "$ref": "#/$defs/Report"
+                  }
+                },
+                "required": [
+                  "op",
+                  "report"
+                ]
               }
             ]
           },
@@ -48654,6 +49769,249 @@
               "in_doubt",
               "on_limit",
               "on_failure"
+            ]
+          },
+          "CardAct": {
+            "description": "What a person does to a card.\n\n`{\"act\":\"queue\"}`, `{\"act\":\"send_back\",\"request\":\"Handle an empty list\"}`",
+            "oneOf": [
+              {
+                "description": "Backlog to Ready to dev.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "queue"
+                  }
+                },
+                "required": [
+                  "act"
+                ]
+              },
+              {
+                "description": "Lets agents pick a card that waited on a person again; at the round cap, with\n`max_rounds` more.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "resume"
+                  }
+                },
+                "required": [
+                  "act"
+                ]
+              },
+              {
+                "description": "Back to Ready to dev with the person's request, from review or Ready to deploy.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "send_back"
+                  },
+                  "request": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "act",
+                  "request"
+                ]
+              },
+              {
+                "description": "A card waiting on a person in review goes to Ready to deploy.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "pass"
+                  }
+                },
+                "required": [
+                  "act"
+                ]
+              },
+              {
+                "description": "A person merges its PR through pinned: Ready to deploy, or Approving with no run, to Done.\nThe hub merges the PR first and moves the card only once GitHub merged it.",
+                "type": "object",
+                "properties": {
+                  "act": {
+                    "type": "string",
+                    "const": "merged"
+                  }
+                },
+                "required": [
+                  "act"
+                ]
+              }
+            ]
+          },
+          "BoardSetup": {
+            "description": "How a team's board runs. Only the owner changes it.",
+            "type": "object",
+            "properties": {
+              "profiles": {
+                "description": "The team's worker profiles, which the seats name.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/WorkerProfile"
+                }
+              },
+              "builder": {
+                "$ref": "#/$defs/Seat"
+              },
+              "reviewer": {
+                "$ref": "#/$defs/Seat"
+              },
+              "approver": {
+                "$ref": "#/$defs/Seat"
+              },
+              "merge_bar": {
+                "description": "The score a merge needs.",
+                "type": "integer",
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255,
+                "default": 90
+              },
+              "max_rounds": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              }
+            },
+            "required": [
+              "profiles",
+              "builder",
+              "reviewer",
+              "approver"
+            ]
+          },
+          "Seat": {
+            "description": "One agent's seat on the board: who it is (`soul`), how it runs (`profile`, a name from\n`BoardSetup::profiles`) and the team bot whose runs work its cards. With no bot the seat is\nempty: its queue waits, and with no Approver a person merges every card in Ready to deploy.",
+            "type": "object",
+            "properties": {
+              "profile": {
+                "type": "string"
+              },
+              "bot": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "soul": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "profile"
+            ]
+          },
+          "Report": {
+            "description": "What an agent's run reports about the card it works, from its box.\n\n`{\"kind\":\"built\",\"pr\":12,\"url\":\"https://github.com/acme/site/pull/12\",\"branch\":\"card/1a2b3c4d\"}`",
+            "oneOf": [
+              {
+                "description": "The Builder's PR is open with its checks passing.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "built"
+                  },
+                  "pr": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "branch": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "pr",
+                  "url",
+                  "branch"
+                ]
+              },
+              {
+                "description": "The Reviewer ran the tests. Not passed sends `request` (or the report) to the Builder.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "reviewed"
+                  },
+                  "passed": {
+                    "type": "boolean"
+                  },
+                  "report": {
+                    "type": "string"
+                  },
+                  "request": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "passed",
+                  "report"
+                ]
+              },
+              {
+                "description": "The Approver's score on the merge: at the bar pinned merges the PR.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "scored"
+                  },
+                  "score": {
+                    "type": "integer",
+                    "format": "uint8",
+                    "minimum": 0,
+                    "maximum": 255
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "hints": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "kind",
+                  "score",
+                  "reason"
+                ]
+              },
+              {
+                "description": "The agent cannot go on: a person decides.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "stuck"
+                  },
+                  "why": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "why"
+                ]
+              }
             ]
           },
           "Changes": {
@@ -76444,6 +77802,22 @@
                   "kind",
                   "run"
                 ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "card_changed"
+                  },
+                  "card": {
+                    "$ref": "#/$defs/Card"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "card"
+                ]
               }
             ]
           },
@@ -76783,6 +78157,328 @@
                 "type": "string",
                 "const": "gave_up"
               }
+            ]
+          },
+          "Card": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "brief": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "description": "The team project the Builder works in, by key.",
+                "type": "string",
+                "default": ""
+              },
+              "column": {
+                "$ref": "#/$defs/Column"
+              },
+              "turn": {
+                "description": "The agent the card waits for or is worked by; none in Backlog and Done, and none in Ready\nto deploy when no Approver sits.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Agent"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "run": {
+                "description": "The team run working the card now.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "person": {
+                "description": "Why a person must act before any agent picks the card again.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "round": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "round_limit": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              },
+              "pr": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CardPr"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "requests": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Request"
+                },
+                "default": []
+              },
+              "report": {
+                "description": "The Reviewer's last report.",
+                "type": "string",
+                "default": ""
+              },
+              "verdict": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Verdict"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "log": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/CardMove"
+                },
+                "default": []
+              },
+              "created_by": {
+                "description": "The member who added it.",
+                "type": "string"
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "brief",
+              "project",
+              "column",
+              "turn",
+              "run",
+              "person",
+              "round",
+              "round_limit",
+              "pr",
+              "requests",
+              "report",
+              "verdict",
+              "log",
+              "created_by",
+              "created_at"
+            ]
+          },
+          "Column": {
+            "description": "`\"backlog\"`, `\"ready_to_dev\"`, `\"in_dev\"`, `\"ready_to_review\"`, `\"in_review\"`, `\"ready_to_deploy\"`, `\"approving\"`, `\"done\"`",
+            "type": "string",
+            "enum": [
+              "backlog",
+              "ready_to_dev",
+              "in_dev",
+              "ready_to_review",
+              "in_review",
+              "ready_to_deploy",
+              "approving",
+              "done"
+            ]
+          },
+          "Agent": {
+            "description": "The agent that works a card: its role on the board.",
+            "type": "string",
+            "enum": [
+              "builder",
+              "reviewer",
+              "approver"
+            ]
+          },
+          "CardPr": {
+            "description": "The card's one pull request, opened by the Builder and kept for the card's whole life.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              },
+              "branch": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url",
+              "branch"
+            ]
+          },
+          "Request": {
+            "description": "What a card asks of the Builder: a Reviewer's bug or failing test, an Approver's steps to the\nbar, or a person's words.",
+            "type": "object",
+            "properties": {
+              "by": {
+                "$ref": "#/$defs/By2"
+              },
+              "round": {
+                "description": "The round it was sent in.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "text": {
+                "type": "string"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "by",
+              "round",
+              "text",
+              "at"
+            ]
+          },
+          "By2": {
+            "description": "Who moved a card.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "person"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "account"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "agent"
+                  },
+                  "agent": {
+                    "$ref": "#/$defs/Agent"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "agent"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "pinned"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Verdict": {
+            "description": "The Approver's score on the card's merge.",
+            "type": "object",
+            "properties": {
+              "score": {
+                "type": "integer",
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "bar": {
+                "description": "The bar it was held to.",
+                "type": "integer",
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "reason": {
+                "type": "string"
+              },
+              "hints": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "score",
+              "bar",
+              "reason",
+              "hints",
+              "at"
+            ]
+          },
+          "CardMove": {
+            "description": "One move in a card's log. `to` equals `from` for what changed the card in place.",
+            "type": "object",
+            "properties": {
+              "from": {
+                "$ref": "#/$defs/Column"
+              },
+              "to": {
+                "$ref": "#/$defs/Column"
+              },
+              "by": {
+                "$ref": "#/$defs/By2"
+              },
+              "what": {
+                "type": "string"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "from",
+              "to",
+              "by",
+              "what",
+              "at"
             ]
           }
         }
@@ -81254,6 +82950,22 @@
                   "kind",
                   "run"
                 ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "card_changed"
+                  },
+                  "card": {
+                    "$ref": "#/$defs/Card"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "card"
+                ]
               }
             ]
           },
@@ -81578,6 +83290,315 @@
                 "type": "string",
                 "const": "gave_up"
               }
+            ]
+          },
+          "Card": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "brief": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "description": "The team project the Builder works in, by key.",
+                "type": "string",
+                "default": ""
+              },
+              "column": {
+                "$ref": "#/$defs/Column"
+              },
+              "turn": {
+                "description": "The agent the card waits for or is worked by; none in Backlog and Done, and none in Ready\nto deploy when no Approver sits.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Agent"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "run": {
+                "description": "The team run working the card now.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "person": {
+                "description": "Why a person must act before any agent picks the card again.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "round": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "round_limit": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 3
+              },
+              "pr": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CardPr"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "requests": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Request"
+                },
+                "default": []
+              },
+              "report": {
+                "description": "The Reviewer's last report.",
+                "type": "string",
+                "default": ""
+              },
+              "verdict": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Verdict"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "log": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/CardMove"
+                },
+                "default": []
+              },
+              "created_by": {
+                "description": "The member who added it.",
+                "type": "string"
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "column",
+              "created_by",
+              "created_at"
+            ]
+          },
+          "Column": {
+            "description": "`\"backlog\"`, `\"ready_to_dev\"`, `\"in_dev\"`, `\"ready_to_review\"`, `\"in_review\"`, `\"ready_to_deploy\"`, `\"approving\"`, `\"done\"`",
+            "type": "string",
+            "enum": [
+              "backlog",
+              "ready_to_dev",
+              "in_dev",
+              "ready_to_review",
+              "in_review",
+              "ready_to_deploy",
+              "approving",
+              "done"
+            ]
+          },
+          "Agent": {
+            "description": "The agent that works a card: its role on the board.",
+            "type": "string",
+            "enum": [
+              "builder",
+              "reviewer",
+              "approver"
+            ]
+          },
+          "CardPr": {
+            "description": "The card's one pull request, opened by the Builder and kept for the card's whole life.",
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "url": {
+                "type": "string"
+              },
+              "branch": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "number",
+              "url",
+              "branch"
+            ]
+          },
+          "Request": {
+            "description": "What a card asks of the Builder: a Reviewer's bug or failing test, an Approver's steps to the\nbar, or a person's words.",
+            "type": "object",
+            "properties": {
+              "by": {
+                "$ref": "#/$defs/By2"
+              },
+              "round": {
+                "description": "The round it was sent in.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              },
+              "text": {
+                "type": "string"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "by",
+              "round",
+              "text",
+              "at"
+            ]
+          },
+          "By2": {
+            "description": "Who moved a card.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "person"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "account"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "agent"
+                  },
+                  "agent": {
+                    "$ref": "#/$defs/Agent"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "agent"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "pinned"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Verdict": {
+            "description": "The Approver's score on the card's merge.",
+            "type": "object",
+            "properties": {
+              "score": {
+                "type": "integer",
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "bar": {
+                "description": "The bar it was held to.",
+                "type": "integer",
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "reason": {
+                "type": "string"
+              },
+              "hints": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "score",
+              "bar",
+              "reason",
+              "at"
+            ]
+          },
+          "CardMove": {
+            "description": "One move in a card's log. `to` equals `from` for what changed the card in place.",
+            "type": "object",
+            "properties": {
+              "from": {
+                "$ref": "#/$defs/Column"
+              },
+              "to": {
+                "$ref": "#/$defs/Column"
+              },
+              "by": {
+                "$ref": "#/$defs/By2"
+              },
+              "what": {
+                "type": "string"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "from",
+              "to",
+              "by",
+              "what",
+              "at"
             ]
           }
         }

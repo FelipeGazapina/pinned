@@ -31,6 +31,7 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
             return Some(0);
         }
         team_call::SUBCOMMAND => return Some(team_call::main(rest)),
+        crate::work_board::SUBCOMMAND => return Some(crate::work_board::main(rest)),
         reminders::SUBCOMMAND => {
             reminders::serve(first != Some(reminders::NO_REMINDERS));
             return Some(0);

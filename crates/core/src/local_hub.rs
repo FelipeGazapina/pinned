@@ -151,7 +151,7 @@ pub fn signed_out(connectors: &Connectors, message: Message) -> SignedOut {
             name,
             value,
         } => SignedOut::Done(connectors.run_set(&connector, &subject, &name, &value)),
-        Message::AskPeople { .. } => SignedOut::Done(Err(NEEDS_THE_HUB.into())),
+        Message::AskPeople { .. } | Message::CardReport { .. } => SignedOut::Done(Err(NEEDS_THE_HUB.into())),
         Message::Agent(_)
         | Message::Compacting { .. }
         | Message::Team { .. }
@@ -368,7 +368,7 @@ impl LocalHub<'_> {
             | HubCall::BoxUsage
             | HubCall::StuckBoxes => Answer::Done(Err(NEEDS_THE_HUB_OFF.into())),
             HubCall::GenerateWorkflow { .. } => Answer::Done(Err("Generate with AI was removed: ask an agent to create the workflow".into())),
-            HubCall::Team { op: crate::teams::TeamOp::AskPeople { .. }, .. } => Answer::Done(Err(NEEDS_THE_HUB.into())),
+            HubCall::Team { op: crate::teams::TeamOp::AskPeople { .. } | crate::teams::TeamOp::CardReport { .. }, .. } => Answer::Done(Err(NEEDS_THE_HUB.into())),
             HubCall::DelegationStats { days } if self.account.is_none() => match crate::delegate::stats_days(Some(u64::from(days))) {
                 Ok(days) => done(Ok(self.machine.local_delegation_stats(days))),
                 Err(error) => Answer::Done(Err(error)),

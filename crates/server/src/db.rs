@@ -202,6 +202,10 @@ create table if not exists team_calls (id uuid primary key, team uuid not null r
   question text not null, choices jsonb not null, created_at timestamptz not null default now(),
   escalated_at timestamptz, answered_by uuid references accounts, answered_at timestamptz, answer jsonb, outcome text);
 create index if not exists team_calls_open on team_calls (created_at) where answered_at is null;
+-- A team's work board: its setup (`work_board::BoardSetup`) and its cards (`work_board::Card`).
+create table if not exists team_board (team uuid primary key references teams on delete cascade, setup jsonb not null);
+create table if not exists team_cards (team uuid not null references teams on delete cascade, id uuid not null,
+  card jsonb not null, primary key (team, id));
 alter table team_bots add column if not exists once boolean not null default false;
 alter table team_runs add column if not exists subject jsonb;
 alter table team_bots add column if not exists off_note text;
