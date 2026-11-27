@@ -539,22 +539,34 @@ panelBody.addEventListener("click", (e) => {
  * last sent, and the add form's unsent title and text, which a redraw would otherwise drop. */
 const memoryPanels = new Map();
 const hasProject = (tab) => !!tab && !threadOf(tab).workspace?.scratch;
-function memoryOf(tab) {
-  const key = `${tab.machine}:${projectPathOf(tab)}`;
+/** The project a thread's Memory panel shows, as `{ machine, path }`. Memory ids are per project, so
+ * a change names the project its panel was drawn for, not the thread that is active when it lands. */
+const projectOf = (tab) => ({ machine: tab.machine, path: projectPathOf(tab) });
+const sameProject = (a, b) => a.machine === b.machine && a.path === b.path;
+/** The project a control's panel was drawn for, read from the panel element the control sits in. A
+ * change can land after the panel was replaced (Chromium fires it as the field leaves the page), so
+ * this reads the element the control belongs to, not the thread that is active by then. */
+function memoryProject(control) {
+  const { machine, path } = control.closest(".memory").dataset;
+  return { machine, path };
+}
+function memoryOf(project) {
+  const key = `${project.machine}:${project.path}`;
   if (!memoryPanels.has(key)) memoryPanels.set(key, { query: "", hits: null, status: null, title: "", text: "", at: 0 });
   return memoryPanels.get(key);
 }
-async function refreshMemory(tab) {
-  const m = memoryOf(tab);
+/** Whether the panel on screen is this project's: the active thread's project, now. */
+const showsProject = (project) => hasProject(active) && sameProject(projectOf(active), project);
+async function refreshMemory(project) {
+  const m = memoryOf(project);
   // One read per project at a time, so a slow machine isn't asked again on every render. A search
   // or change made meanwhile reads once more after it.
   if (m.reading) return void (m.again = true);
   m.reading = true;
-  const path = projectPathOf(tab);
   const query = m.query;
   m.at = Date.now();
   try {
-    const [hits, status] = await Promise.all([callOn(tab.machine, { cmd: "memory_search", path, query, limit: 50 }), callOn(tab.machine, { cmd: "memory_status", path })]);
+    const [hits, status] = await Promise.all([callOn(project.machine, { cmd: "memory_search", path: project.path, query, limit: 50 }), callOn(project.machine, { cmd: "memory_status", path: project.path })]);
     if (m.query === query) Object.assign(m, { hits, status });
     else m.again = true;
   } catch (e) {
@@ -564,22 +576,22 @@ async function refreshMemory(tab) {
   m.reading = false;
   if (m.again) {
     m.again = false;
-    return refreshMemory(tab);
+    return refreshMemory(project);
   }
-  const shown = tab === active && shownSurface(tab)?.kind === "memory";
+  const shown = showsProject(project) && shownSurface(active)?.kind === "memory";
   if (shown) renderPanel();
   // The model downloads in the background, and nothing else would tell the panel it finished.
-  if (shown && m.status?.vectors === "loading") setTimeout(() => !m.reading && m.at < Date.now() - 1500 && refreshMemory(tab), 2000);
+  if (shown && m.status?.vectors === "loading") setTimeout(() => !m.reading && m.at < Date.now() - 1500 && refreshMemory(project), 2000);
 }
-async function changeMemory(tab, call) {
+async function changeMemory(project, call) {
   try {
-    await callOn(tab.machine, { ...call, path: projectPathOf(tab) });
+    await callOn(project.machine, { ...call, path: project.path });
     return true;
   } catch (e) {
     flash(String(e));
     return false;
   } finally {
-    refreshMemory(tab);
+    refreshMemory(project);
   }
 }
 const VECTORS = { ready: "vector search ready", loading: "downloading model", off: "word search only" };
@@ -598,11 +610,14 @@ function memoryRowHtml(h) {
 function renderMemoryPanel() {
   const tab = active;
   if (!hasProject(tab)) return showPanel(`<div class="memory"><p class="memory-empty">This thread is not in a project, so it has no memory.</p></div>`);
+  const project = projectOf(tab);
   // A weight being typed keeps its element: a redraw would replace it mid-typing, and its change
-  // would then send a partial value. The panel draws again once the field lets go.
-  if (document.activeElement?.closest?.(".memory [data-weight]")) return;
-  const m = memoryOf(tab);
-  if (!m.reading && (!m.hits || Date.now() - m.at > 5000)) refreshMemory(tab);
+  // would then send a partial value. Only the project that field belongs to holds the redraw; another
+  // project's panel draws now, and the field's change still goes to its own project.
+  const typing = document.activeElement?.closest?.(".memory [data-weight]");
+  if (typing && sameProject(memoryProject(typing), project)) return;
+  const m = memoryOf(project);
+  if (!m.reading && (!m.hits || Date.now() - m.at > 5000)) refreshMemory(project);
   const count = m.status ? `${m.status.count} ${m.status.count === 1 ? "memory" : "memories"} · ${VECTORS[m.status.vectors] ?? m.status.vectors}` : "";
   const hits = !m.hits
     ? `<p class="memory-empty">Loading…</p>`
@@ -612,7 +627,7 @@ function renderMemoryPanel() {
   const focus = panelBody.contains(document.activeElement) ? document.activeElement : null;
   // The global tab's panel is the account's memory, and reads with the orchestrator's own name.
   const find = isGlobalOrchestratorTab(tab) ? `Search ${globalOrchestratorName()}'s memory` : `Search ${esc(projectName(tab))}'s memory`;
-  const shown = showPanel(`<div class="memory"><p class="memory-state">${esc(count)}</p>
+  const shown = showPanel(`<div class="memory" data-machine="${esc(project.machine)}" data-path="${esc(project.path)}"><p class="memory-state">${esc(count)}</p>
     <input class="memory-find" name="query" type="search" value="${esc(m.query)}" placeholder="${esc(find)}" aria-label="${esc(find)}" autocomplete="off" spellcheck="false">
     ${hits}
     <form class="memory-add"><input name="title" type="text" value="${esc(m.title)}" placeholder="Title" aria-label="New memory's title" autocomplete="off"><textarea name="text" rows="3" placeholder="What to remember about this project" aria-label="New memory's text">${esc(m.text)}</textarea><button type="submit" class="outline">Add</button></form></div>`);
@@ -625,43 +640,44 @@ function renderMemoryPanel() {
 let memorySearchTimer;
 panelBody.addEventListener("input", (e) => {
   const field = e.target.closest(".memory [name]");
-  if (!field || !active) return;
-  const tab = active;
-  memoryOf(tab)[field.name] = field.value;
+  if (!field) return;
+  const project = memoryProject(field);
+  memoryOf(project)[field.name] = field.value;
   if (field.name !== "query") return;
   clearTimeout(memorySearchTimer);
-  memorySearchTimer = setTimeout(() => refreshMemory(tab), 250);
+  memorySearchTimer = setTimeout(() => refreshMemory(project), 250);
 });
 panelBody.addEventListener("click", (e) => {
   const forget = e.target.closest(".memory [data-forget]");
-  if (forget && active) changeMemory(active, { cmd: "memory_forget", id: Number(forget.dataset.forget) });
+  if (forget) changeMemory(memoryProject(forget), { cmd: "memory_forget", id: Number(forget.dataset.forget) });
 });
 // Enter, leaving the field or its arrows commit a weight. A field left empty or not a number
 // shows the stored weight again, as does one the machine refuses.
 panelBody.addEventListener("change", async (e) => {
   const field = e.target.closest(".memory [data-weight]");
-  if (!field || !active) return;
-  const tab = active;
-  const m = memoryOf(tab);
+  if (!field) return;
+  const project = memoryProject(field);
+  const m = memoryOf(project);
   const id = Number(field.dataset.weight);
   const stored = String(m.hits?.find((h) => h.id === id)?.weight ?? 1);
   const weight = Number(field.value);
   if (!field.value.trim() || !Number.isFinite(weight)) return void (field.value = stored);
-  if (!(await changeMemory(tab, { cmd: "memory_set_weight", id, weight }))) field.value = stored;
+  if (!(await changeMemory(project, { cmd: "memory_set_weight", id, weight }))) field.value = stored;
 });
 // Leaving a weight field reads the panel again: the redraw that its focus held back follows the
 // change sent on the way out.
 panelBody.addEventListener("focusout", (e) => {
-  if (e.target.closest?.(".memory [data-weight]") && active) refreshMemory(active);
+  const field = e.target.closest?.(".memory [data-weight]");
+  if (field) refreshMemory(memoryProject(field));
 });
 panelBody.addEventListener("submit", async (e) => {
   const form = e.target.closest(".memory-add");
-  if (!form || !active) return;
+  if (!form) return;
   e.preventDefault();
-  const tab = active;
-  const m = memoryOf(tab);
+  const project = memoryProject(form);
+  const m = memoryOf(project);
   if (!m.title.trim() || !m.text.trim()) return flash("A memory needs a title and a text.");
-  if (await changeMemory(tab, { cmd: "memory_save", title: m.title, text: m.text })) Object.assign(m, { title: "", text: "", query: "" });
+  if (await changeMemory(project, { cmd: "memory_save", title: m.title, text: m.text })) Object.assign(m, { title: "", text: "", query: "" });
 });
 panelBody.addEventListener("contextmenu", (e) => {
   const row = e.target.closest(".prs [data-prs-open]");
