@@ -6,6 +6,7 @@ import vm from "node:vm";
 const read = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
 const settingsSrc = read("settings.js");
 const surfacesSrc = read("gui-surfaces.js");
+const panelSrc = read("gui-panel.js");
 const line = (src, from) => src.slice(src.indexOf(from), src.indexOf("\n", src.indexOf(from)));
 const fn = (src, name) => {
   const at = src.search(new RegExp(`^function ${name}\\(`, "m"));
@@ -69,8 +70,21 @@ function control(html, selector, dataset, value = "") {
   const el = { dataset, value, closest: (s) => (s === selector ? el : s === ".memory" ? panel : null) };
   return el;
 }
-/** Memory #7's weight field in the panel drawn as `html`, holding the value the panel drew. */
+/** Memory #7's weight field in the panel drawn as `html`, holding the value the panel drew. Focusing
+ * it and replacing the panel does not blur it; typedField is the field that does. */
 const weightField = (html) => control(html, ".memory [data-weight]", { weight: "7" }, attr(html.match(/<input [^>]*data-weight="7"[^>]*>/)[0], "value"));
+/** Memory #7's weight field as a browser has it once typed in: `blur()` leaves the field the way a
+ * real blur does, change then focusout, both to the panel's listeners, while the field is still in
+ * the page. Whatever panel replaces it later finds it under the selector showPanel blurs by. */
+function typedField(p, html, value) {
+  const panel = { dataset: { machine: attr(html, "data-machine"), path: attr(html, "data-path") } };
+  const el = { dataset: { weight: "7" }, value, closest: (s) => (s.endsWith("[data-weight]") ? el : s === ".memory" ? panel : null) };
+  el.blur = () => {
+    p.listeners.change({ target: el });
+    p.listeners.focusout({ target: el });
+  };
+  return el;
+}
 
 /** The Memory panel on a stub page, running its real code. Two projects, alpha and beta, each with
  * memory #7 (alpha's weight stored 2.5, beta's 1). The thread and the hub are stubs: `show` makes a
@@ -85,11 +99,15 @@ function panel({ ok = true } = {}) {
   const context = vm.createContext({
     active: null,
     document: { activeElement: null },
-    panelBody: { contains: () => true, querySelector: () => null, addEventListener: (type, handler) => (listeners[type] = handler) },
-    showPanel: (html) => {
-      drawn.push(html);
-      context.document.activeElement = null; // a redraw takes the focused element out of the page
-      return true;
+    panelBody: {
+      isConnected: true,
+      contains: () => true,
+      querySelector: () => null,
+      addEventListener: (type, handler) => (listeners[type] = handler),
+      set innerHTML(html) {
+        drawn.push(html);
+        context.document.activeElement = null; // a redraw takes the focused element out of the page
+      },
     },
     threadOf: () => ({}),
     projectPathOf: (tab) => tab.path,
@@ -113,6 +131,8 @@ function panel({ ok = true } = {}) {
   });
   vm.runInContext(line(settingsSrc, "const esc = "), context);
   vm.runInContext(memorySection(surfacesSrc), context);
+  vm.runInContext(line(panelSrc, "let shownPanel"), context);
+  vm.runInContext(fn(panelSrc, "showPanel"), context);
   const redraw = () => vm.runInContext("renderMemoryPanel()", context);
   return {
     listeners, drawn, sent, reads, flashes,
@@ -122,6 +142,9 @@ function panel({ ok = true } = {}) {
       redraw();
       await flush();
     },
+    switchTo: (tab) => (context.active = tab),
+    /** Another surface's render of the panel, as the Diff or a file list draws it. */
+    showHtml: (html) => vm.runInContext("showPanel", context)(html),
     focus: (el) => (context.document.activeElement = el),
   };
 }
@@ -139,26 +162,48 @@ test("a redraw while a weight field has focus leaves the panel alone, so its par
   assert.deepEqual(p.sent, []);
   p.focus(null);
   p.redraw();
-  assert.equal(p.drawn.length, drawn + 1, "the panel redraws once the field lets go");
+  assert.equal(p.drawn.length, drawn, "the same panel is not written again once the field lets go");
 });
 
-test("a change sends the typed weight to the project its field was drawn for", async () => {
+test("a change sends the typed weight to the project its field was drawn for, after the thread became another project", async () => {
   const p = panel();
   await p.show(BETA);
   const input = weightField(p.drawn.at(-1));
   input.value = "4";
+  await p.show(ALPHA);
   await p.listeners.change({ target: input });
   assert.deepEqual(p.sent, [{ machine: "m1", call: { cmd: "memory_set_weight", id: 7, weight: 4, path: "/w/beta" } }]);
 });
 
-test("a weight typed in alpha's panel is sent for alpha when the change lands after the active thread became beta", async () => {
+test("a weight typed in alpha's panel is sent for alpha by the panel's own blur when beta's Memory panel replaces it", async () => {
   const p = panel();
   await p.show(ALPHA);
-  const input = weightField(p.drawn.at(-1));
-  input.value = "9";
+  const input = typedField(p, p.drawn.at(-1), "9");
   p.focus(input);
   await p.show(BETA);
-  await p.listeners.change({ target: input });
+  assert.deepEqual(p.sent, [{ machine: "m1", call: { cmd: "memory_set_weight", id: 7, weight: 9, path: "/w/alpha" } }]);
+  assert.match(p.drawn.at(-1), /seven of \/w\/beta/);
+});
+
+test("a weight typed in alpha's panel is sent for alpha by the blur when beta's thread shows another surface", async () => {
+  const p = panel();
+  await p.show(ALPHA);
+  const input = typedField(p, p.drawn.at(-1), "9");
+  p.focus(input);
+  p.switchTo(BETA);
+  p.showHtml(`<div class="diff">beta's diff</div>`);
+  await flush();
+  assert.deepEqual(p.sent, [{ machine: "m1", call: { cmd: "memory_set_weight", id: 7, weight: 9, path: "/w/alpha" } }]);
+  assert.equal(p.drawn.at(-1), `<div class="diff">beta's diff</div>`);
+});
+
+test("a weight typed in one machine's panel goes to that machine when another machine's thread has the same path", async () => {
+  const p = panel();
+  const ALPHA_ON_M2 = { machine: "m2", path: "/w/alpha" };
+  await p.show(ALPHA);
+  const input = typedField(p, p.drawn.at(-1), "9");
+  p.focus(input);
+  await p.show(ALPHA_ON_M2);
   assert.deepEqual(p.sent, [{ machine: "m1", call: { cmd: "memory_set_weight", id: 7, weight: 9, path: "/w/alpha" } }]);
 });
 

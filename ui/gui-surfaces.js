@@ -613,7 +613,7 @@ function renderMemoryPanel() {
   const project = projectOf(tab);
   // A weight being typed keeps its element: a redraw would replace it mid-typing, and its change
   // would then send a partial value. Only the project that field belongs to holds the redraw; another
-  // project's panel draws now, and the field's change still goes to its own project.
+  // project's panel draws now, and its change runs because showPanel blurs the field first.
   const typing = document.activeElement?.closest?.(".memory [data-weight]");
   if (typing && sameProject(memoryProject(typing), project)) return;
   const m = memoryOf(project);

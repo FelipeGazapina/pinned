@@ -380,6 +380,8 @@ let shownPanel = "";
 function showPanel(html) {
   if (html === shownPanel && panelBody.isConnected) return false;
   shownPanel = html;
+  // WebKit fires no change on a focused input that innerHTML removes, so blur a weight being typed first.
+  document.activeElement?.closest?.("#panel-body .memory [data-weight]")?.blur();
   panelBody.innerHTML = html;
   return true;
 }
