@@ -135,6 +135,7 @@ pub fn owner_only(op: &Op, locked: bool) -> bool {
             | TeamOp::Projects
             | TeamOp::Groups
             | TeamOp::Bots
+            | TeamOp::BotWorkflow { .. }
             | TeamOp::Runs
             | TeamOp::Calls
             | TeamOp::GiveBack { .. }
@@ -189,6 +190,7 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
         TeamOp::JoinGroup { handle } => json(groups::join_group(hub, s, &handle).await?),
         TeamOp::LeaveGroup { handle } => json(groups::leave_group(hub, s, &handle).await?),
         TeamOp::Bots => json(bots::bots(hub, s).await?),
+        TeamOp::BotWorkflow { workflow } => json(bots::bot_workflow(hub, s, &workflow).await?),
         TeamOp::SaveBot { bot, connector } => json(bots::save_bot(hub, s, bot, connector).await?),
         TeamOp::TurnBotOn { workflow, on } => json(bots::turn_bot_on(hub, s, &workflow, on).await?),
         TeamOp::DeleteBot { workflow } => json(bots::delete_bot(hub, s, &workflow).await?),
@@ -267,7 +269,9 @@ pub fn hub_rule(call: &HubCall) -> Rule {
         | HubCall::ConnectGithub { .. }
         | HubCall::DisconnectGithub { .. }
         | HubCall::ConnectSlack { .. }
-        | HubCall::DisconnectSlack { .. } => (Gate::OwnerKey, true),
+        | HubCall::DisconnectSlack { .. }
+        | HubCall::ConnectLinear { .. }
+        | HubCall::DisconnectLinear { .. } => (Gate::OwnerKey, true),
         // A team's workflows change only through its bots (`TeamOp::SaveBot`, `DeleteBot`, `RunNow`),
         // it keeps no schedules yet, and its settings show its keys' hints.
         HubCall::GetSettings { .. }
@@ -281,8 +285,6 @@ pub fn hub_rule(call: &HubCall) -> Rule {
         | HubCall::PauseSchedule { .. }
         | HubCall::DeleteSchedule { .. }
         // Keys the team does not keep, and reads made with a key.
-        | HubCall::ConnectLinear { .. }
-        | HubCall::DisconnectLinear { .. }
         | HubCall::LinearSuggestions { .. }
         | HubCall::SlackSuggestions { .. }
         | HubCall::GithubRepos { .. }
@@ -492,6 +494,8 @@ mod tests {
             json!({ "cmd": "disconnect_github" }),
             json!({ "cmd": "connect_slack", "token": "t" }),
             json!({ "cmd": "disconnect_slack" }),
+            json!({ "cmd": "connect_linear", "key": "k" }),
+            json!({ "cmd": "disconnect_linear" }),
             json!({ "cmd": "set_box_access", "access": serde_json::to_value(pinned_core::connectors::BoxAccess::default()).unwrap() }),
             json!({ "cmd": "extend_box", "machine": "m1", "extra_usd": 1.0 }),
         ];
@@ -610,10 +614,10 @@ mod tests {
 
     #[test]
     fn an_owners_key_call_answers_only_which_keys_are_set() {
-        for call in [json!({ "cmd": "connect_upstash", "key": "k", "claude_token": "t" }), json!({ "cmd": "remove_box_claude_token", "name": "n" }), json!({ "cmd": "connect_github", "token": "t" })] {
+        for call in [json!({ "cmd": "connect_upstash", "key": "k", "claude_token": "t" }), json!({ "cmd": "remove_box_claude_token", "name": "n" }), json!({ "cmd": "connect_github", "token": "t" }), json!({ "cmd": "connect_linear", "key": "k" }), json!({ "cmd": "disconnect_linear" })] {
             assert_eq!(hub_rule(&hub_call(call.clone())), Rule { gate: Gate::OwnerKey, unlock: true }, "{call}");
         }
-        for call in [json!({ "cmd": "mint_box_claude_token", "machine": "m1", "account": "a" }), json!({ "cmd": "load_mcp_servers" }), json!({ "cmd": "connect_linear", "key": "k" })] {
+        for call in [json!({ "cmd": "mint_box_claude_token", "machine": "m1", "account": "a" }), json!({ "cmd": "load_mcp_servers" }), json!({ "cmd": "linear_suggestions" }), json!({ "cmd": "connect_posthog", "key": "k", "project": "1", "host": "us" })] {
             assert_eq!(hub_rule(&hub_call(call.clone())).gate, Gate::Never, "{call}");
         }
     }

@@ -267,7 +267,7 @@ fn a_member_cannot_set_the_teams_keys_but_its_owner_can() {
     // Slack, so they are only refused above, never run for the owner here.
     // A key call answers which keys are set, never a hint of one.
     let connected = via(&mut s.a, &team, owner_calls[0].clone()).unwrap();
-    assert_eq!(connected, json!({ "upstash": true, "claude": true, "github": false, "slack": false }));
+    assert_eq!(connected, json!({ "upstash": true, "claude": true, "github": false, "slack": false, "linear": false }));
     assert_eq!(via(&mut s.a, &team, owner_calls[1].clone()), Ok(connected));
     via(&mut s.a, &team, owner_calls[4].clone()).unwrap();
     let extended = via(&mut s.a, &team, owner_calls[5].clone());

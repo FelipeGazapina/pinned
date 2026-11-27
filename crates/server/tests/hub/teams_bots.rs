@@ -51,7 +51,7 @@ impl Crew {
     /// The owner gives the team its Upstash key and Claude token.
     fn give_keys(&self) {
         let connected = self.hub_op(&self.ana, json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
-        assert_eq!(connected, json!({ "upstash": true, "claude": true, "github": false, "slack": false }), "which keys are set, never a hint");
+        assert_eq!(connected, json!({ "upstash": true, "claude": true, "github": false, "slack": false, "linear": false }), "which keys are set, never a hint");
     }
 
     fn connector(&self, name: &str, machine: Value) -> Value {
@@ -310,4 +310,34 @@ fn deleting_the_workflow_removes_the_bot() {
     crew.call(&crew.bob, TeamOp::DeleteBot { workflow: id.clone() }).unwrap();
     assert_eq!(crew.bots(), vec![]);
     assert_eq!(crew.hub.runtime.block_on(teams::db::bots(&crew.hub.hub().db, crew.team)).unwrap(), vec![], "and its row");
+}
+
+#[test]
+fn a_member_reads_a_bots_workflow_and_another_team_reads_none() {
+    let crew = Crew::new("tb_workflow");
+    let id = crew.workflow("Fix bugs");
+    crew.save_bot(&crew.bob, &bot_of(&id)).unwrap();
+    let workflow = crew.call(&crew.carl, TeamOp::BotWorkflow { workflow: id.clone() }).unwrap();
+    assert_eq!(workflow["id"], id);
+    assert_eq!(workflow["name"], "Fix bugs");
+    assert_eq!(
+        crew.call(&crew.carl, TeamOp::BotWorkflow { workflow: "no-such".into() }).unwrap_err(),
+        "this team has no workflow no-such"
+    );
+    let (_, view) = account::signup(&crew.hub.url, "eve@example.test", "correct horse").unwrap();
+    let eve = crew.hub.runtime.block_on(crew.hub.hub().account(Uuid::parse_str(&view.id).unwrap())).unwrap();
+    let other = teams::Op::Team(TeamOp::Create { name: "Other".into() });
+    let other_team = Uuid::parse_str(crew.hub.runtime.block_on(teams::call(crew.hub.hub(), &eve, None, other)).unwrap()["id"].as_str().unwrap()).unwrap();
+    let read = teams::Op::read(TeamOp::BotWorkflow { workflow: id.clone() }).unwrap();
+    assert_eq!(
+        crew.hub.runtime.block_on(teams::call(crew.hub.hub(), &eve, Some(other_team), read)).unwrap_err(),
+        format!("this team has no workflow {id}"),
+        "a member of another team reads none of this team's workflows by id"
+    );
+    let outside = teams::Op::read(TeamOp::BotWorkflow { workflow: id }).unwrap();
+    assert_eq!(
+        crew.hub.runtime.block_on(teams::call(crew.hub.hub(), &eve, Some(crew.team), outside)).unwrap_err(),
+        "you are not a member of that team",
+        "a person on no team of it reads none"
+    );
 }

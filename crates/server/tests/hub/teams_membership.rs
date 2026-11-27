@@ -80,7 +80,7 @@ fn an_owner_invites_a_member_who_joins_and_both_see_two_members() {
     assert_eq!(
         joined,
         json!({ "id": team, "name": "Acme", "owner": ana_id, "role": "member",
-            "credential": { "upstash": false, "claude": false, "github": false, "slack": false } })
+            "credential": { "upstash": false, "claude": false, "github": false, "slack": false, "linear": false } })
     );
 
     let members = json!([

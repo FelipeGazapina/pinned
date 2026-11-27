@@ -114,9 +114,15 @@ The orchestrator needs a Claude Code account.
 ### Project memory
 
 Every thread in a project shares a memory: your preferences, decisions, conventions and facts
-about the code. Agents save to it and search it with the `memory_save`, `memory_search` and
-`memory_forget` tools. When you send a prompt, pinned also adds the few memories that match
-it best. A thread without a project has no memory.
+about the code. Agents save to it and search it with the `memory_save`, `memory_search`,
+`memory_forget` and `memory_set_weight` tools. When you send a prompt, pinned also adds the few
+memories that match it best. A thread without a project has no memory.
+
+Each memory has a weight, 1 by default, from 0.1 to 10. A heavier memory moves up to 3 places in
+search results, and a lighter one down up to 3; a memory recall used in the last 30 days moves up 1 place.
+How well it matches the words still decides the rest. Each time pinned adds a memory to a prompt,
+that counts as a use. Searching does not count as a use. Agents change a weight with
+`memory_set_weight`.
 
 Search matches words and meaning, so a question in Portuguese finds a memory written in
 English. Matching by meaning needs a model of about 530 MB. pinned downloads it in the
@@ -124,7 +130,8 @@ background after the project's first memory is saved. Until then, search matches
 Each project's memories are kept on your machine in pinned's config folder, not in the
 repository.
 
-To search, add or delete memories, open the **Memory** tab in the side panel.
+To search, add or delete memories, open the **Memory** tab in the side panel. Each memory there
+shows its weight, which you can change, and how many times it was used.
 
 ### Memory report
 
@@ -859,13 +866,12 @@ Windows before a release.
 
 ## Release
 
-```sh
-scripts/release.sh 0.2.0
-```
-
-The script runs only from a clean `main` that matches `origin/main`. It bumps the version
-in `Cargo.toml`, tags `v0.2.0`, and pushes `main` and the tag in one atomic push. The `release`
-workflow builds both Mac architectures, the Windows installer, the Linux AppImage and .deb for
+A release runs in GitHub Actions. Open Actions, choose `release`, click Run workflow on `main`,
+enter the version (for example `0.2.0`) and turn `dry_run` off. `dry_run` is on by default and
+builds and verifies every leg without a tag or a release. The first job runs
+`scripts/release.sh prepare`, which works only from a clean `main` that matches `origin/main`.
+It bumps the version in `Cargo.toml`, writes the wire snapshot, and tags `v0.2.0`, and the
+workflow pushes `main` and the tag in one atomic push. The same run builds both Mac architectures, the Windows installer, the Linux AppImage and .deb for
 x86_64 and arm64 (on `ubuntu-22.04` and `ubuntu-22.04-arm`), and the Linux musl node
 binaries. Each desktop job uploads its own updater fragment and does not upload
 `latest.json`. One job assembles that file, signs it with the musl binaries, then uploads

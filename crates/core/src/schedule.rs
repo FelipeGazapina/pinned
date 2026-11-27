@@ -1,5 +1,6 @@
 //! Scheduled tasks: when, who and what (0.18.2 Ideas + Tasks, PR 1). Types and the clock only. The hub
-//! scheduler and the stores come in later PRs, so nothing calls this yet.
+//! stores them, and its scheduler (`pinned_server::scheduler`) fires the due tasks whose action is a
+//! workflow; prompt tasks are not fired yet.
 //!
 //! `next_after` is the one place that turns a [`Schedule`] and a time zone into unix time. The hub
 //! evaluates with `chrono-tz`: a local time that a DST change skips runs at the first valid minute
@@ -337,17 +338,23 @@ pub const AGENT_MAX_TASKS: usize = 20;
 /// can be held, a task may not start workers.
 pub const WORKER_TARGETS_OPEN: bool = false;
 
-/// Whether a task an agent creates waits for the user's OK. It does not: it is active at once and the
-/// user gets a notice (`Task::fyi`, an Inbox row, an audit row). The one place that rule lives:
-/// setting this to true makes `save_schedule` a Confirm for every new task an agent creates.
+/// Whether a task an agent creates waits for the user's OK. A prompt task does not: it is active at
+/// once and the user gets a notice (`Task::fyi`, an Inbox row, an audit row). A workflow task always
+/// waits, whatever this says (`save_needs_ok`). Setting this to true makes `save_schedule` a Confirm
+/// for every new task an agent creates.
 pub const AGENT_TASK_NEEDS_OK: bool = false;
 
 /// Why `save_schedule` from an agent waits for the user, or None when it runs at once. Approvals
-/// always wait; a new task waits only while [`AGENT_TASK_NEEDS_OK`] is true.
+/// always wait, and so does a task whose action is a workflow: the hub's scheduler starts it as the
+/// user's Run now, past the limits an agent's own `run_workflow` has. Another new task waits only
+/// while [`AGENT_TASK_NEEDS_OK`] is true.
 pub fn save_needs_ok(task: &Task) -> Option<String> {
     if !task.approvals.is_empty() {
         let list: Vec<String> = task.approvals.iter().map(|a| format!("{} containing \"{}\" in {}", a.item.label(), a.must_contain, a.repo)).collect();
         return Some(format!("task \"{}\" would run without asking for: {}", task.title, list.join("; ")));
+    }
+    if let Action::Workflow { id } = &task.action {
+        return Some(format!("task \"{}\" would start workflow {id} on its schedule with nobody watching", task.title));
     }
     (AGENT_TASK_NEEDS_OK && task.id.trim().is_empty()).then(|| format!("an agent wants to schedule \"{}\"", task.title))
 }
@@ -770,6 +777,15 @@ mod tests {
     fn approvals_make_an_agent_save_wait_and_a_plain_one_run() {
         assert!(save_needs_ok(&sample()).unwrap().contains("release"));
         assert_eq!(save_needs_ok(&Task { id: String::new(), ..plain() }), None, "an agent's new task needs no OK");
+    }
+
+    #[test]
+    fn a_workflow_task_waits_for_the_user_and_a_plain_prompt_task_does_not() {
+        let workflow = Task { action: Action::Workflow { id: "c1".into() }, ..plain() };
+        let reason = save_needs_ok(&workflow).expect("a workflow task waits");
+        assert!(reason.contains("workflow c1") && reason.contains("nobody watching"), "{reason}");
+        assert_eq!(save_needs_ok(&Task { id: String::new(), ..workflow.clone() }).map(|r| r.contains("c1")), Some(true), "a new one too");
+        assert_eq!(save_needs_ok(&plain()), None);
     }
 
     #[test]

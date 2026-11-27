@@ -22,6 +22,19 @@ pub struct Memory {
     /// Unix seconds.
     pub created: i64,
     pub updated: i64,
+    /// How far a search moves it: 0.1 to 10, 1 by default. A heavier one moves up to 3 places.
+    #[serde(default = "default_weight")]
+    pub weight: f64,
+    /// How many times recall put it in a prompt.
+    #[serde(default)]
+    pub hits: u32,
+    /// When recall last put it in a prompt, in Unix seconds; absent until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used: Option<i64>,
+}
+
+fn default_weight() -> f64 {
+    1.0
 }
 
 /// A memory someone asked to save: trimmed, with a title and a text.
@@ -86,6 +99,12 @@ const RECALL_TEXT_CHARS: usize = 400;
 const RETRY: Duration = Duration::from_secs(600);
 /// Reciprocal Rank Fusion's constant, as in the paper and in coffee-fueled-dev/agent.
 const RRF_K: f64 = 60.0;
+/// The most places a memory's weight, and its recent use, can move it in a search.
+const MAX_LIFT: i64 = 3;
+/// How fast a recent use fades: its share halves for each 30 days since recall last used the memory.
+const USE_HALF_LIFE: Duration = Duration::from_secs(30 * 24 * 3600);
+/// The weights a memory may have, both ends included.
+const WEIGHTS: std::ops::RangeInclusive<f64> = 0.1..=10.0;
 
 const SCHEMA: &str = "
 CREATE TABLE memories(
@@ -111,6 +130,13 @@ CREATE TRIGGER memories_au AFTER UPDATE OF title, text ON memories BEGIN
 END;
 ";
 
+/// Version 2: each memory's weight and how recall has used it.
+const USE_COLUMNS: &str = "
+ALTER TABLE memories ADD COLUMN weight REAL NOT NULL DEFAULT 1.0;
+ALTER TABLE memories ADD COLUMN hits INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memories ADD COLUMN last_used INTEGER;
+";
+
 pub struct Store {
     db: Connection,
 }
@@ -128,11 +154,14 @@ impl Store {
         if version < 1 {
             db.execute_batch(&format!("BEGIN; {SCHEMA} PRAGMA user_version = 1; COMMIT;")).map_err(sql)?;
         }
+        if version < 2 {
+            db.execute_batch(&format!("BEGIN; {USE_COLUMNS} PRAGMA user_version = 2; COMMIT;")).map_err(sql)?;
+        }
         Ok(Store { db })
     }
 
-    /// Adds `draft`, or with `id` replaces that memory's title, text and kind. A new memory that
-    /// repeats an old one, by title or by meaning, is not added.
+    /// Adds `draft`, or with `id` replaces that memory's title, text and kind, keeping its weight
+    /// and uses. A new memory that repeats an old one, by title or by meaning, is not added.
     pub fn save(&self, draft: &Draft, id: Option<i64>, vectors: Option<&dyn Embedder>, now: i64) -> Result<Saved, String> {
         let vector = vectors.map(|e| (e.model(), e.embed(&draft.passage())));
         let (model, blob) = vector.as_ref().map(|(m, v)| (Some(*m), Some(to_blob(v)))).unwrap_or_default();
@@ -176,9 +205,28 @@ impl Store {
         Ok(memory)
     }
 
+    /// Sets how far a search moves `id` (see `lift`). Its text, times and uses stay as they are.
+    pub fn set_weight(&self, id: i64, weight: f64) -> Result<Memory, String> {
+        if !WEIGHTS.contains(&weight) {
+            return Err("a memory's weight is a number from 0.1 to 10".into());
+        }
+        if self.db.execute("UPDATE memories SET weight = ?2 WHERE id = ?1", params![id, weight]).map_err(sql)? == 0 {
+            return Err(format!("no memory #{id}"));
+        }
+        self.get(id)
+    }
+
+    /// Counts one use of each of `ids`, at `now`: recall put them in a prompt.
+    pub fn used(&self, ids: &[i64], now: i64) -> Result<(), String> {
+        for id in ids {
+            self.db.execute("UPDATE memories SET hits = hits + 1, last_used = ?2 WHERE id = ?1", params![id, now]).map_err(sql)?;
+        }
+        Ok(())
+    }
+
     pub fn get(&self, id: i64) -> Result<Memory, String> {
         self.db
-            .query_row("SELECT id, title, text, kind, created, updated FROM memories WHERE id = ?1", [id], row)
+            .query_row("SELECT id, title, text, kind, created, updated, weight, hits, last_used FROM memories WHERE id = ?1", [id], row)
             .optional()
             .map_err(sql)?
             .ok_or_else(|| format!("no memory #{id}"))
@@ -188,9 +236,10 @@ impl Store {
         self.db.query_row("SELECT count(*) FROM memories", [], |r| r.get::<_, i64>(0)).map(|n| n as u64).map_err(sql)
     }
 
-    /// The memories that best match `query`, best first. An empty query lists the latest ones.
-    /// `floor` drops vector matches less similar than it, since every memory has some similarity.
-    pub fn search(&self, query: &str, vectors: Option<&dyn Embedder>, floor: f32, limit: usize) -> Result<Vec<Memory>, String> {
+    /// The memories that best match `query`, best first, each lifted by its weight and its recent
+    /// use as of `now`. An empty query lists the latest ones. `floor` drops vector matches less
+    /// similar than it, since every memory has some similarity.
+    pub fn search(&self, query: &str, vectors: Option<&dyn Embedder>, floor: f32, limit: usize, now: i64) -> Result<Vec<Memory>, String> {
         if query.trim().is_empty() {
             return self.recent(limit);
         }
@@ -199,11 +248,14 @@ impl Store {
             Some(e) => self.by_meaning(e.model(), &e.embed(query), floor)?,
             None => vec![],
         };
-        fuse(&[words, meaning], limit).into_iter().map(|id| self.get(id)).collect()
+        let rankings = [words, meaning];
+        let mut found: HashMap<i64, Memory> = rankings.iter().flatten().map(|&id| Ok((id, self.get(id)?))).collect::<Result<_, String>>()?;
+        let best = lift_places(&fuse(&rankings), |id| lift(&found[&id], now));
+        Ok(best.into_iter().take(limit).filter_map(|id| found.remove(&id)).collect())
     }
 
     fn recent(&self, limit: usize) -> Result<Vec<Memory>, String> {
-        let mut statement = self.db.prepare("SELECT id, title, text, kind, created, updated FROM memories ORDER BY updated DESC, id DESC LIMIT ?1").map_err(sql)?;
+        let mut statement = self.db.prepare("SELECT id, title, text, kind, created, updated, weight, hits, last_used FROM memories ORDER BY updated DESC, id DESC LIMIT ?1").map_err(sql)?;
         let rows = statement.query_map([limit as i64], row).map_err(sql)?;
         rows.collect::<Result<_, _>>().map_err(sql)
     }
@@ -246,7 +298,36 @@ impl Store {
 }
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Memory> {
-    Ok(Memory { id: r.get(0)?, title: r.get(1)?, text: r.get(2)?, kind: r.get(3)?, created: r.get(4)?, updated: r.get(5)? })
+    Ok(Memory {
+        id: r.get(0)?,
+        title: r.get(1)?,
+        text: r.get(2)?,
+        kind: r.get(3)?,
+        created: r.get(4)?,
+        updated: r.get(5)?,
+        weight: r.get(6)?,
+        // A count past u32 reads as u32::MAX, so a huge count cannot fail a search.
+        hits: r.get::<_, i64>(7)?.clamp(0, i64::from(u32::MAX)) as u32,
+        last_used: r.get(8)?,
+    })
+}
+
+/// How many places a search moves a memory up (below zero, down): `3 * log10(weight)` rounded, so
+/// 10 is up 3 and 0.1 is down 3, plus 1 while a recent use still has a share of at least a quarter:
+/// one use lifts it 1 place for 30 days, many uses for up to 60, and a year-old use does not.
+/// Clamped to `MAX_LIFT` either way.
+fn lift(m: &Memory, now: i64) -> i64 {
+    let weight = (3.0 * m.weight.log10()).round() as i64;
+    let used = match m.last_used {
+        Some(at) if m.hits > 0 => {
+            let hits = m.hits as f64;
+            let age = (now - at).max(0) as f64;
+            let share = hits / (hits + 1.0) * 0.5f64.powf(age / USE_HALF_LIFE.as_secs_f64());
+            i64::from(share >= 0.25)
+        }
+        _ => 0,
+    };
+    (weight + used).clamp(-MAX_LIFT, MAX_LIFT)
 }
 
 fn to_blob(vector: &[f32]) -> Vec<u8> {
@@ -296,8 +377,9 @@ fn fold(word: &str) -> String {
         .collect()
 }
 
-/// Reciprocal Rank Fusion: each ranking gives an id `1 / (60 + rank)`, and the sums order the ids.
-fn fuse(rankings: &[Vec<i64>], limit: usize) -> Vec<i64> {
+/// Reciprocal Rank Fusion: each ranking gives an id `1 / (60 + rank)`, and the sums order the ids,
+/// a tie going to the newer memory.
+fn fuse(rankings: &[Vec<i64>]) -> Vec<i64> {
     let mut scores: HashMap<i64, f64> = HashMap::new();
     for ranking in rankings {
         for (rank, id) in ranking.iter().enumerate() {
@@ -306,7 +388,23 @@ fn fuse(rankings: &[Vec<i64>], limit: usize) -> Vec<i64> {
     }
     let mut ids: Vec<(f64, i64)> = scores.into_iter().map(|(id, score)| (score, id)).collect();
     ids.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)));
-    ids.into_iter().take(limit).map(|(_, id)| id).collect()
+    ids.into_iter().map(|(_, id)| id).collect()
+}
+
+/// Moves each id `lift` places from its position in `base`: sorted by the place it would land,
+/// base position less lift, a lifted id first on a tie, then by base position. So a lift of 3
+/// passes at most 3 ids above it.
+fn lift_places(base: &[i64], lift_of: impl Fn(i64) -> i64) -> Vec<i64> {
+    let mut placed: Vec<(i64, i64, usize, i64)> = base
+        .iter()
+        .enumerate()
+        .map(|(at, &id)| {
+            let by = lift_of(id);
+            (at as i64 - by, -by, at, id)
+        })
+        .collect();
+    placed.sort_unstable();
+    placed.into_iter().map(|(.., id)| id).collect()
 }
 
 /// Builds the vector model. The first time, that downloads it, which can take minutes.
@@ -419,19 +517,23 @@ impl Memories {
 
     pub fn search(self: &Arc<Self>, project: &Path, query: &str, limit: usize) -> Result<Vec<Memory>, String> {
         match self.store(project, false)? {
-            Some(store) => store.lock().unwrap().search(query, self.ready().as_deref(), SEARCH_FLOOR, limit),
+            Some(store) => store.lock().unwrap().search(query, self.ready().as_deref(), SEARCH_FLOOR, limit, crate::schedule::now()),
             None => Ok(vec![]),
         }
     }
 
     /// The few memories closest to `prompt`, written for the thread to read with it, or nothing.
+    /// Each memory the text holds counts one use.
     pub fn recall(self: &Arc<Self>, project: &Path, prompt: &str) -> String {
         if prompt.trim().is_empty() {
             return String::new();
         }
         let Ok(Some(store)) = self.store(project, false) else { return String::new() };
-        let found = store.lock().unwrap().search(prompt, self.ready().as_deref(), RECALL_FLOOR, RECALL_LIMIT).unwrap_or_default();
+        let store = store.lock().unwrap();
+        let now = crate::schedule::now();
+        let found = store.search(prompt, self.ready().as_deref(), RECALL_FLOOR, RECALL_LIMIT, now).unwrap_or_default();
         let mut lines: Vec<String> = vec![];
+        let mut used: Vec<i64> = vec![];
         for m in found {
             // The title and the text were saved by an agent or the owner, a title may hold a line
             // break, and a text's lines can start like a pinned line: each is made safe on its own,
@@ -441,9 +543,13 @@ impl Memories {
                 break;
             }
             lines.push(line);
+            used.push(m.id);
         }
         if lines.is_empty() {
             return String::new();
+        }
+        if let Err(e) = store.used(&used, now) {
+            eprintln!("pinned: could not count the recalled memories' use: {e}");
         }
         format!("Project memory pinned found for this prompt, by id (memory_search finds more; memory_save with an id corrects one):\n{}", lines.join("\n"))
     }
@@ -452,13 +558,16 @@ impl Memories {
     pub fn save(self: &Arc<Self>, project: &Path, draft: &Draft, id: Option<i64>) -> Result<Saved, String> {
         let store = self.store(project, true)?.ok_or("this machine keeps no memory")?;
         let vectors = self.vectors();
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-        let saved = store.lock().unwrap().save(draft, id, vectors.as_deref(), now);
+        let saved = store.lock().unwrap().save(draft, id, vectors.as_deref(), crate::schedule::now());
         saved
     }
 
     pub fn forget(self: &Arc<Self>, project: &Path, id: i64) -> Result<Memory, String> {
         self.store(project, false)?.ok_or_else(|| format!("no memory #{id}"))?.lock().unwrap().forget(id)
+    }
+
+    pub fn set_weight(self: &Arc<Self>, project: &Path, id: i64, weight: f64) -> Result<Memory, String> {
+        self.store(project, false)?.ok_or_else(|| format!("no memory #{id}"))?.lock().unwrap().set_weight(id, weight)
     }
 
     pub fn status(self: &Arc<Self>, project: &Path) -> Result<Status, String> {
@@ -528,12 +637,12 @@ mod tests {
         let store = Store::open(&file).unwrap();
         assert_eq!(
             store.save(&Draft::new(" Package manager ", " Use pnpm, not npm. ", Some(" convention ")).unwrap(), None, None, 100),
-            Ok(Saved::Added(Memory { id: 1, title: "Package manager".into(), text: "Use pnpm, not npm.".into(), kind: Some("convention".into()), created: 100, updated: 100 }))
+            Ok(Saved::Added(Memory { id: 1, title: "Package manager".into(), text: "Use pnpm, not npm.".into(), kind: Some("convention".into()), created: 100, updated: 100, weight: 1.0, hits: 0, last_used: None }))
         );
         assert!(matches!(store.save(&draft("Deploys", "The hub deploys from railway-hub."), None, None, 101), Ok(Saved::Added(Memory { id: 2, .. }))));
         assert_eq!(
             store.save(&draft("Deploys", "The hub deploys itself from version tags on main."), Some(2), None, 150),
-            Ok(Saved::Updated(Memory { id: 2, title: "Deploys".into(), text: "The hub deploys itself from version tags on main.".into(), kind: None, created: 101, updated: 150 }))
+            Ok(Saved::Updated(Memory { id: 2, title: "Deploys".into(), text: "The hub deploys itself from version tags on main.".into(), kind: None, created: 101, updated: 150, weight: 1.0, hits: 0, last_used: None }))
         );
         assert_eq!(store.save(&draft("Gone", "x"), Some(9), None, 151), Err("no memory #9".into()));
         assert_eq!(Draft::new(" ", "text", None), Err("a memory needs a title and a text".into()));
@@ -542,10 +651,10 @@ mod tests {
         drop(store);
 
         let store = Store::open(&file).unwrap();
-        assert_eq!(titles(store.search("", None, 0.0, 8)), ["#1 Package manager"]);
+        assert_eq!(titles(store.search("", None, 0.0, 8, 200)), ["#1 Package manager"]);
         assert!(matches!(store.save(&draft("Tests", "Run cargo test --workspace."), None, None, 200), Ok(Saved::Added(Memory { id: 3, .. }))), "a forgotten id came back");
-        assert_eq!(titles(store.search(" ", None, 0.0, 8)), ["#3 Tests", "#1 Package manager"]);
-        assert_eq!(titles(store.search("deploys", None, 0.0, 8)), Vec::<String>::new(), "the forgotten memory is still in the word index");
+        assert_eq!(titles(store.search(" ", None, 0.0, 8, 200)), ["#3 Tests", "#1 Package manager"]);
+        assert_eq!(titles(store.search("deploys", None, 0.0, 8, 200)), Vec::<String>::new(), "the forgotten memory is still in the word index");
         assert_eq!(store.count(), Ok(2));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -556,32 +665,35 @@ mod tests {
         for (title, text) in [("Deploy do hub", "O hub faz deploy no Railway, a partir da branch railway-hub."), ("Proximity", "NEAR(a b) is FTS5 syntax; title:x too.")] {
             store.save(&draft(title, text), None, None, 1).unwrap();
         }
-        assert_eq!(titles(store.search("\"", None, 0.0, 8)), Vec::<String>::new());
-        assert_eq!(titles(store.search("*", None, 0.0, 8)), Vec::<String>::new());
-        assert_eq!(titles(store.search("NEAR(", None, 0.0, 8)), ["#2 Proximity"]);
-        assert_eq!(titles(store.search("-railway", None, 0.0, 8)), ["#1 Deploy do hub"]);
-        assert_eq!(titles(store.search("title:x AND OR NOT", None, 0.0, 8)), ["#2 Proximity"]);
-        assert_eq!(titles(store.search("como faço o deploy do hub?", None, 0.0, 8)), ["#1 Deploy do hub"]);
-        assert_eq!(titles(store.search("Railway's \"branch\"", None, 0.0, 8)), ["#1 Deploy do hub"]);
+        assert_eq!(titles(store.search("\"", None, 0.0, 8, 1)), Vec::<String>::new());
+        assert_eq!(titles(store.search("*", None, 0.0, 8, 1)), Vec::<String>::new());
+        assert_eq!(titles(store.search("NEAR(", None, 0.0, 8, 1)), ["#2 Proximity"]);
+        assert_eq!(titles(store.search("-railway", None, 0.0, 8, 1)), ["#1 Deploy do hub"]);
+        assert_eq!(titles(store.search("title:x AND OR NOT", None, 0.0, 8, 1)), ["#2 Proximity"]);
+        assert_eq!(titles(store.search("como faço o deploy do hub?", None, 0.0, 8, 1)), ["#1 Deploy do hub"]);
+        assert_eq!(titles(store.search("Railway's \"branch\"", None, 0.0, 8, 1)), ["#1 Deploy do hub"]);
         assert_eq!(fts_query("How do I DEPLOY o hub? -now *"), Some("\"deploy\" OR \"hub\" OR \"now\"".into()));
         assert_eq!(fts_query("como é que faço?"), None);
     }
 
     #[test]
     fn word_and_vector_rankings_are_fused_by_reciprocal_rank() {
-        assert_eq!(fuse(&[vec![1, 2, 3], vec![3, 1]], 3), [1, 3, 2]);
-        assert_eq!(fuse(&[vec![4], vec![]], 8), [4]);
-        assert_eq!(fuse(&[vec![5, 6], vec![6, 5]], 8), [6, 5], "a tie goes to the newer memory");
+        assert_eq!(fuse(&[vec![1, 2, 3], vec![3, 1]]), [1, 3, 2]);
+        assert_eq!(fuse(&[vec![4], vec![]]), [4]);
+        assert_eq!(fuse(&[vec![5, 6], vec![6, 5]]), [6, 5], "a tie goes to the newer memory");
+        assert_eq!(lift_places(&[1, 2, 3, 4, 5], |id| if id == 5 { 3 } else { 0 }), [1, 5, 2, 3, 4], "a lift of 3 passes 3 ids");
+        assert_eq!(lift_places(&[1, 2, 3, 4, 5], |id| if id == 1 { -3 } else { 0 }), [2, 3, 4, 1, 5], "a lift of -3 sinks 3 ids");
+        assert_eq!(lift_places(&[1, 2, 3, 4, 5], |id| if id == 5 { 3 } else if id == 4 { 1 } else { 0 }), [1, 5, 2, 4, 3], "a tie goes to the lifted id");
 
         let store = Store::open(Path::new(":memory:")).unwrap();
         let vectors = Topics("topics-1");
         for (title, text) in [("Railway", "The service deploys from the railway-hub branch."), ("Tests", "Run cargo test before each commit."), ("Login", "Users sign in with a magic link."), ("Hub logs", "The hub writes JSON logs; hub errors go to Sentry.")] {
             store.save(&draft(title, text), None, Some(&vectors), 1).unwrap();
         }
-        assert_eq!(titles(store.search("onde publica o hub?", Some(&vectors), 0.5, 8)), ["#1 Railway", "#4 Hub logs"]);
-        assert_eq!(titles(store.search("onde publica o hub?", None, 0.5, 8)), ["#4 Hub logs", "#1 Railway"]);
-        assert_eq!(titles(store.search("esqueci a senha", Some(&vectors), 0.5, 8)), ["#3 Login"]);
-        assert_eq!(titles(store.search("esqueci a senha", Some(&vectors), 0.5, 1)), ["#3 Login"]);
+        assert_eq!(titles(store.search("onde publica o hub?", Some(&vectors), 0.5, 8, 1)), ["#1 Railway", "#4 Hub logs"]);
+        assert_eq!(titles(store.search("onde publica o hub?", None, 0.5, 8, 1)), ["#4 Hub logs", "#1 Railway"]);
+        assert_eq!(titles(store.search("esqueci a senha", Some(&vectors), 0.5, 8, 1)), ["#3 Login"]);
+        assert_eq!(titles(store.search("esqueci a senha", Some(&vectors), 0.5, 1, 1)), ["#3 Login"]);
     }
 
     #[test]
@@ -684,10 +796,248 @@ mod tests {
         store.save(&draft("Login", "Users sign in with a magic link."), None, None, 1).unwrap();
         store.save(&draft("Tests", "Run cargo test before each commit."), None, Some(&Topics("old-model")), 2).unwrap();
         let vectors = Topics("new-model");
-        assert_eq!(titles(store.search("esqueci a senha", Some(&vectors), 0.5, 8)), Vec::<String>::new());
+        assert_eq!(titles(store.search("esqueci a senha", Some(&vectors), 0.5, 8, 2)), Vec::<String>::new());
         assert_eq!(store.embed_missing(&vectors), Ok(2));
         assert_eq!(store.embed_missing(&vectors), Ok(0));
-        assert_eq!(titles(store.search("esqueci a senha", Some(&vectors), 0.5, 8)), ["#1 Login"]);
-        assert_eq!(titles(store.search("quebrou o teste", Some(&vectors), 0.5, 8)), ["#2 Tests"]);
+        assert_eq!(titles(store.search("esqueci a senha", Some(&vectors), 0.5, 8, 2)), ["#1 Login"]);
+        assert_eq!(titles(store.search("quebrou o teste", Some(&vectors), 0.5, 8, 2)), ["#2 Tests"]);
+    }
+
+    #[test]
+    fn a_version_1_database_gets_weights_and_uses_and_keeps_its_memories() {
+        let dir = temp("version-1");
+        let file = dir.join("app.sqlite");
+        let old = Connection::open(&file).unwrap();
+        old.execute_batch(&format!("{SCHEMA} PRAGMA user_version = 1;")).unwrap();
+        old.execute("INSERT INTO memories(title, text, kind, created, updated) VALUES ('Deploys', 'From version tags.', 'decision', 5, 7)", []).unwrap();
+        drop(old);
+
+        let store = Store::open(&file).unwrap();
+        let deploys = Memory { id: 1, title: "Deploys".into(), text: "From version tags.".into(), kind: Some("decision".into()), created: 5, updated: 7, weight: 1.0, hits: 0, last_used: None };
+        assert_eq!(store.get(1), Ok(deploys.clone()));
+        assert_eq!(store.db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)), Ok(2));
+        assert_eq!(store.search("deploys", None, 0.0, 8, 9), Ok(vec![deploys.clone()]), "the word index still finds it");
+        drop(store);
+        let store = Store::open(&file).unwrap();
+        assert_eq!(store.get(1), Ok(deploys));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Two memories the word "deploys" matches alike, saved at 1.
+    fn two_deploys() -> Store {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store.save(&draft("Hub", "The hub deploys from tags."), None, None, 1).unwrap();
+        store.save(&draft("Docs", "The docs deploys from main."), None, None, 1).unwrap();
+        assert_eq!(titles(store.search("deploys", None, 0.0, 8, 1)), ["#1 Hub", "#2 Docs"]);
+        store
+    }
+
+    #[test]
+    fn the_heavier_of_two_equal_matches_comes_first() {
+        let store = two_deploys();
+        assert_eq!(store.set_weight(2, 2.0).map(|m| m.weight), Ok(2.0));
+        assert_eq!(titles(store.search("deploys", None, 0.0, 8, 1)), ["#2 Docs", "#1 Hub"]);
+        assert_eq!(titles(store.search("deploys", None, 0.0, 1, 1)), ["#2 Docs"], "the limit applies after the weight");
+    }
+
+    #[test]
+    fn a_recent_use_lifts_one_of_two_equal_matches_and_a_year_old_one_does_not() {
+        const DAY: i64 = 24 * 3600;
+        let store = two_deploys();
+        store.used(&[2], 1000).unwrap();
+        assert_eq!(titles(store.search("deploys", None, 0.0, 8, 1000)), ["#2 Docs", "#1 Hub"], "used just now");
+        assert_eq!(titles(store.search("deploys", None, 0.0, 8, 1000 + 365 * DAY)), ["#1 Hub", "#2 Docs"], "used a year ago");
+        assert_eq!(titles(store.search("deploys", None, 0.0, 8, 0)), ["#2 Docs", "#1 Hub"], "a use later than now counts as now");
+    }
+
+    /// Five memories whose texts hold the first five, four, three, two and one words of `FIVE`, all
+    /// of one length: a search for `FIVE` ranks them One to Five, each a place below the last.
+    const FIVE: &str = "alpha beta gamma delta epsilon";
+
+    fn five_matches() -> Store {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        for (title, text) in [("One", "alpha beta gamma delta epsilon"), ("Two", "alpha beta gamma delta zulu"), ("Three", "alpha beta gamma zulu yankee"), ("Four", "alpha beta zulu yankee xray"), ("Five", "alpha zulu yankee xray whisky")] {
+            store.save(&draft(title, text), None, None, 1).unwrap();
+        }
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1)), ["#1 One", "#2 Two", "#3 Three", "#4 Four", "#5 Five"]);
+        store
+    }
+
+    #[test]
+    fn a_heavy_memory_moves_up_three_places_and_no_more() {
+        let store = five_matches();
+        assert_eq!(store.set_weight(5, 10.0).map(|m| m.weight), Ok(10.0));
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1)), ["#1 One", "#5 Five", "#2 Two", "#3 Three", "#4 Four"], "fifth to second");
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 2, 1)), ["#1 One", "#5 Five"], "the limit applies after the lift");
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 1, 1)), ["#1 One"]);
+    }
+
+    #[test]
+    fn a_light_memory_sinks_exactly_three_places() {
+        let store = five_matches();
+        assert_eq!(store.set_weight(1, 0.1).map(|m| m.weight), Ok(0.1));
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1)), ["#2 Two", "#3 Three", "#4 Four", "#1 One", "#5 Five"], "first to fourth");
+    }
+
+    #[test]
+    fn a_memory_past_limit_plus_three_places_does_not_enter_past_memories_that_stay() {
+        let store = five_matches();
+        store.set_weight(5, 10.0).unwrap();
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 1, 1)), ["#1 One"], "fifth is four places below a limit of one");
+        store.set_weight(4, 10.0).unwrap();
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 1, 1)), ["#4 Four"], "fourth is three places below, so the lift brings it in");
+    }
+
+    #[test]
+    fn weight_ten_and_a_recent_use_still_move_three_places() {
+        let store = five_matches();
+        store.set_weight(5, 10.0).unwrap();
+        store.used(&[5], 1).unwrap();
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1)), ["#1 One", "#5 Five", "#2 Two", "#3 Three", "#4 Four"]);
+    }
+
+    #[test]
+    fn many_uses_still_lift_after_forty_five_days() {
+        const DAY: i64 = 24 * 3600;
+        let store = five_matches();
+        store.db.execute("UPDATE memories SET hits = 100, last_used = 1000 WHERE id = 3", []).unwrap();
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1000 + 45 * DAY)), ["#1 One", "#3 Three", "#2 Two", "#4 Four", "#5 Five"]);
+    }
+
+    #[test]
+    fn a_recent_use_moves_a_memory_exactly_one_place_however_many_uses() {
+        const YEAR: i64 = 365 * 24 * 3600;
+        let store = five_matches();
+        store.used(&[3], 1000).unwrap();
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1000)), ["#1 One", "#3 Three", "#2 Two", "#4 Four", "#5 Five"], "third to second");
+        store.db.execute("UPDATE memories SET hits = 1000000 WHERE id = 3", []).unwrap();
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1000)), ["#1 One", "#3 Three", "#2 Two", "#4 Four", "#5 Five"], "a million uses, still one place");
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1000 + YEAR)), ["#1 One", "#2 Two", "#3 Three", "#4 Four", "#5 Five"], "a year later, none");
+    }
+
+    #[test]
+    fn one_use_lifts_a_memory_for_thirty_days() {
+        const DAY: i64 = 24 * 3600;
+        let store = five_matches();
+        store.used(&[3], 1000).unwrap();
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1000 + 29 * DAY)), ["#1 One", "#3 Three", "#2 Two", "#4 Four", "#5 Five"], "29 days later, one place");
+        assert_eq!(titles(store.search(FIVE, None, 0.0, 8, 1000 + 31 * DAY)), ["#1 One", "#2 Two", "#3 Three", "#4 Four", "#5 Five"], "31 days later, none");
+    }
+
+    #[test]
+    fn a_use_count_past_u32_does_not_fail_a_search() {
+        let store = two_deploys();
+        store.db.execute("UPDATE memories SET hits = 5000000000, last_used = 1 WHERE id = 1", []).unwrap();
+        assert_eq!(titles(store.search("deploys", None, 0.0, 8, 1)), ["#1 Hub", "#2 Docs"]);
+    }
+
+    #[test]
+    fn a_one_word_match_passes_a_two_word_match_only_by_its_lift() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store.save(&draft("Hub", "The hub deploys from version tags."), None, None, 1).unwrap();
+        store.save(&draft("Notes", "Deploys are logged in the chat."), None, None, 1).unwrap();
+        assert_eq!(titles(store.search("deploys tags", None, 0.0, 8, 1)), ["#1 Hub", "#2 Notes"]);
+        store.set_weight(2, 10.0).unwrap();
+        assert_eq!(titles(store.search("deploys tags", None, 0.0, 8, 1)), ["#2 Notes", "#1 Hub"], "weight 10 lifts it three places");
+        store.set_weight(2, 1.0).unwrap();
+        store.used(&[2], 1).unwrap();
+        assert_eq!(titles(store.search("deploys tags", None, 0.0, 8, 1)), ["#2 Notes", "#1 Hub"], "a recent use lifts it one place");
+    }
+
+    #[test]
+    fn a_recent_use_lifts_a_memory_one_place_among_words_and_meaning() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let vectors = Topics("topics-1");
+        for (title, text) in [("Railway", "The service deploys from the railway-hub branch."), ("Hub logs", "The hub writes JSON logs; hub errors go to Sentry.")] {
+            store.save(&draft(title, text), None, Some(&vectors), 1).unwrap();
+        }
+        store.db.execute("UPDATE memories SET hits = 1000000, last_used = 5 WHERE id = 2", []).unwrap();
+        assert_eq!(titles(store.search("onde publica o hub?", None, 0.5, 8, 5)), ["#2 Hub logs", "#1 Railway"], "by words alone, the used one leads, as it would unused");
+        assert_eq!(titles(store.search("onde publica o hub?", Some(&vectors), 0.5, 8, 5)), ["#2 Hub logs", "#1 Railway"], "by words and meaning, one place up");
+    }
+
+    #[test]
+    fn a_weight_of_ten_lifts_more_places_than_a_use() {
+        let store = two_deploys();
+        store.db.execute("UPDATE memories SET hits = 1000000, last_used = 5 WHERE id = 1", []).unwrap();
+        store.set_weight(2, 10.0).unwrap();
+        assert_eq!(titles(store.search("deploys", None, 0.0, 8, 5)), ["#2 Docs", "#1 Hub"]);
+    }
+
+    #[test]
+    fn a_weight_never_brings_in_a_memory_the_query_does_not_match() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let vectors = Topics("topics-1");
+        for (title, text) in [("Login", "Users sign in with a magic link."), ("Tests", "Run cargo test before each commit.")] {
+            store.save(&draft(title, text), None, Some(&vectors), 1).unwrap();
+        }
+        store.set_weight(2, 10.0).unwrap();
+        assert_eq!(titles(store.search("esqueci a senha", Some(&vectors), RECALL_FLOOR, 8, 1)), ["#1 Login"]);
+
+        let dir = temp("recall-floor");
+        let load: Loader = Arc::new(|| Ok(Arc::new(Topics("topics-1")) as Arc<dyn Embedder>));
+        let memories = Memories::new(Some(dir.clone()), Some(load));
+        let app = Path::new("/work/app");
+        for (title, text) in [("Login", "Users sign in with a magic link."), ("Tests", "Run cargo test before each commit.")] {
+            memories.save(app, &draft(title, text), None).unwrap();
+        }
+        wait_for("the memories' vectors", || memories.search(app, "esqueci a senha", 8).unwrap().len() == 1);
+        memories.set_weight(app, 2, 10.0).unwrap();
+        let recalled = memories.recall(app, "esqueci a senha");
+        assert!(recalled.contains("[1] Login") && !recalled.contains("Tests"), "{recalled}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_latest_memories_come_first_whatever_their_weight_and_use() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store.save(&draft("Old", "Saved first."), None, None, 1).unwrap();
+        store.save(&draft("New", "Saved last."), None, None, 2).unwrap();
+        store.set_weight(1, 10.0).unwrap();
+        store.db.execute("UPDATE memories SET hits = 500, last_used = 3 WHERE id = 1", []).unwrap();
+        assert_eq!(titles(store.search("", None, 0.0, 8, 3)), ["#2 New", "#1 Old"]);
+    }
+
+    #[test]
+    fn a_weight_runs_from_a_tenth_to_ten_and_an_edit_keeps_it_and_the_uses() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        store.save(&draft("Deploys", "From tags."), None, None, 5).unwrap();
+        store.used(&[1], 7).unwrap();
+        for weight in [0.1, 2.5, 10.0] {
+            let deploys = Memory { id: 1, title: "Deploys".into(), text: "From tags.".into(), kind: None, created: 5, updated: 5, weight, hits: 1, last_used: Some(7) };
+            assert_eq!(store.set_weight(1, weight), Ok(deploys));
+        }
+        for weight in [0.05, 10.5, f64::NAN, f64::INFINITY] {
+            assert_eq!(store.set_weight(1, weight), Err("a memory's weight is a number from 0.1 to 10".into()), "{weight}");
+        }
+        assert_eq!(store.get(1).map(|m| m.weight), Ok(10.0), "a refused weight changed the stored one");
+        assert_eq!(store.set_weight(9, 2.0), Err("no memory #9".into()));
+        let edited = store.save(&draft("Deploys", "From version tags."), Some(1), None, 9);
+        assert!(matches!(edited, Ok(Saved::Updated(Memory { updated: 9, weight: 10.0, hits: 1, last_used: Some(7), .. }))), "{edited:?}");
+
+        let dir = temp("weight-no-database");
+        assert_eq!(Memories::new(Some(dir.clone()), None).set_weight(Path::new("/work/app"), 3, 2.0), Err("no memory #3".into()));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "setting a weight made a database");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn recall_counts_a_use_of_each_memory_its_text_holds_and_search_counts_none() {
+        let dir = temp("recall-uses");
+        let memories = Memories::new(Some(dir.clone()), None);
+        let app = Path::new("/work/app");
+        for n in 1..=5 {
+            memories.save(app, &draft(&format!("Deploy step {n}"), &format!("Before the deploy, {}", "check the logs. ".repeat(25))), None).unwrap();
+        }
+        assert_eq!(memories.search(app, "deploy", 8).map(|found| found.len()), Ok(5));
+        let recalled = memories.recall(app, "deploy");
+        let ids: Vec<i64> = recalled.lines().skip(1).map(|line| line[1..line.find(']').unwrap()].parse().unwrap()).collect();
+        assert_eq!(ids.len(), 3, "the 1600-character budget holds three of the five: {recalled}");
+        memories.search(app, "deploy", 8).unwrap();
+        for m in memories.search(app, "", 8).unwrap() {
+            let recalled = ids.contains(&m.id);
+            assert_eq!((m.hits, m.last_used.is_some()), (u32::from(recalled), recalled), "#{}", m.id);
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

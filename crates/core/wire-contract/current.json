@@ -1448,6 +1448,33 @@
                 ]
               },
               {
+                "description": "The `memory::Memory` with its new weight, from 0.1 to 10. A heavier memory moves up to 3 places\nin search results, and a lighter one down up to 3; a memory recall used in the last 30 days moves up 1 place.\nHow well it matches the words still decides the rest.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_set_weight"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "weight": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id",
+                  "weight"
+                ]
+              },
+              {
                 "description": "`memory::Status`: how many memories the project has and whether search also matches by meaning.",
                 "type": "object",
                 "properties": {
@@ -4020,7 +4047,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -10813,6 +10840,18 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -10952,7 +10991,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "ReviewerPatch": {
@@ -11098,6 +11139,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -11106,7 +11152,8 @@
               "tools",
               "access",
               "delivers",
-              "by"
+              "by",
+              "prompt"
             ]
           },
           "ProfileAccess": {
@@ -11168,7 +11215,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "captains": {
@@ -11211,7 +11260,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "projects": {
@@ -11446,9 +11497,19 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
+                "type": "boolean",
+                "default": true
               }
             },
             "required": [
@@ -11473,7 +11534,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "Reviewer": {
@@ -12067,6 +12130,13 @@
               },
               "machine": {
                 "description": "The machine a `Call` runs on, an id or a name; the session's own when absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "description": "Why the session asks, for an act held for the owner.",
                 "type": [
                   "string",
                   "null"
@@ -12886,6 +12956,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -15338,6 +15425,33 @@
                   "cmd",
                   "path",
                   "id"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` with its new weight, from 0.1 to 10. A heavier memory moves up to 3 places\nin search results, and a lighter one down up to 3; a memory recall used in the last 30 days moves up 1 place.\nHow well it matches the words still decides the rest.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_set_weight"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "weight": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id",
+                  "weight"
                 ]
               },
               {
@@ -17886,7 +18000,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -24513,6 +24627,18 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -24647,7 +24773,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "ReviewerPatch": {
@@ -24793,6 +24921,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -24858,7 +24991,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "captains": {
@@ -24901,7 +25036,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "projects": {
@@ -25126,9 +25263,19 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
+                "type": "boolean",
+                "default": true
               }
             }
           },
@@ -25704,6 +25851,13 @@
               },
               "machine": {
                 "description": "The machine a `Call` runs on, an id or a name; the session's own when absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "description": "Why the session asks, for an act held for the owner.",
                 "type": [
                   "string",
                   "null"
@@ -26496,6 +26650,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -34623,6 +34794,18 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -34793,7 +34976,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "ReviewerPatch": {
@@ -34939,6 +35124,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -34947,7 +35137,8 @@
               "tools",
               "access",
               "delivers",
-              "by"
+              "by",
+              "prompt"
             ]
           },
           "ProfileAccess": {
@@ -35009,7 +35200,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "captains": {
@@ -35052,7 +35245,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "projects": {
@@ -35287,9 +35482,19 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
+                "type": "boolean",
+                "default": true
               }
             },
             "required": [
@@ -35314,7 +35519,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "Reviewer": {
@@ -35616,7 +35823,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -36489,6 +36696,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, for an act held for the owner.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -37304,6 +37518,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -45200,6 +45431,18 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -45365,7 +45608,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "ReviewerPatch": {
@@ -45511,6 +45756,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -45576,7 +45826,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "captains": {
@@ -45619,7 +45871,9 @@
                     "CI and deploy config",
                     "Sign-in, tokens and secrets"
                   ],
-                  "manage_only": false
+                  "manage_only": true,
+                  "claude_memory": true,
+                  "worker_claude_memory": true
                 }
               },
               "projects": {
@@ -45844,9 +46098,19 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
+                "type": "boolean",
+                "default": true
               }
             }
           },
@@ -46132,7 +46396,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -46993,6 +47257,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, for an act held for the owner.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -47781,6 +48052,23 @@
                 },
                 "required": [
                   "op"
+                ]
+              },
+              {
+                "description": "`Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a\nteam's settings stay out of reach (`GetSettings` does not run on a team).",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bot_workflow"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -50330,6 +50618,13 @@
               "string",
               "null"
             ]
+          },
+          "reason": {
+            "description": "Why the session asks, on one line, secrets masked and cut at 200 characters. Absent when it gave none.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -50441,6 +50736,13 @@
           },
           "outcome": {
             "description": "What running it came to: `done`, or `failed: <error>`. Absent until decided.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Why the session asks, on one line, secrets masked and cut at 200 characters. Absent when it gave none.",
             "type": [
               "string",
               "null"
@@ -56722,6 +57024,27 @@
           "updated": {
             "type": "integer",
             "format": "int64"
+          },
+          "weight": {
+            "description": "How far a search moves it: 0.1 to 10, 1 by default. A heavier one moves up to 3 places.",
+            "type": "number",
+            "format": "double",
+            "default": 1.0
+          },
+          "hits": {
+            "description": "How many times recall put it in a prompt.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 0
+          },
+          "last_used": {
+            "description": "When recall last put it in a prompt, in Unix seconds; absent until then.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           }
         },
         "required": [
@@ -56729,7 +57052,9 @@
           "title",
           "text",
           "created",
-          "updated"
+          "updated",
+          "weight",
+          "hits"
         ]
       },
       "accept": {
@@ -56761,6 +57086,27 @@
           },
           "updated": {
             "type": "integer",
+            "format": "int64"
+          },
+          "weight": {
+            "description": "How far a search moves it: 0.1 to 10, 1 by default. A heavier one moves up to 3 places.",
+            "type": "number",
+            "format": "double",
+            "default": 1.0
+          },
+          "hits": {
+            "description": "How many times recall put it in a prompt.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 0
+          },
+          "last_used": {
+            "description": "When recall last put it in a prompt, in Unix seconds; absent until then.",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64"
           }
         },
@@ -68014,7 +68360,9 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": false
+              "manage_only": true,
+              "claude_memory": true,
+              "worker_claude_memory": true
             }
           },
           "captains": {
@@ -68057,7 +68405,9 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": false
+              "manage_only": true,
+              "claude_memory": true,
+              "worker_claude_memory": true
             }
           },
           "projects": {
@@ -68292,9 +68642,19 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
+                "type": "boolean",
+                "default": true
               }
             },
             "required": [
@@ -68319,7 +68679,9 @@
               "escalate_process_failure",
               "escalate_over_lines",
               "escalate_areas",
-              "manage_only"
+              "manage_only",
+              "claude_memory",
+              "worker_claude_memory"
             ]
           },
           "Strategy": {
@@ -68632,6 +68994,18 @@
                 }
               },
               "manage_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
                 "type": [
                   "boolean",
                   "null"
@@ -68885,6 +69259,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -68893,7 +69272,8 @@
               "tools",
               "access",
               "delivers",
-              "by"
+              "by",
+              "prompt"
             ]
           },
           "ProfileAccess": {
@@ -68959,7 +69339,9 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": false
+              "manage_only": true,
+              "claude_memory": true,
+              "worker_claude_memory": true
             }
           },
           "captains": {
@@ -69002,7 +69384,9 @@
                 "CI and deploy config",
                 "Sign-in, tokens and secrets"
               ],
-              "manage_only": false
+              "manage_only": true,
+              "claude_memory": true,
+              "worker_claude_memory": true
             }
           },
           "projects": {
@@ -69227,9 +69611,19 @@
                 ]
               },
               "manage_only": {
-                "description": "The Captain starts without the file-editing tools and hands every change to a worker. Only\nthe Captains' and a project's scope use it.",
+                "description": "The Captain starts without the file-editing tools and hands every change to a worker. On by\ndefault. Only the Captains' and a project's scope use it.",
                 "type": "boolean",
-                "default": false
+                "default": true
+              },
+              "claude_memory": {
+                "description": "Whether the scope's own session loads Claude Code's auto-memory (`MEMORY.md`) and may\nwrite to it. Off sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` on its Claude Code process. The\norchestrator's scope holds the Orchestrator's, the Captains' and a project's the Captain's.\npinned's own project memory is a different thing and stays. Only the user sets it.",
+                "type": "boolean",
+                "default": true
+              },
+              "worker_claude_memory": {
+                "description": "The same for the project's workers, resolved from its project scope like its other worker\nlimits. Only the Captains' and a project's scope use it. Only the user sets it.",
+                "type": "boolean",
+                "default": true
               }
             }
           },
@@ -69547,6 +69941,18 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "worker_claude_memory": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           },
@@ -69776,6 +70182,11 @@
               "by": {
                 "$ref": "#/$defs/ProfileAuthor",
                 "default": "user"
+              },
+              "prompt": {
+                "description": "Who the worker is, put ahead of its task. Several lines, at most `MAX_PROMPT` characters.",
+                "type": "string",
+                "default": ""
               }
             },
             "required": [
@@ -69804,7 +70215,7 @@
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Team",
-        "description": "A team as one of its members sees it, with that member's role.\n\n`{\"id\":\"6f1c…\",\"name\":\"Acme\",\"owner\":\"0b7e…\",\"role\":\"owner\",\"credential\":{\"upstash\":false,\"claude\":false,\"github\":false,\"slack\":false}}`",
+        "description": "A team as one of its members sees it, with that member's role.\n\n`{\"id\":\"6f1c…\",\"name\":\"Acme\",\"owner\":\"0b7e…\",\"role\":\"owner\",\"credential\":{\"upstash\":false,\"claude\":false,\"github\":false,\"slack\":false,\"linear\":false}}`",
         "type": "object",
         "properties": {
           "id": {
@@ -69826,7 +70237,8 @@
               "upstash": false,
               "claude": false,
               "github": false,
-              "slack": false
+              "slack": false,
+              "linear": false
             }
           },
           "line_held": {
@@ -69858,7 +70270,7 @@
             ]
           },
           "CredentialState": {
-            "description": "Which of the team's keys are set, never a value.\n\n`{\"upstash\":true,\"claude\":true,\"github\":false,\"slack\":false}`",
+            "description": "Which of the team's keys are set, never a value.\n\n`{\"upstash\":true,\"claude\":true,\"github\":false,\"slack\":false,\"linear\":false}`",
             "type": "object",
             "properties": {
               "upstash": {
@@ -69876,13 +70288,19 @@
               "slack": {
                 "type": "boolean",
                 "default": false
+              },
+              "linear": {
+                "description": "The team's own Linear key, which its bots' Linear triggers read with.",
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
               "upstash",
               "claude",
               "github",
-              "slack"
+              "slack",
+              "linear"
             ]
           },
           "LineHeld": {
@@ -69914,7 +70332,7 @@
       "accept": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Team",
-        "description": "A team as one of its members sees it, with that member's role.\n\n`{\"id\":\"6f1c…\",\"name\":\"Acme\",\"owner\":\"0b7e…\",\"role\":\"owner\",\"credential\":{\"upstash\":false,\"claude\":false,\"github\":false,\"slack\":false}}`",
+        "description": "A team as one of its members sees it, with that member's role.\n\n`{\"id\":\"6f1c…\",\"name\":\"Acme\",\"owner\":\"0b7e…\",\"role\":\"owner\",\"credential\":{\"upstash\":false,\"claude\":false,\"github\":false,\"slack\":false,\"linear\":false}}`",
         "type": "object",
         "properties": {
           "id": {
@@ -69936,7 +70354,8 @@
               "upstash": false,
               "claude": false,
               "github": false,
-              "slack": false
+              "slack": false,
+              "linear": false
             }
           },
           "line_held": {
@@ -69967,7 +70386,7 @@
             ]
           },
           "CredentialState": {
-            "description": "Which of the team's keys are set, never a value.\n\n`{\"upstash\":true,\"claude\":true,\"github\":false,\"slack\":false}`",
+            "description": "Which of the team's keys are set, never a value.\n\n`{\"upstash\":true,\"claude\":true,\"github\":false,\"slack\":false,\"linear\":false}`",
             "type": "object",
             "properties": {
               "upstash": {
@@ -69983,6 +70402,11 @@
                 "default": false
               },
               "slack": {
+                "type": "boolean",
+                "default": false
+              },
+              "linear": {
+                "description": "The team's own Linear key, which its bots' Linear triggers read with.",
                 "type": "boolean",
                 "default": false
               }
@@ -76074,6 +76498,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, on one line, secrets masked and cut at 200 characters. Absent when it gave none.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -80899,6 +81330,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "reason": {
+                "description": "Why the session asks, on one line, secrets masked and cut at 200 characters. Absent when it gave none.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -83049,6 +83487,33 @@
                   "cmd",
                   "path",
                   "id"
+                ]
+              },
+              {
+                "description": "The `memory::Memory` with its new weight, from 0.1 to 10. A heavier memory moves up to 3 places\nin search results, and a lighter one down up to 3; a memory recall used in the last 30 days moves up 1 place.\nHow well it matches the words still decides the rest.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_set_weight"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "weight": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id",
+                  "weight"
                 ]
               },
               {
@@ -85624,7 +86089,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"
@@ -88784,6 +89249,33 @@
                 ]
               },
               {
+                "description": "The `memory::Memory` with its new weight, from 0.1 to 10. A heavier memory moves up to 3 places\nin search results, and a lighter one down up to 3; a memory recall used in the last 30 days moves up 1 place.\nHow well it matches the words still decides the rest.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "memory_set_weight"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "weight": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "path",
+                  "id",
+                  "weight"
+                ]
+              },
+              {
                 "description": "`memory::Status`: how many memories the project has and whether search also matches by meaning.",
                 "type": "object",
                 "properties": {
@@ -91329,7 +91821,7 @@
                 ]
               },
               "profile": {
-                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `profiles::admit` refuses\nit until U6.",
+                "description": "The worker profile (`profiles::WorkerProfile`) the task runs as. `Machine::profile_request`\nlooks it up by name and sets the request up as it says. A request sent to another machine\ncarries what the profile set, and no name.",
                 "type": [
                   "string",
                   "null"

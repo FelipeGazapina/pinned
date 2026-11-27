@@ -43,6 +43,7 @@ const TB_TEXT = {
     doesManual: "What it does, only when someone runs it",
     doesOn: (when) => `What it does, ${when}`,
     noSteps: "This bot has no steps written in its workflow.",
+    stepsFailed: "Could not load the steps.",
     calls: "Who it calls",
     moments: {
       before_irreversible: "Before something that can't be undone",
@@ -76,6 +77,7 @@ const TB_TEXT = {
     deleteKeep: "Keep it",
     runs: "Latest runs",
     noRuns: "No runs yet.",
+    runsFailed: "Could not load the runs.",
   },
 
   run: {
@@ -150,15 +152,20 @@ const TB_TEXT = {
     when: "What starts it",
     triggers: [
       { kind: "manual", label: "Only when someone runs it" },
+      { kind: "linear-label", label: "A Linear issue gets a label" },
       { kind: "slack-mention", label: "Someone mentions it in a Slack channel" },
     ],
+    labelField: "Linear label",
+    labelPlaceholder: "E.g. bot-review",
     channelField: "Slack channel",
     channelPlaceholder: "E.g. #releases",
     fires: {
       manual: "Nothing starts it but Run now, on its page.",
+      "linear-label": (label) => `A run starts for each new Linear issue that gets the label “${label || "…"}”. Events that arrive while the bot is off are not picked up later.`,
       "slack-mention": (channel) => `A run starts each time someone mentions the bot in ${channel || "the channel"}. Events that arrive while the bot is off are not picked up later.`,
     },
     slackOff: "The team's Slack is not connected yet, so this starts nothing until the owner connects it.",
+    linearOff: "The team's Linear is not connected yet, so this starts nothing until the owner connects it.",
     once: "Run once, then discard",
     onceAbout: "When its first run ends, the bot and its workflow are deleted.",
     s3Title: "Who stays nearby?",
@@ -360,19 +367,19 @@ function tbTriggerHeading(trigger) {
 /** The numbered steps a bot's workflow is saved with. */
 const tbPromptOf = (steps) => steps.map((s, i) => `${i + 1}. ${s.trim()}`).join("\n");
 
-/** The trigger a bot made here has, as the hub's `Trigger` reads it: Run now only, or a mention in a Slack channel.
- * A Linear label is not offered: a team keeps no Linear key, so the hub never runs it. A routing trigger (`slack-message`,
- * which sorts every message) is never offered either: the hub refuses it on a team. */
-function tbTrigger({ trigger = "manual", channel = "" } = {}) {
+/** The trigger a bot made here has, as the hub's `Trigger` reads it: Run now only, a Linear label, or a mention in a Slack channel.
+ * A routing trigger (`slack-message`, which sorts every message) is never offered: the hub refuses it on a team. */
+function tbTrigger({ trigger = "manual", label = "", channel = "" } = {}) {
+  if (trigger === "linear-label") return { kind: "linear-label", label: String(label).trim() };
   if (trigger === "slack-mention") return { kind: "slack-mention", channel: String(channel).trim() };
   return { kind: "manual" };
 }
 /** The line that says what starts the bot, from the chosen trigger. */
 const tbFires = (s) => {
   const f = TB_TEXT.wiz.fires;
-  return s.trigger === "slack-mention" ? f["slack-mention"](s.channel.trim()) : f.manual;
+  return s.trigger === "linear-label" ? f["linear-label"](s.label.trim()) : s.trigger === "slack-mention" ? f["slack-mention"](s.channel.trim()) : f.manual;
 };
-const tbTriggerOk = (s) => (s.trigger === "slack-mention" ? !!s.channel.trim() : true);
+const tbTriggerOk = (s) => (s.trigger === "linear-label" ? !!s.label.trim() : s.trigger === "slack-mention" ? !!s.channel.trim() : true);
 
 /** The workflow the hub stores for a bot made here, as `save_bot`'s `connector`: one Session step and the chosen trigger. A new one has the id made for it. */
 function tbConnector({ id = "", name, steps, repo, trigger }) {
@@ -545,25 +552,34 @@ async function tbLoadBot(quiet = false) {
   }
   const id = ui.id;
   try {
-    const [bots, members, groups, projects, runs, calls, settings] = await Promise.all([
+    // A read that fails is not an empty answer: runs and the workflow say so on the page, and a failed
+    // team list fails the page. A quiet reload that fails keeps what the page already showed for this bot.
+    const soft = (p) => p.then((v) => ({ ok: true, v }), () => ({ ok: false }));
+    const [bots, members, groups, projects, runs, calls, workflow] = await Promise.all([
       tbCall({ op: "bots" }),
       tbCall({ op: "members" }),
       tbCall({ op: "groups" }),
       tbCall({ op: "projects" }),
-      tbCall({ op: "runs" }),
+      soft(tbCall({ op: "runs" })),
       tbCall({ op: "calls" }).catch(() => []),
-      tbCall({ op: "hub", call: { cmd: "get_settings" } }),
+      soft(tbCall({ op: "bot_workflow", workflow: id })),
     ]);
     if (ui.id !== id) return;
     const list = (v) => (Array.isArray(v) ? v : []);
+    const prev = ui.data?.id === id ? ui.data : null;
+    const runsLoaded = runs.ok || !!prev;
+    const workflowLoaded = workflow.ok || !!prev;
     ui.data = {
+      id,
       bot: list(bots).find((b) => b.workflow === id) ?? null,
       members: list(members),
       groups: list(groups),
       projects: list(projects),
-      runs: list(runs).filter((r) => r.workflow === id).sort((a, b) => b.started_at - a.started_at),
+      runs: runs.ok ? list(runs.v).filter((r) => r.workflow === id).sort((a, b) => b.started_at - a.started_at) : prev?.runs ?? [],
+      runsFailed: !runsLoaded,
       calls: list(calls),
-      workflow: list(settings?.connectors).find((c) => c.id === id) ?? null,
+      workflow: workflow.ok ? workflow.v : prev?.workflow ?? null,
+      workflowFailed: !workflowLoaded,
     };
     ui.state = "ready";
     if (!quiet) ui.error = "";
@@ -587,7 +603,7 @@ function tbBotHtml(ui, team) {
   const t = TB_TEXT.bot;
   if (ui.state === "error") return `${tbError(TB_TEXT.loadFailed(ui.error))}<div class="tb-actions">${tbButton('data-tb="reload"', TB_TEXT.retry)}</div>`;
   if (!ui.data) return `<p class="tb-hint" role="status">${TB_TEXT.loading}</p>`;
-  const { bot, members, groups, projects, runs, calls, workflow } = ui.data;
+  const { bot, members, groups, projects, runs, calls, workflow, runsFailed, workflowFailed } = ui.data;
   if (!bot) return `<div class="tb-empty"><h2>${tbEsc(t.notFound)}</h2></div>`;
   const rules = tbRules(bot);
   const owner = bot.owner ? tbMemberName(members, bot.owner) : tbOwnerOf(members) ? tbPerson(tbOwnerOf(members).email) : "";
@@ -606,7 +622,7 @@ function tbBotHtml(ui, team) {
     ? tbRunLink(running.id, tbEsc(t.follow), "tb-btn follow")
     : ui.busy === "run"
       ? tbButton("disabled", t.starting, "secondary", true)
-      : `<button type="button" class="tb-btn primary" data-tb="run-now"${bot.on ? "" : ` disabled title="${tbEsc(t.runNowDraft)}"`}>${tbEsc(t.runNow)}</button>`;
+      : `<button type="button" class="tb-btn primary" data-tb="run-now"${bot.on && !runsFailed ? "" : ` disabled title="${tbEsc(bot.on ? t.runsFailed : t.runNowDraft)}"`}>${tbEsc(t.runNow)}</button>`;
   const toggle = bot.on
     ? tbButton(`data-tb="toggle" aria-pressed="true"`, ui.busy === "toggle" ? t.switching : t.turnOff, "secondary", ui.busy === "toggle")
     : tbButton(`data-tb="toggle" aria-pressed="false"`, ui.busy === "toggle" ? t.switching : t.turnOn, "secondary", ui.busy === "toggle" || !may);
@@ -656,13 +672,13 @@ function tbBotHtml(ui, team) {
         <div class="tb-sub">${tbEsc(t.of(project, owner))}${bot.once ? ` <span class="tb-tag">${tbEsc(t.once)}</span>` : ""}</div></div></div>
       <div class="tb-actions">${runBtn}${toggle}</div>
     </div>
-    ${tbError(ui.error && ui.state === "ready" ? ui.error : "")}${offNote}${notice}${needKeys && !bot.on ? tbNeedKeysHtml(team, members) : ""}
-    <section class="tb-section"><h2>${tbEsc(manual ? t.doesManual : firesOn ? t.doesOn(firesOn) : t.does)}</h2>${stepRows.length ? `<ol class="tb-steps">${stepRows.join("")}</ol>` : `<p class="tb-hint">${tbEsc(t.noSteps)}</p>`}</section>
+    ${tbError(ui.error && ui.state === "ready" ? ui.error : "")}${offNote}${notice}${needKeys ? tbNeedKeysHtml(team, members) : ""}
+    <section class="tb-section"><h2>${tbEsc(manual ? t.doesManual : firesOn ? t.doesOn(firesOn) : t.does)}</h2>${stepRows.length ? `<ol class="tb-steps">${stepRows.join("")}</ol>` : `<p class="tb-hint">${tbEsc(workflowFailed ? t.stepsFailed : t.noSteps)}</p>`}</section>
     <section class="tb-section"><h2>${tbEsc(t.calls)}</h2><div class="tb-card">${moments.map(moment).join("")}</div><p class="tb-foot">${tbEsc(t.callsNote)}</p></section>
     <section class="tb-section" data-limits><h2>${tbEsc(t.limits)}</h2><div class="tb-card"><div class="tb-row" data-limit="time"><span>${tbEsc(t.time)}</span><span class="tb-value">${tbEsc(t.timeValue(bot.limits?.minutes ?? TB_POLICY.minutes))}</span></div></div><p class="tb-foot">${tbEsc(t.maxLife)}</p></section>
     <section class="tb-section tb-guard"><h2>${tbEsc(t.asks)}</h2>${tbAsksHtml()}</section>
     ${skippedHtml}
-    <section class="tb-section"><h2>${tbEsc(t.runs)}</h2>${runRows.length ? `<div class="tb-list">${runRows.join("")}</div>` : `<p class="tb-hint">${tbEsc(t.noRuns)}</p>`}</section>
+    <section class="tb-section"><h2>${tbEsc(t.runs)}</h2>${runRows.length ? `<div class="tb-list">${runRows.join("")}</div>` : `<p class="tb-hint">${tbEsc(runsFailed ? t.runsFailed : t.noRuns)}</p>`}</section>
     ${del}`;
 }
 
@@ -908,6 +924,7 @@ function tbWizReset() {
     steps: [],
     once: false,
     trigger: "manual",
+    label: "",
     channel: "",
     who: { before: { kind: "owner" }, doubt: { kind: "owner" }, limit: { kind: "owner" } },
     project: "",
@@ -985,9 +1002,11 @@ function tbWizHtml(team) {
       <div class="tb-actions">${tbButton('data-tb="add-step"', w.addStep, "quiet")}</div>
       <div class="tb-field"><div class="tb-label" id="tb-when">${tbEsc(w.when)}</div><div class="tb-pills" role="radiogroup" aria-labelledby="tb-when">
         ${w.triggers.map((x) => `<button type="button" class="tb-pill" role="radio" data-tb="trigger" data-kind="${x.kind}" aria-checked="${s.trigger === x.kind}">${tbEsc(x.label)}</button>`).join("")}</div>
+        ${s.trigger === "linear-label" ? `<label class="tb-sub-field" for="tb-label-in"><span>${tbEsc(w.labelField)}</span><input id="tb-label-in" type="text" data-tb-input="label" value="${tbEsc(s.label)}" placeholder="${tbEsc(w.labelPlaceholder)}" autocomplete="off"></label>` : ""}
         ${s.trigger === "slack-mention" ? `<label class="tb-sub-field" for="tb-channel-in"><span>${tbEsc(w.channelField)}</span><input id="tb-channel-in" type="text" data-tb-input="channel" value="${tbEsc(s.channel)}" placeholder="${tbEsc(w.channelPlaceholder)}" autocomplete="off"></label>` : ""}
         <p class="tb-fires" data-fires>${tbEsc(tbFires(s))}</p>
-        ${s.trigger === "slack-mention" && !team.line_held && team.credential && !team.credential.slack ? `<p class="tb-note">${tbEsc(w.slackOff)}</p>` : ""}</div>
+        ${s.trigger === "slack-mention" && !team.line_held && team.credential && !team.credential.slack ? `<p class="tb-note">${tbEsc(w.slackOff)}</p>` : ""}
+        ${s.trigger === "linear-label" && !team.line_held && team.credential && !team.credential.linear ? `<p class="tb-note">${tbEsc(w.linearOff)}</p>` : ""}</div>
       <button type="button" class="tb-check" role="checkbox" aria-checked="${s.once}" data-tb="once"><span class="tb-box" aria-hidden="true"></span><span class="tb-texts"><span class="tb-name">${tbEsc(w.once)}</span><span class="tb-about">${tbEsc(w.onceAbout)}</span></span></button>`;
   } else if (s.step === 3) {
     const options = tbOptions(s.data);
@@ -1113,7 +1132,7 @@ const TB_WIZ_ACTS = {
   trigger(b) {
     if (!TB_TEXT.wiz.triggers.some((x) => x.kind === b.dataset.kind)) return;
     tbWiz.trigger = b.dataset.kind;
-    tbWiz.focus = b.dataset.kind === "slack-mention" ? "#tb-channel-in" : null;
+    tbWiz.focus = b.dataset.kind === "linear-label" ? "#tb-label-in" : b.dataset.kind === "slack-mention" ? "#tb-channel-in" : null;
     tbWizDraw();
   },
   who(b) {

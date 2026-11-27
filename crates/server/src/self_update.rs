@@ -516,7 +516,9 @@ mod tests {
         let stale = format!("{}{}", sums_for(x86_name, x86), sums_for(arm_name, arm));
         std::fs::write(dir.join("SHA256SUMS"), stale).unwrap();
         checked(
-            Command::new(repo.join("scripts/sign-node-sums.sh"))
+            Command::new("bash")
+                .arg(repo.join("scripts/release.sh"))
+                .arg("sign-sums")
                 .arg(dir)
                 .env("TAURI_SIGNING_PRIVATE_KEY", private_key)
                 .env("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", "")

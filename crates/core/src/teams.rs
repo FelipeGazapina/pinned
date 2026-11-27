@@ -35,7 +35,7 @@ impl Role {
 
 /// Which of the team's keys are set, never a value.
 ///
-/// `{"upstash":true,"claude":true,"github":false,"slack":false}`
+/// `{"upstash":true,"claude":true,"github":false,"slack":false,"linear":false}`
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
 pub struct CredentialState {
     #[serde(default)]
@@ -46,11 +46,14 @@ pub struct CredentialState {
     pub github: bool,
     #[serde(default)]
     pub slack: bool,
+    /// The team's own Linear key, which its bots' Linear triggers read with.
+    #[serde(default)]
+    pub linear: bool,
 }
 
 /// A team as one of its members sees it, with that member's role.
 ///
-/// `{"id":"6f1c…","name":"Acme","owner":"0b7e…","role":"owner","credential":{"upstash":false,"claude":false,"github":false,"slack":false}}`
+/// `{"id":"6f1c…","name":"Acme","owner":"0b7e…","role":"owner","credential":{"upstash":false,"claude":false,"github":false,"slack":false,"linear":false}}`
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Team {
     pub id: String,
@@ -582,6 +585,9 @@ pub enum TeamOp {
     LeaveGroup { handle: String },
     /// `Vec<Bot>`.
     Bots,
+    /// `Connector`: the team workflow of the bot `workflow`, for its page. A member reads it; a
+    /// team's settings stay out of reach (`GetSettings` does not run on a team).
+    BotWorkflow { workflow: String },
     /// `SavedBot`. Saves the bot, as a draft. With `connector`, the team's workflow itself (the
     /// `Connector` `HubCall::SaveConnector` takes) is saved with it: the one way a member changes a
     /// team's workflows. The bot then is that workflow's. A new workflow has an empty `id`, which
@@ -710,6 +716,7 @@ mod tests {
             json!({ "op": "join_group", "handle": "design" }),
             json!({ "op": "leave_group", "handle": "design" }),
             json!({ "op": "bots" }),
+            json!({ "op": "bot_workflow", "workflow": "c1" }),
             json!({ "op": "save_bot", "bot": bot }),
             json!({ "op": "turn_bot_on", "workflow": "c1", "on": true }),
             json!({ "op": "delete_bot", "workflow": "c1" }),

@@ -187,7 +187,7 @@ test("the wizard reads the team's people, groups and projects when it opens", as
   assert.deepEqual(a.control("next"), { disabled: true }, "nothing chosen yet");
 });
 
-test("an idea fills its fixed steps, the plan says nothing was understood, and the trigger chooser offers Manual and Slack only", async () => {
+test("an idea fills its fixed steps, the plan says nothing was understood, and the trigger chooser offers Manual, Linear and Slack only", async () => {
   const a = app({ answers: wizardAnswers() });
   await a.open("team-bot-new");
   await a.click("idea", { idea: "publish" });
@@ -198,10 +198,9 @@ test("an idea fills its fixed steps, the plan says nothing was understood, and t
   assert.ok(t.includes("Nothing was worked out from your words"));
   const steps = [...a.page().matchAll(/data-tb-input="step" data-i="(\d)" value="([^"]*)"/g)].map((m) => m[2]);
   assert.deepEqual(steps, ["Take what entered the project since the last publish.", "Run all the tests.", "Stop and call a person before publishing.", "Publish to the test environment and tell whoever made the changes the result."]);
-  assert.match(t, /What starts it Only when someone runs it Someone mentions it in a Slack channel Nothing starts it but Run now, on its page\./);
-  assert.ok(!/Linear/.test(t), "a team keeps no Linear key, so no Linear trigger is offered");
+  assert.match(t, /What starts it Only when someone runs it A Linear issue gets a label Someone mentions it in a Slack channel Nothing starts it but Run now, on its page\./);
   const pills = [...a.page().matchAll(/class="tb-pill" role="radio" data-tb="trigger" data-kind="([a-z-]+)" aria-checked="(true|false)"/g)].map((m) => [m[1], m[2]]);
-  assert.deepEqual(pills, [["manual", "true"], ["slack-mention", "false"]]);
+  assert.deepEqual(pills, [["manual", "true"], ["linear-label", "false"], ["slack-mention", "false"]]);
   assert.ok(!/schedule|every weekday|GitHub|routing|decide|Not available yet/i.test(t), "no scheduled, GitHub-event or routing trigger is offered");
   assert.ok(t.includes("Run once, then discard"));
 });
@@ -244,6 +243,38 @@ test("a team whose Slack is connected is not warned, and a Slack trigger is save
   await a.click("next");
   const saved = a.frames.find((f) => f.op === "save_bot");
   assert.deepEqual(saved.connector.trigger, { kind: "slack-mention", channel: "#weekly" });
+});
+
+test("a Linear trigger asks for its label, warns while the team's Linear is not connected, and is saved as that trigger", async () => {
+  const a = app({ answers: wizardAnswers(saving()) });
+  await a.open("team-bot-new");
+  await a.click("idea", { idea: "review" });
+  await a.click("next");
+  await a.click("trigger", { kind: "linear-label" });
+  assert.ok(a.page().includes('data-tb-input="label"') && !a.page().includes('data-tb-input="channel"'));
+  assert.deepEqual(a.control("next"), { disabled: true }, "a Linear trigger needs its label");
+  await a.input("label", "  bot-review  ");
+  await a.click("trigger", { kind: "linear-label" });
+  const t = text(a.page());
+  assert.ok(t.includes("A run starts for each new Linear issue that gets the label “bot-review”. Events that arrive while the bot is off are not picked up later."), t);
+  assert.ok(t.includes("The team's Linear is not connected yet, so this starts nothing until the owner connects it."), "OWNER_TEAM has no Linear");
+  await a.click("next");
+  await a.click("next");
+  await a.click("project", { key: "github.com/acme/site" });
+  a.frames.length = 0;
+  await a.click("next");
+  const saved = a.frames.find((f) => f.op === "save_bot");
+  assert.deepEqual(saved.connector.trigger, { kind: "linear-label", label: "bot-review" });
+  assert.deepEqual(saved.connector.graph.nodes[0], { id: "trigger-1", name: "Trigger", position: [0, 0], type: "trigger", watch: { kind: "linear-label", label: "bot-review" } });
+});
+
+test("a team whose Linear is connected is not warned about a Linear trigger", async () => {
+  const a = app({ team: { ...OWNER_TEAM, credential: { ...OWNER_TEAM.credential, linear: true } }, answers: wizardAnswers() });
+  await a.open("team-bot-new");
+  await a.click("idea", { idea: "review" });
+  await a.click("next");
+  await a.click("trigger", { kind: "linear-label" });
+  assert.ok(!text(a.page()).includes("Linear is not connected"));
 });
 
 test("a Slack-mention bot is saved with exactly this save_bot, and a Linear label is never sent", async () => {
@@ -291,7 +322,7 @@ test("a Slack-mention bot is saved with exactly this save_bot, and a Linear labe
 });
 
 test("a bot made before this change still says when its Linear label starts it, and a Run now bot says nothing of a label", async () => {
-  const a = app({ answers: { ...botAnswers({ runs: [], calls: [] }), "hub:get_settings": { connectors: [workflow({ trigger: { kind: "linear-label", label: "weekly" } })] } } });
+  const a = app({ answers: { ...botAnswers({ runs: [], calls: [] }), bot_workflow: workflow({ trigger: { kind: "linear-label", label: "weekly" } }) } });
   await openBot(a);
   assert.ok(text(a.page()).includes("when a Linear issue gets “weekly”"), text(a.page()));
   const b = app({ answers: botAnswers({ runs: [], calls: [] }) });
@@ -310,7 +341,7 @@ test("a routing trigger is never offered; if the hub refuses one anyway, its wor
   await a.click("next");
   assert.ok(text(a.page()).includes(`Could not create the bot: ${refusal}`), text(a.page()));
   assert.deepEqual(a.control("next"), { disabled: false }, "the person can try again");
-  assert.equal(a.read("TB_TEXT.wiz.triggers.map((x) => x.kind).join()"), "manual,slack-mention");
+  assert.equal(a.read("TB_TEXT.wiz.triggers.map((x) => x.kind).join()"), "manual,linear-label,slack-mention");
 });
 
 test("a description of the person's own becomes one editable step, not a plan", async () => {
@@ -324,8 +355,7 @@ test("a description of the person's own becomes one editable step, not a plan", 
   assert.ok(!t.includes("Nothing was worked out"), "no claim of having understood anything");
   assert.deepEqual([...a.page().matchAll(/data-tb-input="step" data-i="(\d)" value="([^"]*)"/g)].map((m) => m[2]), ["whenever a PR is open, check that it has tests"]);
   assert.ok(a.page().includes('data-tb-input="name" value="whenever a PR is open, check"'));
-  assert.match(text(a.page()), /What starts it Only when someone runs it Someone mentions it in a Slack channel/);
-  assert.ok(!/Linear/.test(text(a.page())), "no Linear trigger in the plan step either");
+  assert.match(text(a.page()), /What starts it Only when someone runs it A Linear issue gets a label Someone mentions it in a Slack channel/);
   await a.click("add-step");
   await a.input("step", "Say so in the PR.", { i: "1" });
   await a.click("remove-step", { i: "0" });
@@ -515,7 +545,7 @@ test("the done screen turns the bot on only when the person may", async () => {
 });
 
 test("seeing the bot's page opens it by the workflow's id", async () => {
-  const a = app({ answers: { ...wizardAnswers(saving("c1", { bots: [bot()] })), runs: [], calls: [], "hub:get_settings": { connectors: [workflow()] } } });
+  const a = app({ answers: { ...wizardAnswers(saving("c1", { bots: [bot()] })), runs: [], calls: [], bot_workflow: workflow() } });
   await a.open("team-bot-new");
   await a.click("idea", { idea: "review" });
   await a.click("next");
@@ -562,7 +592,9 @@ const botAnswers = (over = {}) => ({
     run({ id: "other", workflow: "c2", started_at: NOW - 10 }),
   ],
   calls: [{ id: "k1", run: "r4", workflow: "c1", situation: "before_irreversible", asked: [{ kind: "group", handle: "publish" }], question: "Publish?", choices: [], created_at: NOW - 90, escalated: false, answer: null }],
-  "hub:get_settings": { connectors: [workflow()] },
+  // The team refuses get_settings; the page reads its workflow through bot_workflow.
+  "hub:get_settings": new Error("get_settings does not run on a team"),
+  bot_workflow: workflow(),
   ...over,
 });
 const openBot = async (a, id = "c1") => {
@@ -582,7 +614,7 @@ test("the bot page reads the bot, people, groups, projects, runs and calls of th
   await openBot(a);
   assert.deepEqual(
     a.frames.map((f) => (f.op === "hub" ? f.call.cmd : f.op)).sort(),
-    ["bots", "calls", "get_settings", "groups", "members", "projects", "runs"],
+    ["bot_workflow", "bots", "calls", "groups", "members", "projects", "runs"],
   );
 });
 
@@ -727,7 +759,7 @@ test("the bot page asks for a team when none is chosen, and for a bot the team d
 
 test("a bot's name, steps and a run's outcome stay text", async () => {
   const bad = `<img src=x onerror="window.pwned=1">`;
-  const a = app({ answers: botAnswers({ bots: [bot({ name: bad })], runs: [run({ outcome: bad })], "hub:get_settings": { connectors: [workflow({ graph: { nodes: [{ type: "session", prompt: `1. ${bad}` }] } })] } }) });
+  const a = app({ answers: botAnswers({ bots: [bot({ name: bad })], runs: [run({ outcome: bad })], bot_workflow: workflow({ graph: { nodes: [{ type: "session", prompt: `1. ${bad}` }] } }) }) });
   await openBot(a);
   assert.ok(!a.page().includes("<img"));
   assert.ok(a.page().includes("&#60;img") || a.page().includes("&lt;img") || a.page().includes("&#"), "escaped");
@@ -1147,4 +1179,38 @@ test("deleting a draft reads the team's lists again, so the sidebar loses it", a
   await a.click("delete");
   assert.deepEqual(a.frames.filter((f) => f.op === "delete_bot"), [{ op: "delete_bot", workflow: "c1" }]);
   assert.equal(reads.n, 1);
+});
+
+test("a team's bot page draws the bot even though the team refuses get_settings", async () => {
+  const a = app({ answers: botAnswers({ runs: [] }) });
+  await openBot(a);
+  assert.ok(text(a.page()).includes("Test publisher"), text(a.page()));
+  assert.ok(!text(a.page()).includes("does not run on a team"), "the refusal is not shown");
+  assert.ok(a.control("run-now"), "Run now is there");
+});
+
+test("a bot page still draws the bot when its workflow and its runs fail to load, and says so instead of showing them empty", async () => {
+  const a = app({ answers: botAnswers({ bot_workflow: new Error("unknown op bot_workflow"), runs: new Error("runs failed") }) });
+  await openBot(a);
+  assert.ok(text(a.page()).includes("Test publisher"), text(a.page()));
+  assert.ok(text(a.page()).includes("Could not load the steps."), text(a.page()));
+  assert.ok(text(a.page()).includes("Could not load the runs."), text(a.page()));
+  assert.ok(!text(a.page()).includes("No runs yet."), text(a.page()));
+  assert.ok(!text(a.page()).includes("no steps written"), text(a.page()));
+  assert.deepEqual(a.control("run-now"), { disabled: true }, "Run now is not offered while the runs are unknown");
+});
+
+test("a member whose team list fails to load sees the load error and Try again, not a note about who can turn the bot on", async () => {
+  const a = app({ team: MEMBER_TEAM, email: "bruno@acme.dev", answers: botAnswers({ bots: [bot({ on: false, on_by: null })], members: new Error("The hub did not answer.") }) });
+  await openBot(a);
+  assert.ok(text(a.page()).includes("Could not load: The hub did not answer."), text(a.page()));
+  assert.ok(a.control("reload"));
+  assert.ok(!text(a.page()).includes("Ask someone in @publish"), text(a.page()));
+});
+
+test("an on bot in a team with no Claude token says it needs the AI account", async () => {
+  const team = { ...OWNER_TEAM, credential: { upstash: true, claude: false, github: true, slack: false } };
+  const a = app({ team, answers: botAnswers({ bots: [bot({ on: true })] }) });
+  await openBot(a);
+  assert.ok(text(a.page()).includes("The team needs its Upstash key and Claude token before a bot can run."), text(a.page()));
 });

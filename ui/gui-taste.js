@@ -10,31 +10,6 @@
 const tasteUi = { saved: null, draft: null, scope: { kind: "captains" }, projects: null, skills: new Map(), error: null, saving: false, toast: false, flash: new Set(), note: "", area: "", adding: false, chatting: false };
 let tasteToastTimer = 0;
 
-const TASTE_FIELD_LABELS = {
-  strategy: "Strategy",
-  ladder: "Model ladder",
-  hard_model: "Hard work model",
-  parallel: "Workers at once",
-  autonomy: "Autonomy",
-  review_diffs: "Review each diff",
-  second_opinion: "Second opinion",
-  skills: "Skills",
-  context: "Context",
-  tier: "Model tier",
-  default_model: "Default model",
-  default_effort: "Default effort",
-  max_effort: "Most effort",
-  budget_cents: "Budget per worker",
-  time_limit_min: "Time limit per worker",
-  box_budget_cents: "Box budget",
-  box_size: "Default box size",
-  boxes_at_once: "Boxes at once",
-  escalate_breaking_change: "Breaks an older version",
-  escalate_process_failure: "The process did not work as designed",
-  escalate_over_lines: "Too big to merge unseen",
-  escalate_areas: "Always send to me",
-  manage_only: "Manage only",
-};
 const TASTE_TIER_ABOUT = { low: "Haiku and flash models", mid: "Sonnet, GLM and the like", high: "Opus and pro models" };
 
 const tasteShown = () => tasteResolve(tasteUi.draft, tasteUi.scope);
@@ -333,7 +308,9 @@ function tastePaceHtml(t) {
     <div class="taste-field">${tasteLabelHtml("autonomy")}<div class="taste-seg" role="group" aria-label="Autonomy">${autonomies}</div></div>
     ${tasteToggleHtml(t, "review_diffs", "Review each diff before accepting", "The Captain reads the worker's diff before merging it in.")}
     ${tasteToggleHtml(t, "second_opinion", "Second opinion on risky changes", "Another model reviews the change before it goes ahead.")}
-    ${tasteUi.scope.kind !== "orchestrator" && t.manage_only != null ? tasteToggleHtml(t, "manage_only", "Manage only", "The Captain starts without Claude Code's Edit, Write and NotebookEdit tools and hands every change to a worker. Applies from its next start. Bash stays, so the shell can still change files.") : ""}
+    ${tasteUi.scope.kind !== "orchestrator" && t.manage_only != null ? tasteToggleHtml(t, "manage_only", "Manage only", "The Captain starts without Claude Code's Edit, Write and NotebookEdit tools and hands every change to a worker. On by default. Applies from its next start. Bash stays, for reading and checking.") : ""}
+    ${t.claude_memory != null ? tasteToggleHtml(t, "claude_memory", TASTE_FIELD_LABELS.claude_memory, tasteUi.scope.kind === "orchestrator" ? "The Orchestrator loads Claude Code's own memory (MEMORY.md) and may write to it. Off saves tokens; pinned's project memory stays. Applies from its next start." : "The Captain loads Claude Code's own memory (MEMORY.md) and may write to it. Off saves tokens; pinned's project memory stays. Applies from its next start.") : ""}
+    ${tasteUi.scope.kind !== "orchestrator" && t.worker_claude_memory != null ? tasteToggleHtml(t, "worker_claude_memory", TASTE_FIELD_LABELS.worker_claude_memory, "Workers load Claude Code's own memory (MEMORY.md). Off saves tokens; pinned's project memory stays. Applies to workers started after the change.") : ""}
   </section>`;
 }
 
@@ -445,7 +422,7 @@ function tasteRender() {
     ${delegationSectionHtml()}
   </div></div>${tasteFootHtml()}`);
   tasteUi.flash = new Set();
-  const back = focused && [...pageView.querySelectorAll("button, select, input")].find((el) => tasteFocusKey(el) === focused);
+  const back = focused && [...pageView.querySelectorAll("button, select, input, textarea")].find((el) => tasteFocusKey(el) === focused);
   back?.focus({ preventScroll: true });
 }
 
