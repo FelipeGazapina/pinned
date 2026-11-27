@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.18.12 (2026-11-27)
+
+### Added
+
+- Teams have a work board. A Builder, a Reviewer and an Approver work each card on one PR, through Backlog, Ready to dev, In dev, Ready to review, In review, Approving, Ready to deploy and Done. The Reviewer and the Approver send a card back to the Builder when code can fix it, up to three rounds, and to a person otherwise.
+- The board's Approving column: the Approver scores the PR, and at the act's bar the PR merges. Below the bar, a person decides. Merge! on a card has the hub merge its PR with the team's GitHub key. The team merge and the Approver's auto-merge have only been tried against a fake GitHub so far.
+- The board fits any width: eight, four, two or one column per row, with no sideways scroll, and one column per swipe on a phone.
+- A team's owner can connect Linear, so bots with a Linear label trigger start. The team setup lists an optional Linear key, and the bot wizard warns while the team's Linear is not connected.
+- Way of working has Keep memory free: a percent of each machine's memory that pinned leaves to the rest of the computer, 15 by default and never under 2 GB. While a machine has less free, it starts no new worker, workflow worker or Captain, and says how much is free and how much pinned holds. 0 turns it off. Only the user sets it.
+- Each memory has a weight and a use count. Both move it a bounded number of places in recall, and one recent use lifts it one place for 30 days. The Memory panel shows them on each row, and agents can call `memory_set_weight`.
+- Way of working has Worker profiles: add, edit and remove profiles, and `delegate_task` with a profile runs the worker with its model, effort, access, tools and prompt.
+- The hub's scheduler fires due workflow tasks once and records each run. An agent's save or restart of a workflow task waits for your approval.
+- A failed workflow run's card has Fork from here and Rewind.
+- Way of working has a Claude Code memory switch per role.
+- An agent's way of working proposal carries its reason. Needs you and Agent activity show it as rows from now to next, with the reason.
+- The thread header shows the thread's turns and tokens in and out, live, after the time and cost, in whatever room its title and actions leave.
+
+### Changed
+
+- Captains start in Manage only by default: they hand every change to a worker. Turn it off in Way of working for Captains or for one project.
+- Releases run in GitHub Actions (Actions › release › Run workflow), and the release starts the hub deploy itself.
+- `crates/layout` checks where files go. The app's build and a dev hub stop on a broken layout.
+
+### Fixed
+
+- A team bot's page says when a read failed, with Try again, instead of showing an empty list or wrong data.
+- The Workers card hides finished workers away from their turn.
+
 ## 0.18.11 (2026-11-24)
 
 ### Added
