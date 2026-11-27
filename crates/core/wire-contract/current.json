@@ -13802,7 +13802,7 @@
                 ]
               },
               {
-                "description": "The person merged its PR: Ready to deploy, or Approving with no run, to Done.",
+                "description": "A person merges its PR through pinned: Ready to deploy, or Approving with no run, to Done.\nThe hub merges the PR first and moves the card only once GitHub merged it.",
                 "type": "object",
                 "properties": {
                   "act": {
@@ -27769,7 +27769,7 @@
                 ]
               },
               {
-                "description": "The person merged its PR: Ready to deploy, or Approving with no run, to Done.",
+                "description": "A person merges its PR through pinned: Ready to deploy, or Approving with no run, to Done.\nThe hub merges the PR first and moves the card only once GitHub merged it.",
                 "type": "object",
                 "properties": {
                   "act": {
@@ -38943,7 +38943,7 @@
                 ]
               },
               {
-                "description": "The person merged its PR: Ready to deploy, or Approving with no run, to Done.",
+                "description": "A person merges its PR through pinned: Ready to deploy, or Approving with no run, to Done.\nThe hub merges the PR first and moves the card only once GitHub merged it.",
                 "type": "object",
                 "properties": {
                   "act": {
@@ -49777,7 +49777,7 @@
                 ]
               },
               {
-                "description": "The person merged its PR: Ready to deploy, or Approving with no run, to Done.",
+                "description": "A person merges its PR through pinned: Ready to deploy, or Approving with no run, to Done.\nThe hub merges the PR first and moves the card only once GitHub merged it.",
                 "type": "object",
                 "properties": {
                   "act": {

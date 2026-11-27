@@ -1,7 +1,8 @@
 //! A team's work board end to end: a card a member queues is picked by the Builder's bot in a box,
 //! the box reports the PR, the Reviewer's bot sends it back once, the Builder pushes to the same
 //! PR, the Reviewer passes it, the Approver approves it in Approving, and when pinned cannot merge
-//! the PR (this team has no GitHub key) the card goes back to a person, who merges it.
+//! the PR (this team has no GitHub key) the card goes back to a person, whose Merge! fails the
+//! same way and leaves the card in place.
 
 use super::*;
 use pinned_core::teams::{TeamOp, TeamPolicy};
@@ -77,7 +78,7 @@ fn built(pr: u64) -> Report {
 }
 
 #[test]
-fn a_card_goes_from_backlog_to_done_through_the_builder_reviewer_and_approver_on_one_pr() {
+fn a_card_goes_from_backlog_to_approving_through_the_builder_reviewer_and_approver_on_one_pr() {
     let b = Board::new("board_flow");
     let (builder, reviewer, approver) = (b.on_bot("Builder"), b.on_bot("Reviewer"), b.on_bot("Approver"));
     let mut setup = BoardSetup::default();
@@ -124,8 +125,9 @@ fn a_card_goes_from_backlog_to_done_through_the_builder_reviewer_and_approver_on
 
     wait_for("pinned to try the merge", || b.card(&card.id).person.is_some());
     let ready = b.card(&card.id);
-    assert_eq!((ready.column, ready.pr.unwrap().number, ready.requests.len()), (pinned_core::work_board::Column::ReadyToDeploy, 12, 1));
+    assert_eq!((ready.column, ready.pr.as_ref().unwrap().number, ready.requests.len()), (pinned_core::work_board::Column::ReadyToDeploy, 12, 1));
     assert_eq!(ready.person.as_deref(), Some("The Approver approved the merge, but pinned could not merge PR #12: the team has no GitHub key"));
-    b.call(&b.bob, serde_json::from_value(json!({ "op": "card_act", "card": card.id, "act": { "act": "merged" } })).unwrap()).unwrap();
-    assert_eq!(b.card(&card.id).column, pinned_core::work_board::Column::Done);
+    let merge = || b.call(&b.bob, serde_json::from_value(json!({ "op": "card_act", "card": card.id, "act": { "act": "merged" } })).unwrap());
+    assert_eq!(merge(), Err("pinned could not merge PR #12: the team has no GitHub key".into()));
+    assert_eq!(b.card(&card.id), ready, "a merge GitHub did not do leaves the card where it is");
 }

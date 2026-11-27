@@ -16,7 +16,7 @@
 //! Ready to deploy  → Approving                             pinned, when the Approver is free
 //! Approving        → Done                                  the Approver scored the bar and pinned merged the PR
 //! Approving        → Ready to deploy                       below the bar, or the merge failed: a person decides
-//! Ready to deploy  → Done                                  a person merged the PR
+//! Ready to deploy  → Done                                  a person pressed Merge! and pinned merged the PR
 //! Ready to deploy  → Ready to dev                          a person's send-back
 //! ```
 //!
@@ -324,7 +324,8 @@ pub enum CardAct {
     SendBack { request: String },
     /// A card waiting on a person in review goes to Ready to deploy.
     Pass,
-    /// The person merged its PR: Ready to deploy, or Approving with no run, to Done.
+    /// A person merges its PR through pinned: Ready to deploy, or Approving with no run, to Done.
+    /// The hub merges the PR first and moves the card only once GitHub merged it.
     Merged,
 }
 
@@ -497,7 +498,7 @@ impl Card {
                     return Err("the card has no PR to merge".into());
                 }
                 self.person = None;
-                self.go(Column::Done, None, by, "merged", at);
+                self.go(Column::Done, None, by, "merged the PR", at);
             }
         }
         Ok(())

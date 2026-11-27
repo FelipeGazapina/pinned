@@ -74,7 +74,7 @@ function wbActsHtml(card) {
   if (card.column === "backlog") acts.push(act("queue", "Queue", "tc-primary"));
   if (card.person) acts.push(act("resume", card.round >= card.round_limit && card.column === "ready_to_dev" ? "Give more rounds" : "Resume", "tc-primary"));
   if (card.person && card.column === "in_review") acts.push(act("pass", "Pass to deploy"));
-  if (card.column === "ready_to_deploy" || (card.column === "approving" && !card.run)) acts.push(act("merged", "I merged it", "tc-primary"));
+  if (card.column === "ready_to_deploy" || (card.column === "approving" && !card.run)) acts.push(act("merged", "Merge!", "tc-primary"));
   if (["ready_to_review", "in_review", "ready_to_deploy"].includes(card.column)) acts.push(act("send_back", "Send back…", "tc-quiet"));
   return acts.length ? `<div class="tc-actions wb-acts">${acts.join("")}</div>` : "";
 }

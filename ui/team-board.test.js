@@ -104,7 +104,7 @@ test("a card the Approver did not approve shows its PR, round, score and why it 
   assert.match(html, /round 2 of 3/);
   assert.match(html, /80\/90/);
   assert.match(html, /did not approve the merge/);
-  assert.match(html, /data-wb-act="merged"/);
+  assert.match(html, /data-wb-act="merged"[^>]*>Merge!</);
   assert.match(html, /data-wb-act="send_back"/);
 });
 

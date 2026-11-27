@@ -8,7 +8,7 @@ use super::queue::{self, Asked};
 use super::{db, push, Scope};
 use crate::hub::{Account, Hub};
 use pinned_core::teams::TeamEvent;
-use pinned_core::work_board::{next_picks, with_profile, Agent, BoardSetup, BoardView, Card, CardAct, Report};
+use pinned_core::work_board::{next_picks, with_profile, Agent, BoardSetup, BoardView, Card, CardAct, CardPr, Report};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 use uuid::Uuid;
@@ -53,11 +53,32 @@ pub async fn add_card(hub: &Arc<Hub>, s: &Scope, title: &str, brief: &str, proje
     Ok(card)
 }
 
-/// Any member: queue, resume, send back, pass or mark merged.
+/// Any member: queue, resume, send back, pass or merge. A merge merges the card's PR with the
+/// team's GitHub key first; when GitHub refuses, the card stays where it is and the member reads why.
 pub async fn card_act(hub: &Arc<Hub>, s: &Scope, card: &str, act: CardAct) -> Result<Card, String> {
     let setup = setup(hub, s.team.id).await?;
     let member = s.member.to_string();
-    change(hub, &s.team, parse_id(card)?, |c| c.act(act.clone(), &member, &setup, now())).await
+    let id = parse_id(card)?;
+    if act == CardAct::Merged {
+        let mut card: Card = read(db::card(&hub.db, s.team.id, id).await?.ok_or("the board has no such card")?, "card")?;
+        let pr = card.pr.clone();
+        card.act(CardAct::Merged, &member, &setup, now())?;
+        let pr = pr.ok_or("the card has no PR to merge")?;
+        let merged = async {
+            let (github, repo) = github_of(hub, &s.team, &pr).await?;
+            github.put(&format!("/repos/{repo}/pulls/{}/merge", pr.number), &serde_json::json!({})).await?;
+            Ok::<_, String>(())
+        };
+        merged.await.map_err(|e| format!("pinned could not merge PR #{}: {e}", pr.number))?;
+    }
+    change(hub, &s.team, id, |c| c.act(act.clone(), &member, &setup, now())).await
+}
+
+/// The team's GitHub, with its own key, and the `owner/name` of the repository of `pr`.
+async fn github_of(hub: &Arc<Hub>, team: &Arc<Account>, pr: &CardPr) -> Result<(pinned_core::github::Client, String), String> {
+    let token = hub.connectors(team).await?.github_token().ok_or("the team has no GitHub key")?;
+    let repo = pr.url.strip_prefix("https://github.com/").and_then(|path| path.split("/pull/").next()).filter(|r| r.split('/').count() == 2).ok_or("the PR's link is not a GitHub pull request")?;
+    Ok((pinned_core::github::Client::new(&token), repo.to_owned()))
 }
 
 /// Owner only. Each seat's bot must be one of the team's bots.
@@ -201,9 +222,7 @@ async fn approve(hub: &Arc<Hub>, team: &Arc<Account>, card: &Card) {
     let (Some(pr), Some(verdict), Ok(id)) = (&card.pr, &card.verdict, parse_id(&card.id)) else { return };
     let approved = card.approved();
     let merged = async {
-        let token = hub.connectors(team).await?.github_token().ok_or("the team has no GitHub key")?;
-        let repo = pr.url.strip_prefix("https://github.com/").and_then(|path| path.split("/pull/").next()).filter(|r| r.split('/').count() == 2).ok_or("the PR's link is not a GitHub pull request")?;
-        let github = pinned_core::github::Client::new(&token);
+        let (github, repo) = github_of(hub, team, pr).await?;
         let pull = github.get(&format!("/repos/{repo}/pulls/{}", pr.number)).await?;
         let sha = pull["head"]["sha"].as_str().ok_or("the PR has no head commit")?;
         let state = if approved { "success" } else { "failure" };
