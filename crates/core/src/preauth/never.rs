@@ -22,6 +22,9 @@ pub struct AskCtx<'a> {
     pub worktree: &'a Path,
     /// The session's scratch dir. Writes there are fine.
     pub scratch: Option<&'a Path>,
+    /// Temp folders a delete may run strictly below, none of which holds the worktree. Empty holds
+    /// every delete there.
+    pub temp: &'a [PathBuf],
     pub home: &'a Path,
     /// The session's Claude home, `CLAUDE_CONFIG_DIR`, when it is known. pinned runs an added
     /// account with its own, which has no `.claude` component.
@@ -113,6 +116,8 @@ pub fn never(ctx: &AskCtx, ask: &Ask) -> Option<NeverHit> {
     match ask {
         Ask::Bash { command } => {
             let cwd = Some(scan.abs(ctx.cwd));
+            scan.temp_ok = scan.temp_line(command);
+            scan.plain_ok = scan.plain_line(command);
             scan.line(command, cwd, 0);
             scan.finish_line();
         }
@@ -156,7 +161,7 @@ fn parts(p: &Path) -> VecDeque<Part> {
 /// that doesn't exist yet too: the part that exists resolves, the rest is appended. A dangling
 /// symlink resolves to where it points, since a write through it creates that file. Walking one
 /// component at a time also puts a `..` after a missing component in the right place.
-fn walk(abs: &Path) -> PathBuf {
+pub(super) fn walk(abs: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     let mut todo = parts(abs);
     let mut hops = 0;
@@ -194,7 +199,7 @@ fn comps(text: &str) -> Vec<String> {
     text.split(['/', '\\']).filter(|c| !c.is_empty() && *c != ".").map(str::to_ascii_lowercase).collect()
 }
 
-fn path_comps(p: &Path) -> Vec<String> {
+pub(super) fn path_comps(p: &Path) -> Vec<String> {
     p.components().filter_map(|c| match c {
         Component::Normal(n) => Some(n.to_string_lossy().to_ascii_lowercase()),
         _ => None,
@@ -354,7 +359,7 @@ struct Lexer<'h> {
 }
 
 fn blank(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\r')
+    matches!(c, ' ' | '\t')
 }
 
 fn lex(src: &str, home: &str, claude_home: Option<&str>) -> Vec<Segment> {
@@ -909,10 +914,32 @@ const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash", "fish"];
 /// Programs that run what they read, so downloaded text must not reach them.
 const RUNNERS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "python", "python3", "python2", "node", "deno", "bun", "perl", "ruby", "php", "eval", "source", "."];
 
+/// What on a line points git at a repository other than the one in its folder, `env` moving it
+/// included, lowercase.
+const REPO_NAMED: &[&str] = &["--git-dir", "--work-tree", "git_dir=", "git_work_tree=", "core.worktree=", "env -c", "--chdir"];
+
+/// The only programs a temp line runs: plain deletes.
+const TEMP_DELETES: &[&str] = &["rm", "rmdir", "unlink"];
+/// Characters a temp line may not hold anywhere: expansions, groups, substitutions and redirects.
+const TEMP_BARRED_LINE: [char; 10] = ['$', '~', '`', '<', '>', '(', ')', '{', '}', '\r'];
+/// Characters a temp target may not hold: the zsh extended-glob operators `^` and `#` among them.
+const TEMP_BARRED_PATH: [char; 6] = ['!', '@', '+', ';', '^', '#'];
+
+/// Characters a plain line may not hold: groups, substitutions, negation and carriage returns. `&` is barred apart from `&&`.
+const PLAIN_BARRED_LINE: [char; 7] = ['(', ')', '{', '}', '!', '`', '\r'];
+/// The options `xargs` may take before its `git rm` on a plain line.
+const PLAIN_XARGS: &[&str] = &["-0", "-r", "-t", "--null", "--no-run-if-empty", "--verbose"];
+
 fn is_assign(t: &str) -> bool {
     let Some((name, _)) = t.split_once('=') else { return false };
     let mut chars = name.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether a word is `--parents` or a leading part of it, which GNU `rmdir` takes for it (`--p`, `--pa`, …).
+fn parents_word(t: &str) -> bool {
+    let name = t.split('=').next().unwrap_or("");
+    name.len() > 2 && "--parents".starts_with(name)
 }
 
 fn first_prog(words: &[Word]) -> Option<String> {
@@ -1019,9 +1046,40 @@ impl Cmd {
     }
 }
 
+/// Whether the paths a `git rm` on a plain line names stay in the folder it runs in: none is absolute, starts with
+/// `~`, holds `..`, or holds a variable. `words` start at `git`. Git refuses paths outside its repository, but a
+/// skipped `rm` must not be the only thing that holds such a path.
+fn rm_targets_stay(words: &[Word]) -> bool {
+    words.iter().skip(2).filter(|w| !w.text.starts_with('-')).all(|w| !w.text.starts_with(['/', '~']) && !w.text.contains("..") && w.var_at.is_none())
+}
+
+/// Whether one command of a plain line has the shape its program allows: git without `config` or a `-C`, `-c`,
+/// `--git-dir`, `--work-tree` or `--namespace`; a filter; `xargs` with the allowed options, then `git rm`; `env` or
+/// `nice` with nothing between it and `git rm`; and in both wrapper forms, `git rm` names only paths that stay
+/// ([`rm_targets_stay`]). A bare redirect runs nothing.
+fn plain_command(words: &[Word]) -> bool {
+    if words.iter().any(|w| is_assign(&w.text)) {
+        return false;
+    }
+    let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
+    match texts.as_slice() {
+        [] => true,
+        ["git", rest @ ..] => !rest.iter().any(|t| *t == "config" || *t == "-c" || t.starts_with("-C") || ["--git-dir", "--work-tree", "--namespace"].iter().any(|o| t.starts_with(o))),
+        ["grep" | "egrep" | "fgrep" | "sort" | "uniq" | "head" | "tail" | "tr" | "cut", ..] => true,
+        ["xargs", rest @ ..] => {
+            let opts = rest.iter().take_while(|&&t| PLAIN_XARGS.contains(&t)).count();
+            rest.get(opts..).is_some_and(|tail| tail.starts_with(&["git", "rm"]) && rm_targets_stay(&words[words.len() - tail.len()..]))
+        }
+        ["env" | "nice", "git", "rm", ..] => rm_targets_stay(&words[1..]),
+        _ => false,
+    }
+}
+
 /// The commands a segment runs: its program, and when it is a wrapper, every later word as a program
 /// too, since a wrapper's options (`timeout 30`, `nice -n 5`, `xargs -I {}`) can't be told from its command.
-fn commands(words: &[Word]) -> Vec<Cmd> {
+/// On a plain line (see [`Scan::plain_line`]) the `rm` of `xargs git rm` and `env git rm` is git's subcommand;
+/// on any other line it is the program, as on main.
+fn commands(words: &[Word], plain: bool) -> Vec<Cmd> {
     let mut i = 0;
     while i < words.len() && (is_assign(&words[i].text) || KEYWORDS.contains(&words[i].text.as_str())) {
         i += 1;
@@ -1036,7 +1094,11 @@ fn commands(words: &[Word]) -> Vec<Cmd> {
     if wrapper {
         for j in i + 1..words.len() {
             let t = words[j].text.as_str();
-            if t.starts_with('-') || is_assign(t) {
+            // `xargs git rm`: that `rm` is git's subcommand, which git's own check sees to. Only the words
+            // between the wrapper and `git` may stand there: `xargs` options that read no value, and none
+            // for the other wrappers. Any other word may take `git` as its value, so the `rm` is the program.
+            let gits_rm = plain && t == "rm" && j >= i + 2 && words[j - 1].text == "git" && words[i + 1..j - 1].iter().all(|w| stdin && matches!(w.text.as_str(), "-0" | "-r" | "-t" | "--null" | "--no-run-if-empty" | "--verbose"));
+            if t.starts_with('-') || is_assign(t) || gits_rm {
                 continue;
             }
             out.push(Cmd::new(&words[j..], stdin));
@@ -1067,6 +1129,14 @@ struct Scan<'c, 'a> {
     ctx: &'c AskCtx<'a>,
     work: PathBuf,
     scratch: Option<PathBuf>,
+    /// The temp roots, canonical.
+    temp: Vec<PathBuf>,
+    /// The whole line is plain temp deletes ([`Scan::temp_line`]), so a delete below a temp root may run.
+    temp_ok: bool,
+    /// The whole line is plain ([`Scan::plain_line`]), so its `xargs git rm` and `env git rm` are git's own deletes.
+    plain_ok: bool,
+    /// The line holds one of [`REPO_NAMED`].
+    repo_named: bool,
     /// The session's Claude home, canonical.
     claude: Option<PathBuf>,
     hits: Vec<NeverHit>,
@@ -1078,9 +1148,10 @@ const DEV_OK: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin
 
 impl<'c, 'a> Scan<'c, 'a> {
     fn new(ctx: &'c AskCtx<'a>) -> Self {
-        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, claude: None, hits: vec![], tagged: false, pushed: false };
+        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, temp: vec![], temp_ok: false, plain_ok: false, repo_named: false, claude: None, hits: vec![], tagged: false, pushed: false };
         scan.work = walk(&scan.abs(ctx.worktree));
         scan.scratch = ctx.scratch.map(|s| walk(&scan.abs(s)));
+        scan.temp = ctx.temp.iter().map(|t| walk(&scan.abs(t))).collect();
         scan.claude = ctx.claude_home.map(|c| walk(&scan.abs(c)));
         scan
     }
@@ -1099,6 +1170,93 @@ impl<'c, 'a> Scan<'c, 'a> {
 
     fn outside(&self, p: &Path) -> bool {
         !(p.starts_with(&self.work) || self.scratch.as_ref().is_some_and(|s| p.starts_with(s)))
+    }
+
+    /// Whether `p` is a temp root or below one, and not in the worktree.
+    fn in_temp(&self, p: &Path) -> bool {
+        self.temp.iter().any(|root| p.starts_with(root)) && !p.starts_with(&self.work)
+    }
+
+    /// Whether `p` is strictly below a temp root. A name right under any root that starts with
+    /// `pinned` or `claude` is theirs (pinned's guard settings, Claude Code's scratchpads), even when
+    /// another root sits inside it.
+    fn scrap(&self, p: &Path) -> bool {
+        let mut names = self.temp.iter().filter_map(|root| p.strip_prefix(root).ok()).map(|below| below.components().next()).peekable();
+        names.peek().is_some()
+            && names.all(|name| {
+                name.is_some_and(|name| {
+                    let name = name.as_os_str().to_string_lossy().to_ascii_lowercase();
+                    !name.starts_with("pinned") && !name.starts_with("claude")
+                })
+            })
+    }
+
+    /// Whether a delete of `w`, which resolves to `p`, only takes temp files. A glob stays in the
+    /// last name: a match before it may be a link that leads out, and a leading dot may match `..`.
+    fn temp_delete(&self, w: &Word, p: &Path) -> bool {
+        let plain_glob = |at: usize| {
+            let last = w.text.rsplit('/').next().unwrap_or("");
+            !w.text.contains("..") && !w.text[at..].contains('/') && !last.starts_with('.')
+        };
+        w.var_at.is_none() && w.glob_at.is_none_or(plain_glob) && self.scrap(p)
+    }
+
+    /// Whether the whole line is nothing but plain deletes of literal absolute temp paths. Only such
+    /// a line takes the temp allowance: every other line holds a delete below a temp root as on main.
+    fn temp_line(&self, line: &str) -> bool {
+        if line.contains(TEMP_BARRED_LINE) {
+            return false;
+        }
+        let claude_home = self.ctx.claude_home.map(|c| c.to_string_lossy().into_owned());
+        let segs = lex(line, &self.home(), claude_home.as_deref());
+        !segs.is_empty() && segs.iter().all(|seg| self.temp_command(seg))
+    }
+
+    /// Whether the whole line is plain: its commands are joined only by `|`, `&&`, `;` or newlines, and each has
+    /// the shape [`plain_command`] allows. Only a plain line trusts the folder the guard tracked from it, since a
+    /// `cd`, a function, a group or a background `&` can leave that folder other than the shell's.
+    fn plain_line(&self, line: &str) -> bool {
+        if line.contains(PLAIN_BARRED_LINE) || line.contains("||") || line.replace("&&", "").contains('&') {
+            return false;
+        }
+        let claude_home = self.ctx.claude_home.map(|c| c.to_string_lossy().into_owned());
+        lex(line, &self.home(), claude_home.as_deref()).iter().all(|seg| plain_command(&seg.words))
+    }
+
+    /// Whether a command of a temp line is a plain delete: `rm`, `rmdir` or `unlink`, at the top
+    /// level, with no redirect or here-document, options that are plain, and only temp targets.
+    fn temp_command(&self, seg: &Segment) -> bool {
+        let Some((prog, args)) = seg.words.split_first() else { return false };
+        if seg.depth != 0 || !seg.redirs.is_empty() || !seg.heredoc.is_empty() || prog.var_at.is_some() || !TEMP_DELETES.contains(&prog.text.as_str()) {
+            return false;
+        }
+        let cmd = Cmd::new(&seg.words, false);
+        let rmdir_parents = prog.text == "rmdir" && (cmd.has("p", &[]) || cmd.flag_texts().any(parents_word));
+        // macOS `rm` and `rmdir` stop reading options at the first operand, so every word after it,
+        // a `-…` one included, is a target.
+        let mut operands = false;
+        args.iter().all(|w| {
+            if !operands && w.text == "--" {
+                operands = true;
+                return true;
+            }
+            if !operands && w.text.starts_with('-') && w.text.len() > 1 {
+                return w.var_at.is_none() && w.glob_at.is_none() && !rmdir_parents;
+            }
+            operands = true;
+            self.temp_target(w)
+        })
+    }
+
+    /// Whether `w` is a literal absolute path that a temp delete may take: no `..` component, no
+    /// barred character, a glob only in the last name and not a name of glob characters alone (`*`, `**`, `?*`), and
+    /// a temp path by [`Scan::temp_delete`]. Relative paths and `~` never qualify.
+    fn temp_target(&self, w: &Word) -> bool {
+        let t = w.text.as_str();
+        let literal = t.starts_with('/') && !t.contains(TEMP_BARRED_PATH) && !t.split('/').any(|c| c == "..");
+        let last = t.rsplit('/').next().unwrap_or("");
+        let glob_last = w.glob_at.is_none_or(|at| !t[at..].contains('/') && !last.chars().all(|c| matches!(c, '*' | '?' | '[' | ']')));
+        literal && glob_last && self.tgt(&None, w).path.is_some_and(|p| self.temp_delete(w, &p))
     }
 
     fn home(&self) -> String {
@@ -1198,6 +1356,8 @@ impl<'c, 'a> Scan<'c, 'a> {
             return;
         }
         self.production(line);
+        let lower = line.to_ascii_lowercase();
+        self.repo_named |= REPO_NAMED.iter().any(|name| lower.contains(name));
         let claude_home = self.ctx.claude_home.map(|c| c.to_string_lossy().into_owned());
         let segs = lex(line, &self.home(), claude_home.as_deref());
         let mut frames = vec![Frame { cwd, fetched: false }];
@@ -1236,7 +1396,7 @@ impl<'c, 'a> Scan<'c, 'a> {
             self.secret_word(&cwd, w);
         }
 
-        let cmds = commands(&seg.words);
+        let cmds = commands(&seg.words, self.plain_ok);
         for c in &cmds {
             self.cmd(&cwd, c, nest, prior_fetch);
         }
@@ -1340,8 +1500,9 @@ impl<'c, 'a> Scan<'c, 'a> {
             let bad = match &t.path {
                 _ if t.top_var => true,
                 None => true,
+                // A glob that starts the path is held only when forced or recursive.
                 Some(_) if t.top_glob => risky,
-                Some(p) => self.outside(p) || (risky && w.var_at.is_none() && w.glob_at.is_none() && *p == self.work),
+                Some(p) => (self.outside(p) && !(self.temp_ok && self.temp_delete(w, p))) || (risky && w.var_at.is_none() && w.glob_at.is_none() && *p == self.work),
             };
             if bad {
                 self.hit(NeverItem::DeleteOutside, format!("{what} {}", short(&w.text)));
@@ -1403,6 +1564,9 @@ impl<'c, 'a> Scan<'c, 'a> {
             "cp" | "install" | "mv" | "ln" | "tee" | "touch" | "mkdir" | "truncate" | "mkfifo" | "sed" | "dd" | "curl" | "wget" => {
                 let words = self.write_args(c);
                 self.write_words(cwd, words);
+                if prog == "mv" {
+                    self.bring_into_temp(cwd, c);
+                }
             }
             "npm" | "pnpm" | "yarn" | "bun" | "npx" | "bunx" | "cargo" | "pip" | "pip3" | "pip2" | "pipx" | "python" | "python3" | "python2" | "uv" | "uvx" | "poetry" | "brew" | "apt" | "apt-get" | "aptitude"
             | "dnf" | "yum" | "apk" | "zypper" | "pacman" | "gem" | "go" | "conda" | "mamba" | "micromamba" | "rustup" | "volta" | "asdf" | "mise" | "composer" | "bundle" | "dotnet" => {
@@ -1494,17 +1658,20 @@ impl<'c, 'a> Scan<'c, 'a> {
         }
         match sub {
             "push" => self.git_push(&rest),
-            "clean" => {
+            // Both delete in the repository they run in. `git rm` refuses a path outside it.
+            "clean" | "rm" => {
                 let mut dir = cwd.clone();
                 for d in dirs {
                     let t = self.tgt(&dir, d);
                     dir = if t.top_var || t.top_glob { None } else { t.path };
                 }
-                if dir.as_deref().is_none_or(|d| self.outside(d)) {
-                    self.hit(NeverItem::DeleteOutside, "git clean outside the worktree");
+                if dir.as_deref().is_none_or(|d| self.outside(&walk(d))) || (sub == "rm" && self.repo_named) {
+                    self.hit(NeverItem::DeleteOutside, format!("git {sub} outside the worktree"));
                 }
-                let pos = rest.positionals();
-                self.delete(&dir, &pos, false, "git clean");
+                if sub == "clean" {
+                    let pos = rest.positionals();
+                    self.delete(&dir, &pos, false, "git clean");
+                }
             }
             "config" => {
                 let read = rest.has("l", &["get", "get-all", "get-regexp", "list", "get-urlmatch", "show-origin", "show-scope", "name-only"]);
@@ -1699,6 +1866,36 @@ impl<'c, 'a> Scan<'c, 'a> {
         }
     }
 
+    /// Holds an `mv` that brings into a temp folder what a delete may not take where it is: deleting
+    /// it there afterwards would run unasked.
+    fn bring_into_temp(&mut self, cwd: &Option<PathBuf>, c: &Cmd) {
+        if self.temp.is_empty() {
+            return;
+        }
+        let pos = c.positionals();
+        let (sources, dest) = match (c.value('t', "target-directory"), pos.split_last()) {
+            (Some(dir), _) => (pos.iter().copied().filter(|w| w.text != dir.text).collect(), dir),
+            (None, Some((last, rest))) if !rest.is_empty() => (rest.to_vec(), (*last).clone()),
+            _ => return,
+        };
+        let t = self.tgt(cwd, &dest);
+        let dest = t.path.filter(|_| !t.top_var && !t.top_glob).map(|p| walk(&p));
+        let into_temp = dest.as_deref().map(|d| self.in_temp(d));
+        // The sources `xargs` reads can't be known.
+        if c.stdin_args && into_temp == Some(true) {
+            self.hit(NeverItem::DeleteOutside, format!("xargs {} into a temp folder: sources unknown", c.prog));
+        }
+        for w in sources {
+            let t = self.tgt(cwd, w);
+            let from = t.path.filter(|_| !t.top_var).map(|p| walk(&p));
+            let free = from.as_deref().is_some_and(|p| !self.outside(p) || self.temp_delete(w, p));
+            // To a place the shell computes, only a source known to be elsewhere is held.
+            if !free && into_temp.unwrap_or(from.is_some()) {
+                self.hit(NeverItem::DeleteOutside, format!("{} {} into a temp folder", c.prog, short(&w.text)));
+            }
+        }
+    }
+
     fn write_words(&mut self, cwd: &Option<PathBuf>, words: Vec<Word>) {
         for w in &words {
             self.write_word(cwd, w);
@@ -1833,7 +2030,7 @@ mod tests {
     }
 
     fn ctx<'a>(f: &'a Fx, branch: Option<&'a str>) -> AskCtx<'a> {
-        AskCtx { worktree: &f.work, scratch: Some(&f.scratch), home: &f.home, claude_home: Some(&f.claude), cwd: &f.work, default_branch: "main", current_branch: branch }
+        AskCtx { worktree: &f.work, scratch: Some(&f.scratch), temp: &[], home: &f.home, claude_home: Some(&f.claude), cwd: &f.work, default_branch: "main", current_branch: branch }
     }
 
     fn item(f: &Fx, branch: Option<&str>, ask: &Ask) -> Option<NeverItem> {
@@ -1894,6 +2091,8 @@ mod tests {
             ("(cd crates && true); rm -rf ../x", Some(DeleteOutside)),
             // Wrappers and nesting.
             ("echo ~ | xargs rm -rf", Some(DeleteOutside)),
+            // After `-u`, `git` is a user, so this `rm` is the program.
+            ("sudo -u git rm -rf ~", Some(DeleteOutside)),
             ("bash -c 'rm -rf ~'", Some(DeleteOutside)),
             ("sh -c \"cd /tmp && rm -rf y\"", Some(DeleteOutside)),
             ("bash -lc 'git log; rm -rf ~'", Some(DeleteOutside)),
@@ -2360,6 +2559,7 @@ mod tests {
             ("git worktree list", None),
             ("git clean -n", None),
             ("git clean -fd", None),
+            ("git ls-files -z | xargs -0 git rm -q -f", None),
             ("cargo test -p pinned-core", None),
             ("cargo test -- --test-threads=4", None),
             ("cargo fmt --all", None),

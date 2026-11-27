@@ -86,7 +86,7 @@ pub fn decide(payload: &str, env: &HookEnv, ask: impl FnOnce(Message) -> Result<
     let worktree = std::fs::canonicalize(&worktree).unwrap_or(worktree);
     let current_branch = repo_top(&cwd).and_then(|top| branch(&top));
     let default_branch = repo_top(&cwd).and_then(|top| default_branch(&top)).unwrap_or_else(|| "main".into());
-    let ctx = AskCtx { worktree: &worktree, scratch: None, home: &env.home, claude_home: env.claude_home.as_deref(), cwd: &cwd, default_branch: &default_branch, current_branch: current_branch.as_deref() };
+    let ctx = AskCtx { worktree: &worktree, scratch: None, temp: &[], home: &env.home, claude_home: env.claude_home.as_deref(), cwd: &cwd, default_branch: &default_branch, current_branch: current_branch.as_deref() };
     let hit = never(&ctx, &tool_ask)?;
     let tool = hook["tool_name"].as_str()?;
     if hides_command(&step_text(tool, &tool_ask, input)) {
