@@ -9,13 +9,13 @@
 //!    `<claude tmp>/<slug>/<session_id>`, counts as inside). A `git clean` or `git rm` is such a
 //!    delete when it runs outside, and so is a `git rm` on a line that names a repository to git or
 //!    moves it with `env`. A delete strictly below a temp folder (`$TMPDIR`, and `/tmp` on Unix)
-//!    runs, unless one of these holds: a name right under that folder starts with `pinned` or
-//!    `claude`; the path holds a variable; a glob is more than a plain last name, or sits right in
-//!    that folder; the program is `shred`; or the line also runs `ln`, `mv`, `cp`, `install`,
-//!    `rsync`, a shell or another interpreter. A temp folder that holds the home, the worktree, the
-//!    session's start folder or its Claude home does not count. An `mv` or `ln` into a temp folder
-//!    is held too, unless its source is in the worktree or the scratch folder, or is one a temp
-//!    delete may take;
+//!    runs only on a line that is nothing but `rm`, `rmdir` or `unlink` of literal absolute paths
+//!    there: no other command, no expansion, substitution, group or redirect, and no `..`, relative
+//!    path or `~` (see `never::temp_line`). Inside that rule a name right under the folder that
+//!    starts with `pinned` or `claude` is held, and so is a glob outside the last name, or `*`. A
+//!    temp folder that holds the home, the worktree, the session's start folder or its Claude home
+//!    does not count. An `mv` into a temp folder is held too, unless its source is in the worktree or
+//!    the scratch folder, or is one a temp delete may take;
 //! 2. a force-push, as the never list finds it, a branch delete by push included;
 //! 3. dropping a database: `dropdb`, or a SQL client named in a command whose text drops a
 //!    database, a schema or a table, or truncates one.
@@ -349,51 +349,43 @@ mod tests {
         ]);
     }
 
-    #[test]
+    /// Each command asks the owner about a delete outside the worktree, with `cwd` as the call's cwd.
     #[cfg(unix)]
-    fn a_temp_delete_is_held_when_its_line_can_make_or_move_a_link() {
-        let f = fx(false);
-        asks(&f, &f.env, &[
-            "ln -s {home} {tmp}/x/a && rm -rf {tmp}/x/a/*",
-            "ln -s {work}/sub {tmp}/x/a && rm -rf {tmp}/x/a/*",
-            "rm -rf {tmp}/x/a/*; ln -s {work}/sub {tmp}/x/a",
-            "mv sub {tmp}/x/m && rm -rf {tmp}/x/m",
-            "cp -R sub {tmp}/x/c && rm -rf {tmp}/x/c",
-            "install -d {tmp}/x/i && rm -rf {tmp}/x/i",
-            "rsync -a sub/ {tmp}/x/r/ && rm -rf {tmp}/x/r",
-            "sh make.sh && rm -f {tmp}/x/b",
-            "bash make.sh; rm -f {tmp}/x/b",
-            "zsh make.sh && find {tmp}/x/b -delete",
-            "bash -c 'rm -rf {tmp}/x/b'",
-            "python make.py && rm -f {tmp}/x/b",
-            "python3.12 make.py && rm -f {tmp}/x/b",
-            "node make.js && rm -f {tmp}/x/b",
-            "perl make.pl && rm -f {tmp}/x/b",
-            "ruby make.rb && rm -f {tmp}/x/b",
-            "eval make && rm -f {tmp}/x/b",
-            "source env.sh && rm -f {tmp}/x/b",
-            ". env.sh && rm -f {tmp}/x/b",
-            "cd {tmp}/x && mv {work}/sub a && rm a*",
-        ]);
-        runs(&f, &f.env, &[
-            "ln -s sub link && rm -rf target",
-            "cp a b && rm -rf {scratch}/x",
-            "echo hi > {tmp}/x/log && rm -f {tmp}/x/log",
-        ]);
+    fn asks_at(f: &Fx, env: &GuardEnv, cwd: &Path, commands: &[&str]) {
+        let asked = ("ask".to_owned(), "pinned holds this command for the owner (delete outside the worktree).".to_owned());
+        for command in commands {
+            let command = sub(f, command);
+            let payload = json!({ "session_id": "s1", "tool_name": "Bash", "tool_input": { "command": command }, "cwd": cwd, "permission_mode": "default" }).to_string();
+            assert_eq!(held(decide(&payload, env)), Some(asked.clone()), "{command}");
+        }
     }
 
     #[test]
     #[cfg(unix)]
-    fn a_move_or_link_that_brings_outside_data_into_temp_is_held() {
+    fn a_plain_temp_delete_runs() {
+        let f = fx(false);
+        runs(&f, &f.env, &[
+            "rm -f {tmp}/x-unused",
+            "rm -rf {tmp}/pg.Kmep {tmp}/x/*.log {tmp}/x-pgdir.txt",
+            "rm -rf {tmp}/x/a && rm -f {tmp}/x/b.log",
+            "rm -rf -- {tmp}/x/a; rm -f {tmp}/x/b",
+            "rm -rf \"{tmp}/x/a\"",
+            "rm -rf '{tmp}/x/a'",
+            "rmdir {tmp}/x/empty",
+            "unlink {tmp}/x/f",
+        ]);
+    }
+
+    /// A `mv` that brings outside data into a temp folder is held: a later line's temp delete would
+    /// otherwise remove what the owner had outside it. A `ln` is not: a delete walks a link to its target.
+    #[test]
+    #[cfg(unix)]
+    fn a_move_that_brings_outside_data_into_temp_is_held() {
         let f = fx(false);
         asks(&f, &f.env, &[
             "mv {elsewhere} {tmp}/x/o",
             "mv a {elsewhere}/b {tmp}/x",
             "mv -t {tmp}/x {elsewhere}/f",
-            "ln -s {home} {tmp}/x/a",
-            "ln {elsewhere}/f {tmp}/x/h",
-            "ln -s ../../elsewhere {tmp}/x/a",
-            "cd {tmp}/x && ln -s {home}",
             "mv {elsewhere} \"$TMPDIR/o\"",
             "mv \"$d\" {tmp}/x/",
             "echo {elsewhere} | xargs -I {} mv {} {tmp}/x/",
@@ -401,6 +393,10 @@ mod tests {
             "mv {tmp}/* {tmp}/x/",
         ]);
         runs(&f, &f.env, &[
+            "ln -s {home} {tmp}/x/a",
+            "ln {elsewhere}/f {tmp}/x/h",
+            "ln -s ../../elsewhere {tmp}/x/a",
+            "cd {tmp}/x && ln -s {home}",
             "mv sub {tmp}/x/m",
             "ln -s {work}/sub {tmp}/x/a",
             "ln -s b {tmp}/x/a",
@@ -415,12 +411,165 @@ mod tests {
         ]);
     }
 
+    /// Hole 1: a `cd` in the same line runs in another process, so the delete does not follow it.
     #[test]
     #[cfg(unix)]
-    fn shred_never_takes_the_temp_allowance() {
+    fn hole_1_a_cd_joined_by_background_pipe_or_or_is_held() {
         let f = fx(false);
-        asks(&f, &f.env, &["shred -u {tmp}/x/a", "shred {tmp}/x/a", "find {tmp}/x -type f -exec shred -u {} +"]);
-        runs(&f, &f.env, &["shred -u secret.bin", "find {tmp}/x -type f -delete"]);
+        asks(&f, &f.env, &["cd {tmp}/x & rm -rf ../src", "cd {tmp}/x | rm -rf ../src", "cd {tmp}/nope || rm -rf ../src"]);
+    }
+
+    /// Hole 2: the shell's extglob runs under `shopt`, and the lexer ends a word at `(`.
+    #[test]
+    #[cfg(unix)]
+    fn hole_2_an_extglob_pattern_is_held() {
+        let f = fx(false);
+        asks(&f, &f.env, &["shopt -s extglob; rm -rf {tmp}/!(pinned)", "cd {tmp} && rm -rf !(pinned)", "find {tmp}/!(pinned) -delete"]);
+    }
+
+    /// Hole 3: a program named by a variable or a substitution is not `ln`, whatever it expands to.
+    #[test]
+    #[cfg(unix)]
+    fn hole_3_a_program_named_by_a_variable_or_a_substitution_is_held() {
+        let f = fx(false);
+        asks(&f, &f.env, &[
+            "L=ln; $L -s ~ {tmp}/x/l && rm -rf {tmp}/x/l/*",
+            "\"${L:-ln}\" -s ~ {tmp}/x/l && rm -rf {tmp}/x/l/*",
+            "$(echo ln) -s ~ {tmp}/x/l && rm -rf {tmp}/x/l/*",
+        ]);
+    }
+
+    /// Hole 4: a command before the delete can write a tree that the delete then reaches.
+    #[test]
+    #[cfg(unix)]
+    fn hole_4_a_build_or_unpack_before_the_delete_is_held() {
+        let f = fx(false);
+        asks(&f, &f.env, &[
+            "./w.sh && rm -rf {tmp}/x/l/*",
+            "make && rm -rf {tmp}/x/l/*",
+            "git clone ./r {tmp}/x/c && rm -rf {tmp}/x/c/l/*",
+            "unzip a.zip -d {tmp}/x && rm -rf {tmp}/x/l/*",
+            "tar -xf a.tar -C {tmp}/x && rm -rf {tmp}/x/a/*",
+        ]);
+    }
+
+    /// Hole 5: `find -exec mv` moves a file out of temp. Held on main too.
+    #[test]
+    #[cfg(unix)]
+    fn hole_5_find_exec_mv_out_of_a_temp_folder_is_held() {
+        let f = fx(false);
+        asks(&f, &f.env, &["find {tmp}/x -exec mv {} ~/.ssh/ \\;"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_temp_delete_beside_another_command_is_held() {
+        let f = fx(false);
+        asks(&f, &f.env, &[
+            "ln -s {home} {tmp}/x/a && rm -rf {tmp}/x/a/*",
+            "ln -s {work}/sub {tmp}/x/a && rm -rf {tmp}/x/a/*",
+            "rm -rf {tmp}/x/a/*; ln -s {work}/sub {tmp}/x/a",
+            "mv sub {tmp}/x/m && rm -rf {tmp}/x/m",
+            "cp -R sub {tmp}/x/c && rm -rf {tmp}/x/c",
+            "install -d {tmp}/x/i && rm -rf {tmp}/x/i",
+            "rsync -a sub/ {tmp}/x/r/ && rm -rf {tmp}/x/r",
+            "sh make.sh && rm -f {tmp}/x/b",
+            "bash make.sh; rm -f {tmp}/x/b",
+            "zsh make.sh && find {tmp}/x/b -delete",
+            "bash -c 'rm -rf {tmp}/x/b'",
+            "python make.py && rm -f {tmp}/x/b",
+            "node make.js && rm -f {tmp}/x/b",
+            "eval make && rm -f {tmp}/x/b",
+            "source env.sh && rm -f {tmp}/x/b",
+            "sudo rm -rf {tmp}/x/a",
+            "env rm -rf {tmp}/x/a",
+        ]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_temp_delete_in_a_group_redirect_or_second_line_is_held() {
+        let f = fx(false);
+        asks(&f, &f.env, &[
+            "rm -rf {tmp}/x/a > {tmp}/x/log",
+            "(rm -rf {tmp}/x/a)",
+            "rm -rf {tmp}/x/a; cargo test",
+            "cargo test && rm -rf {tmp}/x/a",
+            "rm -rf {tmp}/x/{a,b}",
+            "rm -rf {tmp}/x/a\nrm -rf {home}/x",
+            "rm -rf {tmp}/x/$F",
+            "rm -rf {tmp}/x/../..",
+            "rm -rf ~/tmp/x",
+        ]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_temp_delete_by_shred_or_find_is_held() {
+        let f = fx(false);
+        asks(&f, &f.env, &["shred -u {tmp}/x/a", "find {tmp}/x -delete", "find {tmp}/x -type f -exec shred -u {} +"]);
+        runs(&f, &f.env, &["shred -u secret.bin"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_relative_delete_in_a_temp_folder_is_held() {
+        let f = fx(false);
+        asks_at(&f, &f.env, &f.temp, &["rm -rf a", "rm -rf -- -x"]);
+        asks(&f, &f.env, &["cd {tmp}/x && rm -rf a"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_rmdir_with_parents_is_held() {
+        let f = fx(false);
+        asks(&f, &f.env, &["rmdir -p {tmp}/x/a/b"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_temp_path_that_resolves_outside_the_temp_root_is_held() {
+        let f = fx(false);
+        std::os::unix::fs::symlink(&f.elsewhere, f.temp.join("x/out")).unwrap();
+        std::os::unix::fs::symlink(&f.home, f.temp.join("x/l")).unwrap();
+        asks(&f, &f.env, &["rm -rf {tmp}/x/out/*", "rm -rf {tmp}/x/out/a", "rm -rf {tmp}/x/l/*", "rm -f {tmp}/x/l"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_temp_name_starting_pinned_or_claude_is_held_at_any_root() {
+        let f = fx(false);
+        asks(&f, &f.env, &[
+            "rm -rf {tmp}/pinned-1",
+            "rm -rf {tmp}/pinned-1/x",
+            "rm -rf {tmp}/Claude-501/x",
+            "rm -f {tmp}/Pinned-1-a/claude-settings-worker.json",
+        ]);
+        // A temp root inside another one: the name right under the outer root counts too.
+        let nested = GuardEnv { temp: vec![f.temp.join("claude-501"), f.temp.clone()], ..f.env.clone() };
+        asks(&f, &nested, &["rm -rf {tmp}/claude-501/s2"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_temp_glob_sits_in_the_last_name_and_is_not_bare() {
+        let f = fx(false);
+        asks(&f, &f.env, &[
+            "rm -rf {tmp}/x*",
+            "rm -rf {tmp}/*",
+            "rm -rf {tmp}/x/*",
+            "rm -rf {tmp}/x/.*",
+            "rm -rf {tmp}/x/.hidden*",
+            "rm -rf {tmp}/*/a",
+            "rm -rf {tmp}/x/*/pg",
+        ]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_temp_root_or_its_contents_as_a_whole_is_held() {
+        let f = fx(false);
+        asks(&f, &f.env, &["rm -rf {tmp}", "rm -rf {tmp}/x/a/../.."]);
     }
 
     #[test]
@@ -435,70 +584,15 @@ mod tests {
         asks(&f, &claude, &["rm -f {tmp}/x/a.log"]);
     }
 
+    /// A delete that only a session's own scratch folder holds runs as before, relative or not.
     #[test]
     #[cfg(unix)]
-    fn a_relative_glob_in_a_temp_root_is_held() {
+    fn a_delete_in_the_session_scratch_folder_runs() {
         let f = fx(false);
-        asks(&f, &f.env, &[
-            "cd {tmp} && rm -f pinned*",
-            "cd {tmp} && rm pinned*",
-            "cd {tmp} && find pinned* -delete",
-            "cd {tmp}/claude-501 && rm x*",
-            "cd {tmp}/x && find .* -delete",
-            "cd {tmp}/x && shred *",
-        ]);
-        runs(&f, &f.env, &["cd {tmp}/x && rm *.log", "rm *.log"]);
-        // Claude Code's scratchpads sit in a temp folder, and the session's own still counts as inside.
         let claude_tmp = f.temp.join("claude-501");
         let own = claude_tmp.join(crate::machine::claude_slug(&f.work)).join("s1");
         let env = GuardEnv { claude_tmp, ..f.env.clone() };
         runs(&f, &env, &[&format!("cd {} && rm *.o", own.display())]);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn a_worker_cleans_temp_files_and_the_rest_stays_held() {
-        let f = fx(false);
-        std::os::unix::fs::symlink(&f.elsewhere, f.temp.join("out")).unwrap();
-        for command in [
-            "rm -f {tmp}/x-unused",
-            "rm -rf {tmp}/x-base-target",
-            "rm -f {tmp}/x/a.log",
-            "rm -rf {tmp}/pg.Kmep {tmp}/x/*.log {tmp}/x-pgdir.txt",
-            "cd {tmp}/x && rm -rf pg",
-            "rm -rf target && rm -rf {tmp}/pg.K",
-        ] {
-            let command = sub(&f, command);
-            assert_eq!(decide(&bash(&f, &command, Some("default")), &f.env), None, "{command}");
-        }
-        let asked = ("ask".to_owned(), "pinned holds this command for the owner (delete outside the worktree).".to_owned());
-        for command in [
-            "rm -rf {tmp}",
-            "rm -rf {tmp}/*",
-            "rm -rf {tmp}/h.*",
-            "rm -rf {tmp}/x/*/../..",
-            "rm -rf {tmp}/x/*/pg",
-            "find {tmp}/x/.* -delete",
-            "rm -rf {tmp}/x/$F",
-            "rm -rf \"$TMPDIR/x\"",
-            "rm -rf {tmp}/out",
-            "rm -rf {tmp}/out/a",
-            "rm -rf {tmp}/pinned-1-a",
-            "rm -f {tmp}/Pinned-1-a/claude-settings-worker.json",
-            "rm -rf {tmp}/claude-501",
-            "rm -rf {tmp}/x {elsewhere}",
-        ] {
-            let command = sub(&f, command);
-            assert_eq!(held(decide(&bash(&f, &command, Some("default")), &f.env)), Some(asked.clone()), "{command}");
-        }
-        // A temp root inside another one opens nothing the outer one holds.
-        let nested = GuardEnv { temp: vec![f.temp.join("claude-501"), f.temp.clone()], ..f.env.clone() };
-        let command = sub(&f, "rm -rf {tmp}/claude-501/s2");
-        assert_eq!(held(decide(&bash(&f, &command, Some("default")), &nested)), Some(asked.clone()), "{command}");
-        // A worktree under a temp root: nothing under that root is a temp file.
-        std::fs::create_dir_all(f.temp.join("proj/wt/.git")).unwrap();
-        let inside = GuardEnv { project_dir: Some(f.temp.join("proj/wt")), ..f.env.clone() };
-        asks(&f, &inside, &["rm -rf {tmp}/proj", "rm -rf {tmp}/proj/*", "rm -rf {tmp}/proj/other"]);
     }
 
     #[test]

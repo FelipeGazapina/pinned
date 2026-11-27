@@ -116,6 +116,7 @@ pub fn never(ctx: &AskCtx, ask: &Ask) -> Option<NeverHit> {
     match ask {
         Ask::Bash { command } => {
             let cwd = Some(scan.abs(ctx.cwd));
+            scan.temp_ok = scan.temp_line(command);
             scan.line(command, cwd, 0);
             scan.finish_line();
         }
@@ -616,6 +617,21 @@ impl<'h> Lexer<'h> {
         while let Some(ch) = self.peek() {
             match ch {
                 c if blank(c) => break,
+                // An extglob such as `!(pinned)`: a glob whose parentheses belong to the word.
+                '(' if w.word.text.ends_with(['!', '*', '+', '?', '@']) => {
+                    w.glob();
+                    let mut depth = 0;
+                    while let Some(c) = self.peek() {
+                        self.i += 1;
+                        w.push(c);
+                        match c {
+                            '(' => depth += 1,
+                            ')' if depth == 1 => break,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                    }
+                }
                 '\n' | ';' | '&' | '|' | '<' | '>' | '(' | ')' => break,
                 '\'' => {
                     self.i += 1;
@@ -912,12 +928,16 @@ const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash", "fish"];
 /// Programs that run what they read, so downloaded text must not reach them.
 const RUNNERS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "python", "python3", "python2", "node", "deno", "bun", "perl", "ruby", "php", "eval", "source", "."];
 
-/// Programs that can make or move a link, besides the [`RUNNERS`] and any `python*`.
-const LINKERS: &[&str] = &["ln", "mv", "cp", "install", "rsync"];
-
 /// What on a line points git at a repository other than the one in its folder, `env` moving it
 /// included, lowercase.
 const REPO_NAMED: &[&str] = &["--git-dir", "--work-tree", "git_dir=", "git_work_tree=", "core.worktree=", "env -c", "--chdir"];
+
+/// The only programs a temp line runs: plain deletes.
+const TEMP_DELETES: &[&str] = &["rm", "rmdir", "unlink"];
+/// Characters a temp line may not hold anywhere: expansions, groups, substitutions and redirects.
+const TEMP_BARRED_LINE: [char; 9] = ['$', '~', '`', '<', '>', '(', ')', '{', '}'];
+/// Characters a temp target may not hold.
+const TEMP_BARRED_PATH: [char; 4] = ['!', '@', '+', ';'];
 
 fn is_assign(t: &str) -> bool {
     let Some((name, _)) = t.split_once('=') else { return false };
@@ -1083,11 +1103,8 @@ struct Scan<'c, 'a> {
     scratch: Option<PathBuf>,
     /// The temp roots, canonical.
     temp: Vec<PathBuf>,
-    /// The first delete the temp roots let through.
-    let_through: Option<String>,
-    /// A command on the line can make or move a link, so a path in temp may lead anywhere by the time
-    /// it is deleted.
-    relinks: bool,
+    /// The whole line is plain temp deletes ([`Scan::temp_line`]), so a delete below a temp root may run.
+    temp_ok: bool,
     /// The line holds one of [`REPO_NAMED`].
     repo_named: bool,
     /// The session's Claude home, canonical.
@@ -1101,7 +1118,7 @@ const DEV_OK: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin
 
 impl<'c, 'a> Scan<'c, 'a> {
     fn new(ctx: &'c AskCtx<'a>) -> Self {
-        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, temp: vec![], let_through: None, relinks: false, repo_named: false, claude: None, hits: vec![], tagged: false, pushed: false };
+        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, temp: vec![], temp_ok: false, repo_named: false, claude: None, hits: vec![], tagged: false, pushed: false };
         scan.work = walk(&scan.abs(ctx.worktree));
         scan.scratch = ctx.scratch.map(|s| walk(&scan.abs(s)));
         scan.temp = ctx.temp.iter().map(|t| walk(&scan.abs(t))).collect();
@@ -1152,6 +1169,50 @@ impl<'c, 'a> Scan<'c, 'a> {
             !w.text.contains("..") && !w.text[at..].contains('/') && !last.starts_with('.')
         };
         w.var_at.is_none() && w.glob_at.is_none_or(plain_glob) && self.scrap(p)
+    }
+
+    /// Whether the whole line is nothing but plain deletes of literal absolute temp paths. Only such
+    /// a line takes the temp allowance: every other line holds a delete below a temp root as on main.
+    fn temp_line(&self, line: &str) -> bool {
+        if line.contains(TEMP_BARRED_LINE) {
+            return false;
+        }
+        let claude_home = self.ctx.claude_home.map(|c| c.to_string_lossy().into_owned());
+        let segs = lex(line, &self.home(), claude_home.as_deref());
+        !segs.is_empty() && segs.iter().all(|seg| self.temp_command(seg))
+    }
+
+    /// Whether a command of a temp line is a plain delete: `rm`, `rmdir` or `unlink`, at the top
+    /// level, with no redirect or here-document, options that are plain, and only temp targets.
+    fn temp_command(&self, seg: &Segment) -> bool {
+        let Some((prog, args)) = seg.words.split_first() else { return false };
+        if seg.depth != 0 || !seg.redirs.is_empty() || !seg.heredoc.is_empty() || prog.var_at.is_some() || !TEMP_DELETES.contains(&prog.text.as_str()) {
+            return false;
+        }
+        let cmd = Cmd::new(&seg.words, false);
+        let rmdir_parents = prog.text == "rmdir" && cmd.has("p", &["parents"]);
+        let mut after_dd = false;
+        args.iter().all(|w| {
+            if !after_dd && w.text == "--" {
+                after_dd = true;
+                return true;
+            }
+            if !after_dd && w.text.starts_with('-') && w.text.len() > 1 {
+                return w.var_at.is_none() && w.glob_at.is_none() && !rmdir_parents;
+            }
+            self.temp_target(w)
+        })
+    }
+
+    /// Whether `w` is a literal absolute path that a temp delete may take: no `..` component, no
+    /// barred character, a glob only in the last name and not exactly `*`, and a temp path by
+    /// [`Scan::temp_delete`]. Relative paths and `~` never qualify.
+    fn temp_target(&self, w: &Word) -> bool {
+        let t = w.text.as_str();
+        let literal = t.starts_with('/') && !t.contains(TEMP_BARRED_PATH) && !t.split('/').any(|c| c == "..");
+        let last = t.rsplit('/').next().unwrap_or("");
+        let glob_last = w.glob_at.is_none_or(|at| !t[at..].contains('/') && last != "*");
+        literal && glob_last && self.tgt(&None, w).path.is_some_and(|p| self.temp_delete(w, &p))
     }
 
     fn home(&self) -> String {
@@ -1266,14 +1327,10 @@ impl<'c, 'a> Scan<'c, 'a> {
         }
     }
 
-    /// After the whole line: a tag made and pushed in one line is a release, and no temp delete is
-    /// trusted beside a command that can make or move a link.
+    /// After the whole line: a tag made and pushed in one line is a release.
     fn finish_line(&mut self) {
         if self.tagged && self.pushed {
             self.hit(NeverItem::Release, "git tag, then git push");
-        }
-        if let Some(why) = self.let_through.take().filter(|_| self.relinks) {
-            self.hit(NeverItem::DeleteOutside, format!("{why}, on a line that can make a link"));
         }
     }
 
@@ -1396,29 +1453,15 @@ impl<'c, 'a> Scan<'c, 'a> {
     fn delete(&mut self, cwd: &Option<PathBuf>, targets: &[&Word], risky: bool, what: &str) {
         for w in targets {
             let t = self.tgt(cwd, w);
-            let why = format!("{what} {}", short(&w.text));
             let bad = match &t.path {
                 _ if t.top_var => true,
                 None => true,
-                Some(p) => {
-                    // For a glob that starts the path, `p` is the cwd, which may still hold a link.
-                    let p = walk(p);
-                    let outside = self.outside(&p);
-                    // `shred` overwrites the file itself, which a hard link in temp may share with one elsewhere.
-                    let temp = outside && !what.ends_with("shred") && self.temp_delete(w, &p);
-                    if temp {
-                        self.let_through.get_or_insert_with(|| why.clone());
-                    }
-                    match (t.top_glob, outside) {
-                        // Such a glob is held when forced or recursive, and in temp unless a temp delete may take it.
-                        (true, _) => risky || (outside && !temp && self.in_temp(&p)),
-                        (false, true) => !temp,
-                        (false, false) => risky && w.var_at.is_none() && w.glob_at.is_none() && p == self.work,
-                    }
-                }
+                // A glob that starts the path is held only when forced or recursive.
+                Some(_) if t.top_glob => risky,
+                Some(p) => (self.outside(p) && !(self.temp_ok && self.temp_delete(w, p))) || (risky && w.var_at.is_none() && w.glob_at.is_none() && *p == self.work),
             };
             if bad {
-                self.hit(NeverItem::DeleteOutside, why);
+                self.hit(NeverItem::DeleteOutside, format!("{what} {}", short(&w.text)));
             }
         }
     }
@@ -1433,7 +1476,6 @@ impl<'c, 'a> Scan<'c, 'a> {
         if RUNNERS.contains(&prog) && (pipe_fetch || c.args.iter().any(|w| w.fetch)) {
             self.hit(NeverItem::NetworkInstall, format!("{prog} runs downloaded code"));
         }
-        self.relinks |= LINKERS.contains(&prog) || RUNNERS.contains(&prog) || prog.starts_with("python");
         match prog {
             "rm" | "rmdir" | "unlink" | "shred" => {
                 let risky = c.has("rRf", &["recursive", "force"]);
@@ -1478,7 +1520,7 @@ impl<'c, 'a> Scan<'c, 'a> {
             "cp" | "install" | "mv" | "ln" | "tee" | "touch" | "mkdir" | "truncate" | "mkfifo" | "sed" | "dd" | "curl" | "wget" => {
                 let words = self.write_args(c);
                 self.write_words(cwd, words);
-                if matches!(prog, "mv" | "ln") {
+                if prog == "mv" {
                     self.bring_into_temp(cwd, c);
                 }
             }
@@ -1516,7 +1558,6 @@ impl<'c, 'a> Scan<'c, 'a> {
 
     fn find(&mut self, cwd: &Option<PathBuf>, c: &Cmd, nest: u8) {
         let mut deletes = c.args.iter().any(|w| w.text == "-delete");
-        let mut shreds = false;
         for (k, w) in c.args.iter().enumerate() {
             if !matches!(w.text.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
                 continue;
@@ -1527,7 +1568,6 @@ impl<'c, 'a> Scan<'c, 'a> {
             }
             let sub = Cmd::new(&inner, false);
             deletes |= matches!(sub.prog.as_str(), "rm" | "rmdir" | "unlink" | "shred" | "mv");
-            shreds |= sub.prog == "shred";
             self.cmd(cwd, &sub, nest, false);
         }
         if deletes {
@@ -1536,7 +1576,7 @@ impl<'c, 'a> Scan<'c, 'a> {
             if starts.is_empty() {
                 starts.push(&dot);
             }
-            self.delete(cwd, &starts, false, if shreds { "find -exec shred" } else { "find -delete" });
+            self.delete(cwd, &starts, false, "find -delete");
         }
     }
 
@@ -1782,8 +1822,9 @@ impl<'c, 'a> Scan<'c, 'a> {
         }
     }
 
-    /// Holds an `mv` or `ln` that brings into a temp folder what a delete may not take where it is:
-    /// deleting it there afterwards would run unasked.
+    /// Holds an `mv` that brings into a temp folder what a delete may not take where it is: deleting
+    /// it there afterwards would run unasked. A `ln` needs no hold: a delete walks a link on disk to
+    /// where it points, and a hard link only unlinks the temp name.
     fn bring_into_temp(&mut self, cwd: &Option<PathBuf>, c: &Cmd) {
         if self.temp.is_empty() {
             return;
