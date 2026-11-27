@@ -114,9 +114,15 @@ The orchestrator needs a Claude Code account.
 ### Project memory
 
 Every thread in a project shares a memory: your preferences, decisions, conventions and facts
-about the code. Agents save to it and search it with the `memory_save`, `memory_search` and
-`memory_forget` tools. When you send a prompt, pinned also adds the few memories that match
-it best. A thread without a project has no memory.
+about the code. Agents save to it and search it with the `memory_save`, `memory_search`,
+`memory_forget` and `memory_set_weight` tools. When you send a prompt, pinned also adds the few
+memories that match it best. A thread without a project has no memory.
+
+Each memory has a weight, 1 by default, from 0.1 to 10. A heavier memory moves up to 3 places in
+search results, and a lighter one down up to 3; a memory recall used in the last 30 days moves up 1 place.
+How well it matches the words still decides the rest. Each time pinned adds a memory to a prompt,
+that counts as a use. Searching does not count as a use. Agents change a weight with
+`memory_set_weight`.
 
 Search matches words and meaning, so a question in Portuguese finds a memory written in
 English. Matching by meaning needs a model of about 530 MB. pinned downloads it in the
@@ -124,7 +130,8 @@ background after the project's first memory is saved. Until then, search matches
 Each project's memories are kept on your machine in pinned's config folder, not in the
 repository.
 
-To search, add or delete memories, open the **Memory** tab in the side panel.
+To search, add or delete memories, open the **Memory** tab in the side panel. Each memory there
+shows its weight, which you can change, and how many times it was used.
 
 ### Memory report
 

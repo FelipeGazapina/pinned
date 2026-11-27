@@ -44,6 +44,7 @@ function load({ workers = [], parent = null, panel = { surfaces: [] } } = {}) {
     prRollupState: (d) => d.rollup ?? null,
     prCache: new Map([["t:https://github.com/example/site/pull/12", { data: { rollup: "passing" } }]]),
     hasProject: () => true,
+    projectOf: (tab) => ({ machine: tab.machine, path: tab.path }),
     memoryOf: () => ({ hits: [1, 2, 3] }),
     panelOf: () => panel,
     togglePanel: () => toggled.push(panel.open ? "hide" : "show"),

@@ -325,6 +325,11 @@ body[data-panel-max="true"] #panel { border-left: 0; }
 .memory-list .title { font-weight: 500; }
 .memory-list .kind { font-size: 11px; padding: 0 5px; border-radius: 4px; background: var(--g-input); color: var(--g-muted); }
 .memory-list .text { flex-basis: 100%; overflow-wrap: anywhere; }
+.memory-list .uses { font-size: 11px; color: var(--g-muted); font-variant-numeric: tabular-nums; }
+.memory-list .weight { flex: none; box-sizing: border-box; width: 52px; height: 20px; padding: 0 4px; border: 1px solid var(--g-input); border-radius: 6px; background: none; color: var(--g-fg); font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; outline: none; }
+.memory-list .weight:focus { border-color: rgb(var(--g-primary-rgb) / 0.5); box-shadow: 0 0 0 2px rgb(var(--g-primary-rgb) / 0.2); }
+.memory-list .weight.quiet:not(:hover, :focus) { border-color: transparent; color: var(--g-muted); }
+.memory-list .weight.quiet:not(:hover, :focus)::-webkit-inner-spin-button { -webkit-appearance: none; }
 .memory-list .ghost { display: grid; place-items: center; flex: none; width: 20px; height: 20px; border-radius: 6px; color: var(--g-muted); }
 .memory-list .ghost:hover { background: var(--g-input); color: var(--g-fg); }
 .memory-list .ghost .i { width: 14px; height: 14px; }

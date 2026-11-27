@@ -83,7 +83,7 @@ function threadActionsOf(tab) {
   const port = (t.ports ?? []).find((p) => p.own)?.port;
   const shells = scriptShells.filter((s) => s.tab === tab).length;
   const rollup = pr && prRollupState(prCache.get(`${tab.key}:${pr.url}`)?.data ?? {});
-  const saved = hasProject(tab) ? memoryOf(tab).hits?.length : null;
+  const saved = hasProject(tab) ? memoryOf(projectOf(tab)).hits?.length : null;
   const device = panelOf(tab).surfaces.find((s) => s.kind === "device");
   const tools = [
     { id: "diff", label: "Diff", hint: diff ? `+${diff.added} -${diff.removed}` : "", disabled: ws?.repo === false, run: () => openSurface("diff") },
@@ -595,7 +595,7 @@ function readToolHints(tab) {
     t.workspace?.repo && d.scope !== "turn" && !t.gitDiff ? fetchGitDiff(tab, d.scope, d.scope === "base" ? d.base : null) : null,
     t.portsAt ? null : fetchPorts(tab),
     pr && !prCache.get(`${tab.key}:${pr.url}`)?.data ? loadPr(tab, pr.url, true) : null,
-    hasProject(tab) && !memoryOf(tab).hits ? refreshMemory(tab) : null,
+    hasProject(tab) && !memoryOf(projectOf(tab)).hits ? refreshMemory(projectOf(tab)) : null,
   ]);
 }
 

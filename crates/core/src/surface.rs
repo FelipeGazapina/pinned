@@ -174,6 +174,7 @@ pub const ACTIONS: &[Action] = &[
     n("memory_search", Read, "The memories of the project at path that best match query, best first, or the latest for an empty query. Any project of the account: pass machine for one on another machine.").wired(),
     n("memory_save", Write, "Saves a memory in the project at path, any project of the account (pass machine for another machine). With id, replaces that memory. Refused when the project has one with the same title or nearly the same meaning.").wired(),
     n("memory_forget", Write, "Removes the memory id of the project at path, any project of the account.").wired(),
+    n("memory_set_weight", Write, "Sets the weight of the memory id in the project at path, any project of the account (pass machine for another machine): a number from 0.1 to 10, 1 by default. A heavier memory moves up to 3 places in search results, and a lighter one down up to 3; a memory recall used in the last 30 days moves up 1 place. How well it matches the words still decides the rest.").wired(),
     n("memory_status", Read, "How many memories the project at path has and whether search also matches by meaning.").wired(),
     n("sign_in", Confirm, "Opens the CLI's login for an agent account in a new tab, where the user signs in.").wired(),
     n("setup_token", Excluded, "the hub's way to have a machine mint a Claude token for boxes, which only the hub may receive: call mint_box_claude_token"),
@@ -1163,7 +1164,7 @@ mod tests {
             [
                 "open_tab", "open_scratch", "start_claude", "set_bypass", "set_model", "restart_claude", "stop_turn", "set_folder", "create_project",
                 "publish_project", "make_folder", "add_account", "set_account_key", "remove_account", "set_project_account", "open_orchestrator",
-                "enqueue", "open_global_orchestrator", "set_global_orchestrator_settings", "set_compaction_settings", "memory_save", "memory_forget", "sign_in",
+                "enqueue", "open_global_orchestrator", "set_global_orchestrator_settings", "set_compaction_settings", "memory_save", "memory_forget", "memory_set_weight", "sign_in",
                 "switch_account", "prompt", "regenerate_title", "save_skill", "set_usage_prices", "save_project_scripts", "set_workspace",
                 "device_hub", "device_agents", "device", "rewind", "fork", "update_self", "connect_linear", "disconnect_linear", "connect_slack",
                 "disconnect_slack", "connect_github", "disconnect_github", "connect_vercel", "disconnect_vercel", "connect_posthog", "disconnect_posthog", "connect_upstash",
@@ -1525,6 +1526,9 @@ mod tests {
         assert_eq!((id.as_str(), name.as_str()), ("m1", "Mini"));
         let Ok(Parsed::Node(Call::MemorySave { path, title, .. })) = parse(find("memory_save").unwrap(), &json!({ "path": "/w/site", "title": "Deploys", "text": "From tags." })) else { panic!("memory_save") };
         assert_eq!((path.as_str(), title.as_str()), ("/w/site", "Deploys"));
+        let Ok(Parsed::Node(Call::MemorySetWeight { path, id, weight })) = parse(find("memory_set_weight").unwrap(), &json!({ "path": "/w/site", "id": 3, "weight": 2.0 })) else { panic!("memory_set_weight") };
+        assert_eq!((path.as_str(), id, weight), ("/w/site", 3, 2.0));
+        assert_eq!(find("memory_set_weight").map(|a| (a.side, a.class, a.wired)), Some((Side::Node, Write, true)));
         assert!(matches!(parse(find("tabs").unwrap(), &Value::Null), Ok(Parsed::Node(Call::Tabs))));
         let Err(missing) = parse(find("rename_machine").unwrap(), &json!({ "id": "m1" })) else { panic!("no name") };
         assert!(missing.starts_with("rename_machine: missing field `name`"), "{missing}");

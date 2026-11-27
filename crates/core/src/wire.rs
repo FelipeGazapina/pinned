@@ -486,6 +486,10 @@ pub enum Call {
     },
     /// The `memory::Memory` removed.
     MemoryForget { path: String, id: i64 },
+    /// The `memory::Memory` with its new weight, from 0.1 to 10. A heavier memory moves up to 3 places
+    /// in search results, and a lighter one down up to 3; a memory recall used in the last 30 days moves up 1 place.
+    /// How well it matches the words still decides the rest.
+    MemorySetWeight { path: String, id: i64, weight: f64 },
     /// `memory::Status`: how many memories the project has and whether search also matches by meaning.
     MemoryStatus { path: String },
     /// The new tab's id, running the CLI's login for the account in the account's home.
@@ -973,6 +977,7 @@ impl Call {
                 | Call::MemorySearch { .. }
                 | Call::MemorySave { .. }
                 | Call::MemoryForget { .. }
+                | Call::MemorySetWeight { .. }
                 | Call::MemoryStatus { .. }
                 | Call::UpdateSelf
                 | Call::McpServers { .. }
