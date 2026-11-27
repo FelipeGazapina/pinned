@@ -682,19 +682,31 @@ pub enum BoxPermission {
     },
     /// Open nothing until the user says yes on the Upstash card. A Slack thread also gets one post.
     Ask,
+    /// One box for workflows, like `Fixed`, that no timer ends but its budget.
+    Durable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        row: Option<String>,
+    },
 }
 
 impl BoxPermission {
     fn without_row(&self) -> Self {
+        self.with_row(None).unwrap_or_else(|| self.clone())
+    }
+
+    /// The same Fixed or Durable permission naming `row`; None for a permission that holds no row.
+    fn with_row(&self, row: Option<String>) -> Option<Self> {
         match self {
-            BoxPermission::Fixed { .. } => BoxPermission::Fixed { row: None },
-            other => other.clone(),
+            BoxPermission::Fixed { .. } => Some(BoxPermission::Fixed { row }),
+            BoxPermission::Durable { .. } => Some(BoxPermission::Durable { row }),
+            _ => None,
         }
     }
 
+    /// The row a Fixed or Durable permission names.
     pub fn fixed_row(&self) -> Option<&str> {
         match self {
-            BoxPermission::Fixed { row: Some(row) } => Some(row),
+            BoxPermission::Fixed { row: Some(row) } | BoxPermission::Durable { row: Some(row) } => Some(row),
             _ => None,
         }
     }
@@ -724,7 +736,7 @@ impl Default for BoxAccess {
 }
 
 impl BoxAccess {
-    /// Only the workflow kind (the box a run uses) has a fixed row: the hub names none for a
+    /// Only the workflow kind (the box a run uses) has a fixed or durable row: the hub names none for a
     /// session, a worker or the orchestrator, so one a stored file or an old app carries there is
     /// ignored, and the box it names keeps the normal timers.
     pub fn owns_row(&self, id: &str) -> bool {
@@ -782,14 +794,13 @@ fn box_ask_id(connector: &str, subject: &Subject) -> String {
 }
 
 /// Only the hub names the fixed row, through `claim_fixed_row`, `retake_fixed_row` and
-/// `release_fixed_row`, and only for the workflow kind. A save that still asks for Fixed keeps the stored row, as an older app sends
-/// back the row it read, and any other row it names becomes none: a row named there is exempt from
-/// every box timer, so a client must not pick one.
+/// `release_fixed_row`, and only for the workflow kind. A save that still asks for Fixed (or still
+/// Durable) keeps the stored row, as an older app sends back the row it read, and any other row it
+/// names becomes none: a row named there is exempt from the box timers, so a client must not pick
+/// one. A switch between Fixed and Durable starts without a row, so the old box keeps its old rules.
 fn keep_fixed_row(incoming: BoxPermission, stored: &BoxPermission) -> BoxPermission {
-    match incoming {
-        BoxPermission::Fixed { .. } => BoxPermission::Fixed { row: stored.fixed_row().map(str::to_owned) },
-        incoming => incoming,
-    }
+    let row = (std::mem::discriminant(&incoming) == std::mem::discriminant(stored)).then(|| stored.fixed_row().map(str::to_owned)).flatten();
+    incoming.with_row(row).unwrap_or(incoming)
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -7102,36 +7113,36 @@ impl Connectors {
     /// Claims `proposed` as the workflow kind's one box, or returns the row already claimed.
     pub fn claim_fixed_row(&self, proposed: &str) -> Result<FixedClaim, String> {
         let mut store = self.store.lock().unwrap();
-        match &store.boxes.workflow {
-            BoxPermission::Fixed { row: Some(existing) } => Ok(FixedClaim::Use(existing.clone())),
-            BoxPermission::Fixed { row: None } => {
-                store.boxes.workflow = BoxPermission::Fixed { row: Some(proposed.to_owned()) };
-                self.save(&store)?;
-                Ok(FixedClaim::Create)
-            }
-            _ => Ok(FixedClaim::Create),
+        if let Some(existing) = store.boxes.workflow.fixed_row() {
+            return Ok(FixedClaim::Use(existing.to_owned()));
         }
+        if let Some(claimed) = store.boxes.workflow.with_row(Some(proposed.to_owned())) {
+            store.boxes.workflow = claimed;
+            self.save(&store)?;
+        }
+        Ok(FixedClaim::Create)
     }
 
     /// Points the fixed box at `proposed` when it still names `stale`. Another claim that won is returned as `Use`.
     pub fn retake_fixed_row(&self, stale: &str, proposed: &str) -> Result<FixedClaim, String> {
         let mut store = self.store.lock().unwrap();
-        match &store.boxes.workflow {
-            BoxPermission::Fixed { row: Some(current) } if current == stale => {
-                store.boxes.workflow = BoxPermission::Fixed { row: Some(proposed.to_owned()) };
-                self.save(&store)?;
-                Ok(FixedClaim::Create)
-            }
-            BoxPermission::Fixed { row: Some(current) } => Ok(FixedClaim::Use(current.clone())),
-            _ => Ok(FixedClaim::Create),
+        match store.boxes.workflow.fixed_row() {
+            Some(current) if current != stale => return Ok(FixedClaim::Use(current.to_owned())),
+            Some(_) => {}
+            None => return Ok(FixedClaim::Create),
         }
+        if let Some(retaken) = store.boxes.workflow.with_row(Some(proposed.to_owned())) {
+            store.boxes.workflow = retaken;
+            self.save(&store)?;
+        }
+        Ok(FixedClaim::Create)
     }
 
     /// Forgets a claim that never got a row, so a later run can claim again.
     pub fn release_fixed_row(&self, row: &str) -> Result<(), String> {
         let mut store = self.store.lock().unwrap();
         if store.boxes.workflow.fixed_row() == Some(row) {
-            store.boxes.workflow = BoxPermission::Fixed { row: None };
+            store.boxes.workflow = store.boxes.workflow.without_row();
             self.save(&store)?;
         }
         Ok(())
@@ -10504,6 +10515,82 @@ mod tests {
         let resent = connectors.set_box_access(connectors.box_access()).unwrap();
         assert_eq!(resent.workflow, fixed("row-1"), "an older app sending back the row it read changes nothing");
         assert_eq!(connectors.set_box_access(BoxAccess { workflow: BoxPermission::Fresh, ..BoxAccess::default() }).unwrap().workflow, BoxPermission::Fresh);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_durable_box_permission_round_trips() {
+        assert_eq!(serde_json::to_value(BoxPermission::Durable { row: None }).unwrap(), json!({ "mode": "durable" }));
+        let named = json!({ "mode": "durable", "row": "x" });
+        assert_eq!(serde_json::from_value::<BoxPermission>(named.clone()).unwrap(), BoxPermission::Durable { row: Some("x".into()) });
+        assert_eq!(serde_json::to_value(BoxPermission::Durable { row: Some("x".into()) }).unwrap(), named);
+    }
+
+    #[test]
+    fn a_saved_durable_permission_keeps_only_its_own_row() {
+        let dir = temp_dir("durable-row-saved");
+        std::fs::create_dir_all(&dir).unwrap();
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        let durable = |row: Option<&str>| BoxPermission::Durable { row: row.map(str::to_owned) };
+        let fixed = |row: Option<&str>| BoxPermission::Fixed { row: row.map(str::to_owned) };
+        let save = |workflow: BoxPermission| connectors.set_box_access(BoxAccess { workflow, ..BoxAccess::default() }).unwrap().workflow;
+        assert_eq!(save(durable(Some("named"))), durable(None), "no stored row: the named one is dropped");
+        connectors.claim_fixed_row("row-1").unwrap();
+        assert_eq!(save(durable(None)), durable(Some("row-1")), "durable to durable keeps the hub's row");
+        assert_eq!(save(durable(Some("another-row"))), durable(Some("row-1")), "a row the client names is never stored");
+        assert_eq!(save(fixed(None)), fixed(None), "durable to fixed starts without a row");
+        connectors.claim_fixed_row("row-2").unwrap();
+        assert_eq!(save(fixed(None)), fixed(Some("row-2")), "fixed to fixed keeps its row");
+        assert_eq!(save(durable(Some("row-2"))), durable(None), "fixed to durable starts without a row");
+        assert!(!connectors.box_access().owns_row("row-2"), "the old fixed box keeps the normal timers");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An older app reads `{ "mode": "durable", "row": .. }` as a mode it keeps and a row it drops,
+    /// so its save of another kind sends the durable permission back without a row.
+    #[test]
+    fn an_older_app_saving_another_kind_keeps_the_durable_row() {
+        let dir = temp_dir("durable-row-older-app");
+        std::fs::create_dir_all(&dir).unwrap();
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        connectors.set_box_access(BoxAccess { workflow: BoxPermission::Durable { row: None }, ..BoxAccess::default() }).unwrap();
+        connectors.claim_fixed_row("row-1").unwrap();
+        let saved = connectors.set_box_access(BoxAccess { workflow: BoxPermission::Durable { row: None }, session: BoxPermission::Ask, ..BoxAccess::default() }).unwrap();
+        assert_eq!(saved.workflow, BoxPermission::Durable { row: Some("row-1".into()) });
+        assert_eq!(saved.session, BoxPermission::Ask);
+        assert!(connectors.box_access().owns_row("row-1"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn claiming_retaking_and_releasing_keep_the_durable_variant() {
+        let dir = temp_dir("durable-row-claim");
+        std::fs::create_dir_all(&dir).unwrap();
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        connectors.set_box_access(BoxAccess { workflow: BoxPermission::Durable { row: None }, ..BoxAccess::default() }).unwrap();
+        let durable = |row: &str| BoxPermission::Durable { row: Some(row.into()) };
+        assert!(matches!(connectors.claim_fixed_row("row-1"), Ok(FixedClaim::Create)));
+        assert_eq!(connectors.box_access().workflow, durable("row-1"));
+        assert!(matches!(connectors.claim_fixed_row("row-x"), Ok(FixedClaim::Use(row)) if row == "row-1"));
+        assert!(matches!(connectors.retake_fixed_row("row-1", "row-2"), Ok(FixedClaim::Create)));
+        assert_eq!(connectors.box_access().workflow, durable("row-2"));
+        assert!(matches!(connectors.retake_fixed_row("row-1", "row-3"), Ok(FixedClaim::Use(row)) if row == "row-2"));
+        connectors.release_fixed_row("row-2").unwrap();
+        assert_eq!(connectors.box_access().workflow, BoxPermission::Durable { row: None });
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_the_durable_workflow_row_is_owned() {
+        let dir = temp_dir("durable-row-owned");
+        std::fs::create_dir_all(&dir).unwrap();
+        let boxes = json!({ "workflow": { "mode": "durable", "row": "saved-run" }, "session": { "mode": "durable", "row": "saved-session" } });
+        std::fs::write(dir.join("connectors.json"), json!({ "connectors": [], "boxes": boxes }).to_string()).unwrap();
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        let access = connectors.box_access();
+        assert!(access.owns_row("saved-run"));
+        assert!(!access.owns_row("saved-session"), "a durable row a stored file carries on another kind is not owned");
+        assert_eq!(access.session, BoxPermission::Durable { row: None });
         let _ = std::fs::remove_dir_all(dir);
     }
 

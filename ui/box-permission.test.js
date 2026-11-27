@@ -53,6 +53,38 @@ test("the Upstash card offers a box permission for each actor kind", () => {
   assert.doesNotMatch(chosen, /answer-box/);
 });
 
+test("only the Workflows select offers a durable box, and the hint names the Box budget", () => {
+  const context = {
+    visibleInterval: () => 0,
+    console,
+    addEventListener() {},
+    account: { email: "ana@acme.dev" },
+    load() { return null; },
+    save() {},
+    listen() {},
+    agentAsking: () => null,
+    agentAskingHtml: () => "",
+    document: {
+      body: { dataset: {} },
+      getElementById() { return element(); },
+      querySelector() { return element(); },
+    },
+  };
+  context.globalThis = context;
+  const source = readFileSync(new URL("./settings.js", import.meta.url), "utf8");
+  vm.runInNewContext(`${source}\nglobalThis.__card = upstashCardHtml;\nglobalThis.__settings = settings;`, context);
+  context.__settings.upstash = { key_hint: "…a1b2", claude_hint: "…9f3c" };
+  context.__settings.boxes = { workflow: { mode: "durable", row: "r" } };
+  const html = context.__card();
+  const selects = Object.fromEntries([...html.matchAll(/<select id="box-(\w+)"[^>]*>([\s\S]*?)<\/select>/g)].map(([, kind, options]) => [kind, options]));
+  assert.deepEqual(Object.keys(selects), ["workflow", "session", "worker", "orchestrator"]);
+  assert.match(selects.workflow, /<option value="durable" selected>Durable box, ends on budget<\/option>/);
+  for (const kind of ["session", "worker", "orchestrator"]) {
+    assert.doesNotMatch(selects[kind], /<option value="durable"/, kind);
+  }
+  assert.match(html, /<p class="hint">[^<]*Box budget[^<]*<\/p>/);
+});
+
 test("an ask that arrives while the Upstash card is open is drawn", () => {
   const asks = element();
   const context = {

@@ -946,6 +946,16 @@ pub(crate) fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p
     ended.into_iter().find(|(over, _)| *over).map(|(_, end)| end)
 }
 
+/// How the reaper ends the row the account's workflow permission owns, which no timer ends: a
+/// durable box ends when its budget runs out, and either box when Upstash stops listing it.
+fn owned_verdict(durable: bool, over_budget: bool, gone: bool) -> Option<End> {
+    if durable && over_budget {
+        Some(End::Expired)
+    } else {
+        gone.then_some(End::Vanished)
+    }
+}
+
 const NOT_CONNECTED: &str = "Upstash Box is not connected: connect it in pinned's Connectors settings";
 
 /// Whether the account's box permission for `who` lets a box open for `subject`. Ask files the
@@ -955,6 +965,7 @@ async fn allowed(connectors: &Connectors, permission: BoxPermission, who: &str, 
         BoxPermission::Fresh => Ok(()),
         BoxPermission::Off => Err(format!("Upstash Box is off for {who}: choose a box permission for {who} in Connectors settings")),
         BoxPermission::Fixed { .. } => Err(format!("Upstash Box: One box, reused is for workflows only; choose New box each time or Ask first for {who} in Connectors settings")),
+        BoxPermission::Durable { .. } => Err(format!("Upstash Box: Durable box is for workflows only; choose New box each time or Ask first for {who} in Connectors settings")),
         BoxPermission::Ask => match connectors.box_grant(connector, subject) {
             Some(true) => Ok(()),
             Some(false) => Err("Upstash Box: you said no to a box for this, so none was opened".into()),
@@ -1216,9 +1227,10 @@ fn box_env(keys: &Keys, github: Option<&str>, leaves: bool, team: bool) -> Strin
 }
 
 /// Whether the node in row `row`'s box may leave once the hub has refused it for 15 minutes. Not
-/// in the fixed box ("One box, reused"): the reaper ends that row only when Upstash stops listing
-/// the box, so a node that left would leave every later run failing with its machine offline. A
-/// fixed box its hub has disowned keeps running until the fixed-box limit (#247) lands.
+/// in the fixed box ("One box, reused") or the durable box: the reaper ends that row only when
+/// Upstash stops listing the box (or, for the durable box, when its budget runs out), so a node
+/// that left would leave every later run failing with its machine offline. A fixed box its hub has
+/// disowned keeps running until the fixed-box limit (#247) lands.
 fn leaves_when_refused(access: &BoxAccess, row: &str) -> bool {
     !access.owns_row(row)
 }
@@ -1245,8 +1257,8 @@ fn status_of(row: BoxRow, tab: Option<String>) -> BoxStatus {
 }
 
 /// The box to create for `row`, under the hub label `label`. Only the fixed box ("One box,
-/// reused") keeps running while idle, at Upstash's fixed monthly price per box; every other box
-/// is a standard one that Upstash bills for its active CPU time and pauses when idle.
+/// reused") and the durable box keep running while idle, at Upstash's fixed monthly price per box;
+/// every other box is a standard one that Upstash bills for its active CPU time and pauses when idle.
 fn new_box(access: &BoxAccess, row: &BoxRow, label: &str) -> NewBox {
     NewBox {
         name: box_name(Some(row.spec.folder.as_str()).filter(|f| !f.is_empty()), row.spec.repo.as_deref(), BoxRole::of(row), &row.id),
@@ -1354,7 +1366,8 @@ impl Boxes {
     }
 
     /// `Hub::open` for a box run. The account's workflow permission decides what happens.
-    /// `Fresh` gives the issue or thread its own box. `Fixed` reuses one box for every run.
+    /// `Fresh` gives the issue or thread its own box. `Fixed` reuses one box for every run, and
+    /// `Durable` does too until its budget runs out.
     /// `Ask` opens nothing until the user says yes; the user's own Run now counts as that yes. `Off`, and a disconnected Upstash, open nothing.
     /// A run whose issue or thread already has a box goes to it. On failure the row ends, and the
     /// answer says why, which reaches the workflow's check line.
@@ -1364,7 +1377,7 @@ impl Boxes {
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
         let permission = match connectors.box_access().workflow {
             // A team's runs never share a machine, whatever an older hub stored.
-            BoxPermission::Fixed { .. } if account.team => BoxPermission::Fresh,
+            BoxPermission::Fixed { .. } | BoxPermission::Durable { .. } if account.team => BoxPermission::Fresh,
             permission => permission,
         };
         if permission == BoxPermission::Off {
@@ -1373,7 +1386,8 @@ impl Boxes {
         // Before any ask. A Run now is the user's act, a reused box is no new one, and a subject's
         // own box is answered as it is.
         let run_now = pinned_core::connectors::is_run_now(&run.subject);
-        if !run_now && !matches!(permission, BoxPermission::Fixed { .. }) && hub.db.box_for(account.id, &run.connector, &run.subject).await?.is_none() {
+        let reused = matches!(permission, BoxPermission::Fixed { .. } | BoxPermission::Durable { .. });
+        if !run_now && !reused && hub.db.box_for(account.id, &run.connector, &run.subject).await?.is_none() {
             self.agents_have_room(hub, account).await?;
         }
         let folder = run.cwd.to_str().filter(|f| !f.is_empty());
@@ -1394,9 +1408,9 @@ impl Boxes {
                     return Err("Upstash Box: waiting for a yes before it opens a box for this".into());
                 }
             },
-            BoxPermission::Off | BoxPermission::Fresh | BoxPermission::Fixed { .. } => {}
+            BoxPermission::Off | BoxPermission::Fresh | BoxPermission::Fixed { .. } | BoxPermission::Durable { .. } => {}
         }
-        if matches!(permission, BoxPermission::Fixed { .. }) {
+        if reused {
             return self.open_fixed(hub, account, &connectors, run, step, &keys).await;
         }
         self.open_new(hub, account, run, step, &keys, None, false).await
@@ -2337,8 +2351,9 @@ impl Boxes {
                     // A budget outlives idleness: the box ends when its money runs out, whatever it does.
                     let over_budget = over_budget(&row.spec, row.size, row.age);
                     // Later runs reuse this row. The fresh-box timers would delete it between them.
-                    if connectors.box_access().owns_row(&row.id) {
-                        gone.then_some(End::Vanished)
+                    let access = connectors.box_access();
+                    if access.owns_row(&row.id) {
+                        owned_verdict(matches!(access.workflow, BoxPermission::Durable { .. }), over_budget, gone)
                     } else {
                         let held = connectors.holds_box(&row.connector, &row.subject);
                         let machine = row.machine.to_string();
@@ -3055,6 +3070,38 @@ mod tests {
         let fresh = new_box(&BoxAccess::default(), &fixed, "hub:000000000000");
         assert!(!fresh.keep_alive, "with no fixed row named, even this id is temporary");
         assert_eq!((fresh.size, fresh.labels.len()), (BoxSize::Medium, 2), "the rest of the box is the same");
+    }
+
+    #[test]
+    fn the_durable_row_gets_a_keep_alive_box_whose_node_stays() {
+        let access = BoxAccess { workflow: BoxPermission::Durable { row: Some(ROW_ID.into()) }, ..BoxAccess::default() };
+        let durable = row_of(BoxSize::Medium, Phase::Creating, BoxWork::Run, "nightly", ROW_ID);
+        assert!(new_box(&access, &durable, "hub:000000000000").keep_alive, "the durable row outlives the runs it serves");
+        assert!(!leaves_when_refused(&access, ROW_ID), "its node stays for the next run");
+        let temporary = row_of(BoxSize::Medium, Phase::Creating, BoxWork::Run, "nightly", "0123456789abcdef");
+        assert!(!new_box(&access, &temporary, "hub:000000000000").keep_alive);
+        assert!(leaves_when_refused(&access, "0123456789abcdef"));
+    }
+
+    #[test]
+    fn a_durable_box_ends_on_its_budget_or_vanishing_and_a_fixed_box_only_on_vanishing() {
+        assert_eq!(owned_verdict(true, true, false), Some(End::Expired), "durable, over budget");
+        assert_eq!(owned_verdict(true, true, true), Some(End::Expired), "the budget end wins over vanishing");
+        assert_eq!(owned_verdict(true, false, false), None, "durable, under budget: no timer ends it");
+        assert_eq!(owned_verdict(true, false, true), Some(End::Vanished), "durable, gone from Upstash");
+        assert_eq!(owned_verdict(false, true, false), None, "fixed ignores its budget, as before");
+        assert_eq!(owned_verdict(false, false, true), Some(End::Vanished), "fixed, gone from Upstash");
+    }
+
+    #[tokio::test]
+    async fn a_durable_box_is_refused_for_sessions_workers_and_captains() {
+        let dir = tempfile::tempdir().unwrap();
+        let connectors = Connectors::new(pinned_core::connectors::FileStorage::new(dir.path().to_path_buf()), "/bin/pinned".into());
+        let subject = Subject::LinearIssue { issue: "box".into() };
+        for kind in ["Sessions", "Workers", "Captains"] {
+            let refused = allowed(&connectors, BoxPermission::Durable { row: None }, kind, "nightly", &subject).await;
+            assert!(refused.is_err_and(|e| e.contains("Durable box is for workflows only") && e.contains(kind)), "{kind}: a durable box is refused");
+        }
     }
 
     /// A store an earlier release saved can name a fixed box for the session, worker or orchestrator

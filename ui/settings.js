@@ -482,6 +482,7 @@ const BOX_MODES = [
   ["off", "Off"],
   ["fresh", "New box each time"],
   ["fixed", "One box, reused"],
+  ["durable", "Durable box, ends on budget", "workflow"],
   ["ask", "Ask first"],
 ];
 const BOX_KINDS = [
@@ -524,11 +525,11 @@ function boxAsksHtml() {
 function boxPermissionsHtml() {
   const access = boxAccess();
   const rows = BOX_KINDS.map(([kind, label, hint]) => {
-    const choices = BOX_MODES.map(([value, name]) => `<option value="${value}"${value === access[kind].mode ? " selected" : ""}>${name}</option>`).join("");
+    const choices = BOX_MODES.filter(([, , only]) => !only || only === kind).map(([value, name]) => `<option value="${value}"${value === access[kind].mode ? " selected" : ""}>${name}</option>`).join("");
     return `<div class="look"><label for="box-${kind}">${label}</label><p class="meta">${hint}</p><select id="box-${kind}" data-box-kind="${kind}">${choices}</select></div>`;
   }).join("");
   return `<h2 class="looks-title">Who may use a box</h2>${rows}
-    <p class="hint">Workflows, workers and Captains follow this. A session an agent opens follows Off and Ask first; one you open asks you its budget. A yes or no here needs no password.</p>
+    <p class="hint">Workflows, workers and Captains follow this. A session an agent opens follows Off and Ask first; one you open asks you its budget. A durable box skips idle and max life, ends when the Box budget in the way of working runs out, and runs free when no Box budget is set. A yes or no here needs no password.</p>
     ${boxAsksHtml()}`;
 }
 
