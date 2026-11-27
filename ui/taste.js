@@ -34,6 +34,7 @@ const TASTE_FIELD_LABELS = {
   box_budget_cents: "Box budget",
   box_size: "Default box size",
   boxes_at_once: "Boxes at once",
+  keep_free_memory: "Keep memory free",
   escalate_breaking_change: "Breaks an older version",
   escalate_process_failure: "The process did not work as designed",
   escalate_over_lines: "Too big to merge unseen",
@@ -45,6 +46,8 @@ const TASTE_FIELD_LABELS = {
 /** The most changed lines the escalation limit may be, as Rust's `MAX_ESCALATE_OVER_LINES`. */
 const TASTE_MAX_ESCALATE_LINES = 100000;
 const TASTE_MAX_PARALLEL = 100;
+/** The most Keep memory free may be, as Rust's `MAX_KEEP_FREE_MEMORY`. */
+const TASTE_MAX_KEEP_FREE_MEMORY = 50;
 const TASTE_TIERS = ["low", "mid", "high"];
 /** The sizes an Upstash Box opens at, smallest first. A box with none chosen opens small. */
 const TASTE_BOX_SIZES = ["small", "medium", "large"];
@@ -269,6 +272,7 @@ function tasteSaveCalls(saved, draft) {
     const patch = tasteChanged(saved[kind], draft[kind]);
     if (kind === "captains" && draft.placement != null && !tasteSame(saved.placement, draft.placement)) patch.placement = draft.placement;
     if (kind === "captains" && draft.boxes_at_once != null && draft.boxes_at_once !== saved.boxes_at_once) patch.boxes_at_once = draft.boxes_at_once;
+    if (kind === "captains" && draft.keep_free_memory != null && draft.keep_free_memory !== saved.keep_free_memory) patch.keep_free_memory = draft.keep_free_memory;
     if (kind === "captains") for (const field of TASTE_CAPTAINS_CLEARED) if (saved.captains[field] != null && draft.captains[field] == null) calls.push({ cmd: "reset_taste_field", scope: { kind }, field });
     if (Object.keys(patch).length) calls.push({ cmd: "set_taste", scope: { kind }, patch });
   }
@@ -297,9 +301,9 @@ function tasteRebase(saved, draft, fresh) {
   return tasteSaveCalls(saved, draft).reduce((next, call) => {
     if (call.cmd === "reset_taste_field") return tasteResetField(next, call.scope, call.field);
     if (call.cmd === "set_worker_profiles") return next.worker_profiles ? tasteSetProfiles(next, call.project, call.profiles) : next;
-    const { placement, boxes_at_once, ...fields } = call.patch;
+    const { placement, boxes_at_once, keep_free_memory, ...fields } = call.patch;
     const set = Object.keys(fields).length ? tasteSetFields(next, call.scope, fields) : next;
-    return { ...set, ...(placement ? { placement } : {}), ...(boxes_at_once != null ? { boxes_at_once } : {}) };
+    return { ...set, ...(placement ? { placement } : {}), ...(boxes_at_once != null ? { boxes_at_once } : {}), ...(keep_free_memory != null ? { keep_free_memory } : {}) };
   }, fresh);
 }
 
@@ -407,6 +411,7 @@ const TASTE_VALUE_WORDS = {
   ladder: (v) => (Array.isArray(v) && v.every(tasteIsRef) ? v.map(tasteModelName).join(", ") : undefined),
   hard_model: (v) => (v === null ? "The top rung of the ladder" : tasteIsRef(v) ? tasteModelName(v) : undefined),
   parallel: (v) => (tasteIsCount(v) ? String(v) : undefined),
+  keep_free_memory: (v) => (v === 0 ? "Off" : Number.isInteger(v) && v > 0 ? `${v}%` : undefined),
   tier: (v) => (TASTE_TIERS.includes(v) ? `${v[0].toUpperCase()}${v.slice(1)}` : undefined),
   default_model: (v) => (v === null ? "The CLI's own" : tasteIsRef(v) ? tasteModelName(v) : undefined),
   default_effort: (v) => (v === null ? "The model's own" : TASTE_EFFORTS.includes(v) ? v : undefined),
@@ -446,7 +451,7 @@ function tasteProposal(tastes, action, args) {
   const patch = action === "set_taste" ? args.patch : action === "reset_taste_field" && typeof args.field === "string" ? { [args.field]: null } : null;
   if (!patch || typeof patch !== "object" || Array.isArray(patch)) return { scope, rows: [] };
   const shown = tastes && tasteResolve(tastes, at);
-  const now = (field) => (tastes ? tasteValueText(field, field === "placement" || field === "boxes_at_once" ? tastes[field] : shown?.[field]) : "unknown");
+  const now = (field) => (tastes ? tasteValueText(field, ["placement", "boxes_at_once", "keep_free_memory"].includes(field) ? tastes[field] : shown?.[field]) : "unknown");
   const next = (field) =>
     action === "set_taste" ? tasteValueText(field, patch[field])
       : at.kind !== "project" ? "Built-in default"

@@ -184,6 +184,22 @@ function tasteBoxesHtml() {
   return `<div class="taste-field taste-inline taste-boxes"><label class="taste-label"><span>${TASTE_FIELD_LABELS.boxes_at_once}</span><input type="number" data-boxes-at-once min="0" max="${cap}" step="1" value="${Math.min(stored, cap)}"></label><span class="taste-quiet">0 to ${cap}. How many boxes agents may have open at once: the Orchestrator, the Captains, their workers and workflows. A box you open yourself never counts and is never refused.</span></div>`;
 }
 
+/** Keep memory free: the percent of a machine's memory, never under 2 GB, that pinned leaves to the
+ * rest of the computer. A machine with less free starts no worker or Captain. A hub that predates
+ * it sends none, so there is nothing to show. */
+function tasteMemoryHtml() {
+  const stored = tasteUi.draft.keep_free_memory;
+  if (stored == null) return "";
+  return `<div class="taste-field taste-inline taste-memory"><label class="taste-label"><span>${TASTE_FIELD_LABELS.keep_free_memory}</span><input type="number" data-keep-free-memory min="0" max="${TASTE_MAX_KEEP_FREE_MEMORY}" step="1" value="${stored}"> %</label><span class="taste-quiet">0 to ${TASTE_MAX_KEEP_FREE_MEMORY}, never less than 2 GB. A computer with less memory free than this starts no new worker or Captain, however many Workers at once allows, until some is freed. 0 turns it off.</span></div>`;
+}
+
+/** A typed Keep memory free, held to 0 to `TASTE_MAX_KEEP_FREE_MEMORY`. Not a whole number changes nothing. */
+function tasteEditMemory(text) {
+  const n = Number(text);
+  if (text === "" || !Number.isInteger(n)) return tasteRender();
+  tasteEdit({ ...tasteUi.draft, keep_free_memory: Math.max(0, Math.min(n, TASTE_MAX_KEEP_FREE_MEMORY)) });
+}
+
 /** A typed Boxes at once, held to 0 to the hub's cap. Not a whole number changes nothing. */
 function tasteEditBoxes(text) {
   const n = Number(text);
@@ -239,6 +255,7 @@ function tasteLimitsHtml(t, catalog, names) {
   return `<section class="taste-section taste-limits"><div class="taste-heading"><h2>Delegation limits</h2><p>pinned holds every worker to these. A call past them is refused, and a worker past its time or budget is stopped.</p></div>
     ${tasteParallelHtml(t)}
     ${tasteBoxesHtml()}
+    ${tasteMemoryHtml()}
     <div class="taste-field">${tasteLabelHtml("tier")}<div class="taste-seg" role="group" aria-label="Model tier">${tiers}</div>
       <span class="taste-quiet">The costliest tier a worker's own model may be. ${TASTE_TIER_ABOUT[t.tier]} and below. The models a worker picks for its own subagents are not held to it.</span></div>
     <div class="taste-limit-pair">
@@ -481,6 +498,7 @@ pageView.addEventListener("change", (e) => {
   if (document.body.dataset.page !== "taste") return;
   if (e.target.matches("[data-effort]")) return tasteEditEffort(e.target.dataset.effort, e.target.value || null);
   if (e.target.matches("[data-boxes-at-once]")) return tasteEditBoxes(e.target.value);
+  if (e.target.matches("[data-keep-free-memory]")) return tasteEditMemory(e.target.value);
   if (e.target.matches("[data-escalate-lines]")) return tasteEditLines(e.target.value);
   if (e.target.matches("[data-default-model]")) return tasteEditField("default_model", e.target.value ? tasteRefOf(e.target.value) : null);
   if (!e.target.value) return;

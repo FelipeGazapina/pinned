@@ -10787,6 +10787,15 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "keep_free_memory": {
+                "description": "The account's Keep memory free, a percent. Only the Captains' and the orchestrator's scope\ntake it, and only the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
               "escalate_breaking_change": {
                 "type": [
                   "boolean",
@@ -10968,6 +10977,7 @@
               "placement",
               "box_size",
               "boxes_at_once",
+              "keep_free_memory",
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
@@ -11295,6 +11305,13 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": 8
+              },
+              "keep_free_memory": {
+                "description": "Keep memory free: the percent of a machine's memory, never less than 2 GB, that pinned\nleaves to the rest of the computer. A machine with less free starts no worker or Captain,\nhowever many Workers at once allows. 0 turns it off. Only the user's own app sets it.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 15
               }
             },
             "required": [
@@ -11305,7 +11322,8 @@
               "reviewer",
               "worker_profiles",
               "boxes_at_once",
-              "box_cap"
+              "box_cap",
+              "keep_free_memory"
             ]
           },
           "Taste": {
@@ -24555,6 +24573,15 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "keep_free_memory": {
+                "description": "The account's Keep memory free, a percent. Only the Captains' and the orchestrator's scope\ntake it, and only the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
               "escalate_breaking_change": {
                 "type": [
                   "boolean",
@@ -24731,6 +24758,7 @@
               "placement",
               "box_size",
               "boxes_at_once",
+              "keep_free_memory",
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
@@ -25052,6 +25080,13 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": 8
+              },
+              "keep_free_memory": {
+                "description": "Keep memory free: the percent of a machine's memory, never less than 2 GB, that pinned\nleaves to the rest of the computer. A machine with less free starts no worker or Captain,\nhowever many Workers at once allows. 0 turns it off. Only the user's own app sets it.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 15
               }
             }
           },
@@ -34703,6 +34738,15 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "keep_free_memory": {
+                "description": "The account's Keep memory free, a percent. Only the Captains' and the orchestrator's scope\ntake it, and only the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
               "escalate_breaking_change": {
                 "type": [
                   "boolean",
@@ -34915,6 +34959,7 @@
               "placement",
               "box_size",
               "boxes_at_once",
+              "keep_free_memory",
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
@@ -35242,6 +35287,13 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": 8
+              },
+              "keep_free_memory": {
+                "description": "Keep memory free: the percent of a machine's memory, never less than 2 GB, that pinned\nleaves to the rest of the computer. A machine with less free starts no worker or Captain,\nhowever many Workers at once allows. 0 turns it off. Only the user's own app sets it.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 15
               }
             },
             "required": [
@@ -35252,7 +35304,8 @@
               "reviewer",
               "worker_profiles",
               "boxes_at_once",
-              "box_cap"
+              "box_cap",
+              "keep_free_memory"
             ]
           },
           "Taste": {
@@ -45321,6 +45374,15 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "keep_free_memory": {
+                "description": "The account's Keep memory free, a percent. Only the Captains' and the orchestrator's scope\ntake it, and only the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
               "escalate_breaking_change": {
                 "type": [
                   "boolean",
@@ -45528,6 +45590,7 @@
               "placement",
               "box_size",
               "boxes_at_once",
+              "keep_free_memory",
               "escalate_breaking_change",
               "escalate_process_failure",
               "escalate_over_lines",
@@ -45849,6 +45912,13 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": 8
+              },
+              "keep_free_memory": {
+                "description": "Keep memory free: the percent of a machine's memory, never less than 2 GB, that pinned\nleaves to the rest of the computer. A machine with less free starts no worker or Captain,\nhowever many Workers at once allows. 0 turns it off. Only the user's own app sets it.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 15
               }
             }
           },
@@ -68345,6 +68415,13 @@
             "format": "uint32",
             "minimum": 0,
             "default": 8
+          },
+          "keep_free_memory": {
+            "description": "Keep memory free: the percent of a machine's memory, never less than 2 GB, that pinned\nleaves to the rest of the computer. A machine with less free starts no worker or Captain,\nhowever many Workers at once allows. 0 turns it off. Only the user's own app sets it.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 15
           }
         },
         "required": [
@@ -68355,7 +68432,8 @@
           "reviewer",
           "worker_profiles",
           "boxes_at_once",
-          "box_cap"
+          "box_cap",
+          "keep_free_memory"
         ],
         "$defs": {
           "Taste": {
@@ -68850,6 +68928,15 @@
                 "format": "uint32",
                 "minimum": 0
               },
+              "keep_free_memory": {
+                "description": "The account's Keep memory free, a percent. Only the Captains' and the orchestrator's scope\ntake it, and only the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
               "escalate_breaking_change": {
                 "type": [
                   "boolean",
@@ -69324,6 +69411,13 @@
             "format": "uint32",
             "minimum": 0,
             "default": 8
+          },
+          "keep_free_memory": {
+            "description": "Keep memory free: the percent of a machine's memory, never less than 2 GB, that pinned\nleaves to the rest of the computer. A machine with less free starts no worker or Captain,\nhowever many Workers at once allows. 0 turns it off. Only the user's own app sets it.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "default": 15
           }
         },
         "$defs": {
@@ -69786,6 +69880,15 @@
               },
               "boxes_at_once": {
                 "description": "The account's Boxes at once. Only the Captains' and the orchestrator's scope take it, and\nonly the user's own app sets it.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "keep_free_memory": {
+                "description": "The account's Keep memory free, a percent. Only the Captains' and the orchestrator's scope\ntake it, and only the user's own app sets it.",
                 "type": [
                   "integer",
                   "null"

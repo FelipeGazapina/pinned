@@ -262,6 +262,10 @@ pub struct TastePatch {
     /// only the user's own app sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boxes_at_once: Option<u32>,
+    /// The account's Keep memory free, a percent. Only the Captains' and the orchestrator's scope
+    /// take it, and only the user's own app sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_free_memory: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escalate_breaking_change: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -312,6 +316,7 @@ pub enum TasteField {
     Placement,
     BoxSize,
     BoxesAtOnce,
+    KeepFreeMemory,
     EscalateBreakingChange,
     EscalateProcessFailure,
     EscalateOverLines,
@@ -323,12 +328,13 @@ pub enum TasteField {
 
 impl TasteField {
     /// The JSON name of a setting only the user changes on the Way of working page: a review setting, Boxes at
-    /// once, an escalation setting, Manage only or a Claude Code memory switch. None for the rest.
+    /// once, Keep memory free, an escalation setting, Manage only or a Claude Code memory switch. None for the rest.
     pub fn review_setting(self) -> Option<&'static str> {
         match self {
             TasteField::ReviewDiffs => Some("review_diffs"),
             TasteField::SecondOpinion => Some("second_opinion"),
             TasteField::BoxesAtOnce => Some("boxes_at_once"),
+            TasteField::KeepFreeMemory => Some("keep_free_memory"),
             TasteField::EscalateBreakingChange => Some("escalate_breaking_change"),
             TasteField::EscalateProcessFailure => Some("escalate_process_failure"),
             TasteField::EscalateOverLines => Some("escalate_over_lines"),
@@ -392,7 +398,16 @@ pub struct Tastes {
     /// The hub's fixed cap on the account's open boxes, the most Boxes at once can be. The hub
     /// writes it into every answer; tastes from before it read the cap of then, 8.
     pub box_cap: u32,
+    /// Keep memory free: the percent of a machine's memory, never less than 2 GB, that pinned
+    /// leaves to the rest of the computer. A machine with less free starts no worker or Captain,
+    /// however many Workers at once allows. 0 turns it off. Only the user's own app sets it.
+    pub keep_free_memory: u32,
 }
+
+/// Keep memory free of an account that never set it.
+pub const DEFAULT_KEEP_FREE_MEMORY: u32 = 15;
+/// The most Keep memory free can be.
+pub const MAX_KEEP_FREE_MEMORY: u32 = 50;
 
 /// Boxes at once of an account that never set it, and the hub's cap before the hub sent one.
 pub const DEFAULT_BOXES_AT_ONCE: u32 = 8;
@@ -408,6 +423,7 @@ impl Default for Tastes {
             worker_profiles: crate::profiles::WorkerProfiles::default(),
             boxes_at_once: DEFAULT_BOXES_AT_ONCE,
             box_cap: DEFAULT_BOXES_AT_ONCE,
+            keep_free_memory: DEFAULT_KEEP_FREE_MEMORY,
         }
     }
 }
@@ -643,7 +659,7 @@ impl Taste {
             TasteField::BudgetCents => self.budget_cents = default.budget_cents,
             TasteField::TimeLimitMin => self.time_limit_min = default.time_limit_min,
             TasteField::BoxBudgetCents => self.box_budget_cents = default.box_budget_cents,
-            TasteField::Placement | TasteField::BoxesAtOnce => {}
+            TasteField::Placement | TasteField::BoxesAtOnce | TasteField::KeepFreeMemory => {}
             TasteField::BoxSize => self.box_size = default.box_size,
             TasteField::EscalateBreakingChange => self.escalate_breaking_change = default.escalate_breaking_change,
             TasteField::EscalateProcessFailure => self.escalate_process_failure = default.escalate_process_failure,
@@ -784,12 +800,13 @@ pub(crate) fn usd(cents: u32) -> String {
 
 impl TastePatch {
     /// The settings this patch sets that only the user changes, on the Way of working page: the review settings,
-    /// Boxes at once, the escalation settings and Manage only, by name.
+    /// Boxes at once, Keep memory free, the escalation settings and Manage only, by name.
     pub fn review_settings(&self) -> Vec<&'static str> {
         [
             ("review_diffs", self.review_diffs.is_some()),
             ("second_opinion", self.second_opinion.is_some()),
             ("boxes_at_once", self.boxes_at_once.is_some()),
+            ("keep_free_memory", self.keep_free_memory.is_some()),
             ("escalate_breaking_change", self.escalate_breaking_change.is_some()),
             ("escalate_process_failure", self.escalate_process_failure.is_some()),
             ("escalate_over_lines", self.escalate_over_lines.is_some()),
@@ -871,6 +888,7 @@ impl TastePatch {
         take(newer.box_size, &mut self.box_size);
         take(newer.placement, &mut self.placement);
         take(newer.boxes_at_once, &mut self.boxes_at_once);
+        take(newer.keep_free_memory, &mut self.keep_free_memory);
         take(newer.escalate_breaking_change, &mut self.escalate_breaking_change);
         take(newer.escalate_process_failure, &mut self.escalate_process_failure);
         take(newer.escalate_over_lines, &mut self.escalate_over_lines);
@@ -954,6 +972,7 @@ impl TastePatch {
             TasteField::Placement => self.placement = None,
             TasteField::BoxSize => self.box_size = None,
             TasteField::BoxesAtOnce => self.boxes_at_once = None,
+            TasteField::KeepFreeMemory => self.keep_free_memory = None,
             TasteField::EscalateBreakingChange => self.escalate_breaking_change = None,
             TasteField::EscalateProcessFailure => self.escalate_process_failure = None,
             TasteField::EscalateOverLines => self.escalate_over_lines = None,
@@ -997,6 +1016,20 @@ impl Tastes {
     pub fn set(&mut self, scope: &TasteScope, mut patch: TastePatch) -> Result<(), String> {
         if let Some(areas) = &mut patch.escalate_areas {
             *areas = areas.iter().map(|area| area.trim()).filter(|area| !area.is_empty()).map(str::to_owned).collect();
+        }
+        if let Some(percent) = patch.keep_free_memory.take() {
+            if matches!(scope, TasteScope::Project { .. }) {
+                return Err("Keep memory free belongs to the account: set it for Captains (all), not for one project".into());
+            }
+            if percent > MAX_KEEP_FREE_MEMORY {
+                return Err(format!("Keep memory free goes from 0 to {MAX_KEEP_FREE_MEMORY}%"));
+            }
+            let mut changed = Tastes { keep_free_memory: percent, ..self.clone() };
+            if !patch.is_empty() {
+                changed.set(scope, patch)?;
+            }
+            *self = changed;
+            return Ok(());
         }
         if let Some(boxes) = patch.boxes_at_once.take() {
             if matches!(scope, TasteScope::Project { .. }) {
@@ -1065,6 +1098,10 @@ impl Tastes {
         }
         if field == TasteField::BoxesAtOnce && !matches!(scope, TasteScope::Project { .. }) {
             self.boxes_at_once = DEFAULT_BOXES_AT_ONCE;
+            return;
+        }
+        if field == TasteField::KeepFreeMemory && !matches!(scope, TasteScope::Project { .. }) {
+            self.keep_free_memory = DEFAULT_KEEP_FREE_MEMORY;
             return;
         }
         match scope {
@@ -1281,7 +1318,7 @@ pub fn chat_prompt(scope: &TasteScope) -> String {
     format!(
         "Help me adjust the way of working of {who} in pinned (scope {name}).
 
-You have three tools for it. taste_get(scope) reads a scope: the settings its sessions get (effective), what the scope sets itself (own), and the brief text they start with. taste_set(scope, patch) changes the fields the patch names and keeps the rest; a project's field set to the Captains' value goes back to inheriting it. taste_reset(scope, field) makes a project inherit the field again, or gives the orchestrator and the Captains its default back. A scope is orchestrator, captains, or project: followed by the project's repo, as in project:github.com/acme/site. The fields are strategy (cheap_with_guidance, escalate_on_failure or strongest_first), ladder (models, cheapest first), hard_model, parallel (workers at once, 1 to 100), autonomy (ask_first, decide_and_tell or report_at_end), skills ({{name, enabled}}), context (notes every turn carries) and default_model (a model, with its provider when that matters: the model new sessions start on when they name none, on a Claude Code or OpenCode Go account that lists it), and the delegation limits pinned enforces: tier (low, mid or high), default_effort and max_effort (low, medium, high, xhigh or max; default_effort is the effort of a worker whose call names none and of new sessions that name none), budget_cents (per worker, 0 for no cap), time_limit_min (1 to 10080) and box_budget_cents (per box, 0 for none), and box_size (small, medium or large: the size of a box opened with none named; captains holds the account's, a project overrides it, small when neither does). Leave review_diffs, second_opinion, boxes_at_once, manage_only, claude_memory, worker_claude_memory and the escalation settings (escalate_breaking_change, escalate_process_failure, escalate_over_lines and escalate_areas) alone: taste_set and taste_reset refuse them, and only the user sets them, on the Way of working page. The Way of working page shows each change as soon as it lands, and new sessions start with it.
+You have three tools for it. taste_get(scope) reads a scope: the settings its sessions get (effective), what the scope sets itself (own), and the brief text they start with. taste_set(scope, patch) changes the fields the patch names and keeps the rest; a project's field set to the Captains' value goes back to inheriting it. taste_reset(scope, field) makes a project inherit the field again, or gives the orchestrator and the Captains its default back. A scope is orchestrator, captains, or project: followed by the project's repo, as in project:github.com/acme/site. The fields are strategy (cheap_with_guidance, escalate_on_failure or strongest_first), ladder (models, cheapest first), hard_model, parallel (workers at once, 1 to 100), autonomy (ask_first, decide_and_tell or report_at_end), skills ({{name, enabled}}), context (notes every turn carries) and default_model (a model, with its provider when that matters: the model new sessions start on when they name none, on a Claude Code or OpenCode Go account that lists it), and the delegation limits pinned enforces: tier (low, mid or high), default_effort and max_effort (low, medium, high, xhigh or max; default_effort is the effort of a worker whose call names none and of new sessions that name none), budget_cents (per worker, 0 for no cap), time_limit_min (1 to 10080) and box_budget_cents (per box, 0 for none), and box_size (small, medium or large: the size of a box opened with none named; captains holds the account's, a project overrides it, small when neither does). Leave review_diffs, second_opinion, boxes_at_once, keep_free_memory, manage_only, claude_memory, worker_claude_memory and the escalation settings (escalate_breaking_change, escalate_process_failure, escalate_over_lines and escalate_areas) alone: taste_set and taste_reset refuse them, and only the user sets them, on the Way of working page. The Way of working page shows each change as soon as it lands, and new sessions start with it.
 
 Start with taste_get(\"{name}\"). Then interview me: one short question at a time, each with two or three answers to pick from, and change nothing yet. When you know what to change, list the changes in plain words, apply them with taste_set or taste_reset once I agree, and read the scope again to show me the new brief.",
         who = scope.label(),
@@ -1695,6 +1732,7 @@ Deploys go through the VPS."
             "worker_profiles": { "account": [], "projects": {}, "proposed": [] },
             "boxes_at_once": 8,
             "box_cap": 8,
+            "keep_free_memory": 15,
         });
         assert_eq!(serde_json::to_value(&tastes).unwrap(), json);
         let mut before_the_team = json.clone();
@@ -2133,6 +2171,22 @@ Deploys go through the VPS."
         assert_eq!((tastes.boxes_at_once, tastes.captains.parallel), (0, 2), "with another field in the same patch");
         tastes.reset(&TasteScope::Captains, TasteField::BoxesAtOnce);
         assert_eq!(tastes.boxes_at_once, 8, "a reset gives the default back");
+    }
+
+    #[test]
+    fn keep_memory_free_belongs_to_the_account_and_the_user() {
+        let set = |n: u32| TastePatch { keep_free_memory: Some(n), ..TastePatch::default() };
+        let mut tastes: Tastes = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(tastes.keep_free_memory, DEFAULT_KEEP_FREE_MEMORY, "tastes saved before it hold memory back too");
+        assert_eq!(tastes.set(&TasteScope::Project { repo: SITE.into() }, set(20)), Err("Keep memory free belongs to the account: set it for Captains (all), not for one project".into()));
+        assert_eq!(tastes.set(&TasteScope::Captains, set(51)), Err("Keep memory free goes from 0 to 50%".into()));
+        tastes.set(&TasteScope::Captains, TastePatch { parallel: Some(2), keep_free_memory: Some(0), ..TastePatch::default() }).unwrap();
+        assert_eq!((tastes.keep_free_memory, tastes.captains.parallel), (0, 2), "with another field in the same patch");
+        tastes.reset(&TasteScope::Captains, TasteField::KeepFreeMemory);
+        assert_eq!(tastes.keep_free_memory, DEFAULT_KEEP_FREE_MEMORY, "a reset gives the default back");
+        let refused = Err("keep_free_memory is changed only by the user, on the Way of working page; nothing changed".to_owned());
+        assert_eq!(refuse_review_settings(set(0).review_settings()), refused);
+        assert_eq!(refuse_review_settings(TasteField::KeepFreeMemory.review_setting()), refused);
     }
 
     #[test]
