@@ -358,7 +358,7 @@ struct Lexer<'h> {
 }
 
 fn blank(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\r')
+    matches!(c, ' ' | '\t')
 }
 
 fn lex(src: &str, home: &str, claude_home: Option<&str>) -> Vec<Segment> {
@@ -612,13 +612,37 @@ impl<'h> Lexer<'h> {
         self.out[n0..].iter().any(is_fetch)
     }
 
+    /// Whether the `(` at `self.i` opens an extglob group that belongs to the word so far, which
+    /// must name a path. A group of plain text up to its `)` does; `!(rm …)` is a negated subshell
+    /// that runs `rm`, so the lexer reads it as commands.
+    fn extglob_group(&self, word: &str) -> bool {
+        if !word.contains('/') {
+            return false;
+        }
+        let mut depth = 0;
+        for &c in &self.c[self.i..] {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return true;
+                    }
+                }
+                c if c.is_whitespace() || matches!(c, '\'' | '"' | '\\' | ';' | '&' | '|' | '<' | '>' | '$') => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn word(&mut self, d: usize) -> Word {
         let mut w = WordBuilder::default();
         while let Some(ch) = self.peek() {
             match ch {
                 c if blank(c) => break,
-                // An extglob such as `!(pinned)`: a glob whose parentheses belong to the word.
-                '(' if w.word.text.ends_with(['!', '*', '+', '?', '@']) => {
+                // An extglob such as `/tmp/!(pinned)`: a glob whose parentheses belong to the word.
+                '(' if w.word.text.ends_with(['!', '*', '+', '?', '@']) && self.extglob_group(&w.word.text) => {
                     w.glob();
                     let mut depth = 0;
                     while let Some(c) = self.peek() {
@@ -935,7 +959,7 @@ const REPO_NAMED: &[&str] = &["--git-dir", "--work-tree", "git_dir=", "git_work_
 /// The only programs a temp line runs: plain deletes.
 const TEMP_DELETES: &[&str] = &["rm", "rmdir", "unlink"];
 /// Characters a temp line may not hold anywhere: expansions, groups, substitutions and redirects.
-const TEMP_BARRED_LINE: [char; 9] = ['$', '~', '`', '<', '>', '(', ')', '{', '}'];
+const TEMP_BARRED_LINE: [char; 10] = ['$', '~', '`', '<', '>', '(', ')', '{', '}', '\r'];
 /// Characters a temp target may not hold.
 const TEMP_BARRED_PATH: [char; 4] = ['!', '@', '+', ';'];
 
@@ -1066,10 +1090,13 @@ fn commands(words: &[Word]) -> Vec<Cmd> {
     if wrapper {
         for j in i + 1..words.len() {
             let t = words[j].text.as_str();
-            // `xargs git rm`: that `rm` is git's subcommand, which git's own check sees to. After a
-            // `-u` or `-g` option, `git` names a user or a group, so the `rm` is the program.
-            let names_owner = |t: &str| matches!(t, "--user" | "--group") || (t.starts_with('-') && !t.starts_with("--") && t.ends_with(['u', 'g']));
-            let gits_rm = t == "rm" && words[j - 1].text == "git" && !names_owner(&words[j - 2].text);
+            // `xargs git rm`: that `rm` is git's subcommand, which git's own check sees to. After an
+            // option that takes a value, `git` is that value and the `rm` is the program: `-u` and `-g`
+            // name a user or a group, and `-I`, `-a`, `-p` and the rest take a word of their own.
+            let takes_value = |t: &str| {
+                matches!(t, "--user" | "--group" | "--arg0" | "--replace" | "--eof" | "--prompt") || (t.starts_with('-') && !t.starts_with("--") && t.ends_with(['u', 'g', 'a', 'I', 'J', 'E', 'p']))
+            };
+            let gits_rm = t == "rm" && words[j - 1].text == "git" && !takes_value(&words[j - 2].text);
             if t.starts_with('-') || is_assign(t) || gits_rm {
                 continue;
             }
@@ -1191,15 +1218,18 @@ impl<'c, 'a> Scan<'c, 'a> {
         }
         let cmd = Cmd::new(&seg.words, false);
         let rmdir_parents = prog.text == "rmdir" && cmd.has("p", &["parents"]);
-        let mut after_dd = false;
+        // macOS `rm` and `rmdir` stop reading options at the first operand, so every word after it,
+        // a `-…` one included, is a target.
+        let mut operands = false;
         args.iter().all(|w| {
-            if !after_dd && w.text == "--" {
-                after_dd = true;
+            if !operands && w.text == "--" {
+                operands = true;
                 return true;
             }
-            if !after_dd && w.text.starts_with('-') && w.text.len() > 1 {
+            if !operands && w.text.starts_with('-') && w.text.len() > 1 {
                 return w.var_at.is_none() && w.glob_at.is_none() && !rmdir_parents;
             }
+            operands = true;
             self.temp_target(w)
         })
     }
@@ -1823,8 +1853,7 @@ impl<'c, 'a> Scan<'c, 'a> {
     }
 
     /// Holds an `mv` that brings into a temp folder what a delete may not take where it is: deleting
-    /// it there afterwards would run unasked. A `ln` needs no hold: a delete walks a link on disk to
-    /// where it points, and a hard link only unlinks the temp name.
+    /// it there afterwards would run unasked.
     fn bring_into_temp(&mut self, cwd: &Option<PathBuf>, c: &Cmd) {
         if self.temp.is_empty() {
             return;
@@ -1833,23 +1862,17 @@ impl<'c, 'a> Scan<'c, 'a> {
         let (sources, dest) = match (c.value('t', "target-directory"), pos.split_last()) {
             (Some(dir), _) => (pos.iter().copied().filter(|w| w.text != dir.text).collect(), dir),
             (None, Some((last, rest))) if !rest.is_empty() => (rest.to_vec(), (*last).clone()),
-            // A lone `ln` source is linked into the cwd.
             (None, _) => (pos, Word { text: ".".into(), ..Word::default() }),
         };
         let t = self.tgt(cwd, &dest);
         let dest = t.path.filter(|_| !t.top_var && !t.top_glob).map(|p| walk(&p));
-        // A relative symlink points from the folder it is made in.
-        let base = match &dest {
-            Some(d) if c.prog == "ln" && c.has("s", &["symbolic"]) => if d.is_dir() { Some(d.clone()) } else { d.parent().map(Path::to_owned) },
-            _ => cwd.clone(),
-        };
         let into_temp = dest.as_deref().map(|d| self.in_temp(d));
         // The sources `xargs` reads can't be known.
         if c.stdin_args && into_temp == Some(true) {
             self.hit(NeverItem::DeleteOutside, format!("xargs {} into a temp folder: sources unknown", c.prog));
         }
         for w in sources {
-            let t = self.tgt(&base, w);
+            let t = self.tgt(cwd, w);
             let from = t.path.filter(|_| !t.top_var).map(|p| walk(&p));
             let free = from.as_deref().is_some_and(|p| !self.outside(p) || self.temp_delete(w, p));
             // To a place the shell computes, only a source known to be elsewhere is held.

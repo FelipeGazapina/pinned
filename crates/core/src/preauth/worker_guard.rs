@@ -603,6 +603,70 @@ mod tests {
         assert_eq!(temp_roots(&roots, &[&f.home]), [f.temp]);
     }
 
+    /// Each command is held for `label`, the reason a hit names, with `cwd` as the call's cwd.
+    #[cfg(unix)]
+    fn asks_for(f: &Fx, env: &GuardEnv, label: &str, commands: &[&str]) {
+        let asked = ("ask".to_owned(), format!("pinned holds this command for the owner ({label})."));
+        for command in commands {
+            let command = sub(f, command);
+            assert_eq!(held(decide(&bash(f, &command, Some("default")), env)), Some(asked.clone()), "{command}");
+        }
+    }
+
+    /// The extglob arm reads `!(` as a pattern only inside a path, so a negated subshell is commands.
+    #[test]
+    #[cfg(unix)]
+    fn a_negated_subshell_is_read_as_commands() {
+        let f = fx(false);
+        asks(&f, &f.env, &[
+            "!(rm -rf ~/Documents)",
+            "true && !(rm -rf ~/Documents)",
+            "if !(rm -rf ~/Documents); then :; fi",
+            "(!(rm -rf ~/Documents))",
+            "x=$(!(rm -rf ~/Documents))",
+            "if !(grep -q '(' notes.txt); then :; fi\nrm -rf ~/Documents",
+            "!(echo \")\"); rm -rf ~/Documents",
+            "bash -c '!(rm -rf ~/Documents)'",
+            "f?() { rm -rf ~/Documents; }",
+        ]);
+        asks_for(&f, &f.env, "force-push", &["!(git push --force origin main)"]);
+        asks(&f, &f.env, &["find {tmp}/!(pinned) -delete", "rm -rf {tmp}/x/!(keep)"]);
+    }
+
+    /// `\r` ends no word in the shell, so `a\r#` is one word and the `#` after it is no comment.
+    #[test]
+    #[cfg(unix)]
+    fn a_carriage_return_does_not_end_a_word() {
+        let f = fx(false);
+        asks(&f, &f.env, &["rm -f {tmp}/x/a\r#; rm -rf ~/Documents", "true\r#; rm -rf ~/Documents", "rm -f {tmp}/x/a\r#; git push --force origin main"]);
+        asks_for(&f, &f.env, "force-push", &["true\r#; git push --force origin main"]);
+    }
+
+    /// macOS `rm` and `rmdir` stop reading options at the first operand, so a later `-…` word is a file.
+    #[test]
+    #[cfg(unix)]
+    fn a_dash_word_after_the_first_path_is_a_file() {
+        let f = fx(false);
+        asks(&f, &f.env, &["rm -rf {tmp}/x/a -Documents", "rm -rf {tmp}/x/a -d/../../../Users/x", "rmdir {tmp}/x/a -victim"]);
+        runs(&f, &f.env, &["rm -rf -- {tmp}/x/a {tmp}/x/b", "rm -f -r {tmp}/x/a"]);
+    }
+
+    /// `git` as an option's value is not the program, so the `rm` after it is one.
+    #[test]
+    #[cfg(unix)]
+    fn git_as_an_options_value_does_not_hide_rm() {
+        let f = fx(false);
+        asks(&f, &f.env, &[
+            "echo x | xargs -I git rm -rf ~/Documents",
+            "echo x | xargs -E git rm -rf ~/Documents",
+            "echo x | xargs -J git rm -rf ~/Documents",
+            "exec -a git rm -rf ~/Documents",
+            "parallel -I git rm -rf ~/Documents ::: a",
+            "sudo -p git rm -rf ~/Documents",
+        ]);
+        runs(&f, &f.env, &["git ls-files -z | xargs -0 git rm -q -f"]);
+    }
+
     #[test]
     fn a_long_command_is_cut_in_the_reason() {
         let f = fx(true);
