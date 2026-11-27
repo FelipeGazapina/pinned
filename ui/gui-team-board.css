@@ -1,6 +1,6 @@
-/* The team's work board (gui-team-board.js): eight columns side by side, each queue naming who
-   picks it up. Each column keeps a readable width and the row scrolls sideways when the window is
-   narrower, one column per swipe on a phone. It takes the thread's place as the other team pages do. Colours are the app's own tokens. */
+/* The team's work board (gui-team-board.js): eight columns, each queue naming who picks it up.
+   The columns reflow with the board's width: one row of eight, two rows of four, four rows of two,
+   then one column under another on a phone. Nothing scrolls sideways. It takes the thread's place as the other team pages do. Colours are the app's own tokens. */
 
 body[data-mode="gui"][data-page="team-board"] #expanded > header,
 body[data-mode="gui"][data-page="team-board"] #chat { display: none; }
@@ -10,7 +10,7 @@ body[data-mode="gui"][data-page="team-board"] #workspace { grid-template-columns
 body[data-mode="gui"][data-page="team-board"][data-sidebar="closed"] #workspace { grid-template-columns: 0 minmax(0, 1fr) 0; }
 body[data-mode="gui"][data-page="team-board"] #panel { visibility: hidden; }
 
-.wb-wrap { --tc-line: rgb(var(--g-ink-rgb) / 0.09); --tc-edge: rgb(var(--g-ink-rgb) / 0.16); --tc-link: color-mix(in srgb, var(--g-link) 77%, var(--g-ink));
+.wb-wrap { container: wb-board / inline-size; --tc-line: rgb(var(--g-ink-rgb) / 0.09); --tc-edge: rgb(var(--g-ink-rgb) / 0.16); --tc-link: color-mix(in srgb, var(--g-link) 77%, var(--g-ink));
   padding: 20px 20px 40px; display: flex; flex-direction: column; gap: 18px; color: var(--g-fg); font-size: 13px; line-height: 1.4; min-width: 0; }
 .wb-top { display: flex; flex-direction: column; gap: 12px; max-width: 900px; }
 .wb-top h1 { margin: 0; font-size: 20px; }
@@ -24,9 +24,8 @@ body[data-mode="gui"][data-page="team-board"] #panel { visibility: hidden; }
 .wb-seat { display: flex; gap: 8px; align-items: center; }
 .wb-seat b { width: 84px; font-weight: 500; }
 
-.wb-columns { display: grid; grid-template-columns: repeat(8, minmax(248px, 1fr)); gap: 12px; overflow-x: auto; padding-bottom: 10px; align-items: start;
-  scroll-snap-type: x proximity; scroll-padding-inline: 20px; overscroll-behavior-x: contain; }
-.wb-col { scroll-snap-align: start; display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 10px; border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.035); min-height: 240px; }
+.wb-columns { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 12px; align-items: stretch; }
+.wb-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 10px; border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.035); min-height: 240px; }
 .wb-col[data-column^="ready_"] { background: rgb(var(--g-primary-rgb) / 0.06); }
 .wb-col-head { display: flex; flex-direction: column; gap: 4px; text-align: left; }
 .wb-col-name { display: flex; align-items: center; gap: 6px; font-weight: 600; white-space: nowrap; }
@@ -60,10 +59,21 @@ body[data-mode="gui"][data-page="team-board"] #panel { visibility: hidden; }
 .wb-sendback { display: flex; gap: 6px; }
 .wb-sendback input { flex: 1; min-width: 0; }
 
+@container wb-board (max-width: 1700px) {
+  .wb-columns { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .wb-col { min-height: 160px; }
+}
+@container wb-board (max-width: 900px) {
+  .wb-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@container wb-board (max-width: 560px) {
+  .wb-columns { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .wb-col { min-height: 0; }
+  .wb-col-head { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+}
+
 @media (max-width: 640px) {
-  .wb-wrap { padding: 14px 0 32px; gap: 14px; }
-  .wb-top { padding: 0 14px; }
-  .wb-columns { grid-template-columns: repeat(8, calc(100% - 44px)); gap: 10px; padding-inline: 14px; scroll-padding-inline: 14px; scroll-snap-type: x mandatory; }
+  .wb-wrap { padding: 14px 14px 32px; gap: 14px; }
   .wb-add input, .wb-add select, .wb-add button { flex: 1 1 100%; }
   .wb-seat { flex-wrap: wrap; }
 }
