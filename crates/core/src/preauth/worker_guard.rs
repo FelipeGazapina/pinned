@@ -12,7 +12,8 @@
 //!    runs only on a line that is nothing but `rm`, `rmdir` or `unlink` of literal absolute paths
 //!    there: no other command, no expansion, substitution, group or redirect, and no `..`, relative
 //!    path or `~` (see `never::temp_line`). Inside that rule a name right under the folder that
-//!    starts with `pinned` or `claude` is held, and so is a glob outside the last name, or `*`. A
+//!    starts with `pinned` or `claude` is held, and so is a glob outside the last name, or a last name of
+//!    glob characters alone (`*`, `**`, `?*`). A
 //!    temp folder that holds the home, the worktree, the session's start folder or its Claude home
 //!    does not count. An `mv` into a temp folder is held too, unless its source is in the worktree or
 //!    the scratch folder, or is one a temp delete may take;
@@ -349,6 +350,42 @@ mod tests {
         ]);
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn a_git_rm_through_a_wrapper_is_a_delete_only_on_a_plain_line() {
+        let f = fx(false);
+        asks(&f, &f.env, &[
+            "cd {elsewhere}; cd {work} & git ls-files -z | xargs -0 git rm -r -f",
+            "cd {elsewhere}; cd {work} | true; git ls-files -z | xargs -0 git rm -r -f",
+            "cd {elsewhere}; false && cd {work}; git ls-files -z | xargs -0 git rm -r -f",
+            "cd {elsewhere}; true || cd {work}; git ls-files -z | xargs -0 git rm -r -f",
+            "cd {elsewhere}; if false; then cd {work}; fi; git ls-files -z | xargs -0 git rm -r -f",
+            "cd {elsewhere}; f() { cd {work}; }; git ls-files -z | xargs -0 git rm -r -f",
+            "cd {elsewhere}; cd {work}/no-such-dir; git ls-files -z | xargs -0 git rm -r -f",
+            "builtin cd {elsewhere} && git ls-files -z | xargs -0 git rm -r -f",
+            "chdir {elsewhere} && git ls-files -z | xargs -0 git rm -r -f",
+            "command cd {elsewhere} && git ls-files -z | xargs -0 git rm -r -f",
+            "cd work elsewhere && git ls-files -z | xargs -0 git rm -r -f",
+            "git config core.worktree {elsewhere} && git ls-files -z | xargs -0 git rm -r -f",
+            "export GIT_''DIR={elsewhere}/.git GIT_WORK_''TREE={elsewhere}; git ls-files -z | xargs -0 git rm -r -f",
+            "builtin cd {elsewhere} && env git rm -r -f .",
+            "cd {elsewhere}; cd {work} & env git rm -r -f .",
+            "cd {elsewhere}; cd {work} & nice git rm -r .",
+            "env git rm -rf ~/Documents",
+            "nice git rm -rf {elsewhere}/a",
+            "xargs git rm -rf ~/Documents",
+            "git ls-files -z | xargs -0 git rm -q ../x",
+            "git ls-files -z | xargs -0 git rm -q \"$f\"",
+        ]);
+        runs(&f, &f.env, &[
+            "git ls-files -z | xargs -0 git rm -q -f",
+            "git ls-files -z | xargs -0 -r git rm -q -f",
+            "env git rm -q x",
+            "nice git rm -q x",
+            "git ls-files -z -- '*.orig' | xargs -0 git rm -q",
+        ]);
+    }
+
     /// Each command asks the owner about a delete outside the worktree, with `cwd` as the call's cwd.
     #[cfg(unix)]
     fn asks_at(f: &Fx, env: &GuardEnv, cwd: &Path, commands: &[&str]) {
@@ -524,6 +561,13 @@ mod tests {
     fn a_rmdir_with_parents_is_held() {
         let f = fx(false);
         asks(&f, &f.env, &["rmdir -p {tmp}/x/a/b"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_temp_delete_with_a_caret_a_double_star_or_an_abbreviated_parents_is_held() {
+        let f = fx(false);
+        asks(&f, &f.env, &["rm -rf {tmp}/^claude", "rm -rf {tmp}/x/**", "rm -rf {tmp}/x/?*", "rmdir --p {tmp}/x/a/b", "rmdir --pa {tmp}/x/a/b", "rmdir --parents {tmp}/x/a/b"]);
     }
 
     #[test]

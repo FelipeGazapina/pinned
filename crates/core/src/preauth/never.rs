@@ -117,6 +117,7 @@ pub fn never(ctx: &AskCtx, ask: &Ask) -> Option<NeverHit> {
         Ask::Bash { command } => {
             let cwd = Some(scan.abs(ctx.cwd));
             scan.temp_ok = scan.temp_line(command);
+            scan.plain_ok = scan.plain_line(command);
             scan.line(command, cwd, 0);
             scan.finish_line();
         }
@@ -921,13 +922,24 @@ const REPO_NAMED: &[&str] = &["--git-dir", "--work-tree", "git_dir=", "git_work_
 const TEMP_DELETES: &[&str] = &["rm", "rmdir", "unlink"];
 /// Characters a temp line may not hold anywhere: expansions, groups, substitutions and redirects.
 const TEMP_BARRED_LINE: [char; 10] = ['$', '~', '`', '<', '>', '(', ')', '{', '}', '\r'];
-/// Characters a temp target may not hold.
-const TEMP_BARRED_PATH: [char; 4] = ['!', '@', '+', ';'];
+/// Characters a temp target may not hold: the zsh extended-glob operators `^` and `#` among them.
+const TEMP_BARRED_PATH: [char; 6] = ['!', '@', '+', ';', '^', '#'];
+
+/// Characters a plain line may not hold: groups, substitutions, negation and carriage returns. `&` is barred apart from `&&`.
+const PLAIN_BARRED_LINE: [char; 7] = ['(', ')', '{', '}', '!', '`', '\r'];
+/// The options `xargs` may take before its `git rm` on a plain line.
+const PLAIN_XARGS: &[&str] = &["-0", "-r", "-t", "--null", "--no-run-if-empty", "--verbose"];
 
 fn is_assign(t: &str) -> bool {
     let Some((name, _)) = t.split_once('=') else { return false };
     let mut chars = name.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether a word is `--parents` or a leading part of it, which GNU `rmdir` takes for it (`--p`, `--pa`, …).
+fn parents_word(t: &str) -> bool {
+    let name = t.split('=').next().unwrap_or("");
+    name.len() > 2 && "--parents".starts_with(name)
 }
 
 fn first_prog(words: &[Word]) -> Option<String> {
@@ -1034,9 +1046,40 @@ impl Cmd {
     }
 }
 
+/// Whether the paths a `git rm` on a plain line names stay in the folder it runs in: none is absolute, starts with
+/// `~`, holds `..`, or holds a variable. `words` start at `git`. Git refuses paths outside its repository, but a
+/// skipped `rm` must not be the only thing that holds such a path.
+fn rm_targets_stay(words: &[Word]) -> bool {
+    words.iter().skip(2).filter(|w| !w.text.starts_with('-')).all(|w| !w.text.starts_with(['/', '~']) && !w.text.contains("..") && w.var_at.is_none())
+}
+
+/// Whether one command of a plain line has the shape its program allows: git without `config` or a `-C`, `-c`,
+/// `--git-dir`, `--work-tree` or `--namespace`; a filter; `xargs` with the allowed options, then `git rm`; `env` or
+/// `nice` with nothing between it and `git rm`; and in both wrapper forms, `git rm` names only paths that stay
+/// ([`rm_targets_stay`]). A bare redirect runs nothing.
+fn plain_command(words: &[Word]) -> bool {
+    if words.iter().any(|w| is_assign(&w.text)) {
+        return false;
+    }
+    let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
+    match texts.as_slice() {
+        [] => true,
+        ["git", rest @ ..] => !rest.iter().any(|t| *t == "config" || *t == "-c" || t.starts_with("-C") || ["--git-dir", "--work-tree", "--namespace"].iter().any(|o| t.starts_with(o))),
+        ["grep" | "egrep" | "fgrep" | "sort" | "uniq" | "head" | "tail" | "tr" | "cut", ..] => true,
+        ["xargs", rest @ ..] => {
+            let opts = rest.iter().take_while(|&&t| PLAIN_XARGS.contains(&t)).count();
+            rest.get(opts..).is_some_and(|tail| tail.starts_with(&["git", "rm"]) && rm_targets_stay(&words[words.len() - tail.len()..]))
+        }
+        ["env" | "nice", "git", "rm", ..] => rm_targets_stay(&words[1..]),
+        _ => false,
+    }
+}
+
 /// The commands a segment runs: its program, and when it is a wrapper, every later word as a program
 /// too, since a wrapper's options (`timeout 30`, `nice -n 5`, `xargs -I {}`) can't be told from its command.
-fn commands(words: &[Word]) -> Vec<Cmd> {
+/// On a plain line (see [`Scan::plain_line`]) the `rm` of `xargs git rm` and `env git rm` is git's subcommand;
+/// on any other line it is the program, as on main.
+fn commands(words: &[Word], plain: bool) -> Vec<Cmd> {
     let mut i = 0;
     while i < words.len() && (is_assign(&words[i].text) || KEYWORDS.contains(&words[i].text.as_str())) {
         i += 1;
@@ -1054,7 +1097,7 @@ fn commands(words: &[Word]) -> Vec<Cmd> {
             // `xargs git rm`: that `rm` is git's subcommand, which git's own check sees to. Only the words
             // between the wrapper and `git` may stand there: `xargs` options that read no value, and none
             // for the other wrappers. Any other word may take `git` as its value, so the `rm` is the program.
-            let gits_rm = t == "rm" && j >= i + 2 && words[j - 1].text == "git" && words[i + 1..j - 1].iter().all(|w| stdin && matches!(w.text.as_str(), "-0" | "-r" | "-t" | "--null" | "--no-run-if-empty" | "--verbose"));
+            let gits_rm = plain && t == "rm" && j >= i + 2 && words[j - 1].text == "git" && words[i + 1..j - 1].iter().all(|w| stdin && matches!(w.text.as_str(), "-0" | "-r" | "-t" | "--null" | "--no-run-if-empty" | "--verbose"));
             if t.starts_with('-') || is_assign(t) || gits_rm {
                 continue;
             }
@@ -1090,6 +1133,8 @@ struct Scan<'c, 'a> {
     temp: Vec<PathBuf>,
     /// The whole line is plain temp deletes ([`Scan::temp_line`]), so a delete below a temp root may run.
     temp_ok: bool,
+    /// The whole line is plain ([`Scan::plain_line`]), so its `xargs git rm` and `env git rm` are git's own deletes.
+    plain_ok: bool,
     /// The line holds one of [`REPO_NAMED`].
     repo_named: bool,
     /// The session's Claude home, canonical.
@@ -1103,7 +1148,7 @@ const DEV_OK: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin
 
 impl<'c, 'a> Scan<'c, 'a> {
     fn new(ctx: &'c AskCtx<'a>) -> Self {
-        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, temp: vec![], temp_ok: false, repo_named: false, claude: None, hits: vec![], tagged: false, pushed: false };
+        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, temp: vec![], temp_ok: false, plain_ok: false, repo_named: false, claude: None, hits: vec![], tagged: false, pushed: false };
         scan.work = walk(&scan.abs(ctx.worktree));
         scan.scratch = ctx.scratch.map(|s| walk(&scan.abs(s)));
         scan.temp = ctx.temp.iter().map(|t| walk(&scan.abs(t))).collect();
@@ -1167,6 +1212,17 @@ impl<'c, 'a> Scan<'c, 'a> {
         !segs.is_empty() && segs.iter().all(|seg| self.temp_command(seg))
     }
 
+    /// Whether the whole line is plain: its commands are joined only by `|`, `&&`, `;` or newlines, and each has
+    /// the shape [`plain_command`] allows. Only a plain line trusts the folder the guard tracked from it, since a
+    /// `cd`, a function, a group or a background `&` can leave that folder other than the shell's.
+    fn plain_line(&self, line: &str) -> bool {
+        if line.contains(PLAIN_BARRED_LINE) || line.contains("||") || line.replace("&&", "").contains('&') {
+            return false;
+        }
+        let claude_home = self.ctx.claude_home.map(|c| c.to_string_lossy().into_owned());
+        lex(line, &self.home(), claude_home.as_deref()).iter().all(|seg| plain_command(&seg.words))
+    }
+
     /// Whether a command of a temp line is a plain delete: `rm`, `rmdir` or `unlink`, at the top
     /// level, with no redirect or here-document, options that are plain, and only temp targets.
     fn temp_command(&self, seg: &Segment) -> bool {
@@ -1175,7 +1231,7 @@ impl<'c, 'a> Scan<'c, 'a> {
             return false;
         }
         let cmd = Cmd::new(&seg.words, false);
-        let rmdir_parents = prog.text == "rmdir" && cmd.has("p", &["parents"]);
+        let rmdir_parents = prog.text == "rmdir" && (cmd.has("p", &[]) || cmd.flag_texts().any(parents_word));
         // macOS `rm` and `rmdir` stop reading options at the first operand, so every word after it,
         // a `-…` one included, is a target.
         let mut operands = false;
@@ -1193,13 +1249,13 @@ impl<'c, 'a> Scan<'c, 'a> {
     }
 
     /// Whether `w` is a literal absolute path that a temp delete may take: no `..` component, no
-    /// barred character, a glob only in the last name and not exactly `*`, and a temp path by
-    /// [`Scan::temp_delete`]. Relative paths and `~` never qualify.
+    /// barred character, a glob only in the last name and not a name of glob characters alone (`*`, `**`, `?*`), and
+    /// a temp path by [`Scan::temp_delete`]. Relative paths and `~` never qualify.
     fn temp_target(&self, w: &Word) -> bool {
         let t = w.text.as_str();
         let literal = t.starts_with('/') && !t.contains(TEMP_BARRED_PATH) && !t.split('/').any(|c| c == "..");
         let last = t.rsplit('/').next().unwrap_or("");
-        let glob_last = w.glob_at.is_none_or(|at| !t[at..].contains('/') && last != "*");
+        let glob_last = w.glob_at.is_none_or(|at| !t[at..].contains('/') && !last.chars().all(|c| matches!(c, '*' | '?' | '[' | ']')));
         literal && glob_last && self.tgt(&None, w).path.is_some_and(|p| self.temp_delete(w, &p))
     }
 
@@ -1340,7 +1396,7 @@ impl<'c, 'a> Scan<'c, 'a> {
             self.secret_word(&cwd, w);
         }
 
-        let cmds = commands(&seg.words);
+        let cmds = commands(&seg.words, self.plain_ok);
         for c in &cmds {
             self.cmd(&cwd, c, nest, prior_fetch);
         }
