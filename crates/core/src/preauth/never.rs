@@ -612,50 +612,11 @@ impl<'h> Lexer<'h> {
         self.out[n0..].iter().any(is_fetch)
     }
 
-    /// Whether the `(` at `self.i` opens an extglob group that belongs to the word so far, which
-    /// must name a path. A group of plain text up to its `)` does; `!(rm …)` is a negated subshell
-    /// that runs `rm`, so the lexer reads it as commands.
-    fn extglob_group(&self, word: &str) -> bool {
-        if !word.contains('/') {
-            return false;
-        }
-        let mut depth = 0;
-        for &c in &self.c[self.i..] {
-            match c {
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return true;
-                    }
-                }
-                c if c.is_whitespace() || matches!(c, '\'' | '"' | '\\' | ';' | '&' | '|' | '<' | '>' | '$') => return false,
-                _ => {}
-            }
-        }
-        false
-    }
-
     fn word(&mut self, d: usize) -> Word {
         let mut w = WordBuilder::default();
         while let Some(ch) = self.peek() {
             match ch {
                 c if blank(c) => break,
-                // An extglob such as `/tmp/!(pinned)`: a glob whose parentheses belong to the word.
-                '(' if w.word.text.ends_with(['!', '*', '+', '?', '@']) && self.extglob_group(&w.word.text) => {
-                    w.glob();
-                    let mut depth = 0;
-                    while let Some(c) = self.peek() {
-                        self.i += 1;
-                        w.push(c);
-                        match c {
-                            '(' => depth += 1,
-                            ')' if depth == 1 => break,
-                            ')' => depth -= 1,
-                            _ => {}
-                        }
-                    }
-                }
                 '\n' | ';' | '&' | '|' | '<' | '>' | '(' | ')' => break,
                 '\'' => {
                     self.i += 1;
@@ -1090,13 +1051,10 @@ fn commands(words: &[Word]) -> Vec<Cmd> {
     if wrapper {
         for j in i + 1..words.len() {
             let t = words[j].text.as_str();
-            // `xargs git rm`: that `rm` is git's subcommand, which git's own check sees to. After an
-            // option that takes a value, `git` is that value and the `rm` is the program: `-u` and `-g`
-            // name a user or a group, and `-I`, `-a`, `-p` and the rest take a word of their own.
-            let takes_value = |t: &str| {
-                matches!(t, "--user" | "--group" | "--arg0" | "--replace" | "--eof" | "--prompt") || (t.starts_with('-') && !t.starts_with("--") && t.ends_with(['u', 'g', 'a', 'I', 'J', 'E', 'p']))
-            };
-            let gits_rm = t == "rm" && words[j - 1].text == "git" && !takes_value(&words[j - 2].text);
+            // `xargs git rm`: that `rm` is git's subcommand, which git's own check sees to. Only the words
+            // between the wrapper and `git` may stand there: `xargs` options that read no value, and none
+            // for the other wrappers. Any other word may take `git` as its value, so the `rm` is the program.
+            let gits_rm = t == "rm" && j >= i + 2 && words[j - 1].text == "git" && words[i + 1..j - 1].iter().all(|w| stdin && matches!(w.text.as_str(), "-0" | "-r" | "-t" | "--null" | "--no-run-if-empty" | "--verbose"));
             if t.starts_with('-') || is_assign(t) || gits_rm {
                 continue;
             }
@@ -1862,7 +1820,7 @@ impl<'c, 'a> Scan<'c, 'a> {
         let (sources, dest) = match (c.value('t', "target-directory"), pos.split_last()) {
             (Some(dir), _) => (pos.iter().copied().filter(|w| w.text != dir.text).collect(), dir),
             (None, Some((last, rest))) if !rest.is_empty() => (rest.to_vec(), (*last).clone()),
-            (None, _) => (pos, Word { text: ".".into(), ..Word::default() }),
+            _ => return,
         };
         let t = self.tgt(cwd, &dest);
         let dest = t.path.filter(|_| !t.top_var && !t.top_glob).map(|p| walk(&p));

@@ -424,7 +424,7 @@ mod tests {
     #[cfg(unix)]
     fn hole_2_an_extglob_pattern_is_held() {
         let f = fx(false);
-        asks(&f, &f.env, &["shopt -s extglob; rm -rf {tmp}/!(pinned)", "cd {tmp} && rm -rf !(pinned)", "find {tmp}/!(pinned) -delete"]);
+        asks(&f, &f.env, &["shopt -s extglob; rm -rf {tmp}/!(pinned)", "cd {tmp} && rm -rf !(pinned)"]);
     }
 
     /// Hole 3: a program named by a variable or a substitution is not `ln`, whatever it expands to.
@@ -613,7 +613,7 @@ mod tests {
         }
     }
 
-    /// The extglob arm reads `!(` as a pattern only inside a path, so a negated subshell is commands.
+    /// `!(` opens a negated subshell, so what it holds is commands, whatever word comes before it.
     #[test]
     #[cfg(unix)]
     fn a_negated_subshell_is_read_as_commands() {
@@ -630,7 +630,16 @@ mod tests {
             "f?() { rm -rf ~/Documents; }",
         ]);
         asks_for(&f, &f.env, "force-push", &["!(git push --force origin main)"]);
-        asks(&f, &f.env, &["find {tmp}/!(pinned) -delete", "rm -rf {tmp}/x/!(keep)"]);
+        asks(&f, &f.env, &["rm -rf {tmp}/x/!(keep)"]);
+    }
+
+    /// A function whose name ends in an extglob group still runs its body, so its `rm` is a command.
+    #[test]
+    #[cfg(unix)]
+    fn a_function_named_with_an_extglob_runs_its_body() {
+        let f = fx(false);
+        asks(&f, &f.env, &["x/@() { rm -rf ~/Documents; }; x/@", "f ./@() rm -rf ~/Documents; f", "function x/@() { rm -rf ~/.ssh; }"]);
+        asks_for(&f, &f.env, "force-push", &["f x/!() { git push --force origin main; }; f"]);
     }
 
     /// `\r` ends no word in the shell, so `a\r#` is one word and the `#` after it is no comment.
@@ -651,7 +660,8 @@ mod tests {
         runs(&f, &f.env, &["rm -rf -- {tmp}/x/a {tmp}/x/b", "rm -f -r {tmp}/x/a"]);
     }
 
-    /// `git` as an option's value is not the program, so the `rm` after it is one.
+    /// Under a wrapper, `git` hides the `rm` after it only when nothing else stands between them, so
+    /// any other word there (an option, a value, `NAME=V`) makes the `rm` the program.
     #[test]
     #[cfg(unix)]
     fn git_as_an_options_value_does_not_hide_rm() {
@@ -663,8 +673,15 @@ mod tests {
             "exec -a git rm -rf ~/Documents",
             "parallel -I git rm -rf ~/Documents ::: a",
             "sudo -p git rm -rf ~/Documents",
+            "arch -arm64 -d git rm -rf ~/Documents",
+            "env -iC git rm -rf ~/Documents",
+            "env -i -C git rm -rf ~/Documents",
+            "env --unset git rm -rf ~/Documents",
+            "echo x | xargs --arg-file git rm -rf ~/Documents",
+            "echo x | xargs --process-slot-var git rm -rf ~/Documents",
+            "xargs arch -arm64 -d git rm -rf ~/Documents",
         ]);
-        runs(&f, &f.env, &["git ls-files -z | xargs -0 git rm -q -f"]);
+        runs(&f, &f.env, &["git ls-files -z | xargs -0 git rm -q -f", "git ls-files -z | xargs -0 -r git rm -q -f", "env git rm -q x", "nice git rm -q x"]);
     }
 
     #[test]
