@@ -3,11 +3,11 @@ members = [".", "crates/core", "crates/server", "crates/dev", "crates/layout"]
 
 # scripts/release.sh prepare bumps every `version = ` line in this file, this one included.
 [workspace.package]
-version = "0.18.11"
+version = "0.18.12"
 
 [package]
 name = "pinned"
-version = "0.18.11"
+version = "0.18.12"
 edition = "2021"
 default-run = "pinned"
 
